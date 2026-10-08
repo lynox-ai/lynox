@@ -41,7 +41,7 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal, reservationEstimate } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp } from './worker-loop.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -293,6 +293,54 @@ describe('WorkerLoop', () => {
       expect.stringContaining('confirmation'),
       'failed',
     );
+  });
+
+  // ---- 2b''. mandate gate (PRD customer-granted-operator-access §3.12, §3.13): a trigger
+  // a mandate created or changed waits for the OWNER's stamp, whatever its effect ----
+
+  it('refuses to dispatch a mandate-created workflow schedule the owner has not stamped', async () => {
+    // The due query excludes it; forcing it through the mock proves the dispatch backstop.
+    const task = makeTask({ effect: 'run_workflow', pipeline_id: 'wf-any', confirmed_at: undefined, created_by: 'mandate:eva@kanzlei.example' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('should not run');
+    const engine = makeEngine({ taskManager: tm, session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(engine.createSession).not.toHaveBeenCalled();
+    expect(tm.recordTaskRun).toHaveBeenCalledWith(task.id, expect.stringContaining('someone you let in'), 'failed');
+  });
+
+  it('runs a mandate-changed agent trigger once the owner has stamped it again', async () => {
+    const task = makeTask({ confirmed_at: '2026-10-08T00:00:00.000Z', edited_by: 'mandate:eva@kanzlei.example' });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('ran');
+    const engine = makeEngine({ taskManager: tm, session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(session.run).toHaveBeenCalled();
+    expect(tm.recordTaskRun).not.toHaveBeenCalledWith(task.id, expect.stringContaining('someone you let in'), 'failed');
+  });
+
+  describe('mandateNeedsOwnerStamp', () => {
+    const M = 'mandate:eva@kanzlei.example';
+    it('holds a trigger a mandate created or changed while it carries no stamp', () => {
+      expect(mandateNeedsOwnerStamp({ created_by: M })).toBe(true);
+      expect(mandateNeedsOwnerStamp({ created_by: 'owner', edited_by: M })).toBe(true);
+    });
+    it('lets it through once stamped', () => {
+      expect(mandateNeedsOwnerStamp({ created_by: M, confirmed_at: '2026-10-08T00:00:00.000Z' })).toBe(false);
+    });
+    it('never holds the owner or an untagged trigger', () => {
+      expect(mandateNeedsOwnerStamp({})).toBe(false);
+      expect(mandateNeedsOwnerStamp({ created_by: 'owner', edited_by: 'owner' })).toBe(false);
+    });
+    it('the last party decides: once the owner took a mandate\'s schedule over, losing the stamp does not hold it', () => {
+      expect(mandateNeedsOwnerStamp({ created_by: M, edited_by: 'owner' })).toBe(false);
+    });
   });
 
   // ---- 2c. daily-cap admission: a GRANT, coupled to the run's own cap (SEC-LC-2) ----
@@ -2147,6 +2195,19 @@ describe('WorkerLoop', () => {
     expect(tm.getTrigger).toHaveBeenCalledWith('rn-ok');
     expect(session.run).toHaveBeenCalledTimes(1);
     expect(tm.recordTaskRun).toHaveBeenCalledWith('rn-ok', 'Ran on demand.', 'success');
+  });
+
+  it('runTriggerNow refuses a mandate\'s proposal before any run is recorded, so pressing it destroys nothing', async () => {
+    const task = makeTask({ id: 'rn-prop', effect: 'run_workflow', pipeline_id: 'wf', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined });
+    const tm = makeTaskManager([task]);
+    const session = makeSession('should not run');
+    const engine = makeEngine({ taskManager: tm, session });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+
+    expect(await loop.runTriggerNow('rn-prop')).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tm.recordTaskRun).not.toHaveBeenCalled();
+    expect(session.run).not.toHaveBeenCalled();
   });
 
   it('runTriggerNow returns not_found for an unknown trigger id', async () => {

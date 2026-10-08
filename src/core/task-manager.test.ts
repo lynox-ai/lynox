@@ -858,6 +858,39 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
     expect(tm.getTrigger(t.id)?.confirmed_at).toBeTruthy();
   });
 
+  it('through the real store: a mandate\'s change holds an owner schedule, the owner\'s stamp releases it, the owner\'s own change keeps it running', () => {
+    const M = 'mandate:eva@kanzlei.example';
+    const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' }) as TriggerRecord;
+    const due = (): boolean => tm.getDueTriggers().some((x) => x.id === t.id);
+    expect(due()).toBe(true);
+    // The order the HTTP layer uses: mark, then the write itself.
+    expect(tm.markEditedBy(t.id, M, true)).toBe(true);
+    tm.update(t.id, { nextRunAt: '2020-01-02T00:00:00.000Z' });
+    expect(tm.getTrigger(t.id)!.edited_by).toBe(M);
+    expect(due()).toBe(false);
+    tm.confirmTrigger(t.id, undefined, 'owner');
+    expect(due()).toBe(true);
+    // The owner's own schedule change, unmarked: it stays due.
+    tm.update(t.id, { nextRunAt: '2020-01-03T00:00:00.000Z' });
+    expect(tm.getTrigger(t.id)!.confirmed_at).toBeTruthy();
+    expect(due()).toBe(true);
+  });
+
+  it('through the real store: once the owner stamped a mandate\'s workflow schedule, the owner\'s own rename does not hold it again', () => {
+    const t = tm.createPipelineTask({ title: 'Weekly report', pipelineId: 'wf-x', scheduleCron: '0 9 * * 1', createdBy: 'mandate:eva@kanzlei.example' });
+    tm.update(t.id, { nextRunAt: '2020-01-01T00:00:00.000Z' });
+    const due = (): boolean => tm.getDueTriggers().some((x) => x.id === t.id);
+    expect(t.effect).toBe('run_workflow');
+    expect(due()).toBe(false);
+    tm.confirmTrigger(t.id, undefined, 'owner');
+    expect(due()).toBe(true);
+    // A rename is an instruction edit: the stamp goes, as before v20 …
+    tm.update(t.id, { title: 'Weekly report, renamed' });
+    expect(tm.getTrigger(t.id)!.confirmed_at).toBeUndefined();
+    // … and a run_workflow schedule the owner changed stays due, as before v20.
+    expect(due()).toBe(true);
+  });
+
   it('confirmTrigger returns undefined for an unknown id', () => {
     expect(tm.confirmTrigger('nope')).toBeUndefined();
   });
@@ -912,6 +945,13 @@ describe('a bulk run\'s trigger', () => {
     expect(() => tm.reopen(id)).toThrow(BulkTriggerLockedError);
     expect(() => tm.setEnabled(id, false)).toThrow(BulkTriggerLockedError);
     expect(() => tm.confirmTrigger(id)).toThrow(BulkTriggerLockedError);
+    expect(row()).toEqual(before);
+  });
+
+  it('a refused mandate edit leaves no mark, so the approved run is not held', () => {
+    const before = row();
+    expect(() => tm.markEditedBy(id, 'mandate:eva@kanzlei.example', true)).toThrow(BulkTriggerLockedError);
+    expect(tm.getTrigger(id)!.edited_by).toBeUndefined();
     expect(row()).toEqual(before);
   });
 

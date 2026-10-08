@@ -105,6 +105,12 @@ export interface TaskCreateParams {
   /** The creating session's untrusted-content cause; absent when it had taken in none. A
    *  workflow run the trigger starts is seeded from it. */
   createdUntrusted?: string | undefined;
+  /** Principal tag of the creating request (request-principal.ts): `owner` or
+   *  `mandate:<address>`. Supplied only by the HTTP create route; the agent tool and the
+   *  engine leave it absent. A trigger a mandate created is due only once the owner stamped it. */
+  createdBy?: string | undefined;
+  /** Principal tag of whoever supplied `confirmedAt` — only ever the owner. */
+  confirmedBy?: string | undefined;
 }
 
 export interface TaskUpdateParams {
@@ -236,6 +242,8 @@ export class TaskManager {
         pipelineParams: params.pipelineParams,
         confirmedAt: params.confirmedAt,
         createdUntrusted: params.createdUntrusted,
+        createdBy: params.createdBy,
+        confirmedBy: params.confirmedAt ? params.confirmedBy : undefined,
       });
 
       return this.history.getTrigger(id)!;
@@ -633,13 +641,27 @@ export class TaskManager {
    *  the resolved id (same idiom as {@link setEnabled} + the workflow confirm — the
    *  confirm surfaces are human-HTTP-only, not agent-tool mutation paths). Returns the
    *  updated trigger, or undefined if not found / out of scope. */
-  confirmTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TriggerRecord | undefined {
+  confirmTrigger(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, confirmedBy?: string | undefined): TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
     const trigger = this.history.getTrigger(id, scopeOpts);
     if (!trigger) return undefined;
     refuseBulkTrigger(trigger);
-    this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString());
+    this.history.setTriggerConfirmedAt(trigger.id, new Date().toISOString(), confirmedBy);
     return this.history.getTrigger(trigger.id, scopeOpts);
+  }
+
+  /** Record that a request is about to change a trigger, and drop its stamp when that
+   *  request is not the owner's (PRD customer-granted-operator-access §3.12 point 3).
+   *  Resolves the id like the other write methods; returns false if no trigger matched
+   *  (the caller then lets its own write report the 404). A TODO is not a trigger and has
+   *  no stamp, so it is left alone. */
+  markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+    const trigger = this.history.getTrigger(id);
+    if (!trigger) return false;
+    // Before the mark, not after: the write that follows refuses a bulk trigger, and a
+    // refused attempt must not leave a mark that would hold the owner's approved run.
+    refuseBulkTrigger(trigger);
+    return this.history.markTriggerEditedBy(trigger.id, editedBy, clearStamp);
   }
 
   /** Create a watch/monitor AGENT-TRIGGER → source='watch', effect='run_agent', assignee='lynox', computes next_run_at from interval. */

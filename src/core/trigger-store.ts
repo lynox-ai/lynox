@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
 
@@ -77,6 +78,10 @@ export interface TriggerRow {
   confirmedAt?: string | null | undefined;
   /** The creating session's untrusted-content cause, or null when it had taken in none. */
   createdUntrusted?: string | null | undefined;
+  /** Principal tag of the creator (request-principal.ts); set once, never overwritten. */
+  createdBy?: string | null | undefined;
+  /** Principal tag of whoever stamped `confirmedAt`; cleared with it. */
+  confirmedBy?: string | null | undefined;
 }
 
 export interface StoredTrigger {
@@ -135,6 +140,8 @@ export function triggerRecordToRow(rec: TriggerRecord): TriggerRow {
     retryCount: rec.retry_count ?? 0,
     confirmedAt: rec.confirmed_at ?? null,
     createdUntrusted: rec.created_untrusted ?? null,
+    createdBy: rec.created_by ?? null,
+    confirmedBy: rec.confirmed_by ?? null,
   };
 }
 
@@ -189,6 +196,9 @@ interface TriggerFullDbRow {
   confirmed_at: string | null;
   waiting_until: string | null;
   created_untrusted: string | null;
+  created_by: string | null;
+  edited_by: string | null;
+  confirmed_by: string | null;
 }
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
@@ -196,7 +206,7 @@ const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at, waiting_until, created_untrusted`;
+   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -258,6 +268,9 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     enabled: row.enabled,
     confirmed_at: row.confirmed_at ?? undefined,
     created_untrusted: row.created_untrusted ?? undefined,
+    created_by: row.created_by ?? undefined,
+    edited_by: row.edited_by ?? undefined,
+    confirmed_by: row.confirmed_by ?? undefined,
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
   };
 }
@@ -276,6 +289,9 @@ function likePrefix(id: string): string {
 export function bulkPreviewTriggerId(runId: string): string {
   return `bulk-preview-${runId}`;
 }
+
+/** LIKE pattern for a mandate tag, built from the one prefix request-principal.ts owns. */
+const MANDATE_TAG_LIKE = `${MANDATE_TAG_PREFIX}%`;
 
 export class TriggerStore {
   private readonly db: Database.Database;
@@ -308,9 +324,10 @@ export class TriggerStore {
         id, title, description, source, effect, condition_json, target_workflow_id,
         params_json, scope_type, scope_id, status, enabled, next_run_at,
         last_run_at, last_run_result, last_run_status, notification_channel,
-        max_retries, retry_count, confirmed_at, created_untrusted, created_at, updated_at
+        max_retries, retry_count, confirmed_at, created_untrusted, created_by, confirmed_by,
+        created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -333,6 +350,12 @@ export class TriggerStore {
         confirmed_at = excluded.confirmed_at,
         -- One way: a re-write may record a creator's taint, never clear one already recorded.
         created_untrusted = COALESCE(excluded.created_untrusted, triggers.created_untrusted),
+        -- The creator is set once: a re-write never replaces it. edited_by is not
+        -- written here at all; only markEditedBy writes it.
+        created_by = COALESCE(triggers.created_by, excluded.created_by),
+        -- Who stamped goes with the stamp: no stamp, no stamper.
+        confirmed_by = CASE WHEN excluded.confirmed_at IS NULL THEN NULL
+                            ELSE COALESCE(excluded.confirmed_by, triggers.confirmed_by) END,
         updated_at = excluded.updated_at
     `).run(
       row.id,
@@ -356,6 +379,8 @@ export class TriggerStore {
       row.retryCount,
       row.confirmedAt ?? null,
       row.createdUntrusted ?? null,
+      row.createdBy ?? null,
+      row.confirmedAt ? (row.confirmedBy ?? null) : null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
     );
@@ -424,6 +449,10 @@ export class TriggerStore {
     confirmedAt?: string | undefined;
     /** The creating session's untrusted-content cause; absent when it had taken in none. */
     createdUntrusted?: string | undefined;
+    /** Principal tag of the creating request; absent for the agent tool and the engine. */
+    createdBy?: string | undefined;
+    /** Principal tag of whoever supplied `confirmedAt` — only the owner does. */
+    confirmedBy?: string | undefined;
   }): void {
     this.upsert({
       id: params.id,
@@ -454,6 +483,8 @@ export class TriggerStore {
       retryCount: 0,
       confirmedAt: params.confirmedAt ?? null,
       createdUntrusted: params.createdUntrusted ?? null,
+      createdBy: params.createdBy ?? null,
+      confirmedBy: params.confirmedBy ?? null,
     });
   }
 
@@ -505,10 +536,29 @@ export class TriggerStore {
    *  surface's write. `confirmedAt` = an ISO timestamp to confirm a `run_agent`
    *  trigger for unattended execution, or null to un-confirm. Exact-id (same idiom
    *  as {@link setEnabled}); returns false if no row matched. */
-  setConfirmedAt(id: string, confirmedAt: string | null): boolean {
+  setConfirmedAt(id: string, confirmedAt: string | null, confirmedBy?: string | undefined): boolean {
+    // A named stamper takes the trigger over: it becomes the last party in `edited_by`,
+    // which is what the mandate gate in {@link getDue} reads. Without it, a schedule a
+    // mandate set up would be held again by the owner's own later rename, forever.
+    const by = confirmedAt === null ? null : (confirmedBy ?? null);
     return this.db.prepare(
-      "UPDATE triggers SET confirmed_at = ?, updated_at = datetime('now') WHERE id = ?",
-    ).run(confirmedAt, id).changes > 0;
+      "UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), updated_at = datetime('now') WHERE id = ?",
+    ).run(confirmedAt, by, by, id).changes > 0;
+  }
+
+  /**
+   * Record that a request changed this trigger, and drop its stamp when that request
+   * was not the owner's (PRD customer-granted-operator-access §3.12 point 3). Called
+   * BEFORE the change it records: a crash between the two leaves a trigger that is
+   * unstamped and unchanged — never one that is changed and still stamped. The engine's
+   * own writes (status, next run, lease) do not come through here.
+   */
+  markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
+    return this.db.prepare(
+      clearStamp
+        ? "UPDATE triggers SET edited_by = ?, confirmed_at = NULL, confirmed_by = NULL, updated_at = datetime('now') WHERE id = ?"
+        : "UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(editedBy, id).changes > 0;
   }
 
   /**
@@ -541,15 +591,15 @@ export class TriggerStore {
     // Editing a trigger's INSTRUCTION (title/description) re-requires consent: an
     // edited instruction is a new instruction, so an injected edit can't repurpose
     // an already-confirmed `run_agent` trigger (mirrors update-workflow clearing the
-    // workflow's confirmedAt on any step edit). No-op for non-run_agent effects
-    // (confirmed_at is unread there). A schedule-only change doesn't alter WHAT runs,
+    // workflow's confirmedAt on any step edit). For other effects it matters only on a
+    // trigger a mandate last changed (the mandate gate in getDue). A schedule-only change doesn't alter WHAT runs,
     // so it does NOT clear consent. The watched ADDRESS would alter it — a watch run
     // builds its prompt from the page it fetches — but no path edits it: after creation
     // the only writer of `watch_config` is the run storing its own `last_hash`. A writer
     // that repoints a watch has to clear consent right here; `trigger-consent.test.ts`
     // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {
-      sets.push('confirmed_at = NULL');
+      sets.push('confirmed_at = NULL', 'confirmed_by = NULL');
     }
     if (params.status !== undefined) {
       sets.push('status = ?');
@@ -684,6 +734,22 @@ export class TriggerStore {
    * exactly that row). Bound as a parameter off {@link WAITING}, not written as a
    * SQL literal, so the query and the type cannot drift apart.
    *
+   * MANDATE GATE (engine.db v20; PRD customer-granted-operator-access §3.12, §3.13): a
+   * trigger that a mandate created or last changed is not due until the OWNER stamped
+   * it — for EVERY effect, not only `run_agent`. A `run_workflow` schedule otherwise runs
+   * on the stamp of the workflow it names, so a mandate could put an owner-stamped
+   * workflow on its own cron with its own parameters and it would run unattended. The
+   * owner's own triggers are unaffected: their creator and editor are `owner` or NULL.
+   * What counts is the LAST party that changed the trigger or took it over: `edited_by`
+   * when set, the creator otherwise. An owner's stamp takes the trigger over
+   * ({@link setConfirmedAt} writes the stamper into `edited_by`), so once stamped, a later
+   * change that clears the stamp without a mandate behind it (an owner's rename) does not
+   * hold the schedule again — which it would if the creator counted forever.
+   * The COALESCE is load-bearing: a NULL tag would make the LIKE NULL, the NOT of it NULL,
+   * and the WHERE would then drop every untagged trigger — every trigger from before v20.
+   * A denylist term like the two around it. The `mandate:` prefix is the tag form of
+   * request-principal.ts and is bound as a parameter so the two cannot drift apart.
+   *
    * LEASE GATE (engine.db v16): a trigger whose run holds a live lease is not due, in
    * this process or any other on the same file. A lapsed lease is due again, so the
    * caller's {@link claimLease} can find it and decide what the dead run means. Also
@@ -700,9 +766,10 @@ export class TriggerStore {
          AND status != ?
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
          AND NOT (effect = 'run_agent' AND confirmed_at IS NULL)
+         AND NOT (confirmed_at IS NULL AND COALESCE(edited_by, created_by, '') LIKE ?)
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
-    ).all(now, WAITING, now) as TriggerFullDbRow[];
+    ).all(now, WAITING, MANDATE_TAG_LIKE, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 

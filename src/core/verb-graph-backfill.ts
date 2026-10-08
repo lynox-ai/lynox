@@ -105,6 +105,8 @@ function legacyTriggerToRecord(row: LegacyTriggerRow): TriggerRecord {
     // gated effect); deterministic `created_at`, no wall-clock. Matches the v6
     // migration's grandfather so both entry paths agree.
     confirmed_at: effect === 'run_agent' ? row.created_at : undefined,
+    // Who stamped it: the owner, as engine.db v20 records for every row stamped before it.
+    confirmed_by: effect === 'run_agent' ? 'owner' : undefined,
   };
 }
 

@@ -10,6 +10,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
+import { isMandateTag } from './request-principal.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -359,6 +360,17 @@ export function reservationEstimate(task: TriggerRecord): number {
   return 0;
 }
 
+/**
+ * Whether a trigger waits for the owner's stamp because a mandate created or last changed
+ * it (PRD customer-granted-operator-access §3.12, §3.13). Pure and exported so the rule is
+ * asserted directly; the due query and the dispatch backstop both apply it. The last party
+ * decides — `edited_by` when set, the creator otherwise — and an owner's stamp makes the
+ * owner that party (TriggerStore.setConfirmedAt).
+ */
+export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined }): boolean {
+  return !t.confirmed_at && isMandateTag(t.edited_by ?? t.created_by);
+}
+
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
@@ -539,11 +551,16 @@ export class WorkerLoop {
    */
   async runTriggerNow(
     triggerId: string,
-  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' }> {
+  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
     const taskManager = this.engine.getTaskManager();
     if (!taskManager) return { ok: false, reason: 'not_found' };
     const trigger = taskManager.getTrigger(triggerId);
     if (!trigger) return { ok: false, reason: 'not_found' };
+    // A proposal a mandate made waits for the owner's stamp (PRD customer-granted-operator-
+    // access §3.12). Refused here, before any run is recorded: the dispatch backstop would
+    // refuse it too, but by recording a failed run, and a one-shot proposal recorded as
+    // failed loses its next run — pressing "Run now" would destroy what it was asked to start.
+    if (mandateNeedsOwnerStamp(trigger)) return { ok: false, reason: 'awaits_owner_stamp' };
     if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
@@ -984,6 +1001,15 @@ export class WorkerLoop {
         // so a value the union doesn't know — a newer schema, a synced/corrupt row —
         // is possible at runtime) → the default fails CLOSED, never a money run.
         const effect: string = task.effect;
+        // Mandate gate — DEFENSE-IN-DEPTH backstop to the getDueTriggers exclusion (PRD
+        // customer-granted-operator-access §3.12, §3.13). A trigger a mandate created or
+        // last changed runs only after the OWNER stamped it, whatever its effect: a
+        // `run_workflow` would otherwise run on the stamp of the workflow it names. The
+        // owner's triggers never reach this (their tags are `owner` or absent).
+        if (mandateNeedsOwnerStamp(task)) {
+          this.recordAndNotify(task, 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.', false);
+          return;
+        }
         switch (effect) {
           case 'backup':
             await this.executeBackup(task);

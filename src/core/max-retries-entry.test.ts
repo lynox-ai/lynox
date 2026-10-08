@@ -41,7 +41,7 @@ const MENTIONS: ReadonlyArray<readonly [string, number]> = [
   ["src/core/trigger-store.ts: maxRetries?: number | null | undefined;", 1],
   ["src/core/trigger-store.ts: maxRetries?: number | undefined;", 1],
   ["src/core/trigger-store.ts: max_retries = excluded.max_retries,", 1],
-  ["src/core/trigger-store.ts: max_retries, retry_count, confirmed_at, created_untrusted, created_at, updated_at", 1],
+  ["src/core/trigger-store.ts: max_retries, retry_count, confirmed_at, created_untrusted, created_by, confirmed_by,", 1],
   ["src/core/trigger-store.ts: max_retries: number | null;", 1],
   ["src/core/trigger-store.ts: max_retries: row.max_retries ?? undefined,", 1],
   ["src/core/trigger-store.ts: row.maxRetries ?? null,", 1],

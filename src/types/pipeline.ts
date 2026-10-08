@@ -349,6 +349,14 @@ export interface TriggerRecord {
    *  exempt). Fail-closed: a trigger created by anything other than an explicit
    *  human action lands unconfirmed. */
   confirmed_at?: string | undefined;
+  /** Who created this trigger from a request — `owner` or `mandate:<address>`
+   *  (request-principal.ts). Absent for rows from before v20 and for triggers the agent
+   *  tool or the engine created. Never changes after creation. */
+  created_by?: string | undefined;
+  /** Who last changed this trigger from a request. A mandate's change clears the stamp. */
+  edited_by?: string | undefined;
+  /** Who stamped `confirmed_at`. Only the owner stamps. */
+  confirmed_by?: string | undefined;
   /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes (or a `bulk_preview`
    *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
    *  and, for a preview, the external bulk plan. */

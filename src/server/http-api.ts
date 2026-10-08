@@ -71,6 +71,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import type {
   HealthBody,
   UsageSummaryResponse,
@@ -83,7 +84,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { BulkTriggerLockedError } from '../core/task-manager.js';
+import { BulkTriggerLockedError, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -1532,6 +1533,55 @@ export class LynoxHTTPApi {
    * session cookie, so a session is recognisable without its value being stored.
    */
   private readonly _authOrigin = new WeakMap<IncomingMessage, string>();
+
+  /**
+   * Who a request acts as (request-principal.ts). Until the recipient's login puts a
+   * principal into the session, every authenticated request is the owner, so this
+   * returns the owner and every rule that reads it behaves as before. The rules are in
+   * place for when it does not: only the owner stamps or approves, and a schedule a
+   * mandate created or changed waits for the owner (PRD customer-granted-operator-access
+   * §3.12, §3.13).
+   */
+  private _principalResolver: (req: IncomingMessage) => RequestPrincipal = () => OWNER_PRINCIPAL;
+
+  private _principalOf(req: IncomingMessage): RequestPrincipal {
+    return this._principalResolver(req);
+  }
+
+  /**
+   * Test seam: feed a principal before the session can carry one, so the mandate branch
+   * of the rules is exercised now rather than first in production. Not reachable over
+   * HTTP; the session-borne principal replaces the default resolver.
+   */
+  setPrincipalResolverForTesting(resolver: (req: IncomingMessage) => RequestPrincipal): void {
+    this._principalResolver = resolver;
+  }
+
+  /** The 403 a mandate gets for an act only the owner may perform. */
+  private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string): boolean {
+    if (isOwnerPrincipal(this._principalOf(req))) return false;
+    errorResponse(res, 403, `Only the owner of this instance can ${what}.`);
+    return true;
+  }
+
+  /**
+   * Before a mandate's request changes a trigger, record it and drop the stamp (PRD
+   * customer-granted-operator-access §3.12 point 3): every kind of change — fields,
+   * schedule, the enabled switch, completion — not only the instruction. The owner's
+   * changes are left exactly as they were: they neither mark nor clear. Returns true
+   * when it answered the request itself (a bulk trigger, which no request may change).
+   */
+  private _markMandateEdit(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string): boolean {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
+    try {
+      taskManager.markEditedBy(id, principalTag(principal), true);
+    } catch (err: unknown) {
+      if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return true; }
+      throw err;
+    }
+    return false;
+  }
 
   /** Returns the cookie's issued-at unix-sec on success, null on any failure.
    *  Caller uses the timestamp to decide whether to roll a fresh cookie. */
@@ -4965,6 +5015,8 @@ export class LynoxHTTPApi {
     // boundary. Refuses any prompt lacking the engine-only `onboarding_basics` marker —
     // a model-composed ask_user/tabs prompt can never reach user_asserted this way.
     this.addStatic('user', 'POST /api/onboarding/knowledge/promote', async (_req, res, _params, body) => {
+      // Promoting writes active knowledge and the always-loaded profile: an owner's stamp (§3.13 E9).
+      if (this._refuseUnlessOwner(_req, res, 'promote onboarding knowledge')) return;
       const promptStore = engine.getPromptStore();
       if (!requireService(res, promptStore, 'Prompt store')) return;
       const b = body as Record<string, unknown> | null;
@@ -6147,6 +6199,9 @@ export class LynoxHTTPApi {
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
+      // A mandate's run of a workflow must carry its tool lock (PRD customer-granted-
+      // operator-access, piece H2), which this route cannot apply yet; until then it may not.
+      if (this._refuseUnlessOwner(_req, res, 'run a workflow')) return;
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       // Optional re-target values: { "params": { "<name>": <value>, ... } }.
@@ -6581,6 +6636,12 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid task'); return; }
+      // Who is scheduling (PRD customer-granted-operator-access §3.12 points 1 and 4): the
+      // owner's request IS the consent and stamps, as before; anyone else's lands as a
+      // proposal that waits for the owner, and the row records who created it.
+      const principal = this._principalOf(_req);
+      const byOwner = isOwnerPrincipal(principal);
+      const createdBy = principalTag(principal);
       const b = body as Record<string, unknown>;
       const title = typeof b['title'] === 'string' ? b['title'] : undefined;
       const description = typeof b['description'] === 'string' ? b['description'] : undefined;
@@ -6620,6 +6681,9 @@ export class LynoxHTTPApi {
         // only the preview would leave it open.
         const rawGrant = b['grant'];
         if (rawGrant !== undefined) {
+          // Accepting a write grant stamps the workflow and writes its unattended-write
+          // contract in one act: only the owner grants.
+          if (this._refuseUnlessOwner(_req, res, 'grant a workflow unattended writes')) return;
           const { workflowGrantEnabled, acceptWorkflowGrant } = await import('../core/workflow-grant.js');
           if (!workflowGrantEnabled()) { errorResponse(res, 403, 'Granting a workflow unattended writes is not enabled on this instance.'); return; }
           if (typeof rawGrant !== 'object' || rawGrant === null || Array.isArray(rawGrant)) { errorResponse(res, 400, 'Invalid "grant".'); return; }
@@ -6654,13 +6718,17 @@ export class LynoxHTTPApi {
           // WorkerLoop re-reads the now-confirmed blob at fire time instead of a
           // stale pre-confirm copy — otherwise the confirmedAt gate would refuse
           // to run the workflow this slice just scheduled.
-          history.setWorkflowConfirmedAt(planned.id, new Date().toISOString());
+          // Only the owner's scheduling stamps the workflow. A mandate's schedule is
+          // recorded with its creator and waits for the owner's stamp ON THE SCHEDULE,
+          // even when the workflow itself is already stamped (the due query's mandate gate).
+          if (byOwner) history.setWorkflowConfirmedAt(planned.id, new Date().toISOString());
           forgetPipeline(planned.id);
           const task = taskManager.createPipelineTask({
             title: title ?? `Scheduled: ${planned.name}`,
             pipelineId: planned.id,
             scheduleCron,
             pipelineParams: JSON.stringify(bound.params),
+            createdBy,
           });
           jsonResponse(res, 201, task);
         } catch (e) {
@@ -6681,7 +6749,12 @@ export class LynoxHTTPApi {
         // `task_create` tool never passes it, so ITS run_agent triggers land
         // unconfirmed and wait for an explicit confirm. Ignored for TODOs /
         // non-run_agent effects.
-        const baseParams = { title, description, assignee, dueDate, confirmedAt: new Date().toISOString() };
+        // Only the owner's request stamps; a mandate's trigger lands unconfirmed, like one
+        // the agent tool creates.
+        const baseParams = {
+          title, description, assignee, dueDate, createdBy,
+          ...(byOwner ? { confirmedAt: new Date().toISOString(), confirmedBy: createdBy } : {}),
+        };
         const task = scheduleCron
           ? taskManager.createScheduled({ ...baseParams, scheduleCron })
           : taskManager.create({ ...baseParams, ...(runAt ? { nextRunAt: runAt } : {}) });
@@ -6695,6 +6768,7 @@ export class LynoxHTTPApi {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       if (!body || typeof body !== 'object') { errorResponse(res, 400, 'Invalid update'); return; }
+      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       const b = body as Record<string, unknown>;
       // Slice B2: cron kill-switch toggle — `{ "enabled": true|false }`.
       if (typeof b['enabled'] === 'boolean') {
@@ -6737,6 +6811,7 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
+      if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       let task;
       try {
         task = taskManager.complete(params['id']!);
@@ -6841,16 +6916,21 @@ export class LynoxHTTPApi {
     // the agent `task_create` tool cannot reach it, so confirmation is always an
     // explicit human step. Idempotent (re-confirming just re-stamps).
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params) => {
+      // Only the owner stamps (§3.12 point 2).
+      if (this._refuseUnlessOwner(_req, res, 'confirm a schedule')) return;
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       let trigger;
       try {
-        trigger = taskManager.confirmTrigger(params['id']!);
+        trigger = taskManager.confirmTrigger(params['id']!, undefined, principalTag(this._principalOf(_req)));
       } catch (err: unknown) {
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         throw err;
       }
       if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
+      // The workflow a schedule names keeps its own stamp: confirming a schedule never
+      // stamps it. A workflow is shared by every schedule that names it, so stamping it here
+      // would also restart the owner's other schedules on steps the owner was not shown.
       jsonResponse(res, 200, trigger);
     }));
 
@@ -6860,6 +6940,10 @@ export class LynoxHTTPApi {
     // fire. 202 = accepted + dispatched (the run continues async; its result
     // lands in the run history), 409 = already running, 404 = no such trigger.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/run', async (_req, res, params) => {
+      // A run started here is autonomous, with the worker's full tool set. A mandate may
+      // start one only through the one-time test-run door of PRD customer-granted-
+      // operator-access §3.12 point 6, which is not built yet; until then it may not.
+      if (this._refuseUnlessOwner(_req, res, 'start a schedule by hand')) return;
       const workerLoop = engine.getWorkerLoop();
       if (!requireService(res, workerLoop, 'Worker loop')) return;
       const outcome = await workerLoop.runTriggerNow(params['id']!);
@@ -6881,6 +6965,10 @@ export class LynoxHTTPApi {
           // `{ code, error }` by hand is a template the next author copies with an
           // interpolated string in it. The `code` is what the view switches on.
           errorResponse(res, 409, 'This task is waiting for your answer — answer its question instead of starting it again', 'awaiting_answer');
+          return;
+        }
+        if (outcome.reason === 'awaits_owner_stamp') {
+          errorResponse(res, 409, 'This schedule was set up or changed by someone you let in — confirm it before it runs', 'awaits_owner_stamp');
           return;
         }
         errorResponse(res, 404, 'Trigger not found'); return;
@@ -6983,6 +7071,8 @@ export class LynoxHTTPApi {
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
+      // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
+      if (this._refuseUnlessOwner(req, res, 'approve a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const checksum = checksumOf(body);
@@ -7004,6 +7094,8 @@ export class LynoxHTTPApi {
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
+      // Resuming re-arms the unattended write: an owner's act (§3.13 E6).
+      if (this._refuseUnlessOwner(_req, res, 'resume a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const checksum = checksumOf(body);
@@ -7029,6 +7121,8 @@ export class LynoxHTTPApi {
     // The owner's statement that the one target an external run wrote kept every field the
     // write did not send. It is what lets runs to that host with that verb go wider.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/confirm-probe', async (req, res, params) => {
+      // Confirming the probe releases the remaining writes: an owner's act (§3.13 E6).
+      if (this._refuseUnlessOwner(req, res, 'confirm the probe of a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const out = ledger.confirmProbe(params['id']!, { confirmedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown' }) });
@@ -7037,6 +7131,8 @@ export class LynoxHTTPApi {
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/undo', async (_req, res, params) => {
+      // An undo is itself an unattended external write: an owner's act (§3.13 E6).
+      if (this._refuseUnlessOwner(_req, res, 'undo a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const out = ledger.planUndo(params['id']!);

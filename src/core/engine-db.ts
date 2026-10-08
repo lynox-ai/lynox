@@ -896,6 +896,19 @@ const MIGRATIONS: string[] = [
   // seen was never recorded and cannot be recovered.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (19);
    ALTER TABLE triggers ADD COLUMN created_untrusted TEXT;`,
+
+  // v20 (who wrote a trigger): the principal that created it, last changed it from a
+  // request, and stamped it — `owner` or `mandate:<address>` (request-principal.ts). A
+  // schedule a mandate created or changed is due only once the owner stamped it, for
+  // every effect; the engine's own writes (status, next run, lease) set none of these.
+  // Rows from before carry no creator and no editor: nothing a mandate wrote can exist
+  // yet, so NULL means "not a mandate". A stamp already on a row was the owner's, since
+  // before this version only the owner could stamp.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (20);
+   ALTER TABLE triggers ADD COLUMN created_by TEXT;
+   ALTER TABLE triggers ADD COLUMN edited_by TEXT;
+   ALTER TABLE triggers ADD COLUMN confirmed_by TEXT;
+   UPDATE triggers SET confirmed_by = 'owner' WHERE confirmed_at IS NOT NULL;`,
 ];
 
 /**
