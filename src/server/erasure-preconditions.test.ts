@@ -30,6 +30,12 @@ vi.mock('imapflow', () => {
   function ImapFlow(): unknown { return makeFakeImapClient(); }
   return { ImapFlow, AuthenticationFailure: class extends Error {} };
 });
+// The claim's control-plane call, held open by the test so it can be overtaken by an erasure.
+const cpFetchMock = vi.hoisted(() => vi.fn());
+vi.mock('../core/connector-egress.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/connector-egress.js')>()),
+  cpFetch: cpFetchMock,
+}));
 vi.mock('nodemailer', () => ({
   default: { createTransport: vi.fn().mockImplementation(() => ({ sendMail: vi.fn(), close: vi.fn(), verify: vi.fn() })) },
 }));
@@ -204,6 +210,47 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
       expect(cb.status).toBe(409);
     } finally {
       internals().erasureInProgress = false;
+    }
+
+    // A device flow whose start returns while an erasure has begun: the poll that would
+    // write the grant is never started.
+    const waitForAuth = vi.fn(async () => {});
+    const startSpy = vi.spyOn(google(), 'startDeviceFlow').mockImplementation(async () => {
+      internals().erasureInProgress = true;
+      return { verificationUrl: 'https://example.test/d', userCode: 'uc', waitForAuth };
+    });
+    try {
+      const late = await call('POST', '/api/google/auth', {});
+      expect(late.status).toBe(409);
+      expect(late.body['code']).toBe('erasure_in_progress');
+      expect(waitForAuth).not.toHaveBeenCalled();
+    } finally {
+      startSpy.mockRestore();
+      internals().erasureInProgress = false;
+    }
+
+    // A managed claim still out at the control plane is a pending grant, and when its
+    // answer arrives during an erasure the tokens are not written.
+    const MANAGED = ['LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_MANAGED_INSTANCE_ID'] as const;
+    for (const k of MANAGED) saved[k] ??= process.env[k];
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'zz-inst';
+    let answer!: (r: Response) => void;
+    cpFetchMock.mockImplementationOnce(() => new Promise<Response>((r) => { answer = r; }));
+    try {
+      const claim = call('POST', '/api/google/claim-managed', { claim_nonce: 'zz' });
+      while (cpFetchMock.mock.calls.length === 0) await new Promise((r) => setTimeout(r, 10));
+      expect(google().grantPending).toBe(true);
+      internals().erasureInProgress = true;
+      answer(new Response(JSON.stringify(tokens()), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      const res = await claim;
+      expect(res.status).toBe(409);
+      expect(res.body['code']).toBe('erasure_in_progress');
+      expect(google().isAuthenticated()).toBe(false);
+      expect(google().grantPending).toBe(false);
+    } finally {
+      internals().erasureInProgress = false;
+      for (const k of MANAGED) delete process.env[k];
     }
 
     let release!: () => void;
