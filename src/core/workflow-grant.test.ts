@@ -296,6 +296,45 @@ describe('accepting a grant', () => {
     expect(grantName('   ')).toBeUndefined();
   });
 
+  it('keeps only what reads as text: no tag characters, invisible fillers or variation selectors', () => {
+    const tag = (c: string): string => String.fromCodePoint(0xe0000 + c.charCodeAt(0));
+    expect(grantName(`Ada${tag('X')}${tag('Y')} L.`), 'tag characters').toBe('Ada L.');
+    expect(grantName('A\u3164da \u115fL\u1160.\uffa0'), 'Hangul fillers').toBe('Ada L.');
+    expect(grantName('A\ufe0fda\u034f L.\u{e0100}'), 'variation selectors, grapheme joiner').toBe('Ada L.');
+    expect(grantName('A\ue000da L.'), 'private use').toBe('Ada L.');
+    expect(grantName('A\u2800da\u180b L.\u17b4'), 'braille blank, Mongolian and Khmer invisibles').toBe('Ada L.');
+    expect(grantName('A\u180fda L.\u17b5'), 'the far end of each range').toBe('Ada L.');
+  });
+
+  it('refuses a name with no letter or digit left, and keeps words apart where a control char stood', () => {
+    expect(grantName('\u2800\u2800'), 'a name that only looks blank').toBeUndefined();
+    expect(grantName('\u0301\u0301'), 'marks with nothing to mark').toBeUndefined();
+    expect(grantName('...'), 'punctuation only').toBeUndefined();
+    expect(grantName('Ada\nLovelace'), 'a line break between two words').toBe('Ada Lovelace');
+  });
+
+  it('caps at 120 code points without splitting a character in two', () => {
+    const name = grantName(`${'a'.repeat(119)}\u{1F600}x`);
+    expect([...name!]).toHaveLength(120);
+    expect(name!.isWellFormed(), 'no lone surrogate').toBe(true);
+    expect(grantName(`${'a'.repeat(119)} b`), 'no space left at the cut').toBe('a'.repeat(119));
+  });
+
+  it('keeps letters with their marks, in any script, and composes them', () => {
+    expect(grantName('Mu\u0308ller'), 'a decomposed umlaut, composed').toBe('Müller');
+    expect(grantName('दीपक शर्मा'), 'Devanagari vowel signs are marks').toBe('दीपक शर्मा');
+    expect(grantName('Ada & Co. ®')).toBe('Ada & Co. ®');
+  });
+
+  it('refuses a number default that is not finite, already in the preview', () => {
+    const p = prepareWorkflowGrant(
+      planned({ parameters: [{ name: 'month', description: '', type: 'number', source: 'user_input', defaultValue: '1e999' }] }),
+      { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false },
+      H,
+    );
+    expect(p).toMatchObject({ ok: false });
+  });
+
   it('deletes the schedule again when the grant cannot be written', () => {
     const p = prepareWorkflowGrant(planned(), { ...ENTRY, params: { month: '2026-09' }, cron: CRON, afterUntrusted: false }, H);
     if (!p.ok) throw new Error(p.error);

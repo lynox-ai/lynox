@@ -138,7 +138,12 @@ function coerceParam(
       if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) {
         return { ok: false, error: `Parameter "${param.name}" must be a number.` };
       }
-      return { ok: true, value: Number(s) };
+      // The pattern admits an exponent, and `1e999` is a valid decimal that Number()
+      // turns into Infinity — which JSON then stores as null.
+      const n = Number(s);
+      return Number.isFinite(n)
+        ? { ok: true, value: n }
+        : { ok: false, error: `Parameter "${param.name}" must be a finite number.` };
     }
     case 'date': {
       const s = typeof raw === 'string' ? raw.trim() : '';
