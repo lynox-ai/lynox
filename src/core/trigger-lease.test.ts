@@ -85,6 +85,7 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
     getSecretStore: () => null,
     getBulkLedger: () => null,
     getUserConfig: () => ({}),
+    workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
   } as unknown as Engine;
   const router = { hasChannels: () => false, notify: vi.fn().mockResolvedValue(undefined) } as unknown as NotificationRouter;

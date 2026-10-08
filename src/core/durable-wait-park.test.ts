@@ -146,6 +146,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
         ? ({ maskAll: (t: string) => maskSecretsAndPatterns(t, opts.secretValues!) } as unknown as ReturnType<Engine['getSecretStore']>)
         : null,
       getUserConfig: () => (opts?.maxToolResultChars !== undefined ? { max_tool_result_chars: opts.maxToolResultChars } : {}),
+      workerRunModelOverride: () => ({}),
       escalateToUser: () => null,
     } as unknown as Engine;
 

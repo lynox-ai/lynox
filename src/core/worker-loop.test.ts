@@ -154,7 +154,7 @@ function makeEngine(opts?: {
     // `null` is a real production shape (an engine with no store), and the
     // wiring under test handles it by returning the canonical skip marker.
     getPromptStore: vi.fn(() => ps),
-    getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+    getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
   } as unknown as Engine;
@@ -251,6 +251,47 @@ describe('WorkerLoop', () => {
       'Task: Daily Report\n\nGenerate the daily report',
       { triggerOrigin: 'cron' },
     );
+  });
+
+  // ---- 2a. the background model reaches the run's agent ----
+
+  it('executeStandard hands the engine\'s background-model choice to the run\'s agent', async () => {
+    const slot = { provider: 'mistral', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' };
+    const task = makeTask();
+    const session = makeSession('Done.');
+    const engine = makeEngine({ taskManager: makeTaskManager([task]), session });
+    vi.mocked(engine.workerRunModelOverride).mockReturnValue({ backgroundSlot: slot } as never);
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    await loop.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard');
+    expect(session._recreateAgent).toHaveBeenCalledWith(expect.objectContaining({ autonomy: 'autonomous', backgroundSlot: slot }));
+  });
+
+  it('executeWatch rebuilds the analysis agent with the choice, and not at all without one', async () => {
+    vi.useRealTimers();
+    const slot = { provider: 'mistral', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' };
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
+    const override = vi.fn((): Record<string, unknown> => ({ backgroundSlot: slot }));
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: override,
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+    await fire(makeTask({ id: 't-bgm', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    expect(override).toHaveBeenCalledWith('watch');
+    expect(analysisSession._recreateAgent).toHaveBeenCalledWith({ backgroundSlot: slot });
+
+    vi.mocked(analysisSession._recreateAgent).mockClear();
+    override.mockReturnValue({});
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
+    await fire(makeTask({ id: 't-bgm2', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+    expect(analysisSession._recreateAgent).not.toHaveBeenCalled();
   });
 
   // ---- 2b. executeStandard wires a per-run cost guard (SEC-LC-1) ----
@@ -1321,7 +1362,7 @@ describe('WorkerLoop', () => {
     // Intercept the session to capture promptUser after it's assigned
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager([makeTask()])),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1437,7 +1478,7 @@ describe('WorkerLoop', () => {
     const tm = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => tm),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1488,7 +1529,7 @@ describe('WorkerLoop', () => {
     const engine = {
       getTaskManager: vi.fn(() => tm),
       createSession: vi.fn(() => session),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1534,7 +1575,7 @@ describe('WorkerLoop', () => {
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1582,7 +1623,7 @@ describe('WorkerLoop', () => {
     };
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
@@ -1640,7 +1681,7 @@ describe('WorkerLoop', () => {
 
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1736,7 +1777,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1805,7 +1846,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1857,7 +1898,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -1970,7 +2011,7 @@ describe('WorkerLoop', () => {
     const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager;
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})),
+      getUserConfig: vi.fn(() => ({})), workerRunModelOverride: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
       escalateToUser: escalateSpy,
     } as unknown as Engine;
@@ -2003,7 +2044,7 @@ describe('WorkerLoop', () => {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})),
       createSession,
-      escalateToUser: vi.fn(() => null),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -2046,7 +2087,7 @@ describe('WorkerLoop', () => {
       getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager)),
       getUserConfig: vi.fn(() => ({})),
       createSession: vi.fn(() => analysisSession),
-      escalateToUser: vi.fn(() => null),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
     const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
@@ -2091,7 +2132,7 @@ describe('WorkerLoop', () => {
     });
     const engine = {
       getTaskManager: vi.fn(() => makeTaskManager()),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -2459,7 +2500,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
@@ -2488,7 +2529,7 @@ describe('WorkerLoop', () => {
     const taskManager = makeTaskManager();
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
-      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),

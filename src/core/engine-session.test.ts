@@ -460,8 +460,8 @@ import { Memory } from './memory.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
 import { initLLMProvider } from './llm-client.js';
-import { setTierSetResolver, resolveTierModel } from './tier-resolver.js';
-import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/index.js';
+import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-resolver.js';
+import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
 // === Helper ===
 
@@ -1951,12 +1951,13 @@ describe('Engine + Session (Orchestrator)', () => {
         setup(engine);
         try {
           const admitted = engine.resolveWorkerRunModel(kind);
-          const workerProfile = engine.getUserConfig().worker_profile;
+          // The loop's own choice (`workerRunModelOverride`), applied the way the loop
+          // applies it — not a copy of its rule.
+          const pick = engine.workerRunModelOverride(kind);
           const session = engine.createSession(kind === 'watch' ? { model: 'fast' } : {});
           vi.mocked(Agent).mockClear();
-          if (kind === 'standard') session._recreateAgent({ autonomy: 'autonomous', profile: workerProfile });
-          else if (workerProfile) session._recreateAgent({ profile: workerProfile });
-          else session._recreateAgent({});
+          if (kind === 'standard') session._recreateAgent({ autonomy: 'autonomous', ...pick });
+          else session._recreateAgent(pick);
           const agentModel = vi.mocked(Agent).mock.calls.at(-1)![0].model as string;
           mockSend.mockResolvedValueOnce('done');
           await session.run('go');
@@ -1965,8 +1966,111 @@ describe('Engine + Session (Orchestrator)', () => {
         } finally {
           delete engine.getUserConfig().model_profiles;
           delete engine.getUserConfig().worker_profile;
+          delete engine.getUserConfig().background_model;
         }
       }
+
+      const MISTRAL_SLOT = { provider: 'mistral' as const, model_id: 'ministral-14b-2512', api_key: 'test-slot-key', api_base_url: 'https://api.mistral.ai/v1' };
+
+      it('the user\'s background model: its model and provider, over the worker profile', async () => {
+        const r = await compare('standard', (engine) => {
+          engine.getUserConfig().model_profiles = { worker: { ...MISTRAL_PROFILE, model_id: 'mistral-large-2512' } };
+          engine.getUserConfig().worker_profile = 'worker';
+          engine.getUserConfig().background_model = MISTRAL_SLOT;
+        });
+        expect(r.admitted).toEqual({ modelId: 'ministral-14b-2512', provider: 'mistral' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('the user\'s background model on the base provider: that model, though the tier names another', async () => {
+        const haiku = resolveTierModel('fast', 'anthropic').modelId;
+        const r = await compare('standard', (engine) => {
+          engine.getUserConfig().background_model = { provider: 'anthropic', model_id: haiku };
+        });
+        expect(haiku).not.toBe(resolveTierModel('balanced', 'anthropic').modelId);
+        expect(r.admitted).toEqual({ modelId: haiku, provider: 'anthropic' });
+        expect(r.agentModel).toBe(haiku);
+        expect({ modelId: r.row.modelId, provider: r.row.provider }).toEqual(r.admitted);
+      });
+
+      it('a cross-provider slot without a key gets its provider\'s key; a same-provider one is left as written', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        const saved = { m: process.env['MISTRAL_API_KEY'], a: process.env['ANTHROPIC_API_KEY'] };
+        process.env['MISTRAL_API_KEY'] = ['env', 'mistral', 'value'].join('-');
+        process.env['ANTHROPIC_API_KEY'] = ['env', 'anthropic', 'value'].join('-');
+        try {
+          engine.getUserConfig().background_model = { provider: 'mistral', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' };
+          expect(engine.getBackgroundSlot()?.api_key).toBe(process.env['MISTRAL_API_KEY']);
+          // On the base provider the base client carries the key; nothing is injected.
+          const sameProvider = { provider: 'anthropic' as const, model_id: resolveTierModel('fast', 'anthropic').modelId };
+          engine.getUserConfig().background_model = sameProvider;
+          expect(engine.getBackgroundSlot()).toEqual(sameProvider);
+        } finally {
+          delete engine.getUserConfig().background_model;
+          if (saved.m === undefined) delete process.env['MISTRAL_API_KEY']; else process.env['MISTRAL_API_KEY'] = saved.m;
+          if (saved.a === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = saved.a;
+        }
+      });
+
+      it('a same-provider slot rides the base client and is NOT pinned; its snapshot carries the Anthropic betas', async () => {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        const haiku = resolveTierModel('fast', 'anthropic').modelId;
+        try {
+          const session = engine.createSession({});
+          vi.mocked(Agent).mockClear();
+          session._recreateAgent({ backgroundSlot: { provider: 'anthropic', model_id: haiku } });
+          const cfg = vi.mocked(Agent).mock.calls.at(-1)![0];
+          expect(cfg.model).toBe(haiku);
+          expect(cfg.modelPinnedByProfile).toBe(false);
+          // The reference comes from the provider table, not from another resolution
+          // through snapshotForSlot — that would move with the function under test.
+          const anthropicBetas = getBetasForProvider('anthropic');
+          expect(anthropicBetas.length).toBeGreaterThan(0);
+          expect(snapshotForSlot({ provider: 'anthropic', model_id: haiku }, 'openai', () => 'unused').betas).toEqual(anthropicBetas);
+          expect(snapshotForSlot({ provider: 'mistral', model_id: 'ministral-14b-2512' }, 'anthropic', () => 'unused').betas).toBeUndefined();
+        } finally {
+          delete engine.getUserConfig().background_model;
+        }
+      });
+
+      it('the watch analysis with a background model: that model, not the fast tier', async () => {
+        const r = await compare('watch', (engine) => {
+          engine.getUserConfig().background_model = MISTRAL_SLOT;
+        });
+        expect(r.admitted).toEqual({ modelId: 'ministral-14b-2512', provider: 'mistral' });
+        expect(r.agentModel).toBe(r.admitted.modelId);
+      });
+
+      it('a background run that switches tier mid-run (compaction override) keeps its model, autonomy and iteration cap', async () => {
+        // The rebuild-keeps-identity rule, driven through a real run rather than a bare rebuild:
+        // `runOptions.modelTier` rebuilds the agent for the run (session.ts, the
+        // override swap) and again to restore the tier afterwards.
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await engine.init();
+        engine.getUserConfig().background_model = MISTRAL_SLOT;
+        try {
+          const session = engine.createSession({});
+          session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous', ...engine.workerRunModelOverride('standard') });
+          vi.mocked(Agent).mockClear();
+          mockSend.mockResolvedValueOnce('done');
+          await session.run('go', { modelTier: 'fast' });
+          const rebuilds = vi.mocked(Agent).mock.calls.map((c) => c[0]);
+          expect(rebuilds.length).toBeGreaterThan(0);
+          for (const cfg of rebuilds) {
+            expect(cfg.model).toBe('ministral-14b-2512');
+            expect(cfg.autonomy).toBe('autonomous');
+            expect(cfg.maxIterations).toBe(40);
+            // A slot on another endpoint pins the pair: the agent's own helper calls
+            // must not send the tier's fast id to the Mistral endpoint.
+            expect(cfg.modelPinnedByProfile).toBe(true);
+          }
+        } finally {
+          delete engine.getUserConfig().background_model;
+        }
+      });
 
       it('a worker profile: the profile\'s model and wire, though the tier points elsewhere', async () => {
         const r = await compare('standard', (engine) => {

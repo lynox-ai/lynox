@@ -314,6 +314,9 @@ export const LynoxUserConfigSchema = z.object({
   // persisted value and null the whole config on the next write.
   model_profiles:          z.record(z.string(), ModelProfileSchema).optional(),
   worker_profile:          z.string().optional(),
+  // `.nullable()` so Settings can CLEAR the choice (`PUT {background_model:null}`
+  // deletes the key in the merge) and background runs return to `worker_profile`.
+  background_model:        TierSlotSchema.nullable().optional(),
 }).strict(); // reject unknown keys — prevents stale-tab ghost-writes from
               // landing GET-response-only fields (capabilities, locks,
               // managed, bugsink_dsn_configured) in ~/.lynox/config.json.

@@ -242,6 +242,7 @@ function makeHarness(opts?: {
     getRunHistory: () => history,
     getSecretStore: () => null,
     getUserConfig: () => ({}),
+    workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
   } as unknown as Engine;
 
@@ -701,6 +702,7 @@ function makeClassHarness(opts: {
       updateTrigger: (_id: string, patch: unknown) => { reArms.push(patch); },
     }),
     getUserConfig: () => ({}),
+    workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
     getPromptStore: () => null,
     getSecretStore: () => null,

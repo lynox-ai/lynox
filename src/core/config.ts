@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import type { LynoxUserConfig, ModelProfile, TierSet } from '../types/index.js';
-import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, profileNamed } from '../types/index.js';
+import type { LynoxUserConfig, ModelProfile, ModelTier, TierSet, TierSlot } from '../types/index.js';
+import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, modelIdExceedsMaxTier, profileNamed } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
@@ -28,6 +28,22 @@ const LYNOX_DIR = '.lynox';
  */
 export function applyManagedTierSetConstraints(tierSet: TierSet, blockedModelIds?: readonly string[]): TierSet {
   const out: TierSet = {};
+  for (const tier of ['fast', 'balanced', 'deep'] as const) {
+    const slot = tierSet[tier];
+    if (!slot) continue;
+    const kept = applyManagedSlotConstraint(slot, blockedModelIds);
+    if (kept) out[tier] = kept;
+  }
+  return out;
+}
+
+/**
+ * One slot under the managed constraints of {@link applyManagedTierSetConstraints}:
+ * the slot as the control plane will run it (its own key and base_url replaced by
+ * the CP's), or `undefined` when it must drop. Shared with `background_model`, so the
+ * two user-writable model choices on a managed instance are held to one allowlist.
+ */
+export function applyManagedSlotConstraint(slot: TierSlot, blockedModelIds?: readonly string[]): TierSlot | undefined {
   const anthropicKey = process.env['ANTHROPIC_API_KEY'];
   const mistralKey = process.env['MISTRAL_API_KEY'];
   // Canary (model-presets W3): a Fireworks slot (⚡ efficient's deep model) is kept
@@ -37,36 +53,80 @@ export function applyManagedTierSetConstraints(tierSet: TierSet, blockedModelIds
   // canonical FIREWORKS_API_BASE (no host spoof), mirroring the Mistral branch.
   const fireworksEnabled = managedFireworksEnabled();
   const fireworksKey = process.env['FIREWORKS_API_KEY'];
-  for (const tier of ['fast', 'balanced', 'deep'] as const) {
-    const slot = tierSet[tier];
-    if (!slot) continue;
-    // Model blocklist (LYNOX_BLOCKED_MODEL_IDS): a slot naming a blocked model
-    // is dropped in-memory (the tier falls back to the base provider, where the
-    // tier-resolver enforces the same blocklist). config.json is untouched —
-    // clearing the blocklist restores the user's choice on the next reload.
-    if (isBlockedModelId(slot.model_id, blockedModelIds)) continue;
-    // Mistral is the registry-canonical 'mistral' OR the LLMProvider form the
-    // settings UI persists ('openai' + a Mistral host — same as standard mode).
-    // A non-Mistral host on 'openai' (a tenant trying to sneak a free-text
-    // endpoint) fails isMistralHost → the slot drops. The accepted base_url is
-    // ALWAYS forced to the canonical MISTRAL_API_BASE (no host spoof).
-    const isMistral = slot.provider === 'mistral'
-      || (slot.provider === 'openai' && isMistralHost(slot.api_base_url));
-    // Fireworks (openai wire) — accepted only under the flag, matched by the EXACT
-    // canonical endpoint (no fuzzy host match / no spoof surface).
-    const isFireworks = fireworksEnabled
-      && slot.provider === 'openai'
-      && slot.api_base_url === FIREWORKS_API_BASE;
-    if (slot.provider === 'anthropic' && anthropicKey) {
-      out[tier] = { provider: 'anthropic', model_id: slot.model_id, api_key: anthropicKey };
-    } else if (isMistral && mistralKey) {
-      out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
-    } else if (isFireworks && fireworksKey) {
-      out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: fireworksKey, api_base_url: FIREWORKS_API_BASE };
-    }
-    // else: off-allowlist provider or missing CP key → drop (falls back to base).
+  // Model blocklist (LYNOX_BLOCKED_MODEL_IDS): a slot naming a blocked model
+  // is dropped in-memory (the tier falls back to the base provider, where the
+  // tier-resolver enforces the same blocklist). config.json is untouched —
+  // clearing the blocklist restores the user's choice on the next reload.
+  if (isBlockedModelId(slot.model_id, blockedModelIds)) return undefined;
+  // Mistral is the registry-canonical 'mistral' OR the LLMProvider form the
+  // settings UI persists ('openai' + a Mistral host — same as standard mode).
+  // A non-Mistral host on 'openai' (a tenant trying to sneak a free-text
+  // endpoint) fails isMistralHost → the slot drops. The accepted base_url is
+  // ALWAYS forced to the canonical MISTRAL_API_BASE (no host spoof).
+  const isMistral = slot.provider === 'mistral'
+    || (slot.provider === 'openai' && isMistralHost(slot.api_base_url));
+  // Fireworks (openai wire) — accepted only under the flag, matched by the EXACT
+  // canonical endpoint (no fuzzy host match / no spoof surface).
+  const isFireworks = fireworksEnabled
+    && slot.provider === 'openai'
+    && slot.api_base_url === FIREWORKS_API_BASE;
+  if (slot.provider === 'anthropic' && anthropicKey) {
+    return { provider: 'anthropic', model_id: slot.model_id, api_key: anthropicKey };
+  } else if (isMistral && mistralKey) {
+    return { provider: slot.provider, model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
+  } else if (isFireworks && fireworksKey) {
+    return { provider: slot.provider, model_id: slot.model_id, api_key: fireworksKey, api_base_url: FIREWORKS_API_BASE };
   }
-  return out;
+  // else: off-allowlist provider or missing CP key → drop (falls back to base).
+  return undefined;
+}
+
+/**
+ * Why a user's `background_model` cannot run. Each value names the bound it fails,
+ * in the order they are checked.
+ */
+export type BackgroundModelRefusal = 'blocked' | 'over_ceiling' | 'not_on_managed_allowlist';
+
+/**
+ * Hold the user's background-task model to the bounds every user model choice
+ * answers to, and return the slot as it will run.
+ *
+ * - the model blocklist;
+ * - the `max_tier` ceiling, read on the model id through the capability registry
+ *   (`modelIdExceedsMaxTier`: an id the registry does not know passes only under a
+ *   `deep` ceiling);
+ * - on a managed instance, the provider allowlist with the control plane's key
+ *   (`applyManagedSlotConstraint`, the function `tier_set` slots go through).
+ *
+ * ⚠ The operator's `worker_profile` is NOT checked here and must not be. It is the
+ * control plane's default (managed: Ministral, registered `balanced`), and demo
+ * instances run under a `fast` ceiling, so holding it to the ceiling would move
+ * every one of them off Ministral. The bound is for the choice a tenant can write.
+ *
+ * The same answer at config load and on the settings write. Not pure: on a managed
+ * instance it reads the control plane's keys and the Fireworks opt-in from the env,
+ * as `applyManagedSlotConstraint` does.
+ */
+export function admitBackgroundModel(
+  slot: TierSlot,
+  bounds: {
+    readonly blockedModelIds?: readonly string[] | undefined;
+    readonly maxTier?: ModelTier | undefined;
+    readonly cpSupplied?: boolean | undefined;
+  },
+): { ok: true; slot: TierSlot } | { ok: false; refusal: BackgroundModelRefusal } {
+  if (isBlockedModelId(slot.model_id, bounds.blockedModelIds)) return { ok: false, refusal: 'blocked' };
+  if (modelIdExceedsMaxTier(slot.model_id, bounds.maxTier)) return { ok: false, refusal: 'over_ceiling' };
+  if (bounds.cpSupplied) {
+    const kept = applyManagedSlotConstraint(slot, bounds.blockedModelIds);
+    if (!kept) return { ok: false, refusal: 'not_on_managed_allowlist' };
+    return { ok: true, slot: kept };
+  }
+  // A Mistral slot names its provider, not always its endpoint. Without a base URL it
+  // would go out on the openai wire to an empty base and fail every run, so it gets
+  // the canonical one, as the managed branch forces it.
+  if (slot.provider === 'mistral' && !slot.api_base_url) return { ok: true, slot: { ...slot, api_base_url: MISTRAL_API_BASE } };
+  return { ok: true, slot };
 }
 
 /**
@@ -768,6 +828,27 @@ export function loadConfig(): LynoxUserConfig {
       }
     } catch {
       // ignore malformed LYNOX_TIER_SET_JSON — boot in standard mode rather than crash
+    }
+  }
+  // The user's background-task model, held to the user bounds (admitBackgroundModel).
+  // A choice that fails one is dropped in memory only: config.json keeps it, and the
+  // run falls back to `worker_profile`, the operator default; without one, to the
+  // session's tier as it runs today (which can be the dearer model — that is the
+  // behaviour without any choice, not a new escalation).
+  if (merged.background_model) {
+    const admitted = admitBackgroundModel(merged.background_model, {
+      blockedModelIds: merged.blocked_model_ids,
+      maxTier: merged.max_tier,
+      cpSupplied: merged.cp_supplied,
+    });
+    if (admitted.ok) {
+      merged.background_model = admitted.slot;
+    } else {
+      console.warn(
+        `[lynox] background_model ${JSON.stringify(merged.background_model.model_id)} is not run (${admitted.refusal}); ` +
+        `background tasks use ${merged.worker_profile ? `the worker profile "${merged.worker_profile}"` : 'the default model'}.`,
+      );
+      merged.background_model = undefined;
     }
   }
   // Managed instances: the tier_set is a TENANT-WRITABLE surface, so harden it at

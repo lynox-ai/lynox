@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
-import { resolveProviderApiKey, enrichTierSetCreds } from './llm/provider-keys.js';
+import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
   LynoxConfig,
@@ -449,19 +449,36 @@ export class Engine {
    */
   resolveWorkerRunModel(kind: 'standard' | 'watch'): { modelId: string; provider: ReturnType<typeof resolveAgentModel>['provider'] } {
     const userConfig = this.userConfig;
-    const name = userConfig.worker_profile;
-    // The loop applies the profile differently per kind, and this mirrors it: the
-    // standard run passes it through as given (an empty name throws there), the watch
-    // analysis only when it is set.
-    const applies = kind === 'standard' ? name !== undefined : Boolean(name);
-    const profile = applies && name !== undefined ? resolveNamedProfile(userConfig, name) : undefined;
+    const pick = this.workerRunModelOverride(kind);
+    const profile = 'profile' in pick && pick.profile !== undefined ? resolveNamedProfile(userConfig, pick.profile) : undefined;
     const { modelId, provider } = resolveAgentModel({
       tier: sessionInitialTier(this, kind === 'watch' ? 'fast' : undefined),
       baseProvider: getActiveProvider(),
       profile,
       configProvider: userConfig.provider,
+      backgroundSlot: 'backgroundSlot' in pick ? pick.backgroundSlot : undefined,
     });
     return { modelId, provider };
+  }
+
+  /**
+   * What a WorkerLoop run hands `_recreateAgent` to choose its model — the ONE place
+   * the choice is made, read by the loop and by {@link resolveWorkerRunModel} alike.
+   *
+   * 1. the user's `background_model`, admitted at config load (`getBackgroundSlot`);
+   * 2. else the operator's `worker_profile` — a standard run passes it as given (an
+   *    empty name throws there), a watch analysis only when it is set;
+   * 3. else nothing, and the session's tier decides, as it always has.
+   */
+  workerRunModelOverride(kind: 'standard' | 'watch'):
+    | { backgroundSlot: import('../types/index.js').TierSlot }
+    | { profile: string | undefined }
+    | Record<string, never> {
+    const backgroundSlot = this.getBackgroundSlot();
+    if (backgroundSlot) return { backgroundSlot };
+    const name = this.userConfig.worker_profile;
+    if (kind === 'standard') return { profile: name };
+    return name ? { profile: name } : {};
   }
 
   /** Reload config from disk, update cached reference, and recreate API client if credentials/provider changed. */
@@ -1019,6 +1036,22 @@ export class Engine {
       routingMode: this.userConfig.routing_mode,
       tierSet,
     });
+  }
+
+  /**
+   * The user's background-task model as a run will use it: admitted at config load
+   * (`admitBackgroundModel` — a refused choice is already gone) and, when it names a
+   * provider other than the base, given that provider's key from env > vault, in
+   * memory only, the way a `tier_set` slot is. `undefined` when the user has not
+   * chosen one, and background runs then use `worker_profile` as before.
+   */
+  getBackgroundSlot(): import('../types/index.js').TierSlot | undefined {
+    const slot = this.userConfig.background_model;
+    if (!slot) return undefined;
+    const base = this.userConfig.provider ?? 'anthropic';
+    return enrichSlotCreds(slot, base, (provider, apiBaseURL) =>
+      resolveProviderApiKey({ provider, apiBaseURL, secretStore: this.secretStore, userConfig: this.userConfig }),
+    );
   }
 
   /**

@@ -748,6 +748,18 @@ export interface LynoxUserConfig {
   /** Model profile to use for background tasks (WorkerLoop, Cron). Uses Claude if unset. */
   worker_profile?: string | undefined;
   /**
+   * The user's choice of model for background tasks (WorkerLoop standard runs and
+   * watch analyses), written through `PUT /api/config`. It beats `worker_profile`, which stays the
+   * operator's default (managed: the control plane's Mistral worker). Unlike that
+   * default it is held to the same bounds as any user model choice: the blocklist,
+   * the `max_tier` ceiling and, on managed, the provider allowlist with the
+   * control plane's key (`admitBackgroundModel`). A choice that fails them is
+   * dropped in memory at load, so the run falls back to `worker_profile` — never
+   * further up. Written only when the user picks one; a config without it loads
+   * exactly as before. Mirrors a `tier_set` slot, but is read in every routing mode.
+   */
+  background_model?: TierSlot | null | undefined;
+  /**
    * LLM mode for managed instances. 'standard' (default) uses Claude Sonnet 4.6 via Anthropic Direct.
    * 'eu-sovereign' switches the main LLM to Mistral Large 3 via the OpenAI adapter (Paris) — full
    * EU data sovereignty, no CLOUD Act exposure. Toggleable in the Web UI under Settings → LLM Mode.
