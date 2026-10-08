@@ -289,7 +289,12 @@ function realPathOf(p: string): string {
 }
 
 interface Roots {
+  /** The working directory's real path; every path is resolved against it. */
   cwd: string;
+  /** The working directory as given, which may run through a symlink. Only the textual
+   *  pre-check accepts it, so an absolute path written through that symlink is not
+   *  refused early; the real-path check decides. */
+  logicalCwd: string;
   read: string[];
   home: string | undefined;
   /** False when the working directory is too wide to prove any path from. */
@@ -305,13 +310,14 @@ function provePath(word: Word, env: ProofEnv, roots: Roots): void {
     text = roots.home + text.slice(1);
   }
   // No `..` at all. Path text drops `l/..` as a pair, the kernel resolves it as the parent
-  // of whatever `l` points to, so behind a symlink the two disagree. Without `..`, the text
-  // and the kernel only differ by `.` and repeated slashes, which mean the same to both.
+  // of whatever `l` points to, so behind a symlink the two disagree. Without `..`, text and
+  // kernel can still differ on `.` and repeated slashes only in that the kernel may refuse
+  // (`file/.` is not a directory), which stops the read rather than moving it.
   if (text.split('/').includes('..')) throw new NotProven('path-outside');
   const lexical = resolve(roots.cwd, text);
   // Outside already as text: refused without touching the file system, so a path the
   // model names cannot make the engine wait on a slow mount just to be told no.
-  if (!within(lexical, roots.cwd) && !roots.read.some((r) => within(lexical, r))) {
+  if (!within(lexical, roots.cwd) && !within(lexical, roots.logicalCwd) && !roots.read.some((r) => within(lexical, r))) {
     throw new NotProven('path-outside');
   }
   let real: string;
@@ -465,6 +471,7 @@ export function proveBashCommand(command: string, env: ProofEnv): BashProof {
     const tooWide = dirname(cwd) === cwd || (home !== undefined && within(home, cwd));
     const roots: Roots = {
       cwd,
+      logicalCwd: resolve(env.cwd),
       read: env.readRoots.map(realOrNull).filter((r): r is string => r !== null),
       home: env.home,
       pathsAllowed: !tooWide,

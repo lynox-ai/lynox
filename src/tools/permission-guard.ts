@@ -506,12 +506,15 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
 
 /**
  * Names the deny list leaves to its neighbours but a PROOF may not pass: a proven read is a
- * stronger claim than a missed one. Environment files with a suffix (`.env.local`), and the
- * credential directories themselves, not only paths below them.
+ * stronger claim than a missed one. Environment files with a suffix (`.env.local`, `.envrc`),
+ * the credential directories themselves, not only paths below them, and the dotfiles that
+ * hold a token in plain text (package registries, database passwords, git remotes).
  */
 const PROOF_SENSITIVE: RegExp[] = [
-  /(^|\/)\.env(\.[^/]*)?$/,
+  /(^|\/)\.env([._-][^/]*|rc)?$/,
   /(^|\/)\.(ssh|gnupg|aws|config|docker|kube|npm)$/,
+  /(^|\/)\.(npmrc|pypirc|pgpass|vault-token|git-credentials)$/,
+  /(^|\/)\.git\/config$/,
 ];
 
 /**

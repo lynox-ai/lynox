@@ -261,6 +261,8 @@ describe('proveBashCommand — not proven', () => {
   it('proves from a working directory reached through a symlink, against its real path', () => {
     const viaLink = { ...env, cwd: join(base, 'ws-link') };
     expect(prove('cat notes.md', viaLink).proven).toBe(true);
+    // An absolute path written through the same symlink, as `pwd` prints it.
+    expect(prove(`cat ${join(base, 'ws-link', 'notes.md')}`, viaLink).proven).toBe(true);
     expect(prove('cat ../outside.txt', viaLink)).toEqual(expect.objectContaining({ proven: false, reason: 'path-outside' }));
   });
 

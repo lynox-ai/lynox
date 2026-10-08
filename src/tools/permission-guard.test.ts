@@ -2889,11 +2889,16 @@ describe('bash allowlist observe mode', () => {
     const events = observe(() => {
       isDangerous('bash', { command: 'cat .env.local' }, 'autonomous');
       isDangerous('bash', { command: 'ls .ssh' }, 'autonomous');
-      isDangerous('bash', { command: 'cat .envrc' }, 'autonomous');
+      for (const name of ['.envrc', '.env-local', '.npmrc', '.pypirc', '.pgpass', '.vault-token', '.git-credentials', '.git/config']) {
+        isDangerous('bash', { command: `cat ${name}` }, 'autonomous');
+      }
+      // A name that only starts like one of them stays readable.
+      isDangerous('bash', { command: 'cat .environment-notes.md' }, 'autonomous');
     });
     expect(events.map((e) => e.detail)).toEqual([
       'program=cat;reason=path-sensitive;current=free',
       'program=ls;reason=path-sensitive;current=free',
+      ...Array.from({ length: 8 }, () => 'program=cat;reason=path-sensitive;current=free'),
       'program=cat;reason=ok;current=free',
     ]);
   });
