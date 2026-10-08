@@ -15,6 +15,7 @@ import type { SecretStore } from '../core/secret-store.js';
 import type { CRM } from '../core/crm.js';
 import type { FlatFileMemory } from '../core/memory.js';
 import { HISTORY_KEPT_ON_ERASURE, type RunHistory } from '../core/run-history.js';
+import { MEMORY_KEPT_ON_ERASURE } from '../core/agent-memory-db.js';
 import type { PromptStore } from '../core/prompt-store.js';
 
 /**
@@ -657,6 +658,31 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // And the store still WORKS on the emptied file.
     const am = engineOf().getKnowledgeLayer()!.getDb();
     expect(() => am.createMemory({ text: 'after', namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] })).not.toThrow();
+  }, 120_000);
+
+  it('keeps exactly the agent-memory.db tables this test names as kept', () => {
+    expect([...MEMORY_KEPT_ON_ERASURE].sort()).toEqual([...MEMORY_KEPT].sort());
+  });
+
+  it('rolls agent-memory.db back and names the store when its wipe fails midway', async () => {
+    // The old per-entity loop could stop half done; one transaction cannot. A
+    // trigger refuses the delete of `metrics`, which comes after `memories` in the
+    // file, so the memories are deleted first and must come back.
+    seedLegacyMemory();
+    const path = join(dir, 'agent-memory.db');
+    const before = memoryTables().find(t => t.name === 'memories')!.rows;
+    expect(before, 'fixture: memories seeded').toBeGreaterThan(0);
+    const w = new BetterSqlite3(path);
+    try {
+      w.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
+      const { status, body } = await erase();
+      expect(status).toBe(500);
+      expect((body['failed'] as string[]).filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+      expect(memoryTables().find(t => t.name === 'memories')!.rows, 'a failed wipe must leave every memory in place').toBe(before);
+    } finally {
+      w.exec('DROP TRIGGER IF EXISTS refuse_metrics');
+      w.close();
+    }
   }, 120_000);
 
   /**

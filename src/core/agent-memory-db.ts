@@ -148,6 +148,14 @@ export interface ScoredMemoryRow extends MemoryRow {
 
 // ── Migration SQL ───────────────────────────────────────────────
 
+/**
+ * The tables an Art. 17 erasure keeps (`AgentMemoryDb.deleteAllData`). Only the
+ * migration ledger: it holds no user data, and an emptied `schema_version` would
+ * make the next open re-run every migration. Exported so
+ * `erasure-covers-export.test.ts` can hold it against its own, independent list.
+ */
+export const MEMORY_KEPT_ON_ERASURE: ReadonlySet<string> = new Set(['schema_version']);
+
 const MIGRATIONS: string[] = [
   // v1: Full Agent Memory schema
   `INSERT OR IGNORE INTO schema_version (version) VALUES (1);
@@ -896,19 +904,39 @@ export class AgentMemoryDb {
   }
 
   /**
-   * Soft-delete EVERY active memory (optionally within a namespace) — the wipe-all
-   * primitive for the Right-to-Erasure route (`DELETE /api/data`). Distinct from
-   * {@link deactivateMemoriesByPattern}, which now LIKE-escapes its argument as a
-   * LITERAL match: a `'%'` passed there no longer means "match everything", so the
-   * "deactivate all" intent needs its own predicate-free statement.
+   * GDPR Art. 17, tenant-wide: empty every table of this file except the migration
+   * ledger (`MEMORY_KEPT_ON_ERASURE`). The one caller is `DELETE /api/data`.
+   *
+   * It replaces a soft delete (`UPDATE memories SET is_active = 0 WHERE is_active = 1`)
+   * that left every memory's text on disk — in plaintext, which this store keeps by
+   * design so the pattern match can run — until a later `gc()`, and never touched a
+   * row that was already inactive, the residue an erasure exists to remove. The
+   * route reached the other tables only through an entity listing, so `metrics` and
+   * the `supersedes` lineage stayed as well.
+   *
+   * The table set comes from `sqlite_master`, the same way `RunHistory.deleteAllData`
+   * and `EngineDb.deleteAllData` do it: a table a later migration adds is erased
+   * unless someone puts it in the exception set. One transaction, so a failure leaves
+   * the file as it was and the route reports the store as failed.
+   *
+   * Not {@link purgeMemoriesByIds}: that is the single-subject cascade, and it keeps
+   * what a surviving memory still needs — an entity mentioned elsewhere, `metrics`.
+   * For a tenant-wide wipe nothing survives, so there is nothing to keep.
    */
-  deactivateAllMemories(namespace?: string | undefined): string[] {
-    const now = new Date().toISOString();
-    const rows = (namespace
-      ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND namespace = ? RETURNING id').all(now, namespace)
-      : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 RETURNING id').all(now)
-    ) as { id: string }[];
-    return rows.map(r => r.id);
+  deleteAllData(): void {
+    const tables = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .all() as Array<{ name: string }>;
+    this.transaction(() => {
+      // `foreign_keys` is ON for this connection and the tables reference each other;
+      // the order of the deletes below is the order `sqlite_master` lists them in.
+      this.db.pragma('defer_foreign_keys = ON');
+      for (const { name } of tables) {
+        if (MEMORY_KEPT_ON_ERASURE.has(name)) continue;
+        // A `sqlite_master` identifier, never user input; quoted anyway.
+        this.db.prepare(`DELETE FROM "${name}"`).run();
+      }
+    });
   }
 
   /**

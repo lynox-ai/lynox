@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { AgentMemoryDb } from './agent-memory-db.js';
+import { AgentMemoryDb, MEMORY_KEPT_ON_ERASURE } from './agent-memory-db.js';
 
 describe('AgentMemoryDb', () => {
   let tempDir: string;
@@ -238,12 +238,48 @@ describe('AgentMemoryDb', () => {
       expect(db.getActiveMemoryCount()).toBe(3);
     });
 
-    it('deactivateAllMemories soft-deletes every active row (wipe-all primitive, not a % wildcard)', () => {
-      db.createMemory({ text: 'one', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
-      db.createMemory({ text: 'two', namespace: 'methods', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
-      const ids = db.deactivateAllMemories();
-      expect(ids).toHaveLength(2);
-      expect(db.getActiveMemoryCount()).toBe(0);
+    it('deleteAllData hard-deletes every memory, the already-inactive ones included', () => {
+      const a = db.createMemory({ text: 'one', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const b = db.createMemory({ text: 'two', namespace: 'methods', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      db.supersedMemory(b, a);
+      db.deleteAllData();
+      const raw = (db as unknown as { db: Database.Database }).db;
+      expect((raw.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n).toBe(0);
+    });
+
+    it('deleteAllData drains an entity table larger than one listing page', () => {
+      // The old route deleted entity by entity through a listing clamped to 200, so
+      // a wipe past one page was the case it had to be guarded for. `DELETE FROM`
+      // has no page; this pins that nothing reintroduces one.
+      for (let i = 0; i < 250; i++) db.createEntity({ canonicalName: `e${String(i)}`, entityType: 'person', scopeType: 'global', scopeId: '' });
+      db.deleteAllData();
+      expect(db.getEntityCount()).toBe(0);
+    });
+
+    it('deleteAllData empties a table added AFTER the code was written', () => {
+      const raw = (db as unknown as { db: Database.Database }).db;
+      raw.exec('CREATE TABLE future_table (x TEXT)');
+      raw.prepare('INSERT INTO future_table (x) VALUES (?)').run('later');
+      db.deleteAllData();
+      expect((raw.prepare('SELECT COUNT(*) AS n FROM future_table').get() as { n: number }).n).toBe(0);
+    });
+
+    it('deleteAllData keeps exactly the migration ledger', () => {
+      expect([...MEMORY_KEPT_ON_ERASURE]).toEqual(['schema_version']);
+      const raw = (db as unknown as { db: Database.Database }).db;
+      const before = (raw.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n;
+      expect(before, 'fixture: the ledger holds the migrations').toBeGreaterThan(0);
+      db.deleteAllData();
+      expect((raw.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(before);
+    });
+
+    it('deleteAllData rolls the whole file back when one delete fails', () => {
+      const raw = (db as unknown as { db: Database.Database }).db;
+      db.createMemory({ text: 'kept', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      db.upsertMetric({ metricName: 'm', value: 1 });
+      raw.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
+      expect(() => db.deleteAllData()).toThrow(/refused/);
+      expect((raw.prepare('SELECT COUNT(*) AS n FROM memories').get() as { n: number }).n, 'a failed wipe must leave the memories in place').toBe(1);
     });
   });
 
