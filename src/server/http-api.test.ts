@@ -11802,9 +11802,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     // see) must cost the answer its "all", not pass under it.
     it('DELETE /api/data fails `secrets#residue` when vault rows outlive the deletes', async () => {
       const deleted: string[] = [];
+      const scrubbed = vi.fn();
       await swapEngine({
         getSecretStore: () => ({
-          hasVault: true, scrubFreedPages: () => undefined,
+          hasVault: true, scrubFreedPages: scrubbed,
           listNames: () => ['S1'], listVaultNames: () => ['S1', 'V1'], vaultRowCount: 1,
           deleteSecret: (name: string) => { deleted.push(name); },
         }),
@@ -11815,6 +11816,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         expect(body.failed).toContain('secrets#residue');
         // Both sources are enumerated, each name once.
         expect(deleted.sort()).toEqual(['S1', 'V1']);
+        // A leftover row must not cost the deleted rows their scrub: the residue
+        // check would otherwise trip the scrub's own `secrets#…` skip.
+        expect(scrubbed).toHaveBeenCalledTimes(1);
+        expect(body.failed).not.toContain('secrets#scrub');
       });
     });
 
