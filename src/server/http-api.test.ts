@@ -12689,15 +12689,22 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       const { Engine } = await import('../core/engine.js');
       const ctor = vi.mocked(Engine);
       const original = ctor.getMockImplementation()!;
-      const claim = vi.fn(() => () => Object.freeze({}));
+      const fresh = new LynoxHTTPApi();
+      // In the same turn the loop starts: before any route exists, so before any request
+      // could be served and before anything awaited in init can run.
+      let routesAtClaim = -1;
+      const claim = vi.fn(() => {
+        routesAtClaim = (fresh as unknown as { dynamicRoutes: unknown[] }).dynamicRoutes.length;
+        return () => Object.freeze({});
+      });
       ctor.mockImplementationOnce(function (this: Record<string, unknown>, ...args: unknown[]) {
         (original as (...a: unknown[]) => unknown).apply(this, args);
         this['getWorkerLoop'] = vi.fn(() => ({ claimHandRunMinter: claim }));
         return this;
       } as unknown as typeof original);
-      const fresh = new LynoxHTTPApi();
       await fresh.init();
       expect(claim).toHaveBeenCalledTimes(1);
+      expect(routesAtClaim).toBe(0);
     });
 
     it('may not run a workflow until the tool lock exists', async () => {

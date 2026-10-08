@@ -42,7 +42,7 @@ vi.mock('./network-guard.js', async (importActual) => {
 });
 
 import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers } from './worker-loop.js';
-import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
+import type { HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -2249,42 +2249,27 @@ describe('WorkerLoop', () => {
     }
     type Exec = { executeTask: (t: TriggerRecord, cap: number | null, m?: HandRunMarker) => Promise<void> };
 
-    /** Whether each `recordTaskRun` call happened inside the hand-run scope. */
-    function scopeAtRecord(tm: TaskManager): boolean[] {
-      const seen: boolean[] = [];
-      (tm.recordTaskRun as ReturnType<typeof vi.fn>).mockImplementation((id: string) => { seen.push(isHandRunOf(id)); });
-      return seen;
-    }
-
-    it('runs the proposal once on a marker minted for it, as a test that leaves its schedule alone', async () => {
+    it('runs the proposal once on a marker minted for it, and names who started it in the log', async () => {
       const task = proposal();
       const { loop, tm, session } = setup(task);
-      const seen = scopeAtRecord(tm);
-      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
-      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: true });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(session.run).toHaveBeenCalledTimes(1);
+      const lines: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => { lines.push(String(c)); return true; });
+      try {
+        const mint = loop.claimHandRunMinter();
+        expect(await loop.runTriggerNow('hr-prop', mint('hr-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await loop.runTriggerNow('hr-prop', mint('hr-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        // Twin: a run without a marker writes no such line.
+        await (loop as unknown as Exec).executeTask(proposal({ created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z' }), null);
+      } finally { spy.mockRestore(); }
+      expect(session.run).toHaveBeenCalledTimes(3);
       expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', 'Tested by hand.', 'success');
-      expect(seen).toEqual([true]);
-    });
-
-    it('records a failed test run inside the scope too, error path included', async () => {
-      const task = proposal();
-      const tm = makeTaskManager([task]);
-      const seen = scopeAtRecord(tm);
-      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session: makeSession(new Error('provider down')) }), makeNotificationRouter(false), 60_000);
-      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
-      await (loop as unknown as Exec).executeTask(task, null, marker);
-      expect(seen.length).toBeGreaterThan(0);
-      expect(seen.every(Boolean)).toBe(true);
-    });
-
-    it('twin: a run without a marker records outside the scope, as before', async () => {
-      const task = proposal({ created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z' });
-      const { loop, tm } = setup(task);
-      const seen = scopeAtRecord(tm);
-      await (loop as unknown as Exec).executeTask(task, null);
-      expect(seen).toEqual([false]);
+      const handLines = lines.filter((l) => l.includes('test run by hand'));
+      expect(handLines).toEqual([
+        '[lynox:worker] "Daily Report" (hr-prop) test run by hand by mandate:eva@kanzlei.example\n',
+        '[lynox:worker] "Daily Report" (hr-prop) test run by hand by mandate:eva@kanzlei.example\n',
+      ]);
     });
 
     it('refuses a look-alike marker: an in-process caller cannot mint one', async () => {
@@ -2367,6 +2352,35 @@ describe('WorkerLoop', () => {
       expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
       await vi.advanceTimersByTimeAsync(0);
       expect(session.run).not.toHaveBeenCalled();
+    });
+
+    it('an unanswered test question ends the wait back to open, not failed', async () => {
+      const task = proposal({ status: 'waiting', waiting_until: '2020-01-01T00:00:00.000Z' });
+      const twin = proposal({ id: 'hr-own', created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z', status: 'waiting' });
+      const { loop, tm } = setup(task);
+      (tm.getExpiredWaitingTriggers as ReturnType<typeof vi.fn>).mockReturnValue([task, twin]);
+      (tm.getDueTriggers as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      await loop.tick();
+      expect(tm.endWait).toHaveBeenCalledWith('hr-prop', 'open');
+      expect(tm.endWait).toHaveBeenCalledWith('hr-own', 'failed');
+    });
+
+    it('an answered test question does not move the proposal\'s time', async () => {
+      const task = proposal({ status: 'waiting' });
+      const twin = proposal({ id: 'hr-own', created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z', status: 'waiting' });
+      const tm = makeTaskManager([task, twin]);
+      (tm.getWaitingTriggers as ReturnType<typeof vi.fn>).mockReturnValue([task, twin]);
+      (tm.getDueTriggers as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (tm.endWait as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const updateTrigger = vi.fn();
+      const engine = Object.assign(makeEngine({ taskManager: tm }), {
+        getPromptStore: vi.fn(() => ({ getAnsweredForTrigger: () => ({ id: 'p', session_id: 's' }) })),
+        getRunHistory: vi.fn(() => ({ updateTrigger })),
+      }) as unknown as Engine;
+      const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+      await loop.tick();
+      expect(updateTrigger).toHaveBeenCalledTimes(1);
+      expect(updateTrigger).toHaveBeenCalledWith('hr-own', expect.objectContaining({ nextRunAt: expect.any(String) }));
     });
 
     it('hands its minter out once', () => {
@@ -2455,6 +2469,65 @@ describe('WorkerLoop', () => {
 
     expect(mockRunManifest).not.toHaveBeenCalled();
     expect(taskManager.setEnabled).toHaveBeenCalledWith('t-rn-unconfirmed', false);
+  });
+
+  it('a test of a proposal naming an unconfirmed workflow is refused without switching the proposal off', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    const template = baseTemplate({}); // no confirmedAt
+    const templateJson = JSON.stringify(template);
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
+    const trigger = makeTask({
+      id: 't-prop-wf', pipeline_id: template['id'] as string, effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined,
+      created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined,
+    });
+    const marker = loop.claimHandRunMinter()('t-prop-wf', { kind: 'mandate', email: 'eva@kanzlei.example' });
+    await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> }).executeTask(trigger, null, marker);
+
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    expect(taskManager.setEnabled).not.toHaveBeenCalled();
+    const recorded = (taskManager.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(recorded[0]).toBe('t-prop-wf');
+    expect(recorded[1]).toContain('needs first-run confirmation by the owner');
+    expect(recorded[1]).not.toContain('disabled');
+  });
+
+  it('a test of a watch proposal does not move its baseline; once stamped, a run does', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const updateWatchConfig = vi.fn();
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager), getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession), escalateToUser: vi.fn(() => null),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    const page = '<html><body><main>Headline One</main></body></html>';
+    const watch = (over: Partial<TriggerRecord>): TriggerRecord => makeTask({
+      id: 't-watch-prop', source: 'watch', effect: 'run_agent',
+      watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }), ...over,
+    });
+    mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
+    await fire(watch({ created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined }));
+    expect(analysisSession.run).toHaveBeenCalledTimes(1);
+    expect(updateWatchConfig).not.toHaveBeenCalled();
+    mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
+    await fire(watch({ created_by: 'mandate:eva@kanzlei.example', confirmed_at: '2026-10-08T00:00:00.000Z' }));
+    expect(updateWatchConfig).toHaveBeenCalledTimes(1);
   });
 });
 

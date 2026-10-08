@@ -31,6 +31,17 @@ export function principalTag(p: RequestPrincipal): string {
   return p.kind === 'owner' ? 'owner' : `${MANDATE_TAG_PREFIX}${p.email}`;
 }
 
+/**
+ * Whether a trigger waits for the owner's stamp because a mandate created or last changed
+ * it (PRD customer-granted-operator-access §3.12, §3.13). Pure and exported so the rule is
+ * asserted directly; the due query, the dispatch backstops and the task manager's schedule
+ * writes all apply it. The last party decides — `edited_by` when set, the creator
+ * otherwise — and an owner's stamp makes the owner that party (TriggerStore.setConfirmedAt).
+ */
+export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined }): boolean {
+  return !t.confirmed_at && isMandateTag(t.edited_by ?? t.created_by);
+}
+
 /** Whether a recorded tag names a mandate. A missing tag (a row from before tags, or one
  *  the engine itself wrote) is not a mandate. */
 export function isMandateTag(tag: string | null | undefined): boolean {

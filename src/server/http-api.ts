@@ -1553,8 +1553,9 @@ export class LynoxHTTPApi {
   private _principalResolver: (req: IncomingMessage) => RequestPrincipal = () => OWNER_PRINCIPAL;
 
   /**
-   * The minter of each worker loop's one-time hand-run door (hand-run-door.ts), claimed on
-   * first use and kept here, private. `null` when the claim failed because something else
+   * The minter of each worker loop's one-time hand-run door (hand-run-door.ts), claimed in
+   * `init` right after the loop starts (and on first use for any other loop) and kept here,
+   * private. `null` when the claim failed because something else
    * claimed first: the door then refuses every hand run, which is the closed direction.
    */
   readonly #handRunMinters = new WeakMap<WorkerLoop, HandRunMinter | null>();

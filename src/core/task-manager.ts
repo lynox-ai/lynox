@@ -4,7 +4,7 @@ import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEf
 import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { compose, renderFence } from '../core/data-boundary.js';
-import { isHandRunOf } from './hand-run-door.js';
+import { mandateNeedsOwnerStamp } from './request-principal.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -628,8 +628,6 @@ export class TaskManager {
     const trigger = this.history.getTrigger(id);
     if (!trigger) return false;
     refuseBulkTrigger(trigger);
-    // A test run by hand does not switch off the proposal it tests (hand-run-door.ts).
-    if (isHandRunOf(trigger.id)) return false;
     // Write the row that was checked, like the four methods above.
     return this.history.setTriggerEnabled(trigger.id, enabled);
   }
@@ -796,10 +794,12 @@ export class TaskManager {
     // withholds it because its wait is still open. Two causes, one mechanism.
     const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped';
 
-    // A test run by hand (hand-run-door.ts) records what happened and leaves the schedule
-    // exactly as it was: no status, no next run, no retry. Written here rather than at the
-    // dozen call sites, because the error path records too.
-    if (isHandRunOf(task.id)) {
+    // A proposal that waits for the owner's stamp (PRD customer-granted-operator-access
+    // §3.12) never fires on its schedule, so a run recorded here was a test by hand, or the
+    // backstop refusing one. Either records what happened and leaves the schedule exactly
+    // as it was: no status, no next run, no retry. A one-shot recorded `completed` or
+    // `failed` would never fire after the owner stamps it.
+    if (mandateNeedsOwnerStamp(task)) {
       this.history.updateTriggerRunResult(id, {
         lastRunAt: new Date().toISOString(),
         lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,

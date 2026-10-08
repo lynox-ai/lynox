@@ -10,8 +10,8 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { isMandateTag, principalTag } from './request-principal.js';
-import { HandRunDoor, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
+import { isMandateTag, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
+import { HandRunDoor, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -361,16 +361,8 @@ export function reservationEstimate(task: TriggerRecord): number {
   return 0;
 }
 
-/**
- * Whether a trigger waits for the owner's stamp because a mandate created or last changed
- * it (PRD customer-granted-operator-access §3.12, §3.13). Pure and exported so the rule is
- * asserted directly; the due query and the dispatch backstop both apply it. The last party
- * decides — `edited_by` when set, the creator otherwise — and an owner's stamp makes the
- * owner that party (TriggerStore.setConfirmedAt).
- */
-export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined }): boolean {
-  return !t.confirmed_at && isMandateTag(t.edited_by ?? t.created_by);
-}
+/** Re-exported where it was born; it lives beside the tags it reads. */
+export { mandateNeedsOwnerStamp };
 
 /**
  * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
@@ -722,7 +714,12 @@ export class WorkerLoop {
           const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(parked.id);
           if (!answered) continue;
           if (taskManager.endWait(parked.id, 'open')) {
-            this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+            // A proposal's question came from a test run by hand; its schedule is not the
+            // test's to move. It keeps its own time and runs with the answer once the
+            // owner stamps it, while the answer is still held.
+            if (!mandateNeedsOwnerStamp(parked)) {
+              this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+            }
             process.stderr.write(
               `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
             );
@@ -749,7 +746,9 @@ export class WorkerLoop {
               `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
             );
           }
-          if (taskManager.endWait(parked.id, 'failed')) {
+          // A proposal's wait came from a test run by hand: it ends back where it was, not
+          // `failed`. (recordTaskRun below withholds its schedule writes on the same rule.)
+          if (taskManager.endWait(parked.id, mandateNeedsOwnerStamp(parked) ? 'open' : 'failed')) {
             // Ending the wait is not the whole job, and getting this wrong is a
             // LOOP rather than a stall. `next_run_at` still points at the run that
             // parked — a moment in the past — and `getDue`'s denylist deliberately
@@ -979,11 +978,21 @@ export class WorkerLoop {
     // minted by a request for THIS trigger is the second disjunct of both stamp checks
     // below, and it is used up here, by the dispatch that sees it. Nothing passes them
     // without one the HTTP layer minted — not a principal, not a look-alike object, not
-    // the same marker twice. A run that passes on it is a TEST and runs in the hand-run
-    // scope, which keeps its schedule untouched (hand-run-door.ts).
-    const handRun = handRunCovers(this.#handRunDoor.consume(marker, task.id), task);
-    if (handRun) return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true));
-    return this.#executeTask(task, capUSD, false);
+    // the same marker twice.
+    //
+    // A run that passes on it is a TEST of a proposal, and it leaves the proposal's
+    // schedule as it found it. That is not carried by this run but by the ROW: while a
+    // trigger waits for the owner's stamp nothing fires it on schedule, so every schedule
+    // write the worker makes to such a row comes from a test, and each writer withholds it
+    // on `mandateNeedsOwnerStamp` (TaskManager.recordTaskRun, the wait sweeps, the
+    // workflow refusal, the watch baseline).
+    const grant = this.#handRunDoor.consume(marker, task.id);
+    const handRun = handRunCovers(grant, task);
+    if (handRun && grant) {
+      // One line per hand start, naming who started it. A process log, not a record.
+      process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
+    }
+    return this.#executeTask(task, capUSD, handRun);
   }
 
   async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean): Promise<void> {
@@ -1994,6 +2003,12 @@ export class WorkerLoop {
       // state and retry it forever). Re-scheduling via the consent flow confirms
       // it + creates a fresh, enabled task.
       const tm = this.engine.getTaskManager();
+      // A proposal is not switched off by its own test run: it does not fire anyway, and
+      // the owner stamping it is how it would start.
+      if (mandateNeedsOwnerStamp(task)) {
+        tm?.recordTaskRun(task.id, `Not run: workflow "${planned.id}" needs first-run confirmation by the owner.`, 'failed');
+        return;
+      }
       tm?.setEnabled?.(task.id, false);
       tm?.recordTaskRun(
         task.id,
@@ -2250,7 +2265,9 @@ export class WorkerLoop {
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       taskManager.recordTaskRun(task.id, truncatedAnalysis, 'success');
-      taskManager.updateWatchConfig(task.id, config);
+      // A test run of a proposal does not move the baseline: the first run after the
+      // owner's stamp compares against what the proposal was set up with.
+      if (!mandateNeedsOwnerStamp(task)) taskManager.updateWatchConfig(task.id, config);
     }
 
     // Slice B3 — escalation primitive (consumer #2): a watcher finding opens (or
