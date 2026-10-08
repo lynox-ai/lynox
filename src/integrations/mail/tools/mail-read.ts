@@ -103,9 +103,16 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
             'Reply-To': replyToDisplay === null ? null : oneBlockLine(replyToDisplay),
             'Message-ID': msg.envelope.messageId ? oneBlockLine(msg.envelope.messageId) : null,
             Attachments: attachmentList,
-            Body: cleaned.visible || msg.text || '(empty body)',
           },
         });
+        // The body has many lines and the sender writes all of them, so it gets a block of
+        // its own. A block holds either one-line fields or one free-text value, never both:
+        // next to the fields, a body line `Attachments:` or `From:` would read as one more
+        // field of the same message.
+        const wrappedBody = wrapUntrustedData(
+          cleaned.visible || msg.text || '(empty body)',
+          `mail:${provider.accountId}:${fromAddr}:body`,
+        );
 
         const lines: string[] = [];
         // The trusted framing above the wrapped envelope holds only what the server or
@@ -121,6 +128,9 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
         }
         lines.push('');
         lines.push(wrappedMessage);
+        lines.push('');
+        lines.push('Body:');
+        lines.push(wrappedBody);
 
         if (input.include_quoted && cleaned.quoted) {
           lines.push('');
