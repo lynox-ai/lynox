@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PromptStore } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
+import { EngineDb } from './engine-db.js';
+import { TaskManager as RealTaskManager } from './task-manager.js';
 
 // Mock the orchestrator runner so the pipeline-path tests can drive
 // status/runId outcomes deterministically without spinning up an LLM.
@@ -41,7 +43,8 @@ vi.mock('./network-guard.js', async (importActual) => {
   return { ...actual, fetchPinned: (...args: unknown[]) => mockFetchPinned(...args) };
 });
 
-import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp } from './worker-loop.js';
+import { WorkerLoop, extractWatchSignal, reservationEstimate, mandateNeedsOwnerStamp, handRunCovers } from './worker-loop.js';
+import { isHandRunOf, type HandRunMarker } from './hand-run-door.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { NotificationMessage } from './notification-router.js';
@@ -340,6 +343,27 @@ describe('WorkerLoop', () => {
     });
     it('the last party decides: once the owner took a mandate\'s schedule over, losing the stamp does not hold it', () => {
       expect(mandateNeedsOwnerStamp({ created_by: M, edited_by: 'owner' })).toBe(false);
+    });
+  });
+
+  describe('handRunCovers', () => {
+    const EVA = { triggerId: 't', principal: { kind: 'mandate' as const, email: 'eva@kanzlei.example' } };
+    const M = 'mandate:eva@kanzlei.example';
+    it('covers the proposal its holder set up or last changed', () => {
+      expect(handRunCovers(EVA, { created_by: M })).toBe(true);
+      expect(handRunCovers(EVA, { created_by: 'owner', edited_by: M })).toBe(true);
+    });
+    it('covers nothing without a grant, whoever the last party is', () => {
+      expect(handRunCovers(null, { created_by: M })).toBe(false);
+    });
+    it('covers no one else\'s: another mandate, the owner, an untagged row, or a proposal the owner took over', () => {
+      expect(handRunCovers(EVA, { created_by: 'mandate:arno@kanzlei.example' })).toBe(false);
+      expect(handRunCovers(EVA, { created_by: 'owner' })).toBe(false);
+      expect(handRunCovers(EVA, {})).toBe(false);
+      expect(handRunCovers(EVA, { created_by: M, edited_by: 'owner' })).toBe(false);
+    });
+    it('never covers the owner, even for an owner grant', () => {
+      expect(handRunCovers({ triggerId: 't', principal: { kind: 'owner' } }, { created_by: 'owner' })).toBe(false);
     });
   });
 
@@ -2210,6 +2234,186 @@ describe('WorkerLoop', () => {
     expect(session.run).not.toHaveBeenCalled();
   });
 
+  // ---- the one-time hand-run door (PRD customer-granted-operator-access §3.12 point 6) ----
+  describe('the one-time hand-run door', () => {
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+    const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example' };
+    /** Eva's unstamped proposal: an autonomous agent action, the strictest backstop. */
+    const proposal = (over?: Partial<TriggerRecord>): TriggerRecord => makeTask({
+      id: 'hr-prop', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example',
+      confirmed_at: undefined, schedule_cron: undefined, next_run_at: undefined, ...over,
+    });
+    function setup(task: TriggerRecord): { loop: WorkerLoop; tm: TaskManager; session: Session } {
+      const tm = makeTaskManager([task]);
+      const session = makeSession('Tested by hand.');
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(false), 60_000);
+      return { loop, tm, session };
+    }
+    type Exec = { executeTask: (t: TriggerRecord, cap: number | null, m?: HandRunMarker) => Promise<void> };
+
+    it('runs the proposal once on a marker minted for it, and names who started it in the log', async () => {
+      const task = proposal();
+      const { loop, tm, session } = setup(task);
+      const lines: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => { lines.push(String(c)); return true; });
+      try {
+        const mint = loop.claimHandRunMinter();
+        expect(await loop.runTriggerNow('hr-prop', mint('hr-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await loop.runTriggerNow('hr-prop', mint('hr-prop', EVA))).toEqual({ ok: true });
+        await vi.advanceTimersByTimeAsync(0);
+        // Twin: a run without a marker writes no such line.
+        await (loop as unknown as Exec).executeTask(proposal({ created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z' }), null);
+      } finally { spy.mockRestore(); }
+      expect(session.run).toHaveBeenCalledTimes(3);
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', 'Tested by hand.', 'success');
+      const handLines = lines.filter((l) => l.includes('test run by hand'));
+      expect(handLines).toEqual([
+        '[lynox:worker] "Daily Report" (hr-prop) test run by hand by mandate:eva@kanzlei.example\n',
+        '[lynox:worker] "Daily Report" (hr-prop) test run by hand by mandate:eva@kanzlei.example\n',
+      ]);
+    });
+
+    it('refuses a look-alike marker: an in-process caller cannot mint one', async () => {
+      const { loop, tm, session } = setup(proposal());
+      loop.claimHandRunMinter();
+      const forged = Object.freeze({}) as HandRunMarker;
+      expect(await loop.runTriggerNow('hr-prop', forged)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).not.toHaveBeenCalled();
+      expect(tm.recordTaskRun).not.toHaveBeenCalled();
+    });
+
+    it('refuses the same marker a second time', async () => {
+      const { loop, tm, session } = setup(proposal());
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(tm.recordTaskRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses the marker up at the dispatch backstop itself, not only at the door', async () => {
+      const task = proposal();
+      const { loop, tm, session } = setup(task);
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      const exec = loop as unknown as Exec;
+      await exec.executeTask(task, null, marker);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      await exec.executeTask(task, null, marker);
+      expect(session.run).toHaveBeenCalledTimes(1);
+      expect(tm.recordTaskRun).toHaveBeenLastCalledWith('hr-prop', expect.stringContaining('runs only after you confirm it'), 'failed');
+    });
+
+    it('refuses a marker minted for another trigger, and leaves it usable there', async () => {
+      const other = proposal({ id: 'hr-other' });
+      const task = proposal();
+      const tm = makeTaskManager([task, other]);
+      const session = makeSession('Tested by hand.');
+      const loop = new WorkerLoop(makeEngine({ taskManager: tm, session }), makeNotificationRouter(false), 60_000);
+      const mint = loop.claimHandRunMinter();
+      const forOther = mint('hr-other', EVA);
+      // At the door: refused before anything is recorded, like any proposal without one.
+      expect(await loop.runTriggerNow('hr-prop', forOther)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      expect(tm.recordTaskRun).not.toHaveBeenCalled();
+      const forOtherAgain = mint('hr-other', EVA);
+      const exec = loop as unknown as Exec;
+      await exec.executeTask(task, null, forOtherAgain);
+      expect(session.run).not.toHaveBeenCalled();
+      await exec.executeTask(other, null, forOtherAgain);
+      expect(session.run).toHaveBeenCalledTimes(1);
+    });
+
+    it('opens only the proposal of the principal it was minted for', async () => {
+      const { loop, session } = setup(proposal());
+      const marker = loop.claimHandRunMinter()('hr-prop', ARNO);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).not.toHaveBeenCalled();
+    });
+
+    it('does not step over the consent stamp of the owner\'s own agent action', async () => {
+      // The owner's unconfirmed run_agent: no mandate gate, only the consent stamp. A
+      // mandate's marker for it must not stand in for the owner's consent.
+      const task = proposal({ created_by: 'owner' });
+      const { loop, tm, session } = setup(task);
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      await (loop as unknown as Exec).executeTask(task, null, marker);
+      expect(session.run).not.toHaveBeenCalled();
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', expect.stringContaining('needs your confirmation'), 'failed');
+    });
+
+    it('drops a marker whose run was refused for another reason, so a later call cannot use it', async () => {
+      const { loop, tm, session } = setup(proposal());
+      (tm.claimLease as ReturnType<typeof vi.fn>).mockReturnValueOnce('held');
+      const marker = loop.claimHandRunMinter()('hr-prop', EVA);
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'already_running' });
+      expect(await loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(session.run).not.toHaveBeenCalled();
+    });
+
+    it('an unanswered test question ends the wait back to open, not failed', async () => {
+      const task = proposal({ status: 'waiting', waiting_until: '2020-01-01T00:00:00.000Z' });
+      const twin = proposal({ id: 'hr-own', created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z', status: 'waiting' });
+      const { loop, tm } = setup(task);
+      (tm.getExpiredWaitingTriggers as ReturnType<typeof vi.fn>).mockReturnValue([task, twin]);
+      (tm.getDueTriggers as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (tm.endWait as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const inScope = new Map<string, boolean>();
+      (tm.recordTaskRun as ReturnType<typeof vi.fn>).mockImplementation((id: string) => { inScope.set(id, isHandRunOf(id)); });
+      await loop.tick();
+      expect(tm.endWait).toHaveBeenCalledWith('hr-prop', 'open');
+      expect(tm.endWait).toHaveBeenCalledWith('hr-own', 'failed');
+      // Outside any run the sweep decides on the row, and records a proposal's expired
+      // test question as a test, so its schedule stays; the owner's schedule as before.
+      expect(inScope.get('hr-prop')).toBe(true);
+      expect(inScope.get('hr-own')).toBe(false);
+    });
+
+    it('an answered test question does not move the proposal\'s time', async () => {
+      const task = proposal({ status: 'waiting' });
+      const twin = proposal({ id: 'hr-own', created_by: 'owner', confirmed_at: '2026-01-01T00:00:00.000Z', status: 'waiting' });
+      const tm = makeTaskManager([task, twin]);
+      (tm.getWaitingTriggers as ReturnType<typeof vi.fn>).mockReturnValue([task, twin]);
+      (tm.getDueTriggers as ReturnType<typeof vi.fn>).mockReturnValue([]);
+      (tm.endWait as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const updateTrigger = vi.fn();
+      const engine = Object.assign(makeEngine({ taskManager: tm }), {
+        getPromptStore: vi.fn(() => ({ getAnsweredForTrigger: () => ({ id: 'p', session_id: 's' }) })),
+        getRunHistory: vi.fn(() => ({ updateTrigger })),
+      }) as unknown as Engine;
+      const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+      await loop.tick();
+      expect(updateTrigger).toHaveBeenCalledTimes(1);
+      expect(updateTrigger).toHaveBeenCalledWith('hr-own', expect.objectContaining({ nextRunAt: expect.any(String) }));
+    });
+
+    it('hands its minter out once', () => {
+      const { loop } = setup(proposal());
+      loop.claimHandRunMinter();
+      expect(() => loop.claimHandRunMinter()).toThrow(/already been claimed/);
+    });
+
+    it('lives in one process only: a marker from before a restart opens nothing', async () => {
+      // §9 Q11, the restart path. The marker is not persisted, so a hand run whose
+      // question outlived the process does not come back through the door; the answered
+      // question waits for the owner's stamp. Mutation: keep issued markers anywhere
+      // that outlives the loop (a module-level map, a row) → the second loop admits it.
+      const task = proposal();
+      const before = setup(task);
+      const marker = before.loop.claimHandRunMinter()('hr-prop', EVA);
+      const after = setup(task);
+      after.loop.claimHandRunMinter();
+      expect(await after.loop.runTriggerNow('hr-prop', marker)).toEqual({ ok: false, reason: 'awaits_owner_stamp' });
+      await (after.loop as unknown as Exec).executeTask(task, null, marker);
+      expect(after.session.run).not.toHaveBeenCalled();
+    });
+  });
+
   it('runTriggerNow returns not_found for an unknown trigger id', async () => {
     const tm = makeTaskManager([]); // getTrigger → undefined
     const engine = makeEngine({ taskManager: tm });
@@ -2274,6 +2478,62 @@ describe('WorkerLoop', () => {
 
     expect(mockRunManifest).not.toHaveBeenCalled();
     expect(taskManager.setEnabled).toHaveBeenCalledWith('t-rn-unconfirmed', false);
+  });
+
+  it('a test of a proposal naming an unconfirmed workflow is refused without switching the proposal off', async () => {
+    vi.useRealTimers();
+    mockRunManifest.mockReset();
+    const template = baseTemplate({}); // no confirmedAt
+    const templateJson = JSON.stringify(template);
+    const taskManager = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
+      getSecretStore: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
+        insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const { _resetPipelineStore, storePipeline } = await import('../tools/builtin/pipeline.js');
+    _resetPipelineStore();
+    storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
+    const trigger = makeTask({
+      id: 't-prop-wf', pipeline_id: template['id'] as string, effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined,
+      created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined,
+    });
+    const marker = loop.claimHandRunMinter()('t-prop-wf', { kind: 'mandate', email: 'eva@kanzlei.example' });
+    await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> }).executeTask(trigger, null, marker);
+
+    expect(mockRunManifest).not.toHaveBeenCalled();
+    expect(taskManager.setEnabled).not.toHaveBeenCalled();
+    const recorded = (taskManager.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(recorded[0]).toBe('t-prop-wf');
+    expect(recorded[1]).toContain('needs first-run confirmation by the owner');
+    expect(recorded[1]).not.toContain('disabled');
+  });
+
+  it('a test of a watch proposal does not move its baseline; an ordinary run does', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined } as unknown as Session;
+    const updateWatchConfig = vi.fn();
+    const watch = (over: Partial<TriggerRecord>): TriggerRecord => makeTask({
+      id: 't-watch-prop', source: 'watch', effect: 'run_agent', schedule_cron: undefined,
+      watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }), ...over,
+    });
+    const proposalRow = watch({ created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined });
+    const tm = Object.assign(makeTaskManager([proposalRow]), { updateWatchConfig });
+    const loop = new WorkerLoop(makeEngine({ taskManager: tm, session: analysisSession }), makeNotificationRouter(false), 60_000);
+    const exec = loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+    const page = '<html><body><main>Headline One</main></body></html>';
+    mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
+    await exec.executeTask(proposalRow, null, loop.claimHandRunMinter()('t-watch-prop', { kind: 'mandate', email: 'eva@kanzlei.example' }));
+    expect(analysisSession.run).toHaveBeenCalledTimes(1);
+    expect(updateWatchConfig).not.toHaveBeenCalled();
+    mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
+    await exec.executeTask(watch({ created_by: 'owner' }), null);
+    expect(updateWatchConfig).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -2416,6 +2676,45 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     if (!store.getPending(SESSION_ID)) throw new Error('park(): no prompt row appeared — the task never reached ask_user');
     return { store, loop, taskId: task.id, answered };
   }
+
+  // §9 Q11 (PRD customer-granted-operator-access), the in-process path: a mandate's test
+  // run by hand that asks a question goes on after the answer, in the same run. The door
+  // is passed once, at the start; the wait does not go back through a stamp check, so
+  // nothing has to mint again. Mutation: re-check the stamp after the wait, or release
+  // the run on a park → the answer never reaches the agent and the run never succeeds.
+  it('a mandate\'s hand run goes on after its question is answered, in the same run', async () => {
+    const store = makeRealStore();
+    const task = makeTask({
+      id: 'hr-ask', created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined,
+      schedule_cron: undefined, next_run_at: undefined,
+    });
+    let resolveAnswered!: (v: string) => void;
+    const answered = new Promise<string>((r) => { resolveAnswered = r; });
+    const session = {
+      sessionId: SESSION_ID, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null,
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => {
+        resolveAnswered(await session.promptUser!('Which list?', ['A', 'B']));
+        return 'Tested with list A.';
+      }),
+    };
+    const tm = makeTaskManager([task]);
+    const loop = new WorkerLoop(
+      makeEngine({ taskManager: tm, session: session as unknown as Session, promptStore: store }),
+      makeNotificationRouter(), 60_000,
+    );
+    closers.unshift(() => { loop.stop(); });
+    const marker = loop.claimHandRunMinter()('hr-ask', { kind: 'mandate', email: 'eva@kanzlei.example' });
+    expect(await loop.runTriggerNow('hr-ask', marker)).toEqual({ ok: true });
+    for (let i = 0; i < 200 && !store.getPending(SESSION_ID); i++) await new Promise((r) => setTimeout(r, 5));
+    const row = store.getPending(SESSION_ID);
+    expect(row).toBeDefined();
+    expect(store.answerUser(row!.id, 'A')).toBe(true);
+    await expect(answered).resolves.toBe('A');
+    for (let i = 0; i < 200 && (tm.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-ask', 'Tested with list A.', 'success');
+    expect(session.run).toHaveBeenCalledTimes(1);
+  });
 
   // 1 — persistence. Mutation: go back to a bare in-memory Promise → no row.
   it('writes the background question to pending_prompts', async () => {
@@ -2787,5 +3086,192 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const { loop, taskId, answered } = await park();
     expect(loop.resolveTaskInput(taskId, 'Yes')).toBe(true);
     await expect(answered).resolves.toBe('Yes');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A test run by hand, against the real store, with the race FORCED: the run is held
+// inside the agent turn, the stamp state changes underneath it, then the run finishes.
+// "Is this a test?" must be the answer given at dispatch, not one re-derived when the
+// result is written — re-deriving it at write time, from the row or from the context,
+// is what made the two opposite races below.
+// ---------------------------------------------------------------------------
+describe('a test run by hand while the stamp changes underneath it', () => {
+  const M = 'mandate:eva@kanzlei.example';
+  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+  let dir: string;
+  let history: RunHistory;
+  let engineDb: EngineDb;
+  let tm: RealTaskManager;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-wl-handrun-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    engineDb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engineDb);
+    tm = new RealTaskManager(history);
+  });
+  afterEach(() => {
+    try { history.close(); } catch { /* closed */ }
+    try { engineDb.close(); } catch { /* closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A session whose turn waits at a gate the test opens. */
+  function heldSession(result: string | Error): { session: Session; started: Promise<void>; release: () => void } {
+    let markStarted!: () => void;
+    const started = new Promise<void>((r) => { markStarted = r; });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const session = {
+      sessionId: 'held', _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null, promptUser: undefined,
+      run: vi.fn(async () => { markStarted(); await gate; if (result instanceof Error) throw result; return result; }),
+    } as unknown as Session;
+    return { session, started, release };
+  }
+  async function until(check: () => boolean): Promise<void> {
+    for (let i = 0; i < 400 && !check(); i++) await new Promise((r) => setTimeout(r, 5));
+    if (!check()) throw new Error('until(): condition never held');
+  }
+  const loopWith = (session: Session, router = makeNotificationRouter(false)): WorkerLoop =>
+    new WorkerLoop(makeEngine({ taskManager: tm as unknown as TaskManager, session }), router, 60_000);
+
+  it('E-1: the owner stamps while the test runs — the proposal still keeps its schedule', async () => {
+    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M }) as TriggerRecord;
+    const { session, started, release } = heldSession('Tested.');
+    const loop = loopWith(session);
+    expect(await loop.runTriggerNow(t.id, loop.claimHandRunMinter()(t.id, EVA))).toEqual({ ok: true });
+    await started;
+    tm.confirmTrigger(t.id, undefined, 'owner');
+    release();
+    await until(() => tm.getTrigger(t.id)?.last_run_status === 'success');
+    const after = tm.getTrigger(t.id)!;
+    expect(after.status).toBe('open');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    loop.stop();
+  });
+
+  it('E-2: a mandate edits a stamped schedule while its ordinary run is under way — the run is recorded as before', async () => {
+    const t = tm.create({
+      title: 'Daily', taskType: 'scheduled', nextRunAt: '2020-01-01T00:00:00.000Z',
+      createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner',
+    }) as TriggerRecord;
+    const { session, started, release } = heldSession('Ran.');
+    const loop = loopWith(session);
+    const run = (loop as unknown as { executeTask: (x: TriggerRecord) => Promise<void> }).executeTask(tm.getTrigger(t.id)!);
+    await started;
+    tm.markEditedBy(t.id, M, true);
+    release();
+    await run;
+    expect(tm.getTrigger(t.id)!.status).toBe('completed');
+    loop.stop();
+  });
+
+  it('D-1: a hand run of a schedule that is already stamped is an ordinary run, recorded as one', async () => {
+    const t = tm.create({
+      title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z',
+      createdBy: M, confirmedAt: '2026-06-01T00:00:00.000Z',
+    }) as TriggerRecord;
+    expect(tm.getTrigger(t.id)!.edited_by ?? tm.getTrigger(t.id)!.created_by).toBe(M);
+    const { session, started, release } = heldSession('Ran.');
+    const loop = loopWith(session);
+    expect(await loop.runTriggerNow(t.id, loop.claimHandRunMinter()(t.id, EVA))).toEqual({ ok: true });
+    await started;
+    release();
+    await until(() => tm.getTrigger(t.id)?.last_run_status === 'success');
+    expect(tm.getTrigger(t.id)!.status).toBe('completed');
+    loop.stop();
+  });
+
+  /** A real prompt store on the same history db, and an engine that parks through it. */
+  function parkingLoop(owner: boolean): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; answered: Promise<string>; finished: () => boolean } {
+    const store = new PromptStore(history.getDb());
+    const t = tm.create({
+      title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z',
+      ...(owner ? { createdBy: 'owner', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner' } : { createdBy: M }),
+    }) as TriggerRecord;
+    let resolveAnswered!: (v: string) => void;
+    const answered = new Promise<string>((r) => { resolveAnswered = r; });
+    let done = false;
+    const session = {
+      sessionId: `ask-${t.id}`, _recreateAgent: vi.fn(), getAgent: () => null, getLastRunStop: () => null,
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => { resolveAnswered(await session.promptUser!('Which list?', ['A', 'B'])); done = true; return 'Asked.'; }),
+    };
+    const engine = Object.assign(
+      makeEngine({ taskManager: tm as unknown as TaskManager, session: session as unknown as Session, promptStore: store }),
+      { getRunHistory: () => history },
+    ) as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    return { loop, store, t, answered, finished: () => done };
+  }
+  async function startParked(owner: boolean): Promise<ReturnType<typeof parkingLoop>> {
+    const h = parkingLoop(owner);
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+    const row = tm.getTrigger(h.t.id)!;
+    void exec.executeTask(row, null, owner ? undefined : h.loop.claimHandRunMinter()(h.t.id, EVA));
+    await until(() => tm.getTrigger(h.t.id)?.status === 'waiting');
+    return h;
+  }
+
+  it('F-1a: the owner stamps while a test question is open, and it expires — the stamped one-shot stays fireable', async () => {
+    const h = await startParked(false);
+    tm.confirmTrigger(h.t.id, undefined, 'owner');
+    history.updateTrigger(h.t.id, { waitingUntil: '2020-01-01T00:00:00.000Z' });
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).not.toBe('failed');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('F-1b: the owner stamps while a test question is open, and it is answered — the proposal keeps its own time', async () => {
+    const h = await startParked(false);
+    tm.confirmTrigger(h.t.id, undefined, 'owner');
+    const row = h.store.getPending(`ask-${h.t.id}`)!;
+    // Answer, then the tick's re-arm in the SAME synchronous turn: the run's own
+    // continuation is a later microtask, so the re-arm sees the trigger still parked.
+    expect(h.store.answerUser(row.id, 'A')).toBe(true);
+    const tick = h.loop.tick();
+    await expect(h.answered).resolves.toBe('A');
+    await tick;
+    await until(h.finished);
+    await until(() => tm.getTrigger(h.t.id)?.last_run_status === 'success');
+    expect(tm.getTrigger(h.t.id)!.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('twin: an ORDINARY run parked on a question is swept and re-armed as before', async () => {
+    const a = await startParked(true);
+    history.updateTrigger(a.t.id, { waitingUntil: '2020-01-01T00:00:00.000Z' });
+    await a.loop.tick();
+    expect(tm.getTrigger(a.t.id)!.last_run_status).toBe('failed');
+    a.loop.stop();
+    const b = await startParked(true);
+    const row = b.store.getPending(`ask-${b.t.id}`)!;
+    expect(b.store.answerUser(row.id, 'A')).toBe(true);
+    const before = Date.now();
+    const tick = b.loop.tick();
+    // Read in the same synchronous turn: the re-arm has run, the run's own continuation
+    // (which records the run and would move next_run_at too) has not.
+    const rearmed = tm.getTrigger(b.t.id)!.next_run_at;
+    await tick;
+    expect(rearmed).not.toBeNull();
+    expect(Date.parse(rearmed!)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(rearmed!)).toBeLessThan(Date.parse('2030-01-01T00:00:00.000Z'));
+    b.loop.stop();
+  });
+
+  it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
+    const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
+    const { session, started, release } = heldSession(new Error('provider down'));
+    const router = makeNotificationRouter(true);
+    const loop = loopWith(session, router);
+    const run = (loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> })
+      .executeTask(tm.getTrigger(t.id)!, null, loop.claimHandRunMinter()(t.id, EVA));
+    await started;
+    release();
+    await run;
+    expect(tm.getTrigger(t.id)!.retry_count ?? 0).toBe(0);
+    expect(router.notify).toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('provider down') }));
   });
 });

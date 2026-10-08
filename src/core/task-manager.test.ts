@@ -6,6 +6,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
+import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
 import type { IAgent } from '../types/index.js';
 import type { TriggerRecord } from '../types/index.js';
@@ -874,6 +875,46 @@ describe('TaskManager — run_agent consent (triggers-consent)', () => {
     tm.update(t.id, { nextRunAt: '2020-01-03T00:00:00.000Z' });
     expect(tm.getTrigger(t.id)!.confirmed_at).toBeTruthy();
     expect(due()).toBe(true);
+  });
+
+  describe('a test run by hand leaves the schedule as it found it (decided at dispatch, hand-run-door.ts)', () => {
+    const M = 'mandate:eva@kanzlei.example';
+    const oneShot = (): TriggerRecord => tm.create({
+      title: 'Check the list once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2,
+    }) as TriggerRecord;
+
+    it('a success records the run and leaves status, next run and retries; the owner\'s stamp then lets it fire', async () => {
+      const t = oneShot();
+      await runAsHandRun(t.id, async () => { tm.recordTaskRun(t.id, 'Tested.', 'success'); });
+      const after = tm.getTrigger(t.id)!;
+      expect(after.status).toBe('open');
+      expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+      expect(after.last_run_status).toBe('success');
+      expect(after.last_run_result).toBe('Tested.');
+      tm.confirmTrigger(t.id, undefined, 'owner');
+      tm.update(t.id, { nextRunAt: '2020-01-01T00:00:00.000Z' });
+      expect(tm.getDueTriggers().some((x) => x.id === t.id)).toBe(true);
+    });
+
+    it('a failure neither ends it nor arms a retry', async () => {
+      const t = oneShot();
+      await runAsHandRun(t.id, async () => { tm.recordTaskRun(t.id, 'boom', 'failed'); });
+      const after = tm.getTrigger(t.id)!;
+      expect(after.status).toBe('open');
+      expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+      expect(after.retry_count ?? 0).toBe(0);
+      expect(after.last_run_status).toBe('failed');
+    });
+
+    it('twin: the same writes outside a test run, or for another trigger, are recorded as before', async () => {
+      const t = oneShot();
+      const other = oneShot();
+      await runAsHandRun(other.id, async () => { tm.recordTaskRun(t.id, 'Ran.', 'success'); });
+      expect(tm.getTrigger(t.id)!.status).toBe('completed');
+      const u = oneShot();
+      tm.recordTaskRun(u.id, 'boom', 'failed');
+      expect(tm.getTrigger(u.id)!.retry_count).toBe(1);
+    });
   });
 
   it('through the real store: once the owner stamped a mandate\'s workflow schedule, the owner\'s own rename does not hold it again', () => {

@@ -4,6 +4,7 @@ import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEf
 import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { compose, renderFence } from '../core/data-boundary.js';
+import { isHandRunOf } from './hand-run-door.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -792,6 +793,22 @@ export class TaskManager {
     // A stop withholds the status for the reason given above; a parked trigger
     // withholds it because its wait is still open. Two causes, one mechanism.
     const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped';
+
+    // A test run by hand (hand-run-door.ts; decided at dispatch and carried by the run)
+    // records what happened and leaves the schedule exactly as it was: no status, no next
+    // run, no retry. A one-shot recorded `completed` or `failed` would never fire after the
+    // owner stamps it. (The wait sweep, outside any run, decides on the row and records a
+    // proposal's expired test question through the same scope.)
+    if (isHandRunOf(task.id)) {
+      this.history.updateTriggerRunResult(id, {
+        lastRunAt: new Date().toISOString(),
+        lastRunResult: result.length > MAX_RUN_RESULT_CHARS ? result.slice(0, MAX_RUN_RESULT_CHARS) : result,
+        lastRunStatus: status,
+        nextRunAt: undefined,
+        retryCount: undefined,
+      });
+      return;
+    }
 
     const now = new Date();
     const truncatedResult = result.length > MAX_RUN_RESULT_CHARS

@@ -192,6 +192,7 @@ vi.mock('../core/engine.js', () => ({
   Engine: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
     this.init = vi.fn().mockReturnValue(Promise.resolve(this));
     this.startWorkerLoop = vi.fn();
+    this.getWorkerLoop = vi.fn().mockReturnValue(null);
     this.shutdown = vi.fn().mockResolvedValue(undefined);
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
     this.getMemory = vi.fn().mockReturnValue({
@@ -12670,17 +12671,98 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       expect(mockTaskMarkEditedBy).toHaveBeenCalledTimes(2);
     });
 
-    it('may not start a schedule by hand, nor run a workflow, until the test-run door and the tool lock exist', async () => {
-      const run = vi.fn();
+    /** A worker loop that records what the route hands it, and a task manager that knows
+     *  `trg-1` with the given last party. Restored after `fn`. */
+    async function withLoop(
+      createdBy: string | undefined,
+      fn: (run: ReturnType<typeof vi.fn>, mint: ReturnType<typeof vi.fn>, claimSpy: ReturnType<typeof vi.fn>) => Promise<void>,
+      claim?: () => unknown,
+    ): Promise<void> {
+      const run = vi.fn().mockResolvedValue({ ok: true });
+      const mint = vi.fn(() => Object.freeze({}));
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
-      const orig = engineRef['getWorkerLoop'];
-      engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow: run });
-      try {
-        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
-        expect(res.status).toBe(403);
-        expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
-      } finally { engineRef['getWorkerLoop'] = orig; }
-      expect(run).not.toHaveBeenCalled();
+      const origLoop = engineRef['getWorkerLoop'];
+      const origTm = engineRef['getTaskManager'] as () => Record<string, unknown>;
+      const tm = origTm();
+      // ONE loop object, as in production: the route caches the minter per loop.
+      const loop = { runTriggerNow: run, claimHandRunMinter: vi.fn(claim ?? (() => mint)) };
+      engineRef['getWorkerLoop'] = (): unknown => loop;
+      engineRef['getTaskManager'] = (): unknown => ({
+        ...tm,
+        getTrigger: (id: string) => (id === 'trg' || id === 'trg-1' ? { id: 'trg-1', created_by: createdBy } : undefined),
+      });
+      try { await fn(run, mint, loop.claimHandRunMinter); } finally {
+        engineRef['getWorkerLoop'] = origLoop;
+        engineRef['getTaskManager'] = origTm;
+      }
+    }
+
+    it('starts its own proposal by hand through the one-time door: a marker minted for the canonical id', async () => {
+      await withLoop(TAG, async (run, mint) => {
+        const res = await jsonFetch('/api/triggers/trg/run', { method: 'POST' });
+        expect(res.status).toBe(202);
+        expect(mint).toHaveBeenCalledWith('trg-1', MANDATE);
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(run.mock.calls[0]![0]).toBe('trg');
+        expect(run.mock.calls[0]![1]).toBe(mint.mock.results[0]!.value);
+      });
+    });
+
+    it('may not start anyone else\'s schedule by hand until the tool lock exists', async () => {
+      for (const createdBy of ['owner', undefined, 'mandate:arno@kanzlei.example']) {
+        await withLoop(createdBy, async (run, mint) => {
+          const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+          expect(res.status).toBe(403);
+          expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+          expect(mint).not.toHaveBeenCalled();
+          expect(run).not.toHaveBeenCalled();
+        });
+      }
+    });
+
+    it('answers 404 for an unknown trigger and mints nothing', async () => {
+      await withLoop(TAG, async (run, mint) => {
+        const res = await jsonFetch('/api/triggers/nope/run', { method: 'POST' });
+        expect(res.status).toBe(404);
+        expect(mint).not.toHaveBeenCalled();
+        expect(run).not.toHaveBeenCalled();
+      });
+    });
+
+    it('refuses every hand run when the door\'s minter was claimed by something else, and does not try again', async () => {
+      await withLoop(TAG, async (run, _mint, claimSpy) => {
+        for (let i = 0; i < 2; i++) {
+          const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+          expect(res.status).toBe(503);
+        }
+        expect(claimSpy).toHaveBeenCalledTimes(1);
+        expect(run).not.toHaveBeenCalled();
+      }, () => { throw new Error('The hand-run minter has already been claimed.'); });
+    });
+
+    it('claims the minter when the server starts, before any request', async () => {
+      const { Engine } = await import('../core/engine.js');
+      const ctor = vi.mocked(Engine);
+      const original = ctor.getMockImplementation()!;
+      const fresh = new LynoxHTTPApi();
+      // In the same turn the loop starts: before any route exists, so before any request
+      // could be served and before anything awaited in init can run.
+      let routesAtClaim = -1;
+      const claim = vi.fn(() => {
+        routesAtClaim = (fresh as unknown as { dynamicRoutes: unknown[] }).dynamicRoutes.length;
+        return () => Object.freeze({});
+      });
+      ctor.mockImplementationOnce(function (this: Record<string, unknown>, ...args: unknown[]) {
+        (original as (...a: unknown[]) => unknown).apply(this, args);
+        this['getWorkerLoop'] = vi.fn(() => ({ claimHandRunMinter: claim }));
+        return this;
+      } as unknown as typeof original);
+      await fresh.init();
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(routesAtClaim).toBe(0);
+    });
+
+    it('may not run a workflow until the tool lock exists', async () => {
       const wf = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
       expect(wf.status).toBe(403);
       expect(((await wf.json()) as { error: string }).error).toContain('Only the owner');
@@ -12691,6 +12773,20 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
     beforeEach(() => {
       mockTaskCreate.mockClear(); mockTaskCreatePipeline.mockClear(); mockSetWorkflowConfirmedAt.mockClear();
       mockConfirmTrigger.mockClear(); mockTaskMarkEditedBy.mockClear(); mockGetPipeline.mockReset();
+    });
+
+    it('starts a schedule by hand as before, minting no marker', async () => {
+      const run = vi.fn().mockResolvedValue({ ok: true });
+      const claim = vi.fn();
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      engineRef['getWorkerLoop'] = (): unknown => ({ runTriggerNow: run, claimHandRunMinter: claim });
+      try {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(202);
+      } finally { engineRef['getWorkerLoop'] = orig; }
+      expect(run).toHaveBeenCalledWith('trg-1', undefined);
+      expect(claim).not.toHaveBeenCalled();
     });
 
     it('stamps the agent trigger it creates, as before, and records itself', async () => {

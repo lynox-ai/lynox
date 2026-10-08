@@ -72,6 +72,8 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
+import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
   HealthBody,
   UsageSummaryResponse,
@@ -1452,6 +1454,12 @@ export class LynoxHTTPApi {
     this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
     setClientErrorSecretStore(this.clientErrorResolver);
     this.engine.startWorkerLoop();
+    // Claim the hand-run minter at once, in the same turn the loop is started: whoever
+    // claims it first holds it, and nothing else may (hand-run-door.ts). Claimed on first
+    // use instead, it would sit unclaimed for as long as no mandate exists — every day,
+    // until there is one — and any in-process caller could take it in the meantime.
+    const workerLoop = this.engine.getWorkerLoop();
+    if (workerLoop) this.#handRunMinterFor(workerLoop);
     this._registerRoutes();
     await this._initPushChannel();
     await this._tryLoadWebUiHandler();
@@ -1544,6 +1552,23 @@ export class LynoxHTTPApi {
    * §3.12, §3.13).
    */
   private _principalResolver: (req: IncomingMessage) => RequestPrincipal = () => OWNER_PRINCIPAL;
+
+  /**
+   * The minter of each worker loop's one-time hand-run door (hand-run-door.ts), claimed in
+   * `init` right after the loop starts (and on first use for any other loop) and kept here,
+   * private. `null` when the claim failed because something else
+   * claimed first: the door then refuses every hand run, which is the closed direction.
+   */
+  readonly #handRunMinters = new WeakMap<WorkerLoop, HandRunMinter | null>();
+
+  #handRunMinterFor(workerLoop: WorkerLoop): HandRunMinter | null {
+    if (!this.#handRunMinters.has(workerLoop)) {
+      let minter: HandRunMinter | null = null;
+      try { minter = workerLoop.claimHandRunMinter(); } catch { minter = null; }
+      this.#handRunMinters.set(workerLoop, minter);
+    }
+    return this.#handRunMinters.get(workerLoop) ?? null;
+  }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
     return this._principalResolver(req);
@@ -6956,13 +6981,32 @@ export class LynoxHTTPApi {
     // fire. 202 = accepted + dispatched (the run continues async; its result
     // lands in the run history), 409 = already running, 404 = no such trigger.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/triggers/:id/run', async (_req, res, params) => {
-      // A run started here is autonomous, with the worker's full tool set. A mandate may
-      // start one only through the one-time test-run door of PRD customer-granted-
-      // operator-access §3.12 point 6, which is not built yet; until then it may not.
-      if (this._refuseUnlessOwner(_req, res, 'start a schedule by hand')) return;
       const workerLoop = engine.getWorkerLoop();
       if (!requireService(res, workerLoop, 'Worker loop')) return;
-      const outcome = await workerLoop.runTriggerNow(params['id']!);
+      // A mandate's hand run goes through the one-time door (PRD customer-granted-operator-
+      // access §3.12 point 6): this request mints a marker for this trigger, and the
+      // dispatch uses it up. It lets the person who set up a proposal test it once per
+      // request, before the owner stamps it. It never makes the proposal due, and the test
+      // leaves its schedule as it was. The owner mints nothing: the owner's "Run now"
+      // passes the stamp checks as it always has, or not at all.
+      const principal = this._principalOf(_req);
+      let marker: HandRunMarker | undefined;
+      if (!isOwnerPrincipal(principal)) {
+        // Bound to the CANONICAL id: the route accepts an id prefix, and the dispatch
+        // checks the marker against the row it resolved.
+        const trigger = engine.getTaskManager()?.getTrigger(params['id']!);
+        if (!trigger) { errorResponse(res, 404, 'Trigger not found'); return; }
+        // Only the proposal this mandate set up or last changed. Starting anything else
+        // by hand, the owner's schedules included, stays the owner's in this piece.
+        if ((trigger.edited_by ?? trigger.created_by) !== principalTag(principal)) {
+          errorResponse(res, 403, 'Only the owner of this instance can start a schedule by hand that someone else set up.');
+          return;
+        }
+        const mint = this.#handRunMinterFor(workerLoop);
+        if (!mint) { errorResponse(res, 503, 'Test runs by hand are not available on this instance right now.'); return; }
+        marker = mint(trigger.id, principal);
+      }
+      const outcome = await workerLoop.runTriggerNow(params['id']!, marker);
       if (!outcome.ok) {
         if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
         // Its own answer, not "already running": the run exists and is waiting for the

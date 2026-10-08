@@ -10,7 +10,8 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { isMandateTag } from './request-principal.js';
+import { isMandateTag, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
+import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -276,6 +277,12 @@ export interface ActiveTask {
    *  Human think-time must not consume the task's compute budget. */
   pauseDeadline: () => void;
   resumeDeadline: () => void;
+  /**
+   * Whether this run is a test run by hand (hand-run-door.ts), as decided at dispatch. The
+   * tick's sweep and answer re-arm read it: a live test owns its question, and the row's
+   * stamp may have changed since the test began.
+   */
+  handRun: boolean;
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
@@ -360,21 +367,27 @@ export function reservationEstimate(task: TriggerRecord): number {
   return 0;
 }
 
+/** Re-exported where it was born; it lives beside the tags it reads. */
+export { mandateNeedsOwnerStamp };
+
 /**
- * Whether a trigger waits for the owner's stamp because a mandate created or last changed
- * it (PRD customer-granted-operator-access §3.12, §3.13). Pure and exported so the rule is
- * asserted directly; the due query and the dispatch backstop both apply it. The last party
- * decides — `edited_by` when set, the creator otherwise — and an owner's stamp makes the
- * owner that party (TriggerStore.setConfirmedAt).
+ * Whether a hand-run grant covers this trigger: only the proposal of the person who holds
+ * it. The door lets the person who set up or last changed a proposal test it; it does not
+ * let a mandate run what someone else wrote — the owner's own unstamped agent action least
+ * of all, whose consent stamp the door would otherwise step over.
  */
-export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; created_by?: string | undefined; edited_by?: string | undefined }): boolean {
-  return !t.confirmed_at && isMandateTag(t.edited_by ?? t.created_by);
+export function handRunCovers(grant: HandRunGrant | null, t: { created_by?: string | undefined; edited_by?: string | undefined }): boolean {
+  if (grant === null) return false;
+  const lastParty = t.edited_by ?? t.created_by;
+  return isMandateTag(lastParty) && lastParty === principalTag(grant.principal);
 }
 
 export class WorkerLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false; // prevent overlapping ticks
   private readonly activeTasks = new Map<string, ActiveTask>();
+  /** The one-time door for a mandate's hand run. Private: its minter goes out once. */
+  readonly #handRunDoor = new HandRunDoor();
   /**
    * Task id → when it was last SAID to be deferred for budget. Drives both halves of
    * the visibility rule: a task absent from here is at its first deferral and speaks
@@ -547,10 +560,39 @@ export class WorkerLoop {
    * stale id and 409 a trigger that is already running (the scheduler picked it
    * up, or a previous Run-now is still in flight). Does NOT consult the
    * `enabled` kill-switch: pausing stops the *schedule* from auto-firing; an
-   * explicit manual run is a deliberate override (the consent gate still bites).
+   * explicit manual run is a deliberate override (the consent gate still bites — except
+   * for a test run by hand through the one-time door, `marker`, whose marker is the
+   * second disjunct of both stamp checks; see `executeTask`).
    */
   async runTriggerNow(
     triggerId: string,
+    marker?: HandRunMarker,
+  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
+    // A marker that is not dispatched is dropped on the way out, whatever refused it: it
+    // was minted for this one request and must not wait for a later one.
+    let dispatched = false;
+    try {
+      const outcome = await this.#runTriggerNow(triggerId, marker);
+      dispatched = outcome.ok;
+      return outcome;
+    } finally {
+      if (!dispatched) this.#handRunDoor.revoke(marker);
+    }
+  }
+
+  /**
+   * Claim the minter of the one-time hand-run door (PRD customer-granted-operator-access
+   * §3.12 point 6). Exactly once per worker loop; the HTTP layer takes it and keeps it
+   * private, and a second claim throws. See hand-run-door.ts for why a marker, not a
+   * principal, is what passes the stamp checks.
+   */
+  claimHandRunMinter(): HandRunMinter {
+    return this.#handRunDoor.claimMinter();
+  }
+
+  async #runTriggerNow(
+    triggerId: string,
+    marker: HandRunMarker | undefined,
   ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
     const taskManager = this.engine.getTaskManager();
     if (!taskManager) return { ok: false, reason: 'not_found' };
@@ -560,7 +602,11 @@ export class WorkerLoop {
     // access §3.12). Refused here, before any run is recorded: the dispatch backstop would
     // refuse it too, but by recording a failed run, and a one-shot proposal recorded as
     // failed loses its next run — pressing "Run now" would destroy what it was asked to start.
-    if (mandateNeedsOwnerStamp(trigger)) return { ok: false, reason: 'awaits_owner_stamp' };
+    // The one exception is a live marker for this trigger: the test run by hand (§3.12
+    // point 6). Checked here without using it up; the dispatch consumes it.
+    if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
+      return { ok: false, reason: 'awaits_owner_stamp' };
+    }
     if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
@@ -607,7 +653,7 @@ export class WorkerLoop {
     if (lease === 'held') return { ok: false, reason: 'already_running' };
     // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
     // activeTasks guard + run history key on exactly the row we found.
-    void this.executeTask(trigger);
+    void this.executeTask(trigger, null, marker);
     return { ok: true };
   }
 
@@ -671,10 +717,19 @@ export class WorkerLoop {
       // only happens for the winner.
       try {
         for (const parked of taskManager.getWaitingTriggers()) {
+          // A live test run by hand waits for its own answer in this process and records
+          // its end as a test. The row cannot say so: the owner may have stamped it since.
+          if (this.activeTasks.get(parked.id)?.handRun === true) continue;
           const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(parked.id);
           if (!answered) continue;
           if (taskManager.endWait(parked.id, 'open')) {
-            this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+            // A proposal's question came from a test run by hand; its schedule is not the
+            // test's to move. Outside any run, so this asks the ROW (hand-run-door.ts says
+            // why writers inside a run must not). It keeps its own time and runs with the answer once the
+            // owner stamps it, while the answer is still held.
+            if (!mandateNeedsOwnerStamp(parked)) {
+              this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
+            }
             process.stderr.write(
               `[lynox:worker] "${parked.title}" (${parked.id}) got its answer — due again\n`,
             );
@@ -694,6 +749,8 @@ export class WorkerLoop {
       // straight past the dispatch loop.
       try {
         for (const parked of taskManager.getExpiredWaitingTriggers()) {
+          // The same for an expired wait: a live test ends its own wait, as a test.
+          if (this.activeTasks.get(parked.id)?.handRun === true) continue;
           try {
             this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
           } catch (err: unknown) {
@@ -701,7 +758,10 @@ export class WorkerLoop {
               `[lynox:worker] prompt settle failed for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
             );
           }
-          if (taskManager.endWait(parked.id, 'failed')) {
+          // A proposal's wait came from a test run by hand: it ends back where it was, not
+          // `failed`. Outside any run, so this asks the ROW.
+          const proposal = mandateNeedsOwnerStamp(parked);
+          if (taskManager.endWait(parked.id, proposal ? 'open' : 'failed')) {
             // Ending the wait is not the whole job, and getting this wrong is a
             // LOOP rather than a stall. `next_run_at` still points at the run that
             // parked — a moment in the past — and `getDue`'s denylist deliberately
@@ -731,7 +791,10 @@ export class WorkerLoop {
             // got its answer still reports success is §0 A7, which this wave does
             // not build; the overwrite is the same defect seen from the other end.
             try {
-              taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
+              // A proposal's expired question was a test's: recorded as one, so its
+              // schedule stays as it was.
+              if (proposal) await runAsHandRun(parked.id, async () => { taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed'); });
+              else taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
             } catch (err: unknown) {
               process.stderr.write(
                 `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -926,7 +989,26 @@ export class WorkerLoop {
    * paths that do not reserve (the manual "Run now" below, and any direct caller). Null
    * keeps each executor's own constant, so an unreserved run behaves exactly as before.
    */
-  private async executeTask(task: TriggerRecord, capUSD: number | null = null): Promise<void> {
+  private async executeTask(task: TriggerRecord, capUSD: number | null = null, marker?: HandRunMarker): Promise<void> {
+    // The one-time door (PRD customer-granted-operator-access §3.12 point 6): a marker
+    // minted by a request for THIS trigger is the second disjunct of both stamp checks
+    // below, and it is used up here, by the dispatch that sees it. Nothing passes them
+    // without one the HTTP layer minted — not a principal, not a look-alike object, not
+    // the same marker twice.
+    //
+    // A run that passes on it is a TEST of a proposal, and that is decided HERE, once,
+    // from the row as it stood at dispatch — a proposal still waiting for the owner's
+    // stamp — and carried by the run (hand-run-door.ts, `runAsHandRun`). Every writer
+    // inside the run asks the run, not the row: the stamp may change while it is under way.
+    const grant = this.#handRunDoor.consume(marker, task.id);
+    const handRun = mandateNeedsOwnerStamp(task) && handRunCovers(grant, task);
+    if (!handRun || !grant) return this.#executeTask(task, capUSD, false);
+    // One line per hand start, naming who started it. A process log, not a record.
+    process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) test run by hand by ${principalTag(grant.principal)}\n`);
+    return runAsHandRun(task.id, () => this.#executeTask(task, capUSD, true));
+  }
+
+  async #executeTask(task: TriggerRecord, capUSD: number | null, handRun: boolean): Promise<void> {
     const controller = new AbortController();
 
     // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
@@ -972,7 +1054,7 @@ export class WorkerLoop {
     // that found `undefined` after a shutdown, which recorded the stopped run as
     // `failed` and re-fired it with a backoff. Same rule, same reason as
     // `attachSession`: the entry object outlives its map entry.
-    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline };
+    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline, handRun };
     this.activeTasks.set(task.id, entry);
     const heartbeat = setInterval(() => {
       try {
@@ -1006,7 +1088,7 @@ export class WorkerLoop {
         // last changed runs only after the OWNER stamped it, whatever its effect: a
         // `run_workflow` would otherwise run on the stamp of the workflow it names. The
         // owner's triggers never reach this (their tags are `owner` or absent).
-        if (mandateNeedsOwnerStamp(task)) {
+        if (mandateNeedsOwnerStamp(task) && !handRun) {
           this.recordAndNotify(task, 'This schedule was set up or changed by someone you let in, and runs only after you confirm it — skipped.', false);
           return;
         }
@@ -1038,7 +1120,7 @@ export class WorkerLoop {
             // a `confirmed_at`-less run_agent trigger ever reaches dispatch (a direct
             // executeTask call, a bypassed read path), refuse it — record + stop,
             // NEVER mint the autonomous run.
-            if (!task.confirmed_at) {
+            if (!task.confirmed_at && !handRun) {
               this.recordAndNotify(task, 'This scheduled agent action needs your confirmation before it runs unattended — skipped.', false);
               break;
             }
@@ -1158,7 +1240,10 @@ export class WorkerLoop {
       // therefore ended in silence: no retry, and no word to the owner either. Losing
       // the retry is intended (the owner's last instruction was stop); losing the
       // notification with it was not.
+      // A test run by hand is never retried (`recordTaskRun` leaves its schedule alone),
+      // so its failure is reported now or never.
       const willRetry = status !== 'stopped'
+        && !isHandRunOf(task.id)
         && (task.max_retries ?? 0) > 0
         && (task.retry_count ?? 0) < (task.max_retries ?? 0);
 
@@ -1934,6 +2019,12 @@ export class WorkerLoop {
       // state and retry it forever). Re-scheduling via the consent flow confirms
       // it + creates a fresh, enabled task.
       const tm = this.engine.getTaskManager();
+      // A proposal is not switched off by its own test run: it does not fire anyway, and
+      // the owner stamping it is how it would start.
+      if (isHandRunOf(task.id)) {
+        tm?.recordTaskRun(task.id, `Not run: workflow "${planned.id}" needs first-run confirmation by the owner.`, 'failed');
+        return;
+      }
       tm?.setEnabled?.(task.id, false);
       tm?.recordTaskRun(
         task.id,
@@ -2190,7 +2281,9 @@ export class WorkerLoop {
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
       taskManager.recordTaskRun(task.id, truncatedAnalysis, 'success');
-      taskManager.updateWatchConfig(task.id, config);
+      // A test run of a proposal does not move the baseline: the first run after the
+      // owner's stamp compares against what the proposal was set up with.
+      if (!isHandRunOf(task.id)) taskManager.updateWatchConfig(task.id, config);
     }
 
     // Slice B3 — escalation primitive (consumer #2): a watcher finding opens (or
