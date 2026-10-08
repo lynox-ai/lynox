@@ -113,6 +113,13 @@ export interface RunManifestOptions {
    */
   capabilityContract?: CapabilityContract | undefined;
   /**
+   * Set only beside a reviewed grant: confirms that a `{{params…}}` value in a step's task is
+   * exactly the value the person accepted, so it goes in without the untrusted-data boundary
+   * (`resolveTaskTemplate`). Threaded into nested pipelines, where it confirms the same way —
+   * a value that changed on the way is not confirmed and keeps the boundary.
+   */
+  isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
+  /**
    * Sees every tool call a top-level step's own agent makes, whether or not a
    * RunHistory records it. The saved-workflow run report reads refused and
    * possibly-landed writes from it. Not threaded into nested pipelines.
@@ -185,6 +192,7 @@ export interface RunCtxInput {
   runId?: string | undefined;
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
+  isAcceptedParam?: ((path: string, value: unknown) => boolean) | undefined;
   observeToolCall?: StepToolRecorder | undefined;
   limits?: WorkflowLimits | undefined;
   secretStore?: SecretStoreLike | undefined;
@@ -235,6 +243,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     runId: input.runId,
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
+    isAcceptedParam: input.isAcceptedParam,
     observeToolCall: input.observeToolCall,
     limits: input.limits,
     secretStore: input.secretStore,
@@ -947,7 +956,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint, options.parentActiveScopes, options.abortScope, options.isAcceptedParam);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -957,7 +966,7 @@ async function executeStep(
       // resolves `{{params.*}}` with the untrusted-data boundary; the captured
       // `input_template` resolves the same params into the literal call the step
       // agent replays (no boundary — those are tool arguments, not prose).
-      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext) : step.task;
+      const resolvedTask = step.task ? resolveTaskTemplate(step.task, stepContext, options.isAcceptedParam) : step.task;
       const resolvedInputTemplate = step.input_template
         ? resolveInputTemplate(step.input_template, stepContext)
         : step.input_template;

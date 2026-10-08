@@ -94,6 +94,58 @@ export function sameBoundValues(a: Readonly<Record<string, unknown>>, b: Readonl
   return storedForm(a) === storedForm(b);
 }
 
+/**
+ * Letters, marks and symbols that render as nothing: the Hangul and Khmer fillers, the braille
+ * blank, the grapheme joiner, the Mongolian and Khmer invisible marks, variation selectors.
+ * One set, read by {@link grantName} (removes them) and by the bound-value check (refuses them),
+ * so the two cannot drift apart. Exported so a test can walk every member.
+ */
+export const BLANK_LOOKING = /[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u;
+
+/**
+ * Characters a bound value or a parameter name may not hold under a grant: everything outside
+ * letters, marks, digits, punctuation, symbols, spaces, line breaks and tabs, and
+ * {@link BLANK_LOOKING}. The grant dialog shows each value as text, and the step model receives
+ * it in its context as written, so a value has to read the way it is.
+ */
+const HIDDEN_IN_VALUE = new RegExp(`${BLANK_LOOKING.source}|[^\\p{L}\\p{M}\\p{N}\\p{P}\\p{S}\\p{Zs}\\n\\t]`, 'u');
+
+/**
+ * Why these bound values cannot be granted, or `null`. Names and values both: a name is
+ * written by whoever wrote the workflow, and the step model reads it next to its value. A
+ * value that is not text is checked as the text the dialog shows for it.
+ */
+export function hiddenInBoundValues(params: Readonly<Record<string, unknown>>): string | null {
+  for (const [name, value] of Object.entries(params)) {
+    // A name is shown on one line before its value: a line break or tab in it would show as a
+    // space, or start what looks like another row, so names may not hold them.
+    if (HIDDEN_IN_VALUE.test(name) || /[\n\t]/.test(name)) return 'A parameter name holds a character that does not show as text. Rename the parameter in the workflow.';
+    const shown = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+    if (HIDDEN_IN_VALUE.test(shown)) return `The value of parameter "${name}" holds a character that does not show as text. Enter the value again without it.`;
+  }
+  return null;
+}
+
+/**
+ * The test `resolveTaskTemplate` asks of a `{{params…}}` value under a grant: is it exactly the
+ * value the person accepted at that path? Walks own properties only, never the prototype, so
+ * `{{params.toString}}` is simply not accepted. Equality is the stored form `sameBoundValues`
+ * uses.
+ */
+export function acceptedValueMatcher(accepted: Readonly<Record<string, unknown>>): (path: string, value: unknown) => boolean {
+  return (path, value) => {
+    const segments = path.split('.');
+    if (segments[0] !== 'params' || value === undefined || typeof value === 'function') return false;
+    let at: unknown = accepted;
+    for (const segment of segments.slice(1)) {
+      if (at === null || typeof at !== 'object' || !Object.hasOwn(at, segment)) return false;
+      at = (at as Record<string, unknown>)[segment];
+    }
+    if (at === undefined || typeof at === 'function') return false;
+    return storedForm(at) === storedForm(value);
+  };
+}
+
 function parseParams(json: string | null): Record<string, unknown> | null {
   if (json === null || json === '') return {};
   try {
@@ -205,6 +257,8 @@ export function prepareWorkflowGrant(planned: PlannedPipeline, req: WorkflowGran
   // by its own enum, or read as "other values". After this pass the values are a fixed point.
   const bound = bindWorkflowParameters(planned.parameters ?? [], first.params, { requireAll: true });
   if (!bound.ok) return { ok: false, error: bound.error };
+  const hidden = hiddenInBoundValues(bound.params);
+  if (hidden !== null) return { ok: false, error: hidden };
   const built = buildReviewedContract({ method: req.method, host: req.host, paths: req.paths }, planned.steps, bound.params);
   if ('error' in built) return { ok: false, error: built.error };
   const invalid = validateContractAgainstSteps({ capabilityContract: built.contract, steps: planned.steps });
@@ -240,7 +294,7 @@ export function grantName(raw: unknown): string | undefined {
   const cleaned = raw
     .normalize('NFC')
     .replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
-    .replace(/[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2800\u3164\uffa0\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/gu, '')
+    .replace(new RegExp(BLANK_LOOKING.source, 'gu'), '')
     .replace(/[^\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]/gu, '')
     .replace(/\s+/g, ' ').trim();
   const capped = [...cleaned].slice(0, 120).join('').trim();

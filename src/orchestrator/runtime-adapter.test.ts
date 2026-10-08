@@ -47,6 +47,7 @@ import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import { ToolSoftFailure } from '../core/tool-soft-failure.js';
 import type { ManifestStep } from '../types/orchestration.js';
+import { acceptedValueMatcher } from '../core/workflow-grant.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
 
@@ -1378,6 +1379,55 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
     const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     expect(innerConfig['autonomy']).toBeUndefined();
+  });
+
+  describe('a nested step\'s {{params}} under a grant', () => {
+    // The matcher rides into the sub-pipeline so a nested step does not wrap the value the
+    // person accepted. It must not do more than that: a value that reaches the sub-pipeline
+    // CHANGED is not the accepted one and keeps the boundary, one level down as at the top.
+    const step: ManifestStep = {
+      id: 'nested-param', agent: 'nested-param', runtime: 'pipeline',
+      pipeline: [{ id: 'inner-param', task: 'note {{params.note}}' }],
+    };
+    const isAccepted = acceptedValueMatcher({ note: 'as agreed' });
+    const sentTask = (): string => mockSend.mock.calls.at(-1)![0] as string;
+    const run = (note: string, matcher?: (path: string, value: unknown) => boolean): Promise<unknown> =>
+      spawnPipeline(step, { params: { note } }, mockConfig, mockParentTools, 0,
+        undefined, undefined, undefined, null, 'autonomous', undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, matcher);
+
+    beforeEach(() => { vi.clearAllMocks(); mockGetRole.mockReturnValue(undefined); });
+
+    it('inserts the accepted value as text', async () => {
+      await run('as agreed', isAccepted);
+      expect(sentTask()).toContain('note as agreed');
+      expect(sentTask()).not.toContain('<untrusted_data');
+    });
+
+    it('keeps a changed value behind the boundary', async () => {
+      await run('as changed', isAccepted);
+      expect(sentTask()).toContain('<untrusted_data');
+      expect(sentTask()).not.toContain('note as changed');
+    });
+
+    it('keeps the accepted value behind the boundary when no matcher rides along', async () => {
+      await run('as agreed');
+      expect(sentTask()).toContain('<untrusted_data');
+    });
+
+    it('reaches the nested step from the run that holds it, through the runner', async () => {
+      // One seam up: the runner hands the matcher to the pipeline step. Called directly,
+      // the tests above cannot see that hand-over.
+      const { runManifest } = await import('./runner.js');
+      const manifest = {
+        manifest_version: '1.1' as const, name: 'nested-grant', triggered_by: 'test',
+        context: { params: { note: 'as agreed' } },
+        agents: [step], gate_points: [], on_failure: 'stop' as const,
+      };
+      await runManifest(manifest, mockConfig, { parentTools: mockParentTools, autonomy: 'autonomous', isAcceptedParam: isAccepted });
+      expect(sentTask()).toContain('note as agreed');
+      expect(sentTask()).not.toContain('<untrusted_data');
+    });
   });
 });
 

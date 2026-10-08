@@ -39,7 +39,7 @@ import { createToolContext } from './tool-context.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { taskCreateTool } from '../tools/builtin/task.js';
-import { getPipeline, _resetPipelineStore, forgetPipeline, storePipeline } from '../tools/builtin/pipeline.js';
+import { getPipeline, _resetPipelineStore, forgetPipeline, storePipeline, runSavedWorkflow } from '../tools/builtin/pipeline.js';
 import { _resetTenantInvariantForTests, runGuardedSavedWorkflow } from './saved-workflow-runner.js';
 import { acceptWorkflowGrant, prepareWorkflowGrant } from './workflow-grant.js';
 import type { IAgent, PlannedPipeline, TriggerRecord } from '../types/index.js';
@@ -267,9 +267,9 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
   });
 
   describe('a library start of a workflow with parameters', () => {
-    // `withTaskParam`: a second parameter that reaches only the step's task text. Such a
-    // value is wrapped as untrusted data in the step's prompt (`resolveTaskTemplate`), which
-    // arms the run's taint — so that workflow is only used where the grant is withheld anyway.
+    // `withTaskParam`: a second parameter that reaches only the step's task text. Under the
+    // grant, the accepted value goes into the step's prompt without the untrusted-data
+    // boundary (`resolveTaskTemplate` with the grant's matcher); any other value keeps it.
     function grantedParamWorkflow(withTaskParam = false): void {
       history.insertPlannedPipeline({
         id: 'wf-vals', name: 'wf-vals', goal: 'g', reasoning: 'r', estimatedCost: 0, createdAt: '2026-10-01T00:00:00.000Z', template: true,
@@ -302,6 +302,39 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
       const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', { week: '40', note: 'something else' }, { origin: { kind: 'library' } });
       expect(result.grantNote).toMatch(/other values than the ones the grant was accepted with/);
+      expect(posts()).toEqual([]);
+    });
+
+    it('verify-done: a parameter in the task text, with the accepted values, runs under the grant and writes', async () => {
+      grantedParamWorkflow(true);
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library' } });
+      expect(result.grantNote).toBeUndefined();
+      expect(posts().map((p) => p.url)).toEqual([TARGET]);
+    });
+
+    it('verify-done: the same run, after the step read external content, does not write', async () => {
+      grantedParamWorkflow(true);
+      mockProcess
+        .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'GET' }, 'tu_read'))
+        .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' }, 'tu_post'))
+        .mockResolvedValueOnce(endTurn('done'));
+      await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library' } });
+      expect(sent.map((s) => s.method)).toEqual(['GET']);
+    });
+
+    it('a grant stamped with a value that does not show as text runs without the grant', async () => {
+      // A stamp from before values were checked: the run asks again at the handover.
+      grantedParamWorkflow(true);
+      const wf = getPipeline('wf-vals', history)!;
+      const hidden = { week: '40', note: 'as\u{E0041} agreed' };
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
+      const ctx = engine().getToolContext();
+      const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, {
+        tools: ctx.tools, toolContext: ctx, memory: null,
+        decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden }),
+      });
+      expect(result.grantNote).toMatch(/holds a character that does not show as text/);
       expect(posts()).toEqual([]);
     });
   });

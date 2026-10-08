@@ -709,9 +709,16 @@
 								</ul>
 								{#if Object.keys(grantPreview.boundParams).length > 0}
 									<p class="mt-2 font-medium">{t('workflow_library.grant_values')}</p>
-									<ul class="space-y-0.5 font-mono text-text-subtle">
+									<ul class="space-y-1 font-mono text-text-subtle">
 										{#each Object.entries(grantPreview.boundParams) as [name, value] (name)}
-											<li>{name} = {String(value)}</li>
+											<!-- Each value sits in its own box, so a line break inside it does not start what
+											     reads as a second `name = value` row. break-spaces keeps trailing and all-space values
+											     visible, break-all wraps a long value inside the dialog, overflow-hidden keeps
+											     stacked marks from painting over the rows above, and <bdi> stops right-to-left
+											     text from reordering the name and the `=`. -->
+											<li><bdi class="whitespace-break-spaces">{name}</bdi> =
+												<span class="mt-0.5 block overflow-hidden break-all whitespace-break-spaces rounded border border-border px-1"><bdi>{String(value)}</bdi></span>
+											</li>
 										{/each}
 									</ul>
 								{/if}

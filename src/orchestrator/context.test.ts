@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
+import { acceptedValueMatcher } from '../core/workflow-grant.js';
 import type { ManifestStep, AgentOutput } from '../types/orchestration.js';
 
 function makeOutput(stepId: string, result: string, skipped = false): AgentOutput {
@@ -147,6 +148,33 @@ describe('resolveTaskTemplate', () => {
     const result = resolveTaskTemplate('{{params.x}} :: {{step-0.result}}', ctx);
     expect(result).toContain('<untrusted_data'); // the param half
     expect(result).toContain('plain output');     // the clean step half, unwrapped
+  });
+
+  describe('under a grant, a value the person accepted', () => {
+    const isAccepted = acceptedValueMatcher({ client: 'Acme Corp', week: 40 });
+
+    it('goes in as written, without the boundary', () => {
+      expect(resolveTaskTemplate('Audit {{params.client}} for week {{params.week}}', { params: { client: 'Acme Corp', week: 40 } }, isAccepted))
+        .toBe('Audit Acme Corp for week 40');
+    });
+
+    it('a value that differs from the accepted one keeps the boundary', () => {
+      // What a nested pipeline would see if a value changed on the way down.
+      const result = resolveTaskTemplate('Audit {{params.client}}', { params: { client: 'Acme Corp.' } }, isAccepted);
+      expect(result).toContain('<untrusted_data');
+      expect(result).toContain('workflow_param:params.client');
+    });
+
+    it('a path the person never saw keeps the boundary, and an inherited property stays a placeholder', () => {
+      const ctx = { params: { client: 'Acme Corp', other: 'x' } };
+      expect(resolveTaskTemplate('{{params.other}}', ctx, isAccepted)).toContain('<untrusted_data');
+      expect(() => resolveTaskTemplate('{{params.toString}}', ctx, isAccepted)).not.toThrow();
+      expect(resolveTaskTemplate('{{params.toString}}', ctx, isAccepted)).toBe('{{params.toString}}');
+    });
+
+    it('CONTROL: without the matcher the accepted value is still wrapped', () => {
+      expect(resolveTaskTemplate('Audit {{params.client}}', { params: { client: 'Acme Corp' } })).toContain('<untrusted_data');
+    });
   });
 });
 

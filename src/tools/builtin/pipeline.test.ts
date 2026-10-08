@@ -1306,6 +1306,70 @@ describe('runSavedWorkflow', () => {
     expect(manifestArg.context?.params).toEqual({ client: 'Acme B' });
   });
 
+  describe('the accepted-value matcher rides only beside a grant', () => {
+    // The runner leaves a {{params.*}} value unwrapped only when this matcher says the
+    // person accepted it. Built without a grant, or for values other than the accepted
+    // ones, it would unwrap a value nobody looked at — so each direction has a witness.
+    const contract = {
+      version: 1, grantedTools: ['http_request'], httpMethods: ['POST' as const],
+      hostPatterns: ['api.example.test'], pathPatterns: ['/*'], paramConstraints: {},
+    };
+    const clientParam: ProcessParameter[] = [{ name: 'client', description: 'client name', type: 'string', source: 'user_input' }];
+    const matcherOf = (): unknown => (mockRunManifest.mock.calls[0]![2] as Record<string, unknown>)['isAcceptedParam'];
+
+    it('is absent for a run that holds no grant', async () => {
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme B' });
+      expect(matcherOf()).toBeUndefined();
+    });
+
+    it('is absent when the grant decision carries no contract', async () => {
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme B' }, {
+        decideGrant: () => ({ contract: undefined, note: null }),
+      });
+      expect(matcherOf()).toBeUndefined();
+    });
+
+    it('under a grant, answers yes for the accepted value and no for any other', async () => {
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme B' }, {
+        decideGrant: () => ({ contract, note: null, boundParams: { client: 'Acme B' } }),
+      });
+      const matcher = matcherOf() as (path: string, value: unknown) => boolean;
+      expect(typeof matcher).toBe('function');
+      expect(matcher('params.client', 'Acme B')).toBe(true);
+      expect(matcher('params.client', 'Acme C')).toBe(false);
+      expect(matcher('params.other', 'Acme B')).toBe(false);
+    });
+
+    // The run can lose its contract after `decideGrant` handed one over; the matcher must go
+    // with it, or a value the grant no longer covers would still go in without the boundary.
+    it('is absent when the run was started with other values than the accepted ones', async () => {
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, { client: 'Acme C' }, {
+        decideGrant: () => ({ contract, note: null, boundParams: { client: 'Acme B' } }),
+      });
+      expect(result.grantNote).toMatch(/other values/);
+      expect(matcherOf()).toBeUndefined();
+    });
+
+    it('is absent when an accepted value holds a character that does not show', async () => {
+      const id = seedSavedWorkflow({ params: clientParam });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      const hidden = { client: 'Acme\u{E0041} B' };
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, hidden, {
+        decideGrant: () => ({ contract, note: null, boundParams: hidden }),
+      });
+      expect(result.grantNote).toMatch(/does not show as text/);
+      expect(matcherOf()).toBeUndefined();
+    });
+  });
+
   it('rejects a missing required param when re-targeting (params supplied) — acceptance #4', async () => {
     const id = seedSavedWorkflow({
       params: [{ name: 'client', description: 'client name', type: 'string', source: 'user_input' }],
@@ -1595,6 +1659,9 @@ const RUN_CTX_KEYS = [
   // works if every new field joins it — and `hooks` shows that presence alone is not
   // enough: the value witness below is what protects a field that is always emitted.
   'runId',
+  // `isAcceptedParam` is the grant's own record of the values the person accepted; dropped,
+  // every accepted value goes back behind the boundary (fails closed, but silently).
+  'isAcceptedParam',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */

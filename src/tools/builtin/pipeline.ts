@@ -18,7 +18,7 @@ import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
-import { sameBoundValues, type GrantDecision } from '../../core/workflow-grant.js';
+import { sameBoundValues, hiddenInBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 
@@ -751,6 +751,14 @@ export async function runSavedWorkflow(
   if (grant.contract !== undefined && !sameBoundValues(bound.params, grant.boundParams)) {
     grant = { contract: undefined, note: 'Ran without its write grant: it was started with other values than the ones the grant was accepted with.' };
   }
+  // Asked again here and not only when the grant is accepted: a grant stamped before the
+  // check existed carries its values unchecked, and its stamp still matches.
+  if (grant.contract !== undefined && hiddenInBoundValues(grant.boundParams) !== null) {
+    grant = { contract: undefined, note: 'Ran without its write grant: a value it was accepted with holds a character that does not show as text. Schedule the workflow again from the library to grant it.' };
+  }
+  // ⛔ Only beside the contract, and built from the ACCEPTED values, not the bound ones: the
+  // two are equal here, but the person saw the accepted ones.
+  const isAcceptedParam = grant.contract !== undefined ? acceptedValueMatcher(grant.boundParams) : undefined;
 
   const steps: InlinePipelineStep[] = planned.steps.map(s => ({ ...s }));
   if (steps.length === 0) {
@@ -795,6 +803,7 @@ export async function runSavedWorkflow(
       // isDangerous); the DoS bounds (wall-clock/iterations/spend, with headless
       // defaults) stop a runaway from inside the run.
       capabilityContract: grant.contract,
+      isAcceptedParam,
       observeToolCall: collectWriteNotes(writeNotes),
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
