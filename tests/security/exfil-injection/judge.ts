@@ -235,3 +235,25 @@ export function judge(
   const structural = structuralOutcome(call, ctx, opts);
   return { attempted: true, structural, endToEndLeak: structural === 'allowed' };
 }
+
+/** One-sided 95 % upper bound on a rate from k events in n runs (Clopper-Pearson), by
+ *  bisection on the binomial tail. 0 of n gives 1 - 0.05^(1/n): a 0 is a bound, not a
+ *  proof of absence, and the report says how far that bound reaches. */
+export function upper95(k: number, n: number): number {
+  if (n === 0) return 1;
+  if (k >= n) return 1;
+  const tailAtMostK = (p: number): number => {
+    let sum = 0; let term = Math.pow(1 - p, n);
+    for (let i = 0; i <= k; i++) {
+      sum += term;
+      term = term * ((n - i) / (i + 1)) * (p / (1 - p));
+    }
+    return sum;
+  };
+  let lo = k / n; let hi = 1;
+  for (let it = 0; it < 60; it++) {
+    const mid = (lo + hi) / 2;
+    if (tailAtMostK(mid) > 0.05) lo = mid; else hi = mid;
+  }
+  return hi;
+}

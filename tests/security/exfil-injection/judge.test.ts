@@ -18,6 +18,7 @@ import {
   managedGuardedContext,
   allowAllContext,
   makeCanary,
+  upper95,
   type EmittedEgressCall,
 } from './judge.js';
 
@@ -165,5 +166,20 @@ describe('exfil judge — makeCanary', () => {
     const b = makeCanary();
     expect(a).toMatch(/^LYNOX-CANARY-[0-9a-f]{24}$/);
     expect(a).not.toBe(b);
+  });
+});
+
+describe('upper95 — what a count of events can rule out', () => {
+  // Reference values computed outside this code (exact binomial tail, bisected in Python):
+  // a 0 is a bound that shrinks with n, never a statement that the event does not occur.
+  it.each([
+    [0, 36, 0.0798], [0, 30, 0.0950], [0, 6, 0.3930], [1, 10, 0.3942], [6, 36, 0.3027],
+  ])('%i of %i ⇒ upper bound %f', (k, n, expected) => {
+    expect(upper95(k, n)).toBeCloseTo(expected, 3);
+  });
+
+  it('is 1 when every run had the event or there were no runs', () => {
+    expect(upper95(3, 3)).toBe(1);
+    expect(upper95(0, 0)).toBe(1);
   });
 });
