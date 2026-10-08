@@ -372,6 +372,13 @@ export class Session {
   private _lastRunStop: SendStop | null = null;
   private _changesetManager: ChangesetManager | null = null;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
+  /**
+   * The user's background-task model for this session (WorkerLoop runs only), set
+   * through `_recreateAgent({ backgroundSlot })`. Session-lifetime like
+   * `_profileOverride`, and exclusive with it: setting one clears the other, so the
+   * client and the model always come from the same source.
+   */
+  private _backgroundSlot: import('../types/index.js').TierSlot | null = null;
   private _isCompacting = false;
   /** In-flight background auto-compaction (fire-and-forget from run()'s tail). A
    *  non-internal run() awaits this at entry so a user turn never overlaps the
@@ -2077,6 +2084,7 @@ export class Session {
       baseProvider,
       profile: this._profileOverride,
       configProvider: this.engine.getUserConfig().provider,
+      backgroundSlot: this._backgroundSlot,
     });
   }
 
@@ -2271,6 +2279,8 @@ export class Session {
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
     /** Named model profile — overrides provider to OpenAI-compatible for this session. */
     profile?: string | undefined;
+    /** The user's admitted background model (see `_backgroundSlot`). Beats `profile`. */
+    backgroundSlot?: import('../types/index.js').TierSlot | undefined;
   }): void {
     // The overrides split into TWO classes, and conflating them was the bug:
     //
@@ -2297,7 +2307,7 @@ export class Session {
     // an explicit `undefined` does NOT erase carried identity (a spread would
     // have — re-introducing this very bug for any caller that forwards an
     // optional value).
-    const { profile, ...supplied } = overrides ?? {};
+    const { profile, backgroundSlot, ...supplied } = overrides ?? {};
     this.agentOverrides = {
       // session-lifetime — carried unless this call supplies a new value
       maxIterations: supplied.maxIterations ?? this.agentOverrides.maxIterations,
@@ -2313,10 +2323,15 @@ export class Session {
       continuationPrompt: supplied.continuationPrompt,
     };
     // A named profile is resolved once and then belongs to the session. Supplying
-    // one re-resolves it; omitting one leaves it in place. Nothing clears it — a
-    // bare rebuild that dropped it WAS the bug above.
-    if (profile !== undefined) {
+    // one re-resolves it; omitting one leaves it in place. A bare rebuild never
+    // clears it — one that dropped it WAS the bug above. The background slot follows
+    // the same rule, and the two are exclusive: supplying one clears the other.
+    if (backgroundSlot !== undefined) {
+      this._backgroundSlot = backgroundSlot;
+      this._profileOverride = null;
+    } else if (profile !== undefined) {
       this._profileOverride = resolveNamedProfile(this.engine.getUserConfig(), profile);
+      this._backgroundSlot = null;
     }
     this._rebuildAgentKeepingConversation();
   }
@@ -2584,7 +2599,8 @@ export class Session {
       abortScope: this.agent?.abortScope,
       name: 'lynox',
       model,
-      modelPinnedByProfile: this._profileOverride !== null,
+      // A background slot on another endpoint pins the pair the same way a profile does.
+      modelPinnedByProfile: this._profileOverride !== null || (this._backgroundSlot !== null && slotCfg.crossProviderSlot),
       systemPrompt,
       tools: effectiveTools,
       thinking: this._thinking,

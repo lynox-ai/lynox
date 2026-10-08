@@ -19,7 +19,7 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, type ModelProfile, type ProviderKey, type TierSet, type LynoxUserConfig, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../types/index.js';
+import { type ModelTier, type LLMProvider, type ModelProfile, type ProviderKey, type TierSet, type TierSlot, type LynoxUserConfig, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
 import { channels } from './observability.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
@@ -248,6 +248,28 @@ export function resolveTierModel(tier: ModelTier, baseProvider: LLMProvider): Ti
   // for this tier. Standard (default): the slot is ignored, so the snapshot is
   // byte-identical to the previous inline resolution against the base provider.
   const slot = _routingMode === 'hybrid' ? _tierSet?.[tier] : undefined;
+  const snap = snapshotForSlot(slot, baseProvider, () => getModelId(tier, baseProvider));
+  // Live routing attribution (lynox:llm:call) — fires per RESOLUTION (not 1:1
+  // with an API call: this runs at run start, agent (re)build, background task,
+  // and model/effort toggles). It's a routing-observability signal — which
+  // provider a tier resolved to (e.g. a hybrid `fast` slot → Mistral live) — NOT
+  // a billing counter (use runs.provider for spend). A diagnostics_channel
+  // publish is a no-op with no subscriber → free on the hot path.
+  channels.llmCall.publish({ tier, provider: snap.provider, model_id: snap.modelId });
+  return snap;
+}
+
+/**
+ * The snapshot a slot resolves to — a hybrid `tier_set` slot, or the user's
+ * `background_model`, which is the same shape — or, without one, the base provider
+ * with `baseModelId()`. One function for both, so a background slot gets exactly the
+ * beta headers and credentials a tier slot naming the same provider would.
+ */
+export function snapshotForSlot(
+  slot: TierSlot | undefined,
+  baseProvider: LLMProvider,
+  baseModelId: () => string,
+): TierProviderSnapshot {
   const provider: ProviderKey = slot?.provider ?? baseProvider;
   // Anthropic beta headers apply ONLY to the Claude-wire providers (anthropic,
   // vertex), never to custom (an Anthropic-compatible proxy that strips them,
@@ -257,16 +279,9 @@ export function resolveTierModel(tier: ModelTier, baseProvider: LLMProvider): Ti
   // isCustomProvider() (custom||openai → no betas) for the 4 standard providers.
   const wire = getProviderDescriptor(provider)?.wireClient;
   const usesBetas = provider !== 'custom' && (wire === 'anthropic' || wire === 'vertex');
-  // A hybrid slot names its own model; otherwise resolve the tier for the base
+  // A slot names its own model; otherwise resolve the tier for the base
   // provider exactly as before.
-  const modelId = slot?.model_id ?? getModelId(tier, baseProvider);
-  // Live routing attribution (lynox:llm:call) — fires per RESOLUTION (not 1:1
-  // with an API call: this runs at run start, agent (re)build, background task,
-  // and model/effort toggles). It's a routing-observability signal — which
-  // provider a tier resolved to (e.g. a hybrid `fast` slot → Mistral live) — NOT
-  // a billing counter (use runs.provider for spend). A diagnostics_channel
-  // publish is a no-op with no subscriber → free on the hot path.
-  channels.llmCall.publish({ tier, provider, model_id: modelId });
+  const modelId = slot?.model_id ?? baseModelId();
   return {
     provider,
     modelId,
@@ -367,7 +382,19 @@ export function resolveAgentModel(input: {
   baseProvider: LLMProvider;
   profile: ModelProfile | null | undefined;
   configProvider: LLMProvider | undefined;
+  /**
+   * The user's background-task model, already admitted (`admitBackgroundModel`) and
+   * given its credentials. It pins the model like a profile does — a tier change
+   * inside the run does not move it — but it is a slot, so it can name any provider,
+   * Anthropic included, which a profile (openai wire only) cannot. Beats `profile`.
+   */
+  backgroundSlot?: TierSlot | null | undefined;
 }): { modelId: string; provider: ProviderKey; tierSnap: TierProviderSnapshot } {
+  if (input.backgroundSlot) {
+    const tierSnap = snapshotForSlot(input.backgroundSlot, input.baseProvider, () => getModelId(input.tier, input.baseProvider));
+    channels.llmCall.publish({ tier: input.tier, provider: tierSnap.provider, model_id: tierSnap.modelId });
+    return { modelId: tierSnap.modelId, provider: tierSnap.provider, tierSnap };
+  }
   const tierSnap = resolveTierModel(input.tier, input.baseProvider);
   const profile = input.profile ?? undefined;
   if (!profile) return { modelId: tierSnap.modelId, provider: tierSnap.provider, tierSnap };

@@ -349,8 +349,11 @@ vi.mock('../core/session-store.js', () => ({
   }),
 }));
 
-vi.mock('../core/config.js', () => ({
+vi.mock('../core/config.js', async (importOriginal) => ({
   loadConfig: vi.fn().mockReturnValue({ default_tier: 'deep' }),
+  // The REAL bound check, like the escaper below: the write gate under test is
+  // this function, and a stub would let the route and the loader disagree.
+  admitBackgroundModel: (await importOriginal<typeof import('../core/config.js')>()).admitBackgroundModel,
   // Not a stub: the REAL escaper, so this suite tests the same rendering the
   // engine ships. A stub here would let the two sinks drift, which is the exact
   // failure this helper exists to prevent.
@@ -3327,6 +3330,55 @@ describe('LynoxHTTPApi', () => {
         body: JSON.stringify({ balanced_model: 'claude-sonnet-4-6' }),
       });
       expect(res.status).toBe(200);
+    });
+
+    // ── background_model: held to the user bounds at write time ──
+    const BG_MINISTRAL = { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' };
+
+    it('PUT refuses a background_model over the ceiling with its reason, and persists nothing', async () => {
+      const { loadConfig, saveUserConfig } = await import('../core/config.js');
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({ default_tier: 'deep', max_tier: 'fast' });
+      const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ background_model: BG_MINISTRAL }) });
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain('over_ceiling');
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+    });
+
+    it('PUT lets the UI re-send a stored background_model that a later ceiling made unrunnable', async () => {
+      // The UI re-sends every field; a stored choice the loader now drops must not
+      // block saving the rest. Only a CHANGE is checked.
+      const { loadConfig, readUserConfig } = await import('../core/config.js');
+      (loadConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', max_tier: 'fast' });
+      (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', background_model: BG_MINISTRAL });
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ background_model: BG_MINISTRAL, thinking_mode: 'adaptive' }) });
+        expect(res.status).toBe(200);
+      } finally {
+        (loadConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep' });
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+      }
+    });
+
+    it('PUT {background_model:null} clears the choice', async () => {
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', background_model: BG_MINISTRAL });
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ background_model: null }) });
+        expect(res.status).toBe(200);
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        expect('background_model' in lastCall![0]).toBe(false);
+      } finally {
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+      }
+    });
+
+    it('PUT accepts and persists an admitted background_model', async () => {
+      const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ background_model: BG_MINISTRAL }) });
+      expect(res.status).toBe(200);
+      const { saveUserConfig } = await import('../core/config.js');
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall![0]['background_model']).toEqual(BG_MINISTRAL);
     });
 
     // model-presets W4 — the settings picker persists a preset choice by name.

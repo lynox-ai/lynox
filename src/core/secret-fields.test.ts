@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   SECRET_CONFIG_KEYS,
+  SECRET_NESTED_SLOTS,
   redactConfigForResponse,
   stripSecretsForPlugin,
 } from './secret-fields.js';
@@ -129,5 +130,18 @@ describe('registration guard — SECRET_CONFIG_KEYS must cover every secret-suff
     const registered = new Set<string>(SECRET_CONFIG_KEYS);
     const unregistered = [...secretLike].filter((n) => !registered.has(n));
     expect(unregistered, `secret-looking config fields not in SECRET_CONFIG_KEYS: ${unregistered.join(', ')}`).toEqual([]);
+  });
+});
+
+describe('registration guard — a top-level slot field must be scrubbed like the collections', () => {
+  it('every LynoxUserConfig field typed TierSlot / ModelProfile is in SECRET_NESTED_SLOTS', () => {
+    const src = readFileSync(fileURLToPath(new URL('../types/config.ts', import.meta.url)), 'utf8');
+    const start = src.indexOf('export interface LynoxUserConfig {');
+    const body = src.slice(start, src.indexOf('\n}', start));
+    const slotFields = [...body.matchAll(/^  (\w+)\??: (?:TierSlot|ModelProfile)\b/gm)].map((m) => m[1]!);
+    // Positive control: the scan sees the one field that exists today.
+    expect(slotFields).toContain('background_model');
+    const registered = new Set<string>(SECRET_NESTED_SLOTS);
+    expect(slotFields.filter((f) => !registered.has(f))).toEqual([]);
   });
 });

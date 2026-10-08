@@ -6,7 +6,7 @@
 // share `provider: 'openai'` — see `vaultSlotForEndpoint`.
 
 import type { LLMProvider } from '../../types/models.js';
-import type { TierSet } from '../../types/config.js';
+import type { TierSet, TierSlot } from '../../types/config.js';
 import { LLM_CATALOG, vaultSlotForEndpoint, pinnedVaultSlotForEndpoint } from './catalog.js';
 import { isGuardedBaselineHost } from './endpoint-allowlist.js';
 
@@ -321,16 +321,26 @@ export function enrichTierSetCreds(
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
     const slot = tierSet[tier];
     if (!slot) continue;
-    if (slot.api_key || slot.provider === baseProvider) {
-      out[tier] = slot;
-      continue;
-    }
-    // A hybrid slot names a catalogued provider AND (for openai-compat ones) its
-    // own endpoint. Both are needed: 'openai' alone cannot distinguish Mistral
-    // from Groq from a local Ollama, and resolving on the provider would inject
-    // whichever key sits in the shared slot into a slot pointing elsewhere.
-    const key = resolveKey(slot.provider as LLMProvider, slot.api_base_url);
-    out[tier] = key ? { ...slot, api_key: key } : slot;
+    out[tier] = enrichSlotCreds(slot, baseProvider, resolveKey);
   }
   return out;
+}
+
+/**
+ * One slot of {@link enrichTierSetCreds}: a same-provider slot or one with its own
+ * key unchanged, a cross-provider slot with its provider's key filled in. Also the
+ * seam for `background_model`, which is a slot outside `tier_set`.
+ */
+export function enrichSlotCreds(
+  slot: TierSlot,
+  baseProvider: LLMProvider,
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined,
+): TierSlot {
+  if (slot.api_key || slot.provider === baseProvider) return slot;
+  // A hybrid slot names a catalogued provider AND (for openai-compat ones) its
+  // own endpoint. Both are needed: 'openai' alone cannot distinguish Mistral
+  // from Groq from a local Ollama, and resolving on the provider would inject
+  // whichever key sits in the shared slot into a slot pointing elsewhere.
+  const key = resolveKey(slot.provider as LLMProvider, slot.api_base_url);
+  return key ? { ...slot, api_key: key } : slot;
 }

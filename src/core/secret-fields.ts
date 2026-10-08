@@ -37,6 +37,12 @@ export const SECRET_CONFIG_KEYS = [
 export const SECRET_NESTED_COLLECTIONS = ['tier_set', 'model_profiles'] as const;
 
 /**
+ * Config fields that ARE one such slot rather than a record of them — the same
+ * per-slot `api_key` one level up, which the collection walk above does not reach.
+ */
+export const SECRET_NESTED_SLOTS = ['background_model'] as const;
+
+/**
  * Scrub the per-slot `api_key` (and, when `stripBaseUrls`, `api_base_url`) out
  * of every nested secret collection, cloning the collection + each touched slot
  * so the caller's object is never mutated in place.
@@ -57,6 +63,14 @@ function scrubNestedSecrets(obj: Record<string, unknown>, opts: { stripBaseUrls?
       }
     }
     obj[coll] = cloned;
+  }
+  for (const field of SECRET_NESTED_SLOTS) {
+    const slot = obj[field];
+    if (!slot || typeof slot !== 'object') continue;
+    const clonedSlot: Record<string, unknown> = { ...(slot as Record<string, unknown>) };
+    delete clonedSlot['api_key'];
+    if (opts.stripBaseUrls) delete clonedSlot['api_base_url'];
+    obj[field] = clonedSlot;
   }
 }
 

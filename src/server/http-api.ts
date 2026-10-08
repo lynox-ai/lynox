@@ -41,7 +41,7 @@ import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig, describePinForDisplay } from '../core/config.js';
+import { loadConfig, describePinForDisplay, admitBackgroundModel, readUserConfig } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
@@ -446,6 +446,11 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // off the curated allowlist (never silent-strip); the loader then hardens the
   // expanded tier_set the same way it does a raw one.
   'tier_preset',
+  // The background-task model. Same exposure as a tier_set slot, and bounded more
+  // tightly: the PUT handler refuses (400) a choice outside the blocklist, the
+  // max_tier ceiling or the managed provider allowlist, and the loader applies
+  // the same check (`admitBackgroundModel`) and the CP key at read time.
+  'background_model',
 ]);
 
 /**
@@ -5959,6 +5964,26 @@ export class LynoxHTTPApi {
       if (incomingBalancedModel !== undefined) {
         if (typeof incomingBalancedModel !== 'string' || !SERVED_BALANCED_SONNET_IDS.has(incomingBalancedModel)) {
           errorResponse(res, 400, `Invalid balanced_model: must be one of ${[...SERVED_BALANCED_SONNET_IDS].join(', ')}`);
+          return;
+        }
+      }
+      // The background-task model: held to the user bounds at WRITE time, on every
+      // tier, so a choice the loader would drop (and quietly replace with the worker
+      // profile) is refused with its reason instead. Only a CHANGE is checked: the UI
+      // re-sends every field on every save, and a stored choice that a later blocklist
+      // or ceiling made unrunnable must not block saving everything else (the loader
+      // already drops it and says so).
+      const incomingBackground = parsed.data.background_model;
+      if (incomingBackground !== undefined && incomingBackground !== null
+        && JSON.stringify(incomingBackground) !== JSON.stringify(readUserConfig().background_model)) {
+        const bounds = loadConfig();
+        const admitted = admitBackgroundModel(incomingBackground, {
+          blockedModelIds: bounds.blocked_model_ids,
+          maxTier: bounds.max_tier,
+          cpSupplied: bounds.cp_supplied,
+        });
+        if (!admitted.ok) {
+          errorResponse(res, 400, `background_model ${JSON.stringify(incomingBackground.model_id)} cannot run on this instance (${admitted.refusal}).`);
           return;
         }
       }

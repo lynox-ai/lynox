@@ -1531,9 +1531,15 @@ export class WorkerLoop {
       ...(starter ? { principal: starter } : {}),
     });
     // Cost control: cap agent loop iterations for background tasks
-    // Worker profile: route background tasks to cheaper provider (e.g. Mistral)
-    const workerProfile = this.engine.getUserConfig().worker_profile;
-    session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
+    // Background model: the user's choice (`background_model`, already bounded at
+    // config load) beats the operator's `worker_profile`, which routes background
+    // tasks to a cheaper provider (managed: Mistral). The choice is made in one place,
+    // `Engine.workerRunModelOverride`, which `resolveWorkerRunModel` reads too.
+    session._recreateAgent({
+      maxIterations: WORKER_MAX_ITERATIONS,
+      autonomy: 'autonomous',
+      ...this.engine.workerRunModelOverride('standard'),
+    });
 
     // §0 A7 — did every question this run asked actually get an answer?
     //
@@ -2262,9 +2268,11 @@ export class WorkerLoop {
     // know which effect a task is, but they are told when the answer is "not right
     // now", which is the half of that sentence this comment used to leave out.
     WorkerLoop.attachSession(stopEntry, analysisSession);
-    const workerProfile3 = this.engine.getUserConfig().worker_profile;
-    if (workerProfile3) {
-      analysisSession._recreateAgent({ profile: workerProfile3 });
+    // Only when there is a choice to apply: without one the analysis keeps the
+    // `fast` session it was created with, and no rebuild happens.
+    const watchModel = this.engine.workerRunModelOverride('watch');
+    if (Object.keys(watchModel).length > 0) {
+      analysisSession._recreateAgent(watchModel);
     }
 
     const isFirstRun = !previousHash;
