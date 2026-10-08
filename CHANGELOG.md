@@ -1,5 +1,186 @@
 # Changelog
 
+## 2.15.3 — 2026-10-08
+
+### Added: a reviewed write grant for saved workflows, switched off
+
+- This release contains a grant that lets a person allow a saved workflow
+  specific writes in advance. It ships switched off: the grant preview
+  (`POST /api/workflows/:id/grant-preview`) and accepting a grant through
+  `POST /api/tasks` answer 403, and scheduling a workflow without a grant
+  works as before. `GET /api/workflows` reports whether the grant is available
+  on the instance (`grantEnabled`). (#1573)
+
+### Changed: what an unattended run reports about writes
+
+- An `http_request` write refused in a scheduled or background run now names
+  the method and the address (scheme, host and path, never the query) in its
+  refusal. A scheduled workflow run's record and notification, and the
+  response of `POST /api/workflows/:id/run` (`writeNotes`), list those lines,
+  from top-level steps and up to ten; that response's `grantNote` says when a
+  run went ahead without its grant. Before, such a refusal was
+  visible only in a tool result. A refused write still leaves its step
+  completed and the run recorded as a success. (#1573)
+- No capability contract grants a request to a known mail provider's API,
+  whoever wrote the contract.
+- When a granted write is answered with a redirect the grant does not cover,
+  the redirect is still not followed. The tool now says the write may have
+  landed and should not be repeated, instead of reporting it as blocked.
+- The scheduling dialog lists a stored contract as one line per method and
+  address.
+
+### Changed — BREAKING (library consumers): `IAgent` gains `governingContract()`
+
+- `IAgent.capabilityContract` is removed, and `Agent.capabilityContract` is now
+  private. `IAgent` has a new required method, `governingContract()`, which
+  returns the contract that applies to the current tool call, or none and why.
+  An `IAgent` implemented outside this package needs it to compile. (#1573)
+- New exports: the types `GoverningContract` and `ReviewedGrantStamp` and the
+  functions `withAfterUntrusted` and `liftsAfterUntrusted`. `PlannedPipeline`
+  gains an optional `reviewedGrant`, and `FeatureFlag` gains
+  `'workflow-reviewed-grant'`. The options of `runManifest` gain an optional
+  `runId` (a UUID; anything else throws, and with `runHistory` passed so does
+  one already in use) and `observeToolCall`.
+  (#1573, #1581)
+- Contracts given to `runManifest` or an `Agent` no longer lift a refusal after
+  the run has read external content, unless the contract is marked with
+  `withAfterUntrusted(contract, true)`. A `reviewed` contract grants only https
+  URLs without port, credentials, query or fragment, and no request that
+  re-targets itself through its headers. A refused call in a non-interactive
+  run is now also streamed as a `tool_result` event. (#1573)
+
+### Fixed: a workflow Run is not started twice for one click
+
+- `POST /api/workflows/:id/run` accepts an optional `idempotencyKey`, a
+  string that is not blank and at most 200 characters; anything else answers
+  400. A
+  repeat with the same key does not start a second run: while the first is
+  starting or running it answers 409, naming that run where it is known, and
+  once it has completed it answers with that run's outcome. A run that failed
+  or was interrupted is started again on a new run id, and the answer names the
+  earlier run and what it cost. A repeat whose earlier run may have spent money
+  but left no record answers 409 instead of running again. (#1581)
+- The workflow library sends one key per attempt, kept across a reload and a
+  second tab, so a double click or a second tab starts one run. A 409 for a run
+  that is still starting or running is shown as a notice. When an earlier
+  run's outcome was never recorded, the library says so and asks whether to
+  release the attempt for a new run.
+- Requests without a key behave as before.
+
+### Fixed: stored API profile text is kept apart from the engine's own text
+
+- The API summary at the start of a conversation now keeps what the profiles
+  store and what the engine says apart: profile names, descriptions and
+  addresses sit in one block, one entry per profile starting with its id, and
+  the engine's guidance about maintaining profiles in a separate block. A
+  stored value can no longer start a line of its own, carry invisible
+  formatting characters or open or close a block. (#1579)
+- `api_setup` `view` and `list` put every stored profile value inside one
+  marked block, with a note on what that text is and that it grants nothing.
+  Only the heading with the profile's id and the engine's description of how
+  the credential is attached stay outside. Profiles created from a docs page
+  keep their free-text fields marked as untrusted data, as before. (#1578)
+- `api_setup` `refine` on a stored profile that is invalid on its own refuses
+  without repeating the stored values, and points to `update` with a complete
+  profile. A patch that repairs the invalid field still saves; an invalid
+  patch on a valid profile gets the specific error as before. (#1576)
+- `api_setup` `bootstrap` returns everything it derived from an OpenAPI spec
+  or a docs page — summary, name, address, auth type, linked sections, other
+  API hosts the page mentions, the draft JSON — inside one marked block whose
+  preamble says it is data for the profile and holds no instruction to
+  follow. The engine's own head line and next steps stand outside the block.
+  Before, those values were printed as plain lines among the engine's
+  instructions. (#1582)
+- In any structured extraction, a value refused for not matching an allowed
+  set or pattern is quoted, escaped and cut at 40 characters in the error.
+  Before, the whole value went into the message. (#1582)
+- `auth.header_name` and `auth.query_param` are checked when a profile is
+  created, updated or refined, whatever its auth type, and the error does not
+  repeat the value: a header name must be a valid HTTP header name, a query
+  name letters, digits and `. _ -`, each at most 64 characters. A stored
+  header name that is empty or not a header name is refused when the
+  credential is attached, with a message naming the profile. (#1583)
+- `api_setup` `view` for `auth.type: "query"` now says the engine does not
+  attach the key, and how to put it in the URL
+  (`?<name>=secret:<VAULT_KEY>`). An auth type it does not recognise gets its
+  own sentence instead of being described as query auth. (#1583)
+- `api_setup` `connect` and `fetch_token` print the auth type and vault slot
+  names from a profile only when they have the expected shape, and show a
+  placeholder such as `<unprintable>` otherwise. (#1569)
+- `fetch_token` resolves a vault slot only when the whole configured name is a
+  slot name. Before, a name that merely began with one resolved to that slot's
+  value with the rest of the name appended, and that combined text was sent to
+  the token endpoint as the client id, client secret or refresh token.
+
+### Fixed: bash commands with options before the subcommand
+
+- The bash guard now also recognises a command when global options stand
+  between the command and its subcommand, for example `git -C repo push`,
+  `git -c user.name=x commit`, `kubectl -n prod delete …`,
+  `helm -n ns upgrade …` or `python3 -X dev -m http.server`. Such a command is
+  now treated exactly like the plain form: blocked in autonomous mode, and
+  asked about in an interactive session where the plain form is (`kubectl`
+  and `helm` already were). This works without a list of tools, so it covers
+  other command-line tools with global options too. (#1571)
+- The read-only git commands `git merge-base`, `git merge-tree` and
+  `git commit-graph` are no longer asked about, or blocked in autonomous mode,
+  as if they were `git merge` or `git commit`.
+- A flag that takes no value can make the next word look like its value, so an
+  occasional read-only command may now be asked about, or blocked in
+  autonomous mode.
+
+### Fixed: a refused sub-agent fan-out says what actually stands in the way
+
+- When sub-agents cannot be started because of the money available, the
+  refusal now names the cause: the run's remaining budget, the sub-agent's own
+  budget, the other sub-agents in the same batch, or a sub-agent given no
+  budget, and which kinds of change can help in that case. Before, one
+  sentence covered all of them and was wrong for most. (#1568)
+- The hint after a sub-agent stops at its budget prints figures rounded so
+  that the suggested minimum is enough.
+
+### Fixed: request-body repair note
+
+- The note `http_request` adds after removing a stray closing tag from a JSON
+  request body appears only when a body is actually sent, so no longer for GET
+  or HEAD. It now also appears when the request times out, and it says what
+  the engine did to the body rather than claiming the request reached the
+  server. (#1577)
+
+### Changed: mail confirmation wording
+
+- The mail documentation now describes what happens before an email is sent:
+  lynox shows the recipients, the subject and the message (very long text
+  shortened, with a note) and waits for your answer. A scheduled task asks the
+  same way and waits up to a day; a saved workflow has no one to ask, so the
+  mail tools refuse to send. The onboarding note now says that email from your
+  mailbox goes out only after you approve it. No behaviour change. (#1574)
+
+### Internal
+
+- A pre-commit hook warns about added lines that describe work as put off; it
+  does not refuse a commit for what it finds. (#1567)
+- Source comments describe what the code does. (#1575)
+- vitest is capped at two worker forks in the repo configuration. (#1572)
+- The node test project refuses to load Svelte modules, and vitest started
+  from `packages/web-ui` runs with the repo configuration. (#1564, #1580)
+
+### Upgrade and rollback
+
+`engine.db` and the mail state (17) do not change. With #1581, `history.db`
+moves from schema **54** to **56** on first start: a new table,
+`workflow_run_claims`, and a unique index on its run id. There is no down path.
+
+Rolling back to 2.15.2: 2.15.2 opens a `history.db` at schema 56 without
+complaint and does not use the new table; it ignores `idempotencyKey`, so a
+repeated Run request starts a second run again. The workflow write grant ships
+switched off; where it was never switched on, rolling back needs no step for
+it. Where it was switched on and a grant accepted, delete that workflow before
+rolling back (Delete in the workflow library, or `DELETE /api/workflows/:id`):
+2.15.2 applies a stored contract without the checks this release adds.
+
+Library consumers implementing `IAgent` need `governingContract()` (see above).
+
 ## 2.15.2 — 2026-10-07
 
 ### Changed — BREAKING (library consumers): `IAgent` gains three budget methods
