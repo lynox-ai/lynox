@@ -10141,18 +10141,30 @@ export class LynoxHTTPApi {
       }
 
       // Clear what the deletes above left in the files' bytes. `secure_delete` zeroes
-      // only the pages its own connection frees; pages freed earlier, before it was on
-      // or by another connection, still hold their old rows. `VACUUM` rewrites each
-      // file without its free pages, and the checkpoint after it empties the WAL,
-      // which still holds the page images each value was WRITTEN with. A blocked
-      // checkpoint is a failure of that store, not a degradation: the old images may
-      // still be there.
+      // only what its own connection deletes; content deleted earlier, before it was
+      // on or by another connection, still sits on the freelist. `VACUUM` rewrites
+      // each file without its free pages, and the checkpoint after it empties the
+      // WAL, which still holds the page images each value was WRITTEN with. A
+      // blocked checkpoint is a failure of that store, not a degradation: the old
+      // bytes may still be there.
+      //
+      // Not on a store whose wipe failed: its data is still in it, so there is
+      // nothing to scrub, and a VACUUM of a full file needs a full temporary copy
+      // and leaves the WAL at that size if it runs out of space. The step is named
+      // as not run rather than left out, like any other step that did not happen.
       // history.db carries the threads too (`ThreadStore` shares the connection).
-      if (runHistoryForWipe) attempt('run_history#scrub', () => { runHistoryForWipe.scrubFreedPages(); });
-      if (kg) attempt('knowledge_graph#scrub', () => { kg.getDb().scrubFreedPages(); });
-      if (engineDb) attempt('engine_db#scrub', () => { engineDb.scrubFreedPages(); });
-      if (ds) attempt('datastore#scrub', () => { ds.scrubFreedPages(); });
-      if (secretStore) attempt('secrets#scrub', () => { secretStore.scrubFreedPages(); });
+      const scrub = (key: string, fn: () => void): void => {
+        if (failed.some(k => k === key || k.startsWith(`${key}:`) || k.startsWith(`${key}#`))) {
+          note(`${key}#scrub`, new Error('not run: the wipe of this store failed'));
+          return;
+        }
+        attempt(`${key}#scrub`, fn);
+      };
+      if (runHistoryForWipe) scrub('run_history', () => { runHistoryForWipe.scrubFreedPages(); });
+      if (kg) scrub('knowledge_graph', () => { kg.getDb().scrubFreedPages(); });
+      if (engineDb) scrub('engine_db', () => { engineDb.scrubFreedPages(); });
+      if (ds) scrub('datastore', () => { ds.scrubFreedPages(); });
+      if (secretStore) scrub('secrets', () => { secretStore.scrubFreedPages(); });
 
       // Reset config to defaults. The reset and the engine's reload are separate
       // attempts on purpose: a failed reload leaves no customer data behind, so

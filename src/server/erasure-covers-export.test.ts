@@ -680,7 +680,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       w.exec("CREATE TRIGGER refuse_metrics BEFORE DELETE ON metrics BEGIN SELECT RAISE(ABORT, 'refused'); END");
       const { status, body } = await erase();
       expect(status).toBe(500);
-      expect((body['failed'] as string[]).filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+      // The store once, plus its scrub as not run: a store that still holds its data
+      // is not VACUUMed.
+      expect((body['failed'] as string[]).filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph', 'knowledge_graph#scrub']);
       expect(memoryTables().find(t => t.name === 'memories')!.rows, 'a failed wipe must leave every memory in place').toBe(before);
     } finally {
       w.exec('DROP TRIGGER IF EXISTS refuse_metrics');

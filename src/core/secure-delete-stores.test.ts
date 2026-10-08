@@ -8,6 +8,7 @@ import { EngineDb } from './engine-db.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import { DataStore } from './data-store.js';
 import { SecretVault } from './secret-vault.js';
+import { SecurityAudit } from './security-audit.js';
 
 // What secure_delete does to the bytes is asserted once, on a bare connection, in
 // `sqlite-constants.test.ts`. This pins the other half: every store that holds user
@@ -20,8 +21,10 @@ describe('every user-data store opens its connection with secure_delete', () => 
   const secureDelete = (store: object): unknown =>
     (store as { db: Database.Database }).db.pragma('secure_delete', { simple: true });
 
-  const cases: Array<[string, (d: string) => { close(): void }]> = [
+  const cases: Array<[string, (d: string) => object]> = [
     ['history.db', d => new RunHistory(join(d, 'history.db'))],
+    // A second connection to history.db that writes user text (`input_preview`).
+    ['history.db (security audit)', d => new SecurityAudit(join(d, 'history.db'))],
     ['engine.db', d => new EngineDb(join(d, 'engine.db'), '')],
     ['agent-memory.db', d => new AgentMemoryDb(join(d, 'agent-memory.db'))],
     ['datastore.db', d => new DataStore(join(d, 'datastore.db'))],
@@ -35,7 +38,8 @@ describe('every user-data store opens its connection with secure_delete', () => 
       try {
         expect(secureDelete(store)).toBe(1);
       } finally {
-        store.close();
+        // Through the handle: SecurityAudit has no close() of its own.
+        (store as { db: Database.Database }).db.close();
       }
     });
   }

@@ -15,9 +15,9 @@ export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 /**
  * Turn on `secure_delete` for a connection. Without it a `DELETE` takes a row out
  * of every query and leaves its bytes on the freed page, where `strings` still
- * reads them; with it SQLite overwrites the content of every page THIS connection
- * frees. Pages freed before it was on (or by a connection without it) keep their
- * bytes on the freelist, and so can stale copies of rows that are still live; only
+ * reads them; with it SQLite overwrites what THIS connection deletes. Content
+ * deleted before it was on (or by a connection without it) keeps its bytes on the
+ * freelist, and so can stale copies of rows that are still live; only
  * `scrubFreedPages` reaches those. Per connection, so every store that holds user
  * data calls this where it opens.
  */
@@ -40,6 +40,6 @@ export function scrubFreedPages(db: { exec: (source: string) => unknown; pragma:
   db.exec('VACUUM');
   const rows = db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
   if ((rows[0]?.busy ?? 0) !== 0) {
-    throw new Error('WAL checkpoint was blocked by another connection; deleted pages may remain in the WAL');
+    throw new Error('WAL checkpoint was blocked by another connection; deleted content may remain in the database file or its WAL');
   }
 }

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { channels } from './observability.js';
 import { getLynoxDir } from './config.js';
 import { BASH_OBSERVE_EVENT } from '../tools/bash-allowlist.js';
+import { SQLITE_BUSY_TIMEOUT_MS, zeroDeletedContent } from './sqlite-constants.js';
 
 export interface SecurityEvent {
   event_type: string;
@@ -43,6 +44,11 @@ export class SecurityAudit {
     const path = dbPath ?? join(getLynoxDir(), 'history.db');
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
+    // A second connection to history.db, and it writes user text (`input_preview`):
+    // the same settings as the store's own, so it zeroes what it deletes and waits
+    // out the erasure's VACUUM instead of dropping its insert on an instant BUSY.
+    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    zeroDeletedContent(this.db);
 
     // Ensure security_events table exists (idempotent)
     this.db.exec(`

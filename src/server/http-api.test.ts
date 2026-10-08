@@ -211,7 +211,7 @@ vi.mock('../core/engine.js', () => ({
       set: mockSecretSet,
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
-      // The erasure truncates the vault's WAL after its deletes (`SecretStore.scrubFreedPages`).
+      // The erasure scrubs the vault's free pages and WAL after its deletes (`SecretStore.scrubFreedPages`).
       scrubFreedPages: vi.fn(),
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
@@ -235,7 +235,7 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
-      // The erasure truncates history.db's WAL after its deletes (`RunHistory.scrubFreedPages`).
+      // The erasure scrubs history.db's free pages and WAL after its deletes (`RunHistory.scrubFreedPages`).
       scrubFreedPages: vi.fn(),
       // The Art.17 erasure calls this (`RunHistory.deleteAllData`). Its predecessor,
       // the legacy verb-def wipe, was MISSING here for as long as the route had the
@@ -11312,7 +11312,9 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         expect(res.status).toBe(500);
         const body = await res.json() as { deleted: boolean; failed: string[]; message?: string; error: string };
         expect(body.deleted).toBe(false);
-        expect(body.failed).toEqual(['engine_db']);
+        // `engine_db#scrub` is the step after the wipes, named as not run: the store
+        // still holds its data, so it is not VACUUMed.
+        expect(body.failed).toEqual(['engine_db', 'engine_db#scrub']);
         expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
         expect(JSON.stringify(body)).not.toContain('permanently deleted');
         // The store key, never the SQLite message — it carries file paths and this
@@ -11396,7 +11398,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
         const body = await res.json() as { failed: string[] };
-        expect(body.failed.filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph']);
+        // The store ONCE; `#scrub` is a different step (not run, the wipe failed).
+        expect(body.failed.filter(k => k.startsWith('knowledge_graph'))).toEqual(['knowledge_graph', 'knowledge_graph#scrub']);
         expect(dropCollection, 'a later store must still be wiped').toHaveBeenCalledWith('c1');
       });
     });
@@ -11456,10 +11459,12 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // including the one inside `GET /api/export`: the tenant is told to retry and
       // cannot export to see what survived their partial erasure.
       const rebuildSchema = vi.fn();
+      const scrubFreedPages = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => null,
         getDataStore: () => ({
+          scrubFreedPages,
           listCollections: () => [{ name: 'contacts' }, { name: 'boom' }],
           dropCollection: (n: string) => { if (n === 'boom') throw new Error('database is locked'); },
         }),
@@ -11471,6 +11476,10 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // Named per ITEM: one locked collection used to abandon the rest of the
         // loop and report only the store.
         expect(body.failed).toContain('datastore:boom');
+        // One collection left behind is enough to skip the store's VACUUM: it still
+        // holds data, and the step is named as not run.
+        expect(body.failed).toContain('datastore#scrub');
+        expect(scrubFreedPages, 'no VACUUM of a datastore that still holds a collection').not.toHaveBeenCalled();
         expect(rebuildSchema, 'the repair must run on the failing path, not only the happy one').toHaveBeenCalledTimes(1);
         // The repair itself is not a wipe: when IT fails the drops have already
         // happened, so it belongs in `degraded`. Here it succeeds, so neither list
@@ -11482,10 +11491,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     it('DELETE /api/data reports EVERY failed store, not just the first', async () => {
       // `failed` is the retry instruction, so a list that stops at the first entry
       // sends a human to look in one place out of three.
+      const scrubbed = { engine: vi.fn(), data: vi.fn() };
       await swapEngine({
-        getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => { throw new Error('a'); } }),
+        getEngineDb: () => ({ scrubFreedPages: scrubbed.engine, deleteAllData: () => { throw new Error('a'); } }),
         getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
-        getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
+        getDataStore: () => ({ scrubFreedPages: scrubbed.data, listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
         getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
@@ -11503,10 +11513,14 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // those two call for different next steps. `#` cannot occur in a
         // collection name (`^[a-z][a-z0-9_]{0,62}$`).
         expect([...body.failed].sort()).toEqual([
-          'datastore#list', 'engine_db', 'knowledge_graph', 'knowledge_graph#scrub',
+          'datastore#list', 'datastore#scrub', 'engine_db', 'engine_db#scrub',
+          'knowledge_graph', 'knowledge_graph#scrub',
         ]);
-        // `knowledge_graph#scrub` too: its handle throws, so the scrub that follows the
-        // wipes cannot run on it either, and an unrun step is named, not assumed.
+        // Each failed store's `#scrub` too, named as not run rather than left out.
+        // The scrub is a VACUUM, and a store whose wipe failed still holds its data:
+        // rewriting that full file would only cost space, so it must not be called.
+        expect(scrubbed.engine, 'no VACUUM of an engine.db that was not wiped').not.toHaveBeenCalled();
+        expect(scrubbed.data, 'no VACUUM of a datastore whose listing failed').not.toHaveBeenCalled();
       });
     });
 

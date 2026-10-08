@@ -48,6 +48,7 @@ describe('scrubFreedPages', () => {
       db.pragma('wal_checkpoint(TRUNCATE)');
       const bytes = readFileSync(path);
       expect(bytes.includes(Buffer.from('ZZOLDDEL')), 'fixture: secure_delete alone leaves the old freelist').toBe(true);
+      expect(bytes.includes(Buffer.from('ZZLIVE')), 'fixture: and the stale copies a rebalance left of rows still live then').toBe(true);
 
       scrubFreedPages(db);
       const after = readFileSync(path);
