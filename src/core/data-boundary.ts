@@ -608,7 +608,7 @@ export function wrapUntrustedData(
 
   if (injection.detected) {
     // Emit security event
-    const givenPatterns = given?.detected ? given.patterns : [];
+    const givenPatterns = given?.patterns ?? [];
     const publishedElsewhere = opts?.publishEvent === false
       && own.patterns.every(p => givenPatterns.includes(p));
     if (!publishedElsewhere && channels.securityInjection.hasSubscribers) {
