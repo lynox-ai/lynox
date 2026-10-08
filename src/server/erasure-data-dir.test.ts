@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -225,6 +225,28 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(await e.getBatchIndex().get('zz-batch')).toBeNull();
     expect(readdirSync(managerDir)).toEqual([]);
     rmSync(managerDir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('checks an unknown entry once it is acknowledged, and refuses one it cannot check', async () => {
+    // Root reads anything; the property is only observable for an ordinary user.
+    if (process.getuid?.() === 0) return;
+    mkdirSync(join(dir, 'zz-dir', 'locked'), { recursive: true });
+    chmodSync(join(dir, 'zz-dir', 'locked'), 0o000);
+    const genBefore = internals().erasureGeneration;
+    try {
+      const first = await erase();
+      expect(first.status).toBe(409);
+      expect(first.body['code']).toBe('unknown_entries');
+      const second = await erase({ remove_unknown: first.body['unknown'] });
+      expect(second.status).toBe(409);
+      expect(second.body['code']).toBe('linked_entries');
+      expect((second.body['linked'] as Array<{ name: string }>).map(l => l.name)).toEqual(['zz-dir']);
+      expect(existsSync(join(dir, 'zz-dir', 'locked'))).toBe(true);
+      expect(internals().erasureGeneration).toBe(genBefore);
+    } finally {
+      chmodSync(join(dir, 'zz-dir', 'locked'), 0o700);
+      rmSync(join(dir, 'zz-dir'), { recursive: true, force: true });
+    }
   }, 60_000);
 
   it('refuses with 409 and erases nothing while an entry it owes is a link it would have to follow', async () => {
