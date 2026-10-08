@@ -10140,17 +10140,19 @@ export class LynoxHTTPApi {
         attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
       }
 
-      // Clear what the deletes above left in the files' bytes. Every store opens its
-      // connection with `secure_delete`, so deleted content is overwritten with zeros
-      // in the main file; the WAL still holds the page images each value was WRITTEN
-      // with until it is checkpointed and truncated. A blocked checkpoint is a
-      // failure of that store, not a degradation: the old images may still be there.
+      // Clear what the deletes above left in the files' bytes. `secure_delete` zeroes
+      // only the pages its own connection frees; pages freed earlier, before it was on
+      // or by another connection, still hold their old rows. `VACUUM` rewrites each
+      // file without its free pages, and the checkpoint after it empties the WAL,
+      // which still holds the page images each value was WRITTEN with. A blocked
+      // checkpoint is a failure of that store, not a degradation: the old images may
+      // still be there.
       // history.db carries the threads too (`ThreadStore` shares the connection).
-      if (runHistoryForWipe) attempt('run_history#wal', () => { runHistoryForWipe.truncateWal(); });
-      if (kg) attempt('knowledge_graph#wal', () => { kg.getDb().truncateWal(); });
-      if (engineDb) attempt('engine_db#wal', () => { engineDb.truncateWal(); });
-      if (ds) attempt('datastore#wal', () => { ds.truncateWal(); });
-      if (secretStore) attempt('secrets#wal', () => { secretStore.truncateWal(); });
+      if (runHistoryForWipe) attempt('run_history#scrub', () => { runHistoryForWipe.scrubFreedPages(); });
+      if (kg) attempt('knowledge_graph#scrub', () => { kg.getDb().scrubFreedPages(); });
+      if (engineDb) attempt('engine_db#scrub', () => { engineDb.scrubFreedPages(); });
+      if (ds) attempt('datastore#scrub', () => { ds.scrubFreedPages(); });
+      if (secretStore) attempt('secrets#scrub', () => { secretStore.scrubFreedPages(); });
 
       // Reset config to defaults. The reset and the engine's reload are separate
       // attempts on purpose: a failed reload leaves no customer data behind, so

@@ -48,7 +48,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('leaves no deleted value in the bytes of engine.db or its WAL after deleteAllData + truncateWal', () => {
+  it('leaves no deleted value in the bytes of engine.db or its WAL after deleteAllData + scrubFreedPages', () => {
     // The route-level byte scan cannot see engine.db: the values its fixture writes
     // there are encrypted at rest. A plaintext table written through the store's own
     // connection can, and that connection is where `secure_delete` is set.
@@ -56,11 +56,11 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const raw = e.getDb();
     raw.exec('CREATE TABLE zz_probe (x TEXT)');
     raw.prepare('INSERT INTO zz_probe (x) VALUES (?)').run('ZZDELETED-engine-7f3a');
-    e.truncateWal();
+    e.scrubFreedPages();
     const path = raw.name;
     expect(readFileSync(path).includes(Buffer.from('ZZDELETED')), 'fixture: the value is in the main file').toBe(true);
     e.deleteAllData();
-    e.truncateWal();
+    e.scrubFreedPages();
     expect(readFileSync(path).includes(Buffer.from('ZZDELETED'))).toBe(false);
     expect(readFileSync(`${path}-wal`).includes(Buffer.from('ZZDELETED'))).toBe(false);
     e.close();

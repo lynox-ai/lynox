@@ -13,7 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
-import { SQLITE_BUSY_TIMEOUT_MS, truncateWal, zeroDeletedContent } from './sqlite-constants.js';
+import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 import { canSupersede, provenanceRank } from './provenance.js';
 
@@ -342,9 +342,9 @@ export class AgentMemoryDb {
 
   get path(): string { return this.dbPath; }
 
-  /** Checkpoint the WAL into the main file and truncate it; see `truncateWal` in `sqlite-constants.ts`. */
-  truncateWal(): void {
-    truncateWal(this.db);
+  /** Drop the free pages and empty the WAL; see `scrubFreedPages` in `sqlite-constants.ts`. */
+  scrubFreedPages(): void {
+    scrubFreedPages(this.db);
   }
 
   close(): void {

@@ -694,6 +694,9 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
    * images it was written with — so a value a query can no longer return can still
    * be read from the file with `strings`. Every file under the data directory is
    * scanned after the erasure, the `-wal` files included, for every seeded value.
+   * Its scope is what this fixture creates there: the stores the route wipes. The
+   * data directory is fresh, so it has no freelist from before secure_delete; that
+   * case is pinned on a bare connection in `sqlite-constants.test.ts`.
    */
   function filesUnder(root: string): string[] {
     const out: string[] = [];
@@ -705,7 +708,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     return out;
   }
 
-  it('leaves no erased value in the bytes of any file, the WAL included', async () => {
+  it('leaves no erased value in the bytes of any store it wipes, the WAL included', async () => {
     await seedEverySurface();
     seedRunSpine();
     const needle = Buffer.from('ZZMARKER');
