@@ -382,6 +382,7 @@ describe('isDangerous', () => {
     it.each([
       'cat ~/.lynox/./secrets.json',
       'cat ~/.lynox//secrets.json',
+      'cat ~/.lynox/.//secrets.json',
       'cat ~/.lynox/././.env',
       'ls ~/.lynox//./backups/2026-10-08',
       'cat /home/op/.lynox/./migration-export.enc',
