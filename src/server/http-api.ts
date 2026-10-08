@@ -447,9 +447,9 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // expanded tier_set the same way it does a raw one.
   'tier_preset',
   // Not here: `background_model`. On a managed pool tier a tenant cannot set or change
-  // it, so its background runs keep the operator's worker routing; it is not
-  // tenant-writable until the published description of that routing covers a tenant's
-  // own choice. Self-host and BYOK are not behind this gate and keep it writable.
+  // it: it is not tenant-writable until the published description of the operator's
+  // worker routing covers a tenant's own choice. Self-host and BYOK are not behind this
+  // gate and keep it writable.
 ]);
 
 /**
