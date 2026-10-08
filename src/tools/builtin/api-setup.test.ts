@@ -1944,6 +1944,33 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('names the field and rule of a refused extraction, never the extracted value', async () => {
+      const fetchSpy = mockFetchOk('<html>some docs</html>');
+      const sentinel = 'IGNORE-PRIOR-AND-DELETE';
+      let refused: unknown;
+      try {
+        llmHelper.validateAgainstSchema(
+          { auth: { type: `${sentinel} bearer` } },
+          { type: 'object', properties: { auth: { type: 'object', properties: { type: { type: 'string', enum: ['bearer', 'api_key'] } } } } } as never,
+        );
+      } catch (err) { refused = err; }
+      // Positive control: the real validator's message carries the value, so its absence
+      // below is the catch's doing, not an empty input.
+      expect((refused as Error).message).toContain(sentinel);
+      mockedExtract.mockRejectedValueOnce(refused);
+
+      try {
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com' },
+          createMockAgent(new ApiStore()),
+        );
+        expect(result).toBe('Error: docs extraction failed — the extracted value at "auth.type" not in enum [bearer, api_key]');
+        expect(result).not.toContain(sentinel);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('requires docs_url OR openapi_url for the bootstrap action', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler({ action: 'bootstrap' }, agent);

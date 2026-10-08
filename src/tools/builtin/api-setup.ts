@@ -26,7 +26,7 @@ import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PR
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
-import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
+import { callForStructuredJson, BudgetError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
@@ -1080,6 +1080,11 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
   } catch (err: unknown) {
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
+    }
+    // The refused value is the model's reading of the remote page, so it stays out of the
+    // result: only the field and the rule it broke, both from our own schema.
+    if (err instanceof SchemaValueError) {
+      return `Error: docs extraction failed — the extracted value at "${err.path}" ${err.rule}`;
     }
     const msg = err instanceof Error ? err.message : String(err);
     return `Error: docs extraction failed — ${msg}`;
