@@ -2885,20 +2885,18 @@ describe('bash allowlist observe mode', () => {
     expect(events.map((e) => e.detail)).toEqual(['program=other;reason=program;current=free']);
   });
 
-  it('does not prove reads of environment files or credential directories', () => {
+  it('does not prove reads of hidden files, and does prove a sensitive name the guard lists', () => {
     const events = observe(() => {
-      isDangerous('bash', { command: 'cat .env.local' }, 'autonomous');
-      isDangerous('bash', { command: 'ls .ssh' }, 'autonomous');
-      for (const name of ['.envrc', '.env-local', '.npmrc', '.pypirc', '.pgpass', '.vault-token', '.git-credentials', '.git/config']) {
+      for (const name of ['.env.local', '.envrc', '.npmrc', '.yarnrc.yml', '.git/config', '.ssh']) {
         isDangerous('bash', { command: `cat ${name}` }, 'autonomous');
       }
-      // A name that only starts like one of them stays readable.
-      isDangerous('bash', { command: 'cat .environment-notes.md' }, 'autonomous');
+      // The guard's own list still applies to names that are not hidden.
+      isDangerous('bash', { command: 'cat deploy.pem' }, 'autonomous');
+      isDangerous('bash', { command: 'cat environment-notes.md' }, 'autonomous');
     });
     expect(events.map((e) => e.detail)).toEqual([
+      ...Array.from({ length: 6 }, () => 'program=cat;reason=path-hidden;current=free'),
       'program=cat;reason=path-sensitive;current=free',
-      'program=ls;reason=path-sensitive;current=free',
-      ...Array.from({ length: 8 }, () => 'program=cat;reason=path-sensitive;current=free'),
       'program=cat;reason=ok;current=free',
     ]);
   });

@@ -31,6 +31,9 @@ symlinkSync(join(base, 'x', 'y'), join(ws, 'a', 'b', 'l'));
 // A symlink OUTSIDE that points inside, and a working directory reached through a symlink.
 symlinkSync(join(ws, 'notes.md'), join(base, 'into-ws'));
 symlinkSync(ws, join(base, 'ws-link'));
+// A plain name inside the directory that points at a hidden file inside it.
+writeFileSync(join(ws, '.hidden'), 'x');
+symlinkSync(join(ws, '.hidden'), join(ws, 'link-to-hidden'));
 const env: ProofEnv = {
   cwd: ws,
   home,
@@ -216,6 +219,10 @@ describe('proveBashCommand — not proven', () => {
     ['cat ~/plain.txt', 'path-outside'],
     ['grep x ../outside.txt', 'path-outside'],
     ['cat creds.key', 'path-sensitive'],
+    ['cat .hidden', 'path-hidden'],
+    ['cat sub/.cache/x', 'path-hidden'],
+    ['ls .git', 'path-hidden'],
+    ['cat link-to-hidden', 'path-hidden'],
     ['cat pipe', 'path-special'],
     ['cat a/b/l/../leak.txt', 'path-outside'],
     ['grep -e x a/b/l/../leak.txt', 'path-outside'],

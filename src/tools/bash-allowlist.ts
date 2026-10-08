@@ -14,7 +14,8 @@
  *   getopt reads it (bundled short options, attached values, exact long names,
  *   `--` ends options);
  * - every path the command names resolves, through symlinks, inside the working
- *   directory or an enumerated read root, and is not a sensitive file.
+ *   directory or an enumerated read root, names no hidden file or directory below it,
+ *   and is not a sensitive file.
  *
  * Anything else is "not proven". That is not a verdict of danger, only the
  * absence of a proof. Double quotes, `$`, backticks, globs, braces, redirections
@@ -54,6 +55,7 @@ export type ProofReason =
   | 'root'
   | 'path-outside'
   | 'path-sensitive'
+  | 'path-hidden'
   | 'path-special'
   | 'path-unresolvable';
 
@@ -328,9 +330,12 @@ function provePath(word: Word, env: ProofEnv, roots: Roots): void {
     throw new NotProven('path-unresolvable');
   }
   // Again on the real path: a symlink inside the directory may point anywhere.
-  if (!within(real, roots.cwd) && !roots.read.some((r) => within(real, r))) {
-    throw new NotProven('path-outside');
-  }
+  const root = within(real, roots.cwd) ? roots.cwd : roots.read.find((r) => within(real, r));
+  if (root === undefined) throw new NotProven('path-outside');
+  // No hidden file or directory below the root. Dotfiles are where tokens live (`.env*`,
+  // `.npmrc`, `.git/config`, `.ssh`, …), and a list of their names is never complete, so the
+  // proof leaves the whole class out rather than naming its members.
+  if (relative(root, real).split('/').some((part) => part.startsWith('.'))) throw new NotProven('path-hidden');
   if (env.isSensitive(real)) throw new NotProven('path-sensitive');
   if (existsSync(real)) {
     let st;
