@@ -183,12 +183,43 @@ function scaledShares(asks: readonly number[], remainingRunUSD: number): number[
   const total = asks.reduce((sum, a) => sum + a, 0);
   const factor = total > remainingRunUSD && total > 0 ? remainingRunUSD / total : 1;
   const shares = asks.map((a) => a * factor);
-  // The give-back the handler applies: the last share absorbs any float overshoot.
-  const built = shares.reduce((sum, u) => sum + u, 0);
-  if (built > remainingRunUSD && shares.length > 0) {
-    shares[shares.length - 1] = Math.max(0, shares[shares.length - 1]! - (built - remainingRunUSD));
+  // ⛔ THE LAST SHARE IS SET TO WHAT IS LEFT, IN BOTH DIRECTIONS — and only when the batch was
+  // scaled. `sum(ask · factor)` does not reproduce the remainder in binary floating point, and
+  // the error has two signs:
+  //   · OVER, and the reservation (which compares strictly) refuses the batch, blaming a
+  //     concurrent one that does not exist. Measured over 200 000 drawn batches: 23 %.
+  //   · UNDER, and at an exact tie a share one ULP short of the floor is refused. A lone child
+  //     asking for more than a remainder equal to its floor got `ask · (R / ask)`, which is not
+  //     `R` for some asks — the refusal printed "at least $0.20" and refused 15 of 300 asks above
+  //     it. The earlier give-back only corrected the overshoot, so the quantifier was false.
+  // It was also not exact the other way: subtracting the overshoot once can itself round, and
+  // left a sum a few ULPs past the remainder in 39 batches of a 110 808-batch grid.
+  //
+  // ⚠ ONLY WHEN SCALED (`total > R`). Unscaled, the difference is `R − total`, which is not a
+  // rounding error but room nobody asked for; lifting there would hand the last child more than
+  // its own ask.
+  //
+  // ⚠ The sum lands ON the remainder in most batches but not all, and that is arithmetic, not a
+  // gap: with the other shares fixed, `prefix + x` can step over `R` under round-half-to-even for
+  // every `x`, so the closest reachable sum is one ULP under. Measured: exact in 384 106 of
+  // 385 624 scaled batches, one ULP short in the rest, never over. A lone child has no prefix and
+  // always gets exactly `R`.
+  if (total > remainingRunUSD && shares.length > 0) {
+    const last = shares.length - 1;
+    const prefix = shares.slice(0, last).reduce((sum, u) => sum + u, 0);
+    let share = Math.min(asks[last]!, Math.max(0, remainingRunUSD - prefix));
+    while (share > 0 && prefix + share > remainingRunUSD) share = previousDouble(share);
+    shares[last] = share;
   }
   return shares;
+}
+
+/** The largest double below a positive finite `x`. */
+function previousDouble(x: number): number {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  view.setBigUint64(0, view.getBigUint64(0) - 1n);
+  return view.getFloat64(0);
 }
 
 /**
@@ -580,6 +611,12 @@ function floorRefusal(opts: {
   // it in (a)'s condition, where it swallowed every single-child (b) case. Reaching this line
   // with one child means its ask cleared its floor and the remainder did too, so the only way
   // its share came up short is the rounding give-back at an exact tie.
+  //
+  // ⚠ AND THAT WAY IS NOW CLOSED, so nothing reaches this branch. `scaledShares` gives a lone
+  // child exactly `min(ask, R)`, and with both at or above the floor the child is admitted —
+  // the tie sweep in the tests feeds 4 000 asks through it and all are. The branch stays because
+  // falling through would print the sibling story below about a child that has none; it is a
+  // sentence kept for a regression in the arithmetic, not a path anything exercises.
   if (batchSize === 1) {
     return `This run has ${ceiling} and ${turn} — the two are too close to fund it, so `
       + `${share}, ${abort}. There are no siblings to delegate away here. ${remedy}${nothing}`;
@@ -2159,30 +2196,20 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       // neighbour asking for much. Scaling keeps the sum inside the remainder by
       // construction; the floor below is what stops it scaling into uselessness.
       const factor = asked > remainingRunUSD && asked > 0 ? remainingRunUSD / asked : 1;
-      shares = requested.map((usd) => usd * factor);
-      // ⛔ THE ROUNDING ERROR IS GIVEN BACK, and without this the bound refuses work it
-      // should admit. `sum(requested[i] * factor)` does not reproduce `remainingRunUSD`
-      // in binary floating point: measured over 200 000 randomly drawn trimmed batches
-      // that clear the floor, **23 %** came out a few ULPs above the remainder, and the
-      // reservation below compares strictly. The result was a refusal blaming a
-      // concurrent batch that does not exist — deterministic, so the retry its message
-      // advises fails identically. Minimal case: two default children against $0.103
-      // give shares of $0.051500000000000004 each, summing to $0.10300000000000001.
+      // ⛔ THE SAME FUNCTION THE REMEDIES ARE COMPUTED WITH, NOT A COPY OF IT. This block used
+      // to carry its own give-back beside `scaledShares`, and the two were meant to agree;
+      // a fix to one of them would have made the refusal promise admissions this path
+      // refuses. `scaledShares` carries the rounding rules and why they are what they are:
+      // the last share absorbs the float error in BOTH directions, only when scaled.
+      // Minimal case for the overshoot: two default children against $0.103 give shares of
+      // $0.051500000000000004 each, summing to $0.10300000000000001, and the reservation
+      // below compares strictly. Minimal case for the shortfall: a lone child asking for more
+      // than a remainder equal to its floor, refused one ULP short of it.
       //
-      // The last child absorbs the difference rather than a tolerance being added to the
-      // comparison: a tolerance would make the bound inexact for every caller, while
-      // this keeps `sum <= remainder` true as arithmetic.
-      //
-      // ⚠ The floor is checked AFTER this, which is the right order — but NOT a witnessed
-      // one, and the earlier version of this line claimed more than it could show. The
-      // give-back moves the last share by a few ULPs, so it cannot push a child across a
-      // floor except on an exact tie: a mutant that hoists the floor check above this
-      // block survives the whole suite. Correct by construction, indistinguishable by
-      // test; do not read it as a protection that something checks.
-      const built = shares.reduce((sum, usd) => sum + usd, 0);
-      if (built > remainingRunUSD && shares.length > 0) {
-        shares[shares.length - 1] = Math.max(0, shares[shares.length - 1]! - (built - remainingRunUSD));
-      }
+      // ⚠ The floor is checked AFTER this, which is the right order, and since the shortfall
+      // half exists it is a WITNESSED one: on an exact tie, a floor check hoisted above this
+      // line sees the one-ULP-short share and refuses — the tie sweep in the tests fails.
+      shares = scaledShares(requested, remainingRunUSD);
       // ⛔ Per child, against ITS OWN model's first turn. Two
       // children on different tiers have different floors.
       //

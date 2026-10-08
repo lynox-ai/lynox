@@ -2181,6 +2181,130 @@ describe('spawn_agent tool', () => {
       expect(notFollowable.length, `not followable: ${String(notFollowable.length)} of ${String(raiseChecked + soloChecked)} — ${notFollowable.slice(0, 5).join(' | ')}`).toBe(0);
     }, 120000);
 
+    /**
+     * ⛔⛔ "AT LEAST" IS A CLAIM ABOUT A SET, SO IT IS CHECKED OVER A DENSE ONE — at every exact
+     * tie, on every tier. The sweep above feeds back three values over the printed figure (1×, 3×,
+     * 50), and that is three points, not a set: at a remainder EXACTLY equal to the default tier's
+     * first turn it printed `at least $0.20` and refused 15 of 300 asks above it, on both
+     * surfaces, while one cent above the tie and a non-tie remainder each refused 0 of 300. The
+     * tie was in that grid on purpose; the quantifier was not.
+     *
+     * The cause was the share: `ask · (R / ask)` is not `R` in binary floating point, it comes
+     * out one ULP short for some asks, and at a tie one ULP short is under the floor. The
+     * give-back only ever corrected an overshoot.
+     */
+    it('"at least" holds for every ask above the printed figure at every exact tie', async () => {
+      const { estimateFirstTurnUSD } = await import('../../core/pricing.js');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      mockSend.mockResolvedValue('done');
+      const run = async (agents: unknown[], R: number): Promise<string | null> => {
+        resetSessionSpawnCost(testCounters);
+        const { agent } = parentWithCeiling(R);
+        return spawnAgentTool.handler({ agents } as never, agent).then(() => null, (e: unknown) => (e as Error).message);
+      };
+      const variants: Array<Record<string, unknown>> = [{}, { model: 'fast' }, { model: 'deep' }, { max_tokens: 500 }, { model: 'fast', max_tokens: 500 }];
+      // A geometric ladder from the figure to the schema maximum plus a fine walk just above
+      // the figure — 400 asks per tie, where the defect lives in a band and not at a point.
+      const ladder = (x: number): number[] => [
+        ...Array.from({ length: 200 }, (_, k) => x * Math.pow(50 / x, k / 199)),
+        ...Array.from({ length: 200 }, (_, k) => x + k * 0.0123456789),
+      ].filter((a) => a >= x && a <= 50);
+
+      let ties = 0, fed = 0, aboveTie = 0;
+      const refused: string[] = [];
+      for (const v of variants) {
+        // The tie, read off the model the handler ACTUALLY routes this child to — not a
+        // second copy of the tier map, which could disagree with it silently.
+        vi.mocked(MockAgent).mockClear();
+        expect(await run([{ name: 'probe', task: 'A', max_budget_usd: 1, ...v }], 50), 'the probe is admitted').toBeNull();
+        const routed = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as { model: string };
+        const tie = estimateFirstTurnUSD(routed.model, v['max_tokens'] as number | undefined);
+        // Both surfaces: the lone child's raise, and the solo remedy a batch prints.
+        const lone = await run([{ name: 'c0', task: 'A', max_budget_usd: 0.0001, ...v }], tie);
+        const batch = await run([{ name: 'c0', task: 'A', max_budget_usd: 0.0001, ...v }, { name: 'c1', task: 'A', max_budget_usd: 5 }], tie);
+        const printed = [
+          /raise max_budget_usd to at least \$([0-9]+(?:\.[0-9]+)?) for "c0"/.exec(lone ?? ''),
+          /delegate it on its own with at least \$([0-9]+(?:\.[0-9]+)?)/.exec(batch ?? ''),
+        ].map((m) => (m ? Number(m[1]) : null));
+        expect(printed, `both surfaces print a figure at the ${JSON.stringify(v)} tie`).not.toContain(null);
+        ties++;
+        for (const x of printed as number[]) {
+          for (const ask of ladder(x)) {
+            fed++;
+            if (ask > tie) aboveTie++;
+            if (await run([{ name: 'c0', task: 'A', max_budget_usd: ask, ...v }], tie) !== null) {
+              refused.push(`${JSON.stringify(v)} R=${String(tie)} printed $${String(x)} ask=${String(ask)}`);
+            }
+          }
+        }
+      }
+      // The self-control: five ties, two surfaces each, and asks that actually exceed the tie —
+      // the case where the share is SCALED and the one-ULP shortfall can occur at all.
+      // MEASURED on 2026-10-08: 4 000 asks fed, 3 996 of them above the tie.
+      expect(ties).toBe(variants.length);
+      expect(aboveTie, 'the scaled regime must be exercised').toBeGreaterThan(2660);
+      expect(refused.length, `refused ${String(refused.length)} of ${String(fed)} asks above a printed "at least" — ${refused.slice(0, 3).join(' | ')}`).toBe(0);
+    }, 120000);
+
+    /**
+     * The share arithmetic itself, over the whole grid, read off the ceilings the children were
+     * actually BUILT with. Four properties, and the third is the reason this test exists:
+     *   1. no child gets more than it asked for;
+     *   2. when every share is positive, the shares never sum past the remainder (the
+     *      reservation compares strictly — a few ULPs over is a refusal blaming nobody);
+     *   3. a lone child that asked for more than the remainder gets EXACTLY the remainder;
+     *   4. a scaled batch lands within one ULP of the remainder. Not exactly on it: moving the
+     *      last share alone cannot always hit `R`, because round-half-to-even can step over it;
+     *   5. a batch that was NOT scaled gets exactly what it asked for. This is what keeps the
+     *      give-back inside the scaled branch: lifted or trimmed there, the last child of a batch
+     *      that fits the remainder exactly comes out one ULP under its ask — and is then
+     *      announced to the model as trimmed. The remainders below therefore include, per
+     *      batch, the exact sum of its asks, which is where that happens.
+     */
+    it('shares never exceed an ask, never sum past the remainder, and a lone child gets all of it', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      mockSend.mockResolvedValue('done');
+      const ulp = (x: number): number => {
+        const b = new Float64Array([x]); const i = new BigInt64Array(b.buffer); i[0]! += 1n; return b[0]! - x;
+      };
+      const remainders = [0.0001, 0.002, 0.03, 0.05, 0.1, 0.192, 0.2, 0.3, 0.384, 0.5, 1, 1.5, 2, 5, 10, 20];
+      const asks = [0.0001, 0.001, 0.01, 0.05, 0.1, 0.192, 0.2, 0.3, 0.384, 1, 1.2370370276, 5, 10, 50];
+      const breaks: string[] = [];
+      let lone = 0, scaled = 0, exact = 0, fitsExactly = 0;
+      for (const a of asks) for (const b of [null, ...asks]) for (const c of [null, 0.3, 5]) {
+        const want = [a, b, c].filter((x): x is number => x !== null);
+        const asked = want.reduce((s, x) => s + x, 0);
+        for (const R of [...remainders, asked]) {
+          vi.mocked(MockAgent).mockClear();
+          resetSessionSpawnCost(testCounters);
+          const { agent } = parentWithCeiling(R);
+          const agents = want.map((usd, i) => ({ name: `c${String(i)}`, task: 'A', model: 'fast', max_tokens: 500, max_budget_usd: usd }));
+          if (await spawnAgentTool.handler({ agents } as never, agent).then(() => true, () => false) === false) continue;
+          const got = childCaps(MockAgent);
+          const where = `asks=${JSON.stringify(want)} R=${String(R)} got=${JSON.stringify(got)}`;
+          const sum = got.reduce((s, x) => s + x, 0);
+          if (got.some((g, i) => g > want[i]!)) breaks.push(`share over ask @ ${where}`);
+          if (sum > R) breaks.push(`sum ${String(sum)} past R @ ${where}`);
+          if (asked > R) {
+            scaled++;
+            if (want.length === 1) { lone++; if (got[0] !== R) breaks.push(`lone child got ${String(got[0])}, not R @ ${where}`); }
+            if (sum === R) exact++;
+            else if (R - sum > ulp(R)) breaks.push(`sum ${String(R - sum)} short of R @ ${where}`);
+          } else {
+            if (R === asked && want.length > 1) fitsExactly++;
+            if (got.some((g, i) => g !== want[i])) breaks.push(`unscaled batch not given its asks @ ${where}`);
+          }
+        }
+      }
+      // MEASURED on 2026-10-08, written out of a real run: lone 64 · scaled 1 319 (1 317 of them
+      // exactly on R) · fits exactly 400. Each gate sits at about two thirds of it.
+      expect(lone, 'the lone scaled case must be exercised').toBeGreaterThan(42);
+      expect(fitsExactly, 'and the batch that fits the remainder exactly').toBeGreaterThan(265);
+      expect(scaled, 'and the scaled batch').toBeGreaterThan(880);
+      expect(breaks.length, `${String(breaks.length)} broken — ${breaks.slice(0, 3).join(' | ')}`).toBe(0);
+      expect(exact, 'and most scaled batches land on R exactly').toBeGreaterThan(scaled * 0.9);
+    }, 120000);
+
     it('nothing exotic reaches the model, and every figure is at display precision', async () => {
       // ⛔ THIS TEST USED TO ASSERT THAT NO BRANCH PRESCRIBES A FIGURE AT ALL, and that was the
       // right invariant for exactly one cut: the message had been stripped of every number
@@ -2224,7 +2348,9 @@ describe('spawn_agent tool', () => {
         ['siblings, batch fits', 0.5, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
         ['siblings, batch cannot fit', 0.3, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
         ['siblings at the gate boundary', balanced * 2, [{ name: 'a', task: 'A', max_budget_usd: 10 }, { name: 'b', task: 'B', max_budget_usd: 0.3 }]],
-        ['solo at the rounding tie', deep, [{ name: 'solo', task: 'A', model: 'deep' }]],
+        // (The fixture 'solo at the rounding tie' stood here. A lone child at an exact tie is
+        // ADMITTED since the give-back corrects a shortfall as well as an overshoot, so there
+        // is no refusal left to count figures in — see the test that asserts the admission.)
         ['the exact-tie remainder', balanced, [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }]],
         ['ten children', 0.4, Array.from({ length: 10 }, (_, i) => ({ name: `c${String(i)}`, task: 'A' }))],
       ];
@@ -2237,7 +2363,7 @@ describe('spawn_agent tool', () => {
       // part of why: it reported the FIRST mismatch and nothing about the rest, so each wrong
       // list looked like a one-number slip. Comparing the arrays prints both.
       const measured: number[] = [];
-      const expectedFigures = [2, 2, 4, 3, 5, 3, 3, 4, 4, 5, 4, 7, 6, 4, 3, 6, 5, 6, 3, 5, 5];
+      const expectedFigures = [2, 2, 4, 3, 5, 3, 3, 4, 4, 5, 4, 7, 6, 4, 3, 6, 5, 6, 5, 5];
       expect(expectedFigures, 'one expected count per fixture').toHaveLength(fixtures.length);
 
       for (const [i, [label, remainder, agents]] of fixtures.entries()) {
@@ -2800,23 +2926,24 @@ describe('spawn_agent tool', () => {
     });
 
 
-    it('a single child is never told that its siblings took its share', async () => {
-      // ⛔ The one way a lone child lands under its floor is the rounding give-back at an exact
-      // tie. A first cut let that reach the siblings branch, which printed "1 sub-agent(s) … on
-      // its own it would fit" about a child that was on its own and did not fit.
+    it('a single child at an exact tie is admitted with the whole remainder', async () => {
+      // ⛔ THIS TEST USED TO ASSERT A REFUSAL HERE, and the refusal was the defect. A lone child
+      // asking for more than a remainder exactly equal to its floor was scaled to
+      // `ask · (R / ask)`, one ULP short of `R` for some asks, and refused — with a message that
+      // said "the two are too close to fund it" about a remainder that funds it exactly. The
+      // give-back now corrects the shortfall too, so the child gets `R` and is admitted.
       //
-      // ⚠ The remainder is DERIVED from the pricer, not typed. A delta round proved the typed
-      // version green-but-blind: a 0.01 % rise in the deep tier's price moves the fixture onto
-      // the `remainingRunUSD < need` path, which returns a byte-identical string — so every
-      // assertion still passed while the line they exist for stopped being executed. The
-      // admission at `floor + ε` below is what pins the fixture to THIS branch.
+      // ⚠ The remainder is DERIVED from the pricer, not typed: a typed one stops being a tie the
+      // day a price moves, and the assertion would then pass for the wrong reason.
       const { deep } = await floors();
-      const msg = await refusalFor(deep, [{ name: 'solo', task: 'A', model: 'deep' }]);
-      expect(msg, 'the two figures are named as too close').toContain('the two are too close to fund it');
-      expect(msg, 'and the absence of siblings is said outright').toContain('There are no siblings to delegate away');
-      expect(msg, 'no sibling story').not.toContain('sub-agents asked for');
-      expect(msg, 'and no claim that it would fit alone').not.toContain('on its own it would fit');
-      expect(msg, 'nor the plural-of-one grammar').not.toContain('1 sub-agent');
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      vi.mocked(MockAgent).mockClear();
+      const { agent: atTie } = parentWithCeiling(deep);
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'solo', task: 'A', model: 'deep' }] },
+        atTie,
+      ), 'the remainder covers the floor exactly, so the child runs').resolves.toBeTruthy();
+      expect(childCaps(MockAgent), 'with exactly the remainder, not one ULP under it').toEqual([deep]);
       const { agent } = parentWithCeiling(deep * 1.001);
       await expect(spawnAgentTool.handler(
         { agents: [{ name: 'solo', task: 'A', model: 'deep' }] },
