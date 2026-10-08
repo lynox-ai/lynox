@@ -848,8 +848,10 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        this.register(migrateV1Profile(profile), 'load');
-        loaded++;
+        // Counted only when it landed, as in `loadFromDirectory`: `register` refuses
+        // a slot collision or a protected derived slot, and a count of the rows
+        // read would report a profile the store does not hold.
+        if (this.register(migrateV1Profile(profile), 'load')) loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
