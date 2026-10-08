@@ -5725,6 +5725,30 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect((err as Error).message).toContain('***CRET');
   });
 
+  it('the refused gate streams its reason as the call\'s result, once — the chat shows why even after streamed text', async () => {
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    const onStream = vi.fn();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', vi.fn())], secretStore: gateStore(), promptUser, onStream });
+    await expect(agent.send('Fetch it')).rejects.toBeInstanceOf(InputRequiredError);
+    const results = onStream.mock.calls.map(c => c[0] as { type: string; name?: string; result?: string; isError?: boolean })
+      .filter(e => e.type === 'tool_result' && e.name === 'run_cmd');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.isError).toBe(true);
+    expect(results[0]!.result).toContain('Needs input');
+    expect(results[0]!.result).not.toContain('sk-live-SECRET');
+  });
+
+  it('ask_user\'s own result is streamed once, not again by the batch', async () => {
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve?' } }]));
+    const onStream = vi.fn();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], onStream });
+    await expect(agent.send('Go')).rejects.toBeInstanceOf(InputRequiredError);
+    const results = onStream.mock.calls.map(c => c[0] as { type: string; name?: string })
+      .filter(e => e.type === 'tool_result' && e.name === 'ask_user');
+    expect(results).toHaveLength(1);
+  });
+
   it('…the same call with NO prompt path at all runs — why the HTTP engine wires one that throws', async () => {
     const handler = vi.fn().mockResolvedValue('ran');
     mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall])).mockResolvedValueOnce(endTurnResponse('done'));

@@ -3589,6 +3589,9 @@ export class Agent implements IAgent {
   /** The question re-built MASKED, whole, so the cap the error applies falls after the mask and
    *  a secret straddling it is still recognised. Its message leaves the agent: into the ledger,
    *  the failed run's record and its note. */
+  /** Needs-input errors the handler's catch already streamed as the call's result. */
+  private readonly _needsInputStreamed = new WeakSet<InputRequiredError>();
+
   private _maskedNeedsInput(err: InputRequiredError): InputRequiredError {
     return new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
   }
@@ -3653,9 +3656,17 @@ export class Agent implements IAgent {
     // Masked HERE as well: a consent or secret prompt raises before the handler's `try`, so a
     // question from one of those reaches this point unmasked (the handler's own is masked twice,
     // which changes nothing).
-    const needsInput = settled.find(o => o.status === 'rejected' && isInputRequired(o.reason));
+    // Streamed here too, as the refused call's result: a gate raises without the handler's
+    // bookkeeping, and without a result the chat shows no reason once text was streamed.
+    const askedAt = settled.findIndex(o => o.status === 'rejected' && isInputRequired(o.reason));
+    const needsInput = askedAt === -1 ? undefined : settled[askedAt];
     if (needsInput !== undefined && needsInput.status === 'rejected' && isInputRequired(needsInput.reason)) {
-      throw this._maskedNeedsInput(needsInput.reason);
+      if (this._needsInputStreamed.has(needsInput.reason)) throw needsInput.reason;
+      const masked = this._maskedNeedsInput(needsInput.reason);
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, isError: true });
+      }
+      throw masked;
     }
 
     const results: BetaToolResultBlockParam[] = settled.map((outcome, i) => {
@@ -4254,7 +4265,10 @@ export class Agent implements IAgent {
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the
       // bookkeeping above, so the call is in the ledger and the UI's tool block closes.
-      if (askedNobody !== undefined) throw askedNobody;
+      if (askedNobody !== undefined) {
+        this._needsInputStreamed.add(askedNobody); // the batch must not stream it a second time
+        throw askedNobody;
+      }
       return {
         type: 'tool_result',
         tool_use_id: tc.id,

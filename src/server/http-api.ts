@@ -3646,8 +3646,10 @@ export class LynoxHTTPApi {
           // engine has no prompt store). Not a failure to alarm about — ended like a run the
           // engine refused before the model, with the reason as the result, which the chat shows
           // when nothing was streamed. The thread keeps the "needs input" note.
+          // No `usage`: `getLastRunUsage` is set only by a run that succeeds, so here it would be
+          // the PREVIOUS run's — and the chat footer takes it as this turn's.
           const msg = capForClient(maskForClient(err.message, { includeGeneric: true }));
-          res.write(`event: done\ndata: ${JSON.stringify({ result: msg, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
+          res.write(`event: done\ndata: ${JSON.stringify({ result: msg })}\n\n`);
           res.end();
         } else if (!aborted) {
           // Masked AND capped: this string is a runtime/provider error rendered
