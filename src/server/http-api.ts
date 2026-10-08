@@ -6787,6 +6787,13 @@ export class LynoxHTTPApi {
       // was not running. And `DELETE /api/tasks/:id` removes the row while leaving the
       // run alive, so a missing row is not an answer about a run either.
       const history = engine.getRunHistory();
+      // ⛔ An AMBIGUOUS short id is refused before anything is stopped. `getById` returns
+      // whichever prefix match SQLite reads first, and a stop acting on that would end a
+      // task the owner did not name.
+      if (history?.isAmbiguousTriggerId(params['id']!) === true) {
+        errorResponse(res, 409, 'That id matches more than one task. Use the full id.');
+        return;
+      }
       const trigger = history?.getTrigger(params['id']!);
       const id = trigger?.id ?? params['id']!;
       const outcome = loop.stopTask(id);

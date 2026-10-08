@@ -229,6 +229,7 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
+      isAmbiguousTriggerId: vi.fn().mockReturnValue(false),
     });
     this.getBulkLedger = vi.fn(() => bulkHolder.ledger);
     this.getTaskManager = vi.fn().mockReturnValue({
@@ -6235,6 +6236,20 @@ describe('LynoxHTTPApi', () => {
     // this describe, so its `beforeAll`/`afterAll` already bracket these requests, and a
     // second declaration would not parse.
 
+    it('an AMBIGUOUS short id is refused with 409 and stops nothing', async () => {
+      // A prefix two tasks share resolves to whichever row SQLite reads first; a stop on
+      // that would end a task the owner did not name.
+      const stopTask = vi.fn();
+      const history = { isAmbiguousTriggerId: () => true, getTrigger: () => ({ id: 'task-1-a' }) };
+      await withEngine({ getWorkerLoop: () => ({ stopTask }), getRunHistory: () => history }, async () => {
+        const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
+        expect(res.status).toBe(409);
+        expect(stopTask).not.toHaveBeenCalled();
+        const body = await res.json() as { error: string };
+        expect(body.error).toContain('more than one task');
+      });
+    });
+
     it('a stop through the SIGNAL is told the run halts, not that it may finish on its own', async () => {
       // A bulk preview has no model call and no tool handler; the session sentence would
       // tell its owner the wrong thing.
@@ -6329,7 +6344,7 @@ describe('LynoxHTTPApi', () => {
 
     it('POST /api/tasks/:id/stop answers 404 for a task that neither exists nor is running', async () => {
       await withEngine({
-        getRunHistory: () => ({ getTrigger: () => undefined }),
+        getRunHistory: () => ({ getTrigger: () => undefined, isAmbiguousTriggerId: () => false }),
         // Present on purpose, and it must SAY not_running: the lookup is no longer what
         // produces the 404 on its own. The run is asked first, because a run outlives its
         // row — `DELETE /api/tasks/:id` removes the row and leaves the run working.
@@ -6347,7 +6362,7 @@ describe('LynoxHTTPApi', () => {
       // a lie-detector for runs.
       const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'session' });
       await withEngine({
-        getRunHistory: () => ({ getTrigger: () => undefined }),
+        getRunHistory: () => ({ getTrigger: () => undefined, isAmbiguousTriggerId: () => false }),
         getWorkerLoop: () => ({ stopTask }),
       }, async () => {
         const res = await jsonFetch('/api/tasks/gone-but-running/stop', { method: 'POST' });
