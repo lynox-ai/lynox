@@ -412,6 +412,14 @@ export class Session {
    */
   private _configVersionAtAgentBuild = 0;
   private _model: ModelTier;
+  /**
+   * The tier this session was asked for, before the cost ceiling: the creation request or the
+   * last pick. `_model` is this, clamped to `max_tier`; keeping both lets a later config change
+   * clamp an open session down when the ceiling drops and give its tier back when it rises.
+   */
+  private _tierIntent: ModelTier;
+  /** The config version `_model` was last clamped at; see the clamp at the top of `run`. */
+  private _tierClampedAtConfigVersion: number;
   private _effort: EffortLevel;
   private _thinking: ThinkingMode | undefined;
   private _maxTokens: number | undefined;
@@ -440,6 +448,8 @@ export class Session {
     // with the run-path clamp. `engine.config.model` is already clamped at engine
     // init, so only the request-supplied branch needs it.
     this._model = sessionInitialTier(engine, opts?.model);
+    this._tierIntent = opts?.model ?? this._model;
+    this._tierClampedAtConfigVersion = engine.getConfigVersion();
     this._effort = opts?.effort ?? engine.config.effort ?? 'medium';
     this._thinking = opts?.thinking ?? engine.config.thinking;
     this._maxTokens = engine.config.maxTokens;
@@ -665,20 +675,36 @@ export class Session {
       await this._compactionInFlight.catch(() => {});
     }
 
-    // Hot-reload tools when registry changed (e.g. Google connected mid-session)
-    if (this.engine.getRegistry().version !== this._registryVersion) {
-      this._recreateAgent();
+    // A config change may have moved the cost ceiling: clamp the session's tier again,
+    // through the same chokepoint the constructor uses and from what the session was asked
+    // for, so a lowered `max_tier` reaches an OPEN session from its next turn and a raised one
+    // gives the tier back. This keeps its OWN version stamp rather than reading the agent's:
+    // any rebuild in between (a registry hot-reload, the restore after a compaction, a
+    // setter) stamps the agent with the current version and would otherwise swallow the change.
+    const configVersion = this.engine.getConfigVersion();
+    let tierMoved = false;
+    if (configVersion !== this._tierClampedAtConfigVersion) {
+      const clamped = sessionInitialTier(this.engine, this._tierIntent);
+      tierMoved = clamped !== this._model;
+      this._model = clamped;
+      this._tierClampedAtConfigVersion = configVersion;
     }
 
-    // Hot-rebuild Agent when the engine's LLM client was recreated (provider
-    // swap, BYOK key rotation, vault reload) or its config changed (e.g. a tool
-    // switched off in Tool Toggles, which then holds from this thread's next turn). _recreateAgent constructs the
+    // Hot-reload tools when registry changed (e.g. Google connected mid-session), and
+    // hot-rebuild the Agent when the engine's LLM client was recreated (provider
+    // swap, BYOK key rotation, vault reload), its config changed (e.g. a tool
+    // switched off in Tool Toggles, which then holds from this thread's next turn) or the
+    // tier just moved. _recreateAgent constructs the
     // Agent against `this.engine.client`, so a stale snapshot means the
     // Session keeps calling the previous provider's API with the old key —
     // empty assistant replies + footer stuck on the previous provider name
     // until the session is destroyed (rafael 2026-05-27 Settings provider
-    // switch from Anthropic → Mistral).
-    if (this.engine.getConfigVersion() !== this._configVersionAtAgentBuild) {
+    // switch from Anthropic → Mistral). One rebuild covers all three.
+    if (
+      this.engine.getRegistry().version !== this._registryVersion
+      || configVersion !== this._configVersionAtAgentBuild
+      || tierMoved
+    ) {
       this._recreateAgent();
     }
 
@@ -1970,6 +1996,7 @@ export class Session {
 
   setModel(tier: ModelTier): string {
     this._model = tier;
+    this._tierIntent = tier;
     this._rebuildAgentKeepingConversation();
     return this._resolveModel(tier, getActiveProvider()).modelId;
   }
@@ -2074,6 +2101,8 @@ export class Session {
     });
 
     const modelId = this.setModel(clampedTier);
+    // The pick, not its clamped form, is what a later ceiling change clamps from.
+    this._tierIntent = requestedTier;
     return { ok: true, tier: clampedTier, modelId };
   }
 
