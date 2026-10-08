@@ -7,6 +7,7 @@ import { estimateFirstTurnUSD, hasKnownPricing } from '../../core/pricing.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, ContinuationLoopError, RunAbortedError, ToolLoopBreakError, type SendStop } from '../../core/agent.js';
+import { isInputRequired } from '../../core/input-required.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
@@ -2678,6 +2679,15 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       depth: childDepth,
       spawnRecords,
     });
+
+    // ⛔ A child that asked a question with no way to reach a person ends THIS run too, as
+    // "needs input" (`input-required.ts`). A child inherits its question path from this
+    // agent, so it had none because this run has none — and folded into the result (one
+    // section among successes) or into the all-failed AggregateError below, the question
+    // would come back to this model as text it reads and decides past. Thrown after the
+    // bookkeeping above, so every child's cost and end are already recorded.
+    const childAskedNobody = errors.find(isInputRequired);
+    if (childAskedNobody !== undefined) throw childAskedNobody;
 
     if (errors.length === specs.length) {
       // ⚠ The trim has to travel on THIS path too. The note below is never reached when

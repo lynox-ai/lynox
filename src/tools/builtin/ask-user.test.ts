@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { InputRequiredError } from '../../core/input-required.js';
 import { askUserTool } from './ask-user.js';
 import type { IAgent } from '../../types/index.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -143,10 +144,20 @@ describe('askUserTool', () => {
     expect(promptUser.mock.calls[0]?.slice(1)).toEqual([['red', 'blue', 'green', '\x00']]);
   });
 
-  it('returns "Interactive input not available" when promptUser is undefined', async () => {
+  it('THROWS "needs input" when promptUser is undefined — it never returns a sentence the run carries on past', async () => {
+    // The old behaviour returned "Interactive input not available in this context." as the
+    // tool RESULT, and the run went on without the decision it had just asked for.
     const agent = makeAgent();
-    const result = await askUserTool.handler({ question: 'Hello?' }, agent);
-    expect(result).toBe('Interactive input not available in this context.');
+    await expect(askUserTool.handler({ question: 'Approve the refund?' }, agent))
+      .rejects.toThrow(InputRequiredError);
+    await expect(askUserTool.handler({ question: 'Approve the refund?' }, agent))
+      .rejects.toThrow('Approve the refund?');
+  });
+
+  it('names every question of a batch when it cannot ask', async () => {
+    const agent = makeAgent();
+    await expect(askUserTool.handler({ questions: [{ question: 'Which account?' }, { question: 'Which month?' }] }, agent))
+      .rejects.toThrow('Which account? / Which month?');
   });
 
   it('uses promptTabs for tabbed multi-question dialog', async () => {

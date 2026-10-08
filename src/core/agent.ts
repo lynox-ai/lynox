@@ -65,6 +65,7 @@ import { compose, detectInjectionAttempt, containsUntrustedMarker, renderFence }
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
 import { isToolSoftFailure } from './tool-soft-failure.js';
+import { InputRequiredError, isInputRequired } from './input-required.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
@@ -339,12 +340,33 @@ export class Agent implements IAgent {
   private _promptSecret: PromptSecretFn | undefined;
   get promptUser(): PromptUserFn | undefined {
     const raw = this._promptUser;
-    return raw ? (question, options, meta) => raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+    return raw ? (question, options, meta) => this._notingAskedNobody(raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
   }
   set promptUser(fn: PromptUserFn | undefined) { this._promptUser = fn; }
   get promptTabs(): PromptTabsFn | undefined {
     const raw = this._promptTabs;
-    return raw ? (questions, meta) => raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+    return raw ? (questions, meta) => this._notingAskedNobody(raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
+  }
+  /** A prompt that could reach nobody, noted HERE — where every prompt passes — and not only
+   *  where it is thrown: a tool that catches the error and returns it as text would otherwise
+   *  turn the end of the run back into a result the model reads and works around. The batch
+   *  ends the run on it (`_dispatchTools`). Reset at the start of each run.
+   *
+   *
+   *  Per INSTANCE, not per run, like the rest of the Agent's run state: `send` is not
+   *  re-entrant, so a caller keeps one run per Agent at a time, as these do: the HTTP `/run` route
+   *  refuses a second run on a session with a 409 (`runningSessions`) and, after a takeover,
+   *  waits until the previous handler has unwound; the worker builds a fresh Session, and with
+   *  it a fresh Agent, per execution (`engine.createSession`); a session's next turn waits for
+   *  its background compaction (`Session.run`, `_compactionInFlight`); spawned children and
+   *  workflow steps get their own Agent. Two `send`s overlapping on one Agent are outside
+   *  what this note supports, as they are outside what the Agent supports. */
+  private _askedNobodyInRun: InputRequiredError | undefined;
+  private _notingAskedNobody<T>(answer: Promise<T>): Promise<T> {
+    return answer.catch((err: unknown) => {
+      if (isInputRequired(err)) this._askedNobodyInRun ??= err;
+      throw err;
+    });
   }
   set promptTabs(fn: PromptTabsFn | undefined) { this._promptTabs = fn; }
   get promptSecret(): PromptSecretFn | undefined {
@@ -2079,6 +2101,7 @@ export class Agent implements IAgent {
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
+    this._askedNobodyInRun = undefined;
     // F5: everything already in the buffer is a PREVIOUS turn — replace the
     // bodies of successfully saved artifacts with a reference (next-turn
     // eviction, D4). Runs here rather than pre-send so the turn that produced
@@ -3585,6 +3608,16 @@ export class Agent implements IAgent {
     });
   }
 
+  /** Needs-input errors the handler's catch already streamed as the call's result. */
+  private readonly _needsInputStreamed = new WeakSet<InputRequiredError>();
+
+  /** The question re-built MASKED, whole, so the cap the error applies falls after the mask and
+   *  a secret straddling it is still recognised. Its message leaves the agent: into the ledger,
+   *  the failed run's record and its note. */
+  private _maskedNeedsInput(err: InputRequiredError): InputRequiredError {
+    return new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
+  }
+
   /** Longest tool input shown whole in a secret prompt; longer inputs are refused, not cut. */
   private static readonly SECRET_PROMPT_MAX_CHARS = 4000;
 
@@ -3639,6 +3672,31 @@ export class Agent implements IAgent {
       toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
     );
     this._taintBeforeBatch = undefined;
+
+    // A call that needs a person and cannot reach one ends the run — after the batch has
+    // settled, so the calls beside it finish rather than being cut off mid-flight.
+    // Masked HERE as well: a consent or secret prompt raises before the handler's `try`, so a
+    // question from one of those reaches this point unmasked (the handler's own is masked twice,
+    // which changes nothing).
+    // Streamed here too, as the refused call's result: a gate raises without the handler's
+    // bookkeeping, and without a result the chat shows no reason once text was streamed.
+    const askedAt = settled.findIndex(o => o.status === 'rejected' && isInputRequired(o.reason));
+    const needsInput = askedAt === -1 ? undefined : settled[askedAt];
+    if (needsInput !== undefined && needsInput.status === 'rejected' && isInputRequired(needsInput.reason)) {
+      if (this._needsInputStreamed.has(needsInput.reason)) throw needsInput.reason;
+      const masked = this._maskedNeedsInput(needsInput.reason);
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, isError: true });
+      }
+      throw masked;
+    }
+    // …and the same end when a tool caught the error and returned it as text: the prompt was
+    // noted where it passed (`_notingAskedNobody`). That call's result is already streamed.
+    const swallowed = this._askedNobodyInRun;
+    if (swallowed !== undefined) {
+      this._askedNobodyInRun = undefined;
+      throw this._maskedNeedsInput(swallowed);
+    }
 
     const results: BetaToolResultBlockParam[] = settled.map((outcome, i) => {
       if (outcome.status === 'fulfilled') return outcome.value;
@@ -4192,7 +4250,12 @@ export class Agent implements IAgent {
       };
     } catch (err: unknown) {
       const duration = timer.end();
-      const cause = err instanceof Error ? err : new Error(String(err));
+      // A question nobody can answer is re-built with the question MASKED before anything
+      // below reads it: its message leaves the agent, into the ledger here and into the
+      // failed run's record and note. The full question is masked and the cap applied
+      // after, so a secret that straddles the cap is still recognised whole.
+      const askedNobody = isInputRequired(err) ? this._maskedNeedsInput(err) : undefined;
+      const cause = askedNobody ?? (err instanceof Error ? err : new Error(String(err)));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
       // The LEDGER copy is a different string from the MODEL copy, deliberately.
@@ -4227,6 +4290,13 @@ export class Agent implements IAgent {
         // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
         // next to a still-streaming response.
         await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, isError: true });
+      }
+      // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
+      // result the model would read and work around (`input-required.ts`). AFTER the
+      // bookkeeping above, so the call is in the ledger and the UI's tool block closes.
+      if (askedNobody !== undefined) {
+        this._needsInputStreamed.add(askedNobody); // the batch must not stream it a second time
+        throw askedNobody;
       }
       return {
         type: 'tool_result',

@@ -9,6 +9,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+import { InputRequiredError } from '../../core/input-required.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -144,6 +145,14 @@ describe('google_calendar tool', () => {
 
       expect(result).toContain('Event created');
       expect(result).toContain('New Meeting');
+    });
+
+    it('a confirmation nobody can answer ends the run — not a "Calendar error" text the model reads', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/calendar.events']);
+      const tool = createCalendarTool(() => auth);
+      await expect(tool.handler({
+        action: 'create_event', summary: 'Test', start: '2026-03-20T10:00:00', end: '2026-03-20T11:00:00',
+      }, { name: 'test', model: 'test-model', memory: null, tools: [], onStream: null, promptUser: vi.fn().mockRejectedValue(new InputRequiredError('Create it?')) } as unknown as IAgent)).rejects.toBeInstanceOf(InputRequiredError);
     });
 
     it('cancels on user decline', async () => {

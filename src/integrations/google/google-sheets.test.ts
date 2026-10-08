@@ -9,6 +9,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+import { InputRequiredError } from '../../core/input-required.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -160,6 +161,14 @@ describe('google_sheets tool', () => {
 
       expect(result).toContain('Data written successfully');
       expect(result).toContain('Cells: 4');
+    });
+
+    it('a confirmation nobody can answer ends the run — not a "Sheets error" text the model reads', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
+      const tool = createSheetsTool(() => auth);
+      await expect(tool.handler({
+        action: 'write', spreadsheet_id: 'id', range: 'A1', values: [['x']],
+      }, { name: 'test', model: 'test-model', memory: null, tools: [], onStream: null, promptUser: vi.fn().mockRejectedValue(new InputRequiredError('Create it?')) } as unknown as IAgent)).rejects.toBeInstanceOf(InputRequiredError);
     });
 
     it('cancels on user decline', async () => {

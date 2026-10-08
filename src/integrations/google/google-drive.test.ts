@@ -9,6 +9,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+import { InputRequiredError } from '../../core/input-required.js';
 
 // §3.8 moved this module's calls onto the connector egress surface, so they now
 // go through the pinned transport instead of `globalThis.fetch`. The bridge
@@ -145,6 +146,15 @@ describe('google_drive tool', () => {
       }, createMockAgent('Yes'));
 
       expect(result).toContain(SCOPES.DRIVE_FILE);
+    });
+
+    it('a confirmation nobody can answer ends the run — not a "Drive error" text the model reads', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
+      const tool = createDriveTool(() => auth);
+      await expect(tool.handler({
+        action: 'upload', file_name: 'test.txt', content: 'Hello World',
+      }, { name: 'test', model: 'test-model', memory: null, tools: [], onStream: null, promptUser: vi.fn().mockRejectedValue(new InputRequiredError('Create it?')) } as unknown as IAgent)).rejects.toBeInstanceOf(InputRequiredError);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     it('uploads file with confirmation', async () => {

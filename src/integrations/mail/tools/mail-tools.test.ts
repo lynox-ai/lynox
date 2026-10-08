@@ -28,6 +28,7 @@ import type { MailContext, MailAccountView } from '../context.js';
 import type { MailAccountConfig } from '../provider.js';
 import { flattenPrompt } from '../../../core/prompt-value.js';
 import type { PromptText } from '../../../types/index.js';
+import { InputRequiredError } from '../../../core/input-required.js';
 
 /** Minimal MailContext stub for type-aware tool tests. */
 function makeStubContext(accounts: ReadonlyArray<MailAccountConfig>): MailContext {
@@ -408,6 +409,18 @@ describe('mail_reply tool', () => {
     await tool.handler({ uid: 78, body: 'q'.repeat(5000) }, agent);
     expect(prompt).toContain('Body is 5000 chars');
     expect(prompt.split('\n').some((l) => l.trimStart().startsWith('<!--'))).toBe(false);
+  });
+
+  it('a confirmation nobody can answer ends the run — not a "mail_reply error" text the model reads', async () => {
+    const orig = envelope(79, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'Report' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'Original.', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    const tool = createMailReplyTool(registry);
+    const agent = { promptUser: vi.fn().mockRejectedValue(new InputRequiredError('Send it?')) } as unknown as IAgent;
+    await expect(tool.handler({ uid: 79, body: 'Thanks.' }, agent)).rejects.toBeInstanceOf(InputRequiredError);
+    expect(provider.send).not.toHaveBeenCalled();
   });
 
   it('blocks reply bodies that contain credentials', async () => {

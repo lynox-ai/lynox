@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { ToolEntry, StreamEvent } from '../types/index.js';
+import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 
 // === Mocks ===
@@ -60,6 +60,8 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { Agent, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { InputRequiredError } from './input-required.js';
+import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
 import type { PromptText } from '../types/index.js';
@@ -5617,3 +5619,183 @@ describe('a secret reference in a tool whose destination cannot be read', () => 
     expect(JSON.stringify(handler.mock.calls[0]![0])).toContain('resolved-value');
   });
 });
+
+/**
+ * A run with no way to ask a person, whose model asks anyway. The real `ask_user` tool, the
+ * real agent loop: the chain the fail-open ran through.
+ */
+describe('ask_user with no question path ends the run as "needs input"', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('the run ends — the model gets no second turn to carry on without the answer', async () => {
+    // SLOW, so "the run ends after the batch settles" is witnessed: an end on the first
+    // rejection would reject before this resolves.
+    let siblingFinished = false;
+    const sibling = makeTool('sibling_tool', vi.fn(() => new Promise<string>(resolve => {
+      setTimeout(() => { siblingFinished = true; resolve('sibling done'); }, 30);
+    })));
+    mockProcess.mockResolvedValueOnce(toolUseResponse([
+      { id: 'tu_ask', name: 'ask_user', input: { question: 'Approve the refund?' } },
+      { id: 'tu_sib', name: 'sibling_tool', input: {} },
+    ]));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool, sibling] });
+
+    await expect(agent.send('Process the refunds')).rejects.toThrow(InputRequiredError);
+    // ⛔ The fail-open had a second turn here: the model read "not available" and decided.
+    expect(mockProcess).toHaveBeenCalledTimes(1);
+    // The call beside it in the same batch finished rather than being cut off.
+    expect(sibling.handler).toHaveBeenCalledTimes(1);
+    expect(siblingFinished, 'the run ended only after its slow sibling settled').toBe(true);
+  });
+
+  it('the error names the question, masked through the vault before it leaves the agent', async () => {
+    mockProcess.mockResolvedValueOnce(toolUseResponse([
+      { id: 'tu_ask', name: 'ask_user', input: { question: 'Use key sk-live-SECRET for the payout?' } },
+    ]));
+    // The full shape the agent reads (the nested `makeSecretStore` above is out of scope here);
+    // only `maskSecrets` does anything.
+    const secretStore = {
+      getMasked: vi.fn().mockReturnValue(null),
+      resolve: vi.fn().mockReturnValue(null),
+      listNames: vi.fn().mockReturnValue([]),
+      containsSecret: vi.fn().mockReturnValue(false),
+      maskSecrets: vi.fn((t: string) => t.replace('sk-live-SECRET', '***CRET')),
+      recordConsent: vi.fn(),
+      hasConsent: vi.fn().mockReturnValue(false),
+      isExpired: vi.fn().mockReturnValue(false),
+      findUnresolvedSecretRefs: vi.fn().mockReturnValue([]),
+      extractSecretNames: vi.fn().mockReturnValue([]),
+      resolveSecretRefs: vi.fn((input: unknown) => input),
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], secretStore });
+
+    const err = await agent.send('Pay out').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect((err as Error).message).toContain('for the payout?');
+    expect((err as Error).message).not.toContain('sk-live-SECRET');
+  });
+
+  it('a secret that straddles the cap is still masked — masked whole, cut after', async () => {
+    // 295 characters of question, then the secret: the 300-character cap falls inside it. Cut
+    // first, the tail is gone and the vault no longer recognises what is left.
+    const question = `${'x'.repeat(295)} sk-live-SECRET?`;
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question } }]));
+    const secretStore = {
+      getMasked: vi.fn().mockReturnValue(null), resolve: vi.fn().mockReturnValue(null),
+      listNames: vi.fn().mockReturnValue([]), containsSecret: vi.fn().mockReturnValue(false),
+      maskSecrets: vi.fn((t: string) => t.replace('sk-live-SECRET', '***CRET')),
+      recordConsent: vi.fn(), hasConsent: vi.fn().mockReturnValue(false), isExpired: vi.fn().mockReturnValue(false),
+      findUnresolvedSecretRefs: vi.fn().mockReturnValue([]), extractSecretNames: vi.fn().mockReturnValue([]),
+      resolveSecretRefs: vi.fn((input: unknown) => input),
+    } as unknown as import('../types/index.js').SecretStoreLike;
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], secretStore });
+    const err = await agent.send('Pay out').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    // The cap falls four characters into the secret, so a cut-then-masked message would
+    // carry exactly those four: `sk-l`. Asserting the longer prefix would miss it.
+    expect((err as Error).message).not.toContain('sk-l');
+    expect((err as Error).message).toContain('***C');
+  });
+
+  // The secret gate for any tool but http_request asks before the HANDLER runs, outside the
+  // handler's `try`. With the callback an HTTP engine without its prompt store wires (it throws
+  // "needs input", http-api.ts), that gate must refuse — unwired, it lets an untainted call
+  // resolve the secret unasked (the twin below).
+  const gateStore = () => ({
+    getMasked: vi.fn().mockReturnValue(null), resolve: vi.fn().mockReturnValue('the-value'),
+    listNames: vi.fn().mockReturnValue(['API_KEY']), containsSecret: vi.fn().mockReturnValue(false),
+    maskSecrets: vi.fn((t: string) => t.replace('sk-live-SECRET', '***CRET')),
+    recordConsent: vi.fn(), hasConsent: vi.fn().mockReturnValue(true), isExpired: vi.fn().mockReturnValue(false),
+    findUnresolvedSecretRefs: vi.fn().mockReturnValue([]), extractSecretNames: vi.fn().mockReturnValue(['API_KEY']),
+    resolveSecretRefs: vi.fn((input: unknown) => input),
+  }) as unknown as import('../types/index.js').SecretStoreLike;
+  const gatedCall = { id: 'tu_cmd', name: 'run_cmd', input: { command: 'notify --note "sk-live-SECRET" --with secret:API_KEY' } };
+
+  it('a secret in a tool input with a prompt path that reaches nobody: refused, and the question is masked', async () => {
+    const handler = vi.fn().mockResolvedValue('ran');
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', handler)], secretStore: gateStore(), promptUser });
+    const err = await agent.send('Fetch it').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(handler, 'the secret was never put into the call').not.toHaveBeenCalled();
+    // Raised before the handler's `try`, so only the batch-level rethrow can mask it.
+    expect((err as InputRequiredError).question).not.toContain('sk-live-SECRET');
+    expect((err as Error).message).toContain('***CRET');
+  });
+
+  it('the refused gate streams its reason as the call\'s result, once — the chat shows why even after streamed text', async () => {
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    const onStream = vi.fn();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', vi.fn())], secretStore: gateStore(), promptUser, onStream });
+    await expect(agent.send('Fetch it')).rejects.toBeInstanceOf(InputRequiredError);
+    const results = onStream.mock.calls.map(c => c[0] as { type: string; name?: string; result?: string; isError?: boolean })
+      .filter(e => e.type === 'tool_result' && e.name === 'run_cmd');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.isError).toBe(true);
+    expect(results[0]!.result).toContain('Needs input');
+    expect(results[0]!.result).not.toContain('sk-live-SECRET');
+  });
+
+  it('ask_user\'s own result is streamed once, not again by the batch', async () => {
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve?' } }]));
+    const onStream = vi.fn();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], onStream });
+    await expect(agent.send('Go')).rejects.toBeInstanceOf(InputRequiredError);
+    const results = onStream.mock.calls.map(c => c[0] as { type: string; name?: string })
+      .filter(e => e.type === 'tool_result' && e.name === 'ask_user');
+    expect(results).toHaveLength(1);
+  });
+
+  it('…the same call with NO prompt path at all runs — why the HTTP engine wires one that throws', async () => {
+    const handler = vi.fn().mockResolvedValue('ran');
+    mockProcess.mockResolvedValueOnce(toolUseResponse([gatedCall])).mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('run_cmd', handler)], secretStore: gateStore() });
+    await expect(agent.send('Fetch it')).resolves.toBe('done');
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('a tool that catches the error and returns it as text does not turn the end back into a result', async () => {
+    // The shape a catch-all tool has: confirm, and on ANY error return "<tool> error: …". Noted
+    // where the prompt passed, the run still ends — for a tool written tomorrow as well.
+    const swallowing = makeTool('confirm_tool', vi.fn(async (_input: unknown, a: IAgent) => {
+      try { await a.promptUser!('Use key sk-live-SECRET?', ['Yes', 'No']); return 'done'; }
+      catch (err) { return `confirm_tool error: ${(err as Error).message}`; }
+    }));
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'confirm_tool', input: {} }]));
+    const promptUser = vi.fn((q: unknown) => Promise.reject(new InputRequiredError(flattenPrompt(q as Parameters<typeof flattenPrompt>[0]))));
+    // A store that masks but sees no `secret:` reference, so no gate fires before the handler.
+    const secretStore = Object.assign(gateStore(), { extractSecretNames: vi.fn().mockReturnValue([]) });
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [swallowing], promptUser, secretStore });
+    const err = await agent.send('Go').then(() => null, (e: unknown) => e);
+    expect(swallowing.handler, 'the handler ran and swallowed the error').toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect(mockProcess, 'the model gets no turn to work around it').toHaveBeenCalledTimes(1);
+    expect((err as InputRequiredError).question).not.toContain('sk-live-SECRET');
+  });
+
+  it('…and a NEXT run on the same agent starts clean: an unanswerable prompt before it does not end it', async () => {
+    // What the content-policy refusal leaves behind: the prompt was raised (and refused) before
+    // any run. The next run must not inherit the note.
+    const promptUser = vi.fn().mockRejectedValue(new InputRequiredError('Allow this request?'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [makeTool('plain_tool', vi.fn().mockResolvedValue('ok'))], promptUser });
+    await agent.promptUser!('Allow this request?', ['Allow', 'Deny']).catch(() => {});
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_p', name: 'plain_tool', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('fine'));
+    await expect(agent.send('Go')).resolves.toBe('fine');
+  });
+
+  it('with a question path nothing changes: the answer comes back and the run goes on', async () => {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Approve?' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Approved and done'));
+    const promptUser = vi.fn().mockResolvedValue('yes');
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], promptUser });
+    await expect(agent.send('Process')).resolves.toBe('Approved and done');
+    expect(promptUser).toHaveBeenCalledTimes(1);
+  });
+});
+

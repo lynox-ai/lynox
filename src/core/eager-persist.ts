@@ -8,6 +8,7 @@ import type { ThreadStore } from './thread-store.js';
 import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection.js';
 import { getErrorMessage } from './utils.js';
 import type { SendStopCause } from './agent.js';
+import { isInputRequired } from './input-required.js';
 
 export interface EagerPersistInput {
   /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
@@ -138,7 +139,11 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
         : undefined;
     notes.push({
       role: 'assistant',
-      content: noteCode === 'provider_error'
+      // `input_required` names the question that could not be asked — what the reader
+      // needs to answer it some other way. Masked by the agent before it got here.
+      content: noteCode === 'input_required' && isInputRequired(error)
+        ? buildDisplayNoteContent('input_required', sanitizeNoteDetail(error.question))
+        : noteCode === 'provider_error'
         ? buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error)))
         : (noteCode === 'tool_loop_break' || noteCode === 'continuation_loop') && loopDetail !== undefined
           ? buildDisplayNoteContent(noteCode, sanitizeNoteDetail(loopDetail))

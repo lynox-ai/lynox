@@ -91,6 +91,7 @@ import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/
 import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.js';
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
+import { InputRequiredError, isInputRequired } from '../core/input-required.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -3343,7 +3344,11 @@ export class LynoxHTTPApi {
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
       session.promptUser = async (rawQuestion: string | PromptText, options?: string[], meta?: PromptMeta): Promise<string> => {
-        if (!promptStore) return 'n'; // fallback if store unavailable
+        // ⛔ No store, no way to ask — and then nothing is made up. This used to answer 'n',
+        // an answer nobody gave: to `ask_user` a fabricated reply, to a consent dialog a
+        // silent deny the run then worked around. The run ends as "needs input"
+        // (`input-required.ts`), the same outcome `ask_user` gives without a question path.
+        if (!promptStore) throw new InputRequiredError(flattenPrompt(rawQuestion));
         // Both forms go out: `segments` is what a client that understands the
         // frame/value split renders, `question` is the flattened text every
         // older client, the CLI and the logs already expect. They must agree —
@@ -3390,7 +3395,8 @@ export class LynoxHTTPApi {
       // still uses session.promptUser per question.
       if (tabsCapable) {
         session.promptTabs = async (questions, meta?: PromptMeta): Promise<string[]> => {
-          if (!promptStore) return [];
+          // Same rule as `promptUser` above: an empty answer list would be answers nobody gave.
+          if (!promptStore) throw new InputRequiredError(questions.map(q => q.question).join(' / '));
           const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta));
           const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
           hasActivePendingPrompt = true;
@@ -3685,6 +3691,16 @@ export class LynoxHTTPApi {
         // (The backstop/disconnect paths already set `aborted` and tore down res.)
         if (err instanceof RunAbortedError) {
           if (!res.writableEnded && !res.destroyed) res.end();
+        } else if (isInputRequired(err) && !aborted) {
+          // The run stopped on purpose: it asked a question and nobody can be reached (this
+          // engine has no prompt store). Not a failure to alarm about — ended like a run the
+          // engine refused before the model, with the reason as the result, which the chat shows
+          // when nothing was streamed. The thread keeps the "needs input" note.
+          // No `usage`: `getLastRunUsage` is set only by a run that succeeds, so here it would be
+          // the PREVIOUS run's — and the chat footer takes it as this turn's.
+          const msg = capForClient(maskForClient(err.message, { includeGeneric: true }));
+          res.write(`event: done\ndata: ${JSON.stringify({ result: msg })}\n\n`);
+          res.end();
         } else if (!aborted) {
           // Masked AND capped: this string is a runtime/provider error rendered
           // into the tenant's error banner, an 8s toast, and a one-click copy
