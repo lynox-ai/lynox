@@ -18,8 +18,9 @@ export interface PromptOrigin {
 	 * not — that path names its own cause in the two fields above.
 	 *
 	 * It is separate from the name below because the first version keyed the
-	 * claim on the name — and a name of one zero-width space survives the
-	 * engine's validation and cleans down to empty here, so a parent could delete
+	 * claim on the name — and a name of one zero-width space passed the engine's
+	 * validation then (an older engine still lets it through) and cleans down to
+	 * empty here, so a parent could delete
 	 * the very line that warns about it. A boolean cannot be emptied.
 	 */
 	subagent?: true;

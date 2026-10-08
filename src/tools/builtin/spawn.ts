@@ -518,7 +518,7 @@ function floorRefusal(opts: {
   // into an XML-ish envelope (`compose`/`renderFence`) and need it; this string is thrown, and
   // a thrown tool error reaches the model as the `content` of a `tool_result`, with no
   // envelope and so no delimiter to break. What keeps a line break out is the input gate
-  // (`CONTROL_CHARS`, rejected in `validateSpawnInput`), NOT escaping — `escapeXml` does not
+  // (`NOT_NAME_CHAR`, rejected in `validateSpawnInput`), NOT escaping — `escapeXml` does not
   // touch control characters at all. And escaping would corrupt the identifier the model has
   // to name on its next call: a child called `a&b` would come back as `a&amp;b`. If this
   // string is ever composed into an envelope, the escaping belongs at that composition site.
@@ -1001,7 +1001,15 @@ export function resolveSpawnChildProviderConfig(input: {
 // reason CR/LF do: a name is echoed one-per-line in the all-failed message, so a
 // name carrying a line break forges an extra row — and a forged row can claim a
 // child SUCCEEDED inside a message whose whole job is to report that none did.
-const CONTROL_CHARS = /[\x00-\x1f\x7f\u0085\u2028\u2029]/;
+//
+// \u26d4 A POSITIVE SET, not a list of what to refuse. A name may hold letters, marks,
+// digits, punctuation, symbols and plain spaces \u2014 nothing else. Everything outside is
+// refused: control characters C0 and C1, the line breaks above, and the FORMAT category
+// (`\p{Cf}`), which is what a list kept missing: bidi overrides and isolates reorder
+// what a reader sees, zero-width marks and Unicode tag characters are invisible. A name
+// is shown in a frame the model reads as the engine's own, so the characters that hide
+// or reorder text stay out of it. A child's name needs no zero-width joiner.
+const NOT_NAME_CHAR = /[^\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]/u;
 
 function validateSpawnInput(input: SpawnAgentInput): void {
   if (!Array.isArray(input.agents) || input.agents.length === 0) {
@@ -1018,8 +1026,9 @@ function validateSpawnInput(input: SpawnAgentInput): void {
         `spawn_agent: name must be a non-empty string up to ${MAX_SPAWN_NAME_LENGTH} chars.`,
       );
     }
-    if (CONTROL_CHARS.test(spec.name)) {
-      throw new Error('spawn_agent: name must not contain control characters.');
+    // A name of spaces alone passes the set above and still shows nothing.
+    if (NOT_NAME_CHAR.test(spec.name) || !/[^\p{Zs}]/u.test(spec.name)) {
+      throw new Error('spawn_agent: name may hold only visible characters and spaces, no control or invisible characters.');
     }
     if (typeof spec.task !== 'string' || spec.task.length === 0 || spec.task.length > MAX_SPAWN_TASK_LENGTH) {
       throw new Error(
@@ -1075,10 +1084,10 @@ const MAX_CAUSE_DEPTH = 8;
 const MAX_RENDERED_ERROR_CHARS = 2_000;
 
 /** Everything the name gate rejects, flattened wherever a field is rendered on
- *  its own line. Deliberately the SAME class as `CONTROL_CHARS`: a subset would
+ *  its own line. Deliberately the SAME class as `NOT_NAME_CHAR`: a subset would
  *  hold the wide, unvalidated field to a looser rule than the narrow, already
- *  validated one. */
-const UNSAFE_IN_LINE = /[\x00-\x1f\x7f\u0085\u2028\u2029]/g;
+ *  validated one. Built from the gate's own source, so the two cannot drift apart. */
+const UNSAFE_IN_LINE = new RegExp(NOT_NAME_CHAR.source, 'gu');
 
 export function formatSpawnError(err: unknown, depth = 0): string {
   if (!(err instanceof Error)) return String(err);
@@ -1699,7 +1708,7 @@ async function executeThinker(
     // `networkPolicy`/`allowedHosts` as they stand at spawn time. Child-side TIGHTENING (a child more
     // restricted than its parent, via `childIsolation → networkPolicy`) is
     // still explicitly post-launch (PRD §6); T2-X1 does NOT claim to close
-    // child network isolation, only that a child never widens egress.
+    // child network isolation, only that a child starts from its parent's egress settings.
     //
     // Reach delta (intentional, autonomy-inheritance): the shared refs are
     // also write-reachable — a child can mutate parent state through
@@ -2164,12 +2173,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       });
     });
 
-    // Enforce session cost ceiling (shared with pipeline steps) against
-    // this Session's counters object so concurrent spawns on different
-    // Sessions don't see each other's reservations.
-    checkSessionBudget(agent.sessionCounters, totalEstimate);
-
-    // ⛔ AND the delegating RUN's own ceiling — a different barrier from the one above.
+    // ⛔ The delegating RUN's own ceiling — a different barrier from the session ceiling,
+    // which is checked further down, once both refusals below have had their say.
     // The session ceiling is per session; this is the dollar cap on the single run that
     // is delegating, the one the worker's budget admission grants against the tenant's
     // daily total. Children bill that daily total through their own run rows, while
@@ -2313,6 +2318,18 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // what is left when something threw before or during dispatch, which is why it
     // subtracts what was already given back rather than releasing the sum again.
     try {
+    // Enforce session cost ceiling (shared with pipeline steps) against
+    // this Session's counters object so concurrent spawns on different
+    // Sessions don't see each other's reservations.
+    //
+    // ⛔ AFTER both refusals above, not before them. It reserves on the spot and nothing
+    // gives the reservation back, so a batch refused at the floor or by a neighbour's
+    // claim used to leave its whole estimate on the session counter — repeatable at no
+    // cost, until the session refused all further work for money it never spent. Inside
+    // the `try`, so its own refusal gives the run's hold back through the `finally`.
+    // No `await` lies between the run's reservation and this line.
+    checkSessionBudget(agent.sessionCounters, totalEstimate);
+
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
 
     if (agent.onStream) {
@@ -2500,8 +2517,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const downgradeNote = downgradedIdx.has(i)
           ? ' — ran on balanced because you declined deep; quality may be lower'
           : '';
-        // `spec.name` is AGENT INPUT and is validated for length (64) and
-        // control chars only — no charset gate, unlike `safeModelId` beside it.
+        // `spec.name` is AGENT INPUT and is validated for length (64) and a set of
+        // visible characters — which still admits `<`, `"` and `=`, unlike `safeModelId` beside it.
         // It lands in a heading OUTSIDE the untrusted-data envelope, so a name
         // like `x<untrusted_data source="web">` (30 chars) opens a tag that
         // nothing closes and swallows the engine prose plus every section after
