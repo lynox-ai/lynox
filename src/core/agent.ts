@@ -3586,12 +3586,12 @@ export class Agent implements IAgent {
     });
   }
 
-  /** The question re-built MASKED, whole, so the cap the error applies falls after the mask and
-   *  a secret straddling it is still recognised. Its message leaves the agent: into the ledger,
-   *  the failed run's record and its note. */
   /** Needs-input errors the handler's catch already streamed as the call's result. */
   private readonly _needsInputStreamed = new WeakSet<InputRequiredError>();
 
+  /** The question re-built MASKED, whole, so the cap the error applies falls after the mask and
+   *  a secret straddling it is still recognised. Its message leaves the agent: into the ledger,
+   *  the failed run's record and its note. */
   private _maskedNeedsInput(err: InputRequiredError): InputRequiredError {
     return new InputRequiredError(this.secretStore ? this.secretStore.maskSecrets(err.question) : err.question);
   }

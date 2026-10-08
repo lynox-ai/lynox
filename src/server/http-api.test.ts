@@ -1507,11 +1507,12 @@ describe('LynoxHTTPApi', () => {
       mockSessionRun.mockImplementationOnce(async () => {
         throw new InputRequiredError('Approve the refund?');
       });
-      // A previous run's usage is still on the session; it must not be shown as this turn's.
-      mockSessionInstance.getLastRunUsage.mockReturnValueOnce({ costUsd: 0.42, tokensIn: 1, tokensOut: 1 });
       const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'refund' }) });
       const text = await res.text();
-      expect(text).not.toContain('0.42');
+      // The session's last usage belongs to the previous, successful run — not read here at
+      // all. (Asserted by the call, not by a queued stub: a `Once` this branch never consumes
+      // would leak into the next test.)
+      expect(mockSessionInstance.getLastRunUsage).not.toHaveBeenCalled();
       expect(text).not.toContain('event: error');
       expect(text).toContain('event: done');
       expect(text).toContain('Approve the refund?');
