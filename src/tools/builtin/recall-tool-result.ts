@@ -17,7 +17,9 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsUntrustedMarker, wrapUntrustedData } from '../../core/data-boundary.js';
 import { noteOwnWrapped } from '../../core/call-connection.js';
 
-/** One block, nothing before or after it: the shape `wrapUntrustedData` returns. */
+/** Starts with an opener and ends with a closer: the old shape rule. It also matches
+ *  several blocks back to back; then only the last closer is exempted and the others
+ *  stay in the scan. */
 const ONE_BLOCK = /^<untrusted_data[ >][\s\S]*\n<\/untrusted_data>$/;
 
 interface RecallToolResultInput {

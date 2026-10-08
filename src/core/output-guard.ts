@@ -111,7 +111,7 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  * no information, and this one reaches both the model context and the audit table.
  *
  * Which closers are ours is decided by PROVENANCE, not by shape: the dispatcher
- * passes the exact blocks `wrapUntrustedData` produced inside this call
+ * passes the exact blocks `wrapUntrustedData` produced while this call ran
  * (`CallSlot.wrapped`, after the same secret masking as the result). Each is looked
  * up in the result and consumed at most once; only its last line is exempted. That
  * covers a result that is one block, a block with engine text around it, and

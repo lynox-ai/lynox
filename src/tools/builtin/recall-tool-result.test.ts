@@ -71,6 +71,13 @@ describe('recallToolResultTool', () => {
     expect(scanToolResult(result, 'recall_tool_result', slot.wrapped).startsWith('⚠ WARNING: This tool result')).toBe(true);
   });
 
+  it('replays two blocks back to back with the warning: only the last closer is exempted', async () => {
+    const stored = `${wrapUntrustedData('From: a@example.com', 'mail:header')}\n\n${wrapUntrustedData('B'.repeat(5_000), 'mail:body')}`;
+    const { result, slot } = await recallInSlot(stored);
+    expect(slot.wrapped).toEqual([stored]);
+    expect(scanToolResult(result, 'recall_tool_result', slot.wrapped).startsWith('⚠ WARNING: This tool result')).toBe(true);
+  });
+
   it('replays a payload of several blocks unchanged, and the scan warns (a known limit)', async () => {
     const stored = `Date: today\n${wrapUntrustedData('From: a@example.com', 'mail:header')}\n\n${wrapUntrustedData('B'.repeat(5_000), 'mail:body')}`;
     const { result, slot } = await recallInSlot(stored);

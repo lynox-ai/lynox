@@ -51,8 +51,10 @@ export interface CallConnection {
 /** One call's slot. `connection` stays undefined when nothing was resolved. */
 export interface CallSlot {
   connection?: CallConnection | undefined;
-  /** Every `<untrusted_data>` block this call's handler produced, in order, byte for
-   *  byte. The result scan takes the closer of exactly these blocks as the engine's
+  /** Every `<untrusted_data>` block `wrapUntrustedData` produced while this call ran,
+   *  byte for byte: in the handler and in anything it awaited in the same async context
+   *  (a sub-agent's prompt building included; a sub-agent's own tool calls run in their
+   *  own slot). The result scan takes the closer of exactly these blocks as the engine's
    *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
   wrapped?: string[] | undefined;
 }
@@ -66,9 +68,11 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 }
 
 /**
- * Record a block `wrapUntrustedData` produced inside the current call. Outside a slot
- * (prompt building between calls, a test calling the wrapper directly) this is a
- * no-op, so nothing recorded here can reach another call's scan.
+ * Record a block `wrapUntrustedData` produced while the current call runs. Outside a
+ * slot (prompt building between calls, a test calling the wrapper directly) this is a
+ * no-op, so nothing recorded here can reach another call's scan. Every recorded block
+ * is balanced (a literal opener, a body with every boundary tag neutralized, its
+ * closer), so exempting one cannot close a block it sits inside.
  */
 export function noteOwnWrapped(block: string): void {
   const slot = slotStorage.getStore();

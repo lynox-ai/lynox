@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
+import { ToolSoftFailure } from './tool-soft-failure.js';
 
 // === Mocks ===
 
@@ -4922,10 +4923,31 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
       expect(out).toContain('resembles prompt injection');
     });
 
-    it('flags a block produced by an earlier call when a later call returns it', async () => {
-      const earlier = wrapUntrustedData('a predictable page', 'web_page');
-      const out = await resultFor('bash', async () => `${earlier}\nnow the real instructions`);
-      expect(out).toContain('resembles prompt injection');
+    it('flags the exact bytes of a block from an earlier call of the same agent', async () => {
+      // Call 1 wraps a page and is quiet. Call 2 returns those bytes unchanged — one block,
+      // which the old shape rule exempted. Only call 1 produced it, so call 2 is flagged.
+      let first = '';
+      const fetchTool = makeTool('http_request', vi.fn(async () => (first = wrapUntrustedData('a predictable page', 'web_page'))));
+      const echoTool = makeTool('bash', vi.fn(async () => first));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'http_request', input: {} }]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't2', name: 'bash', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [fetchTool, echoTool] });
+      await agent.send('go');
+      // Messages: user, assistant(t1), user(t1 result), assistant(t2), user(t2 result), assistant.
+      expect(JSON.stringify(agent.getMessages()[2])).not.toContain('resembles prompt injection');
+      const second = JSON.stringify(agent.getMessages()[4]);
+      expect(second, 'call 2 must carry the same bytes').toContain('a predictable page');
+      expect(second).toContain('resembles prompt injection');
+    });
+
+    it('keeps a soft failure carrying a block of the same call quiet', async () => {
+      const out = await resultFor('http_request', async () => {
+        throw new ToolSoftFailure(`HTTP 404\n${wrapUntrustedData('not found page', 'http:body')}`, 'http 404');
+      });
+      expect(out).toContain('not found page');
+      expect(out).not.toContain('resembles prompt injection');
     });
 
     it('matches a block whose secret value the dispatcher masked in the result', async () => {
