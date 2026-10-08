@@ -117,3 +117,55 @@ describe('fresh run: an engine error hands the turn to the server probe', () => 
 		expect(store.getMessages().find((m) => m.role === 'user')?.failed).not.toBe(true);
 	});
 });
+
+describe('the streaming state across an engine error', () => {
+	/** Starts a fresh run with one tool call in flight, then sends `error` with `errorData`. */
+	async function runWithToolThenError(errorData: Record<string, unknown>): Promise<{ stream: ReturnType<typeof sseStream>; sent: Promise<void> }> {
+		const stream = sseStream();
+		vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+			const url = String(input);
+			calls.push(url);
+			if (url.endsWith('/sessions')) return json({ sessionId: 't3' });
+			if (url.endsWith('/sessions/t3/run')) return new Response(stream.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+			if (url.endsWith('/runs/active')) return json({ runs: [] });
+			if (url.endsWith('/threads/t3/messages')) return json({ messages: [], activeRun: null });
+			return json({}, 404);
+		}));
+		const sent = store.sendMessage('look it up');
+		await settle();
+		stream.send('tool_call', { name: 'web_search', input: { query: 'x' } }, 1);
+		await settle();
+		stream.send('error', errorData, 2);
+		await settle();
+		return { stream, sent };
+	}
+
+	const toolStatus = (): string | undefined =>
+		store.getMessages().filter((m) => m.role === 'assistant').at(-1)?.toolCalls?.[0]?.status;
+
+	it('stays streaming, with the tool call still running, after a non-fatal error', async () => {
+		const { stream, sent } = await runWithToolThenError({ message: 'tool input unparsable', fatal: false });
+
+		expect(store.getIsStreaming()).toBe(true);
+		expect(store.getStreamingActivity()).toBe('tool');
+		expect(toolStatus()).toBe('running');
+
+		stream.send('done', {});
+		stream.close();
+		await sent;
+		await settle();
+		expect(store.getIsStreaming()).toBe(false);
+	});
+
+	it('ends the streaming state and settles the tool call on an error without the flag', async () => {
+		const { stream, sent } = await runWithToolThenError({ message: 'Absolute iteration limit reached' });
+
+		// Witness for the test above: the same events with `fatal` absent end the run,
+		// so "still streaming" there is the flag's doing and not the harness's.
+		expect(toolStatus()).toBe('done');
+		expect(store.getIsStreaming()).toBe(false);
+
+		stream.close();
+		await sent;
+	});
+});
