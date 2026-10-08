@@ -52,13 +52,15 @@ import { compose, engineText, renderFence, type Part } from './data-boundary.js'
 // ── History + Budget + Subscriptions ────────────────────────────
 
 /**
- * Apply the boot-time cost, rate and egress settings to the ToolContext.
+ * Apply the cost, rate and egress settings to the ToolContext at boot.
  *
  * The HTTP/mail rate limits and the daily/monthly caps count against
  * RunHistory, so they need it. The session cap and the egress settings
  * (`enforce_https`, `network_policy`, the operator host floor) do not, and are
  * applied whether or not RunHistory opened: an engine that boots without its
- * history must still enforce the limits it was configured with.
+ * history must still enforce the limits it was configured with. Of these, only
+ * the egress settings are applied again when the config is reloaded
+ * (`applyEgressSettings`).
  */
 export function configureBudgetAndRateLimits(
   runHistory: RunHistory | null,
@@ -128,8 +130,9 @@ function configureEgressPolicy(userConfig: LynoxUserConfig, toolContext: ToolCon
  * Write the egress settings of `userConfig` onto `toolContext`: `enforce_https`,
  * `network_policy` and the operator host floor. Returns the policy it applied.
  *
- * Called at boot and again by `Engine.reloadUserConfig`, so a policy changed at
- * runtime is the policy the tools read, in both directions. Sessions share the
+ * Called at boot and again by `Engine.reloadUserConfig` and
+ * `Engine.reloadCredentials`, so a policy changed at runtime is the policy the
+ * tools read, in both directions. Sessions share the
  * engine's ToolContext and see the change on their next call. A sub-agent copies
  * the context when it is spawned and keeps the values it started with.
  */

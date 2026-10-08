@@ -133,6 +133,21 @@ describe('Engine — egress settings follow a config reload', () => {
     expect(gate(engine, 'https://api.example.com/v1')).toThrow(/network_policy=deny-all/);
   });
 
+  it('a credential reload the endpoint gate refuses leaves the egress settings at their previous value', async () => {
+    const dir = freshDataDir();
+    writeUserConfig(dir, {});
+    const engine = await boot();
+
+    writeUserConfig(dir, {
+      provider: 'openai', api_base_url: 'https://my-litellm.example.com/v1', openai_model_id: 'gpt-4o-mini',
+      network_policy: 'deny-all',
+    });
+    reloadConfig();
+    await expect(engine.reloadCredentials()).rejects.toThrow(/my-litellm\.example\.com/);
+    expect(engine.getUserConfig().network_policy).toBeUndefined();
+    expect(gate(engine, 'https://api.example.com/v1')).not.toThrow();
+  });
+
   it('enforce_https switched on at runtime refuses plain http on the next call', async () => {
     const dir = freshDataDir();
     writeUserConfig(dir, {});
