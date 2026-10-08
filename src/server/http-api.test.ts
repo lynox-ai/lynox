@@ -1413,6 +1413,15 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('runs', () => {
+    // This file shares ONE per-IP rate window, and the erasure tests in this block add
+    // enough requests to tip a test thousands of lines away into a 429; the block pays
+    // them back (same snapshot/restore as elsewhere in the file).
+    const runsRateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let runsWindowBefore = new Map<string, number>();
+    beforeAll(() => { runsWindowBefore = new Map([...runsRateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of runsRateCounts()) e.count = runsWindowBefore.get(k) ?? 0; });
+
     // Pre-flight key check (added 2026-05-25 to gate Anthropic SDK
     // validateHeaders deep-throws on BYOK demo tenants without a key).
     // Default the resolve to a fake key so the rest of these tests can
