@@ -10099,12 +10099,17 @@ export class LynoxHTTPApi {
       // stderr.
       if (engineDb) attempt('engine_db', () => { engineDb.deleteAllData(); });
 
-      // Clear the DORMANT legacy verb-def rows the B1 self-heal keeps alive (the
-      // non-destructive v44 no longer drops the legacy `triggers` + workflow-def
-      // `pipeline_runs`). Without this an Art.17 erasure would leave trigger/workflow
-      // PII on disk, and an engine.db recreate would re-backfill it into live reads.
-      const runHistoryForWipe = reach('legacy_verb_defs', engine.getRunHistory());
-      if (runHistoryForWipe) attempt('legacy_verb_defs', () => { runHistoryForWipe.clearLegacyVerbDefs(); });
+      // Empty history.db: the run spine (prompts, answers, tool arguments, typed
+      // `ask_user` answers, wire snapshots), the legacy verb definitions an engine.db
+      // recreate would re-backfill into live reads, and every other table, enumerated
+      // from `sqlite_master` rather than listed. This used to clear only the legacy
+      // verb definitions, and the threads above were the only other rows of this file
+      // the erasure reached. It takes the cost history, the HTTP and mail-send rate
+      // counters and the security trail with it, which is acceptable only because
+      // `denyOnManagedInstance` refused this route above on every instance with a
+      // non-empty billing tier (see `RunHistory.deleteAllData`).
+      const runHistoryForWipe = reach('run_history', engine.getRunHistory());
+      if (runHistoryForWipe) attempt('run_history', () => { runHistoryForWipe.deleteAllData(); });
 
       // Delete all DataStore collections (includes CRM tables)
       const ds = reach('datastore', engine.getDataStore());
@@ -10165,6 +10170,12 @@ export class LynoxHTTPApi {
         ...(degraded.length > 0 ? { degraded } : {}),
         ...(skipped.length > 0 ? { skipped } : {}),
       };
+      // The erasure also empties `security_events`, which would otherwise have been
+      // the place to record its outcome. The access log already records the call;
+      // this line records how it ended. Counts only: the labels in `failed` can be
+      // collection or secret names (`note` above already writes those per failure,
+      // masked for credential shapes only), and this line adds none of them.
+      process.stderr.write(`[http-api] data erasure ran at ${new Date().toISOString()}: failed=${String(failed.length)} degraded=${String(degraded.length)} skipped=${String(skipped.length)}\n`);
       if (failed.length > 0) {
         // 500, not a 200 with `deleted: false`: a client that reads the status code
         // alone must not conclude the erasure succeeded, and an Art. 17 answer is

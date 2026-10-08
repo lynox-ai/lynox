@@ -231,9 +231,10 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
-      // The Art.17 erasure calls this. It was MISSING here for as long as the
-      // route has had the call, so every erasure test ran against a route whose
-      // legacy verb-def wipe threw a TypeError on its first line.
+      // The Art.17 erasure calls this (`RunHistory.deleteAllData`). Its predecessor,
+      // the legacy verb-def wipe, was MISSING here for as long as the route had the
+      // call, so every erasure test ran against a route whose wipe threw a TypeError
+      // on its first line.
       //
       // ⚠ And the catch that hid it was NOT silent — it wrote
       // `⚠ /api/data: legacy verb-def wipe failed: …` to the same stderr this
@@ -242,7 +243,7 @@ vi.mock('../core/engine.js', () => ({
       // that a logged warning no assertion reads is exactly as invisible as
       // silence. What found it was not virtue either: the route now RECORDS a
       // failure, which turned a 200-expecting test red.
-      clearLegacyVerbDefs: vi.fn(),
+      deleteAllData: vi.fn(),
       isAmbiguousTriggerId: vi.fn().mockReturnValue(false),
     });
     this.getBulkLedger = vi.fn(() => bulkHolder.ledger);
@@ -11284,24 +11285,21 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data clears the legacy verb-def rows', async () => {
-      // An IDENTIFIER witness, and here that is the honest instrument rather than
-      // a lazy one: those rows are dormant trigger and workflow definitions that
-      // `GET /api/export` does not read, so the set property in
-      // `erasure-covers-export.test.ts` structurally cannot see them — a mutation
-      // round confirmed that deleting this call survives every other test in the
-      // repo. The call exists for a resurrection path, not a read path: an
-      // engine.db recreate re-backfills the legacy rows into live reads.
-      const clearLegacyVerbDefs = vi.fn();
+    it('DELETE /api/data empties the run history', async () => {
+      // An IDENTIFIER witness for the call; what the call must achieve on a real
+      // file — every table of history.db empty, the run spine included — is asserted
+      // in `erasure-covers-export.test.ts`. This one pins the wiring on the success
+      // path: the route must reach the method with the handle it was given.
+      const deleteAllData = vi.fn();
       await swapEngine({
         getEngineDb: () => null,
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
-        getRunHistory: () => ({ clearLegacyVerbDefs }),
+        getRunHistory: () => ({ deleteAllData }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
-        expect(clearLegacyVerbDefs).toHaveBeenCalledTimes(1);
+        expect(deleteAllData).toHaveBeenCalledTimes(1);
       });
     });
 
@@ -11603,7 +11601,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       try {
         await swapEngine({
           getEngineDb: () => ({ deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
-          getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
+          getRunHistory: () => ({ deleteAllData: () => undefined }),
           getThreadStore: () => ({ deleteAllThreads: () => 0 }),
           getKnowledgeLayer: () => ({
             getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
@@ -11635,7 +11633,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // this comment claimed every one was handed over here, which is false.
       await swapEngine({
         getEngineDb: () => ({ deleteAllData: () => undefined }),
-        getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
+        getRunHistory: () => ({ deleteAllData: () => undefined }),
         getThreadStore: () => ({ deleteAllThreads: () => 0 }),
         getKnowledgeLayer: () => ({
           getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),

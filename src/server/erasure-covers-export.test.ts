@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import BetterSqlite3 from 'better-sqlite3';
@@ -14,6 +14,8 @@ import type { DataStore } from '../core/data-store.js';
 import type { SecretStore } from '../core/secret-store.js';
 import type { CRM } from '../core/crm.js';
 import type { FlatFileMemory } from '../core/memory.js';
+import { HISTORY_KEPT_ON_ERASURE, type RunHistory } from '../core/run-history.js';
+import type { PromptStore } from '../core/prompt-store.js';
 
 /**
  * The property `GET /api/export` and `DELETE /api/data` owe each other:
@@ -119,6 +121,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     getCRM: () => CRM | null;
     getDataStore: () => DataStore | null;
     getSecretStore: () => SecretStore | null;
+    getRunHistory: () => RunHistory | null;
+    getPromptStore: () => PromptStore | null;
   } {
     return (api as unknown as { engine: ReturnType<typeof engineOf> }).engine;
   }
@@ -462,5 +466,149 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     expect(status).toBe(200);
     expect(body['deleted']).toBe(true);
     expect(ts.listThreadsForExport({ limit: 500 }), 'an erasure must leave zero threads').toEqual([]);
+  }, 120_000);
+  /**
+   * The run SPINE in `history.db`: the user's prompt and the model's answer per turn
+   * (`runs`), every tool argument (`run_tool_calls`), the last user message per turn
+   * (`wire_snapshots`), the assembled system prompt (`prompt_snapshots`) and the
+   * TYPED answer to an `ask_user` (`pending_prompts`). None of it is in the export,
+   * which is why the property above could not see it: the erasure used to clear
+   * exactly two tables of this file, `threads` and `thread_messages`.
+   *
+   * The assertion is over the FILE, not over a list. Every table `sqlite_master`
+   * names must be empty afterwards except the ones this test names as kept — a list
+   * written here, independently of the one the code keeps, so a table the code
+   * quietly adds to its own exceptions fails this test instead of agreeing with it.
+   */
+  const HISTORY_KEPT = new Set(['schema_version', 'model_provenance_backfill_marker']);
+
+  // The independence above only holds if the code's set cannot grow on its own: a
+  // table the seed below never writes (e.g. `security_events`) would otherwise pass
+  // the emptiness check as "kept" and agree with the code by accident.
+  it('keeps exactly the tables this test names as kept', () => {
+    expect([...HISTORY_KEPT_ON_ERASURE].sort()).toEqual([...HISTORY_KEPT].sort());
+  });
+
+  function historyTables(): Array<{ name: string; rows: number }> {
+    const db = new BetterSqlite3(join(dir, 'history.db'), { readonly: true });
+    try {
+      const names = (db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      ).all() as Array<{ name: string }>).map(r => r.name);
+      return names.map(name => ({
+        name,
+        rows: (db.prepare(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }).n,
+      }));
+    } finally {
+      db.close();
+    }
+  }
+
+  let spineSeq = 0;
+  function seedRunSpine(): void {
+    // A fresh session per seed: the prompt store allows one pending prompt per
+    // session, so a second seed into the same one fails on the FIXTURE.
+    const session = `spine-session-${String(++spineSeq)}`;
+    const rh = engineOf().getRunHistory();
+    if (rh === null) throw new Error('fixture: no run history');
+    const runId = rh.insertRun({
+      sessionId: session, taskText: 'ZZMARKER-run-task-7f3a', modelTier: 'balanced', modelId: 'fixture-model',
+    });
+    rh.updateRun(runId, { responseText: 'ZZMARKER-run-response-7f3a', status: 'completed' });
+    rh.insertToolCall({
+      runId, toolName: 'http_request', inputJson: '{"note":"ZZMARKER-tool-input-7f3a"}', outputJson: '{}',
+      durationMs: 1, sequenceOrder: 0,
+    });
+    rh.insertWireSnapshot({
+      runId, turnIndex: 0, model: 'fixture-model', provider: 'fixture', systemPromptHash: 'h',
+      userMessage: 'ZZMARKER-wire-user-message-7f3a', userMessageChars: 30, toolNames: [], toolCount: 0,
+      toolChoice: undefined, temperature: undefined, maxTokens: 1, ephemeralTailPresent: false,
+      ephemeralTailChars: 0, capturedAt: Date.now(),
+    });
+    rh.insertPromptSnapshot('spine-hash', 'fixture', 'ZZMARKER-system-prompt-7f3a');
+    const ps = engineOf().getPromptStore();
+    if (ps === null) throw new Error('fixture: no prompt store');
+    ps.insertAskUser(session, 'ZZMARKER-ask-user-question-7f3a');
+  }
+
+  it('empties every table of history.db, the run spine included, except what it names as kept', async () => {
+    seedRunSpine();
+    const before = new Map(historyTables().map(t => [t.name, t.rows]));
+    // POSITIVE CONTROL: the seed reached the tables this test is about. Without it
+    // an empty `runs` after the erasure would prove nothing.
+    for (const t of ['runs', 'run_tool_calls', 'wire_snapshots', 'prompt_snapshots', 'pending_prompts']) {
+      expect(before.get(t), `fixture: ${t} must hold the seeded row before the erasure`).toBeGreaterThan(0);
+    }
+
+    const stderr = vi.spyOn(process.stderr, 'write');
+    let erased: Awaited<ReturnType<typeof erase>>;
+    let logged: string[];
+    try {
+      erased = await erase();
+      logged = stderr.mock.calls.map(c => String(c[0]));
+    } finally {
+      stderr.mockRestore();
+    }
+    const { status, body } = erased;
+    expect(status).toBe(200);
+    expect(body['message']).toBe('All user data has been permanently deleted');
+    // `security_events` is gone with the rest, so the process log is the one place
+    // the outcome is recorded — with counts, and with none of the erased content.
+    const outcome = logged.filter(l => l.includes('data erasure ran at'));
+    expect(outcome).toHaveLength(1);
+    expect(outcome[0]).toMatch(/failed=0 degraded=0 skipped=0\n$/);
+    expect(outcome[0]).not.toContain('ZZMARKER');
+
+    const left = historyTables()
+      .filter(t => !HISTORY_KEPT.has(t.name) && t.rows > 0)
+      // The migration seeds ONE scope, `global`, which `scopes.parent_id` points at.
+      // Its re-seeding is asserted below; any OTHER scope row is a leftover.
+      .filter(t => !(t.name === 'scopes' && t.rows === 1))
+      .map(t => `${t.name}=${String(t.rows)}`);
+    expect(left, 'every table of history.db must be empty after an Art. 17 erasure').toEqual([]);
+
+    const db = new BetterSqlite3(join(dir, 'history.db'), { readonly: true });
+    try {
+      // The erasure's acceptance sentence, verbatim.
+      expect(db.prepare('SELECT task_text, response_text FROM runs').all()).toEqual([]);
+      expect(db.prepare('SELECT id FROM scopes').all(), 'the seeded global scope must be back').toEqual([{ id: 'global' }]);
+      expect(
+        db.prepare('SELECT done FROM model_provenance_backfill_marker WHERE id = 1').all(),
+        'the backfill marker must survive as DONE, or every boot re-runs the backfill',
+      ).toEqual([{ done: 1 }]);
+    } finally {
+      db.close();
+    }
+
+    // And the engine still WORKS on the emptied file: a run can be written again.
+    const rh = engineOf().getRunHistory()!;
+    expect(() => rh.insertRun({ taskText: 'after', modelTier: 'balanced', modelId: 'fixture-model' })).not.toThrow();
+  }, 120_000);
+
+  /**
+   * The condition that makes taking the cost history acceptable. `runs` carries the
+   * spend that the daily and monthly limits are counted from, so erasing it resets
+   * them. That is harmless only because this route answers 403 on every instance the
+   * control plane runs — a tenant who could call it would erase the month's counter
+   * and with it the budget. This pins the refusal, and the data surviving it, for
+   * each value that sets a tier: `hosted` (the BYOK tier) and `managed`, and the
+   * legacy alias the guard falls back to.
+   */
+  it.each([
+    ['LYNOX_BILLING_TIER', 'hosted'],
+    ['LYNOX_BILLING_TIER', 'managed'],
+    ['LYNOX_MANAGED_MODE', 'managed'],
+  ])('refuses with 403 and erases nothing when %s=%s', async (name, value) => {
+    seedRunSpine();
+    const runsBefore = historyTables().find(t => t.name === 'runs')!.rows;
+    expect(runsBefore, 'fixture guard').toBeGreaterThan(0);
+    process.env[name] = value;
+    try {
+      const { status } = await erase();
+      expect(status).toBe(403);
+    } finally {
+      delete process.env[name];
+    }
+    expect(historyTables().find(t => t.name === 'runs')!.rows, 'a refused erasure must leave the runs in place').toBe(runsBefore);
   }, 120_000);
 });

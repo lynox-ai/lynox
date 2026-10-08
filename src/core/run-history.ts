@@ -242,6 +242,15 @@ export interface WireSnapshotRecord {
   captured_at: number;
 }
 
+/**
+ * The tables an Art. 17 erasure keeps (`RunHistory.deleteAllData`). Neither holds
+ * user data, and the engine reads both back: `schema_version` is the migration
+ * ledger, and an emptied `model_provenance_backfill_marker` would make every boot
+ * run that backfill again. A table belongs here only if both are true. Exported so
+ * `erasure-covers-export.test.ts` can hold it against its own, independent list.
+ */
+export const HISTORY_KEPT_ON_ERASURE: ReadonlySet<string> = new Set(['schema_version', 'model_provenance_backfill_marker']);
+
 function generateId(): string {
   return randomUUID();
 }
@@ -3463,23 +3472,47 @@ export class RunHistory {
   }
 
   /**
-   * GDPR Art. 17: clear the DORMANT legacy verb-DEFINITION rows that the B1 self-heal
-   * keeps alive (the non-destructive v44 no longer drops them — they are the boot-
-   * backfill source + rollback net). The old destructive v44 removed these at
-   * migration, so an erasure never had to; now the erasure route must, else trigger
-   * titles/descriptions/watch-URLs + saved-workflow manifest JSON persist on disk AND
-   * an engine.db recreate would re-backfill them into live reads. Scoped to exactly
-   * the rows v44 used to drop (the legacy `triggers` table + planned/executed
-   * workflow-def `pipeline_runs`); the run SPINE + other tables are untouched.
-   * Table-absence-tolerant + atomic.
+   * GDPR Art. 17: empty every table of this file, except the two that hold no user
+   * data and that the engine needs to read back (`HISTORY_KEPT_ON_ERASURE`).
+   *
+   * The table set comes from `sqlite_master`, the same way `EngineDb.deleteAllData`
+   * does it, and not from a list. The list was the defect: the erasure used to clear
+   * `threads` and `thread_messages` here plus the legacy verb definitions, and left the
+   * run spine — the user's prompt and the model's answer per turn (`runs`), every
+   * tool argument (`run_tool_calls`), the typed answer to an `ask_user`
+   * (`pending_prompts`), the last user message per turn (`wire_snapshots`). A
+   * hand-maintained list has to be remembered by every table a later change adds;
+   * `resetDatabase` above is the demonstration, broken since v19 by one stale name.
+   * Here a new table is erased unless someone decides otherwise, in the one place the
+   * exception lives.
+   *
+   * ⚠ This takes every COUNTER that is computed from this file with it, deliberately:
+   * `runs` is what the daily and monthly spend limits count from, and
+   * `run_tool_calls` (joined to `runs` through `getToolCallCountSince`) is what the
+   * hourly and daily caps of `http_request` and of the mail-send tools count from —
+   * all of them restart at zero. The security trail (`security_events`) is erased as
+   * well. That is acceptable only because the one caller, `DELETE /api/data`, refuses
+   * on every instance with any non-empty billing tier (e.g. hosted, managed) — a
+   * tenant who could call it would erase the month's counter and with it the budget.
+   * The refusal relies on the control plane setting that env, and is pinned in
+   * `erasure-covers-export.test.ts`. (The mail dedup window is in-memory and is not
+   * touched.)
+   *
+   * The `global` scope is put back after the wipe, with the statement the migration
+   * seeds it with: it is not user data, and `scopes.parent_id` references it.
    */
-  clearLegacyVerbDefs(): void {
-    const hasTriggers = this.db
-      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='triggers'")
-      .get();
+  deleteAllData(): void {
+    const tables = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .all() as Array<{ name: string }>;
     this.db.transaction(() => {
-      if (hasTriggers) this.db.exec('DELETE FROM triggers');
-      this.db.prepare("DELETE FROM pipeline_runs WHERE status IN ('planned', 'executed')").run();
+      this.db.pragma('defer_foreign_keys = ON');
+      for (const { name } of tables) {
+        if (HISTORY_KEPT_ON_ERASURE.has(name)) continue;
+        // A `sqlite_master` identifier, never user input; quoted anyway.
+        this.db.prepare(`DELETE FROM "${name}"`).run();
+      }
+      this.db.prepare("INSERT OR IGNORE INTO scopes (id, type, name) VALUES ('global', 'global', 'Global')").run();
     })();
   }
 
