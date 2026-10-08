@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
  * Source-level because a Svelte component cannot be imported in vitest here (the root config
  * has no svelte plugin). What this pins is the SHAPE of the fix, which is a stand-in for what
  * matters: the rendered page. That was checked at the pixel when this was written — 1440 px
- * (actions on hover, as before), 390 px with and without touch, and a 1024 px touch tablet —
+ * (actions on hover, as before), 320/390/640/768 px with and without touch, and a 1024 px touch tablet —
  * and a layout change should be checked there again, not only here.
  */
 const source = readFileSync(
@@ -26,7 +26,7 @@ describe('the workflow cards on a narrow or touch screen', () => {
     const classes = reveal!.split(/\s+/);
     expect(classes, 'visible by default').toContain('opacity-100');
     expect(classes, 'never hidden unconditionally').not.toContain('opacity-0');
-    expect(classes, 'hidden only at sm and up, on a device that hovers').toContain('sm:[@media(hover:hover)]:opacity-0');
+    expect(classes, 'hidden only at md and up, on a device that hovers').toContain('md:[@media(hover:hover)]:opacity-0');
     expect(classes).toContain('group-hover:opacity-100');
     expect(classes, 'keyboard focus still reveals them').toContain('focus-visible:opacity-100');
   });
@@ -36,8 +36,15 @@ describe('the workflow cards on a narrow or touch screen', () => {
     expect(source, 'no button left on the old hover-only classes').not.toMatch(/class="[^"]*\bopacity-0 group-hover:opacity-100/);
   });
 
-  it('stacks the actions under the name below sm instead of squeezing the name', () => {
-    expect(source).toContain('class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3"');
-    expect(source, 'the action row wraps and only refuses to shrink beside the name').toContain('class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5"');
+  it('stacks the actions under the name below md, and caps them at half the row above it', () => {
+    const classesOf = (marker: string): string[] => {
+      const m = new RegExp(`class="([^"]*${marker.replace(/[[\]]/g, '\\$&')}[^"]*)"`).exec(source);
+      return m ? m[1]!.split(/\s+/) : [];
+    };
+    const row = classesOf('md:flex-row');
+    expect(row, 'the card row stacks by default').toEqual(expect.arrayContaining(['flex', 'flex-col', 'md:flex-row']));
+    const actions = classesOf('md:max-w-[50%]');
+    expect(actions, 'the action row wraps and never takes more than half the row').toEqual(expect.arrayContaining(['flex-wrap', 'md:max-w-[50%]']));
+    expect(actions, 'it refuses to shrink only beside the name').not.toContain('shrink-0');
   });
 });
