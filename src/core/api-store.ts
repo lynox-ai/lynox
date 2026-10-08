@@ -617,6 +617,39 @@ export function refreshTokenKey(id: string): string {
   return `${vaultSlotBase(id)}_REFRESH_TOKEN`;
 }
 
+/**
+ * The derived slot of an oauth2 profile that names a credential of this
+ * instance, or `null` when neither does.
+ *
+ * The id is the profile's, so the agent picks it — and `ID_PATTERN` admits
+ * `mail-account-foo` as readily as `shopify`. That id derives
+ * `MAIL_ACCOUNT_FOO_ACCESS_TOKEN`, which is where the mail store keeps the
+ * credential of an account with the id `foo-access-token`. Every reader and
+ * writer of the derived pair takes the name from here without asking whose it
+ * is: the attach resolves it and sends it as a bearer token to the profile's
+ * host, the renewal sends the refresh half to the token endpoint, and the
+ * OAuth callback writes both. `fetch_token` refuses a protected output name;
+ * the other paths had no such check.
+ *
+ * Both halves are asked although today one answers for both: every infra
+ * pattern is a prefix, which the two names share, and no provider slot ends in
+ * `_ACCESS_TOKEN` or `_REFRESH_TOKEN`. That is a fact about the current set, not
+ * a rule — a protected name with either suffix would split them. No real name
+ * does that today, so `api-store.test.ts` adds one for the length of a test;
+ * that is what keeps the refresh half from being dropped unnoticed.
+ *
+ * Kept pure and exported so the question can be asserted on its own; the
+ * refusal lives in `_admit`, behind both {@link ApiStore.register} and save — the one gate every profile
+ * passes before any of those paths can see it.
+ */
+export function protectedDerivedSlot(profile: ApiProfile): string | null {
+  if (profile.auth?.type !== 'oauth2') return null;
+  for (const name of [accessTokenKey(profile.id), refreshTokenKey(profile.id)]) {
+    if (isProtectedSecretWrite(name)) return name;
+  }
+  return null;
+}
+
 /** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
 function hostOf(profile: ApiProfile): string | null {
   try {
@@ -999,6 +1032,16 @@ export class ApiStore {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
         return `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${otherId}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
       }
+    }
+    // An oauth2 profile may not derive a slot that belongs to the instance —
+    // see `protectedDerivedSlot`. Refused here for the reason the collision
+    // above is: the boot load admits profiles too, and every user of the
+    // derived pair (attach, renewal, callback) works on a registered profile.
+    // Refused in BOTH modes; a stored profile like this loses its registration
+    // at boot, the same as a stored collision does.
+    const reserved = protectedDerivedSlot(profile);
+    if (reserved !== null) {
+      return `profile "${profile.id}" is oauth2, so its token would live in the vault slot ${reserved}, and that name belongs to a credential of this instance. Nothing was saved. Choose a different id for this profile.`;
     }
 
     const hostname = hostOf(profile);

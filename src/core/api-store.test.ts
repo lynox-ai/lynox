@@ -3,7 +3,9 @@ import { mkdirSync, rmdirSync, writeFileSync, rmSync, readFileSync, readdirSync,
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, STORED_PROFILE_PREAMBLE } from './api-store.js';
+import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDerivedSlot, STORED_PROFILE_PREAMBLE } from './api-store.js';
+import { vaultKeyForAccount } from '../integrations/mail/auth/app-password.js';
+import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { containsUntrustedMarker } from './data-boundary.js';
 import type { ApiProfile } from './api-store.js';
 import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
@@ -1322,6 +1324,73 @@ describe('vault slot derivation — one function, and it must stay injective at 
     expect(second.ok === false && second.reason).toMatch(/already holds|derives the vault slot/i);
     expect(store.get('x_y')).toBeUndefined();
     warn.mockRestore();
+  });
+
+  it('derives, from an agent-chosen id, the slot where a mail account keeps its credential', () => {
+    // The PREMISE of the reserved-slot guard below, asserted for the same reason
+    // as the `-`/`_` premise above: the profile id is the agent's, and nothing
+    // in the derivation keeps it out of a namespace the instance owns.
+    expect(accessTokenKey('mail-account-foo')).toBe(vaultKeyForAccount('foo-access-token'));
+  });
+
+  describe('an oauth2 profile may not derive a slot that belongs to the instance', () => {
+    it('names the reserved slot for an oauth2 profile, and nothing for any other type', () => {
+      expect(protectedDerivedSlot(profile('mail-account-foo'))).toBe('MAIL_ACCOUNT_FOO_ACCESS_TOKEN');
+      expect(protectedDerivedSlot(profile('lynox-x'))).toBe('LYNOX_X_ACCESS_TOKEN');
+      expect(protectedDerivedSlot(profile('shopify-store'))).toBeNull();
+      // Only oauth2 derives its slot from the id. A bearer profile named the same
+      // way reads the keys it NAMES, which `validateProfile` checks, so refusing
+      // its id would refuse a working profile for a name it never uses.
+      const bearer = { ...profile('lynox-x'), auth: { type: 'bearer', vault_keys: ['MY_KEY'] } } as unknown as ApiProfile;
+      expect(protectedDerivedSlot(bearer)).toBeNull();
+    });
+
+    it('asks the refresh half on its own, for a protected name that only one half matches', () => {
+      // Every protected name today is a prefix both halves share, so no real name
+      // separates them. A provider slot with the refresh suffix would; this adds
+      // one for the length of the test, which is the case the predicate's comment
+      // says the second half exists for.
+      const slots = PROVIDER_KEY_SLOTS as Set<string>;
+      slots.add('CRMX_REFRESH_TOKEN');
+      try {
+        expect(protectedDerivedSlot(profile('crmx'))).toBe('CRMX_REFRESH_TOKEN');
+      } finally {
+        slots.delete('CRMX_REFRESH_TOKEN');
+      }
+      // And the control: without that entry, the same id derives nothing protected.
+      expect(protectedDerivedSlot(profile('crmx'))).toBeNull();
+    });
+
+    it('save refuses it and says which slot', () => {
+      const store = new ApiStore();
+      const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const result = store.save(profile('mail-account-foo'));
+
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.reason).toMatch(/MAIL_ACCOUNT_FOO_ACCESS_TOKEN.*belongs to a credential of this instance/);
+      expect(store.get('mail-account-foo')).toBeUndefined();
+      warn.mockRestore();
+    });
+
+    it('the boot load refuses a stored one and still admits its neighbour', () => {
+      const dir = createTmpDir();
+      const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      writeFileSync(join(dir, 'lynox-x.json'), JSON.stringify(profile('lynox-x')));
+      writeFileSync(join(dir, 'shopify-store.json'), JSON.stringify(profile('shopify-store')));
+
+      const store = new ApiStore();
+      const loaded = store.loadFromDirectory(dir);
+
+      // The neighbour is the control: a load that admitted nothing would also
+      // leave `lynox-x` out.
+      expect(loaded).toBe(1);
+      expect(store.get('shopify-store')).toBeDefined();
+      expect(store.get('lynox-x')).toBeUndefined();
+      expect(warn.mock.calls.map((c) => String(c[0])).join('')).toMatch(/LYNOX_X_ACCESS_TOKEN/);
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    });
   });
 
   it('loadFromDirectory counts registrations, not files, and admits the pair deterministically', () => {
