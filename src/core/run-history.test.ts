@@ -2846,4 +2846,41 @@ describe('RunHistory', () => {
       h.close();
     });
   });
+  describe('deleteAllData (GDPR Art. 17)', () => {
+    it('empties a table added AFTER this method was written — the set comes from sqlite_master, not a list', () => {
+      const h = createHistory();
+      const db = h.getDb();
+      // A stand-in for the next migration's table. A hand-maintained list would
+      // have to be told about it; the enumeration must not need to be.
+      db.exec("CREATE TABLE future_table (id TEXT PRIMARY KEY, note TEXT); INSERT INTO future_table VALUES ('r1', 'personal');");
+      const runId = h.insertRun({ taskText: 'a prompt', modelTier: 'balanced', modelId: 'm' });
+      h.updateRun(runId, { responseText: 'an answer' });
+
+      h.deleteAllData();
+
+      expect((db.prepare('SELECT COUNT(*) AS n FROM future_table').get() as { n: number }).n).toBe(0);
+      expect(db.prepare('SELECT task_text, response_text FROM runs').all()).toEqual([]);
+      h.close();
+    });
+
+    it('keeps exactly the migration ledger and the backfill marker, and puts the global scope back', () => {
+      const h = createHistory();
+      const db = h.getDb();
+      const versionsBefore = (db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n;
+      const markerBefore = db.prepare('SELECT id, done FROM model_provenance_backfill_marker').all();
+      expect(versionsBefore, 'fixture guard').toBeGreaterThan(0);
+      expect(markerBefore, 'fixture guard').toHaveLength(1);
+      db.prepare("INSERT INTO scopes (id, type, name, parent_id) VALUES ('ctx-1', 'context', 'A client', 'global')").run();
+
+      h.deleteAllData();
+
+      expect((db.prepare('SELECT COUNT(*) AS n FROM schema_version').get() as { n: number }).n).toBe(versionsBefore);
+      expect(db.prepare('SELECT id, done FROM model_provenance_backfill_marker').all()).toEqual(markerBefore);
+      // The user's scope is gone; the seeded one is back, so a new child scope's
+      // foreign key still resolves.
+      expect(db.prepare('SELECT id FROM scopes').all()).toEqual([{ id: 'global' }]);
+      expect(() => db.prepare("INSERT INTO scopes (id, type, name, parent_id) VALUES ('ctx-2', 'context', 'B', 'global')").run()).not.toThrow();
+      h.close();
+    });
+  });
 });

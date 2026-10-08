@@ -823,26 +823,25 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     history.close();
   });
 
-  it('clearLegacyVerbDefs (GDPR Art.17) wipes the dormant legacy triggers + workflow-defs, keeps the run spine', () => {
+  it('deleteAllData (GDPR Art.17) wipes the dormant legacy triggers + workflow-defs, and the run spine with them', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-v44-erase-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
     const db = history.getDb();
-    // Seed the dormant legacy verb-def rows (post-B1 they survive migration) + a run
-    // SPINE row that must NOT be touched.
+    // The dormant legacy verb-def rows (post-B1 they survive migration) — the
+    // resurrection path: an engine.db recreate re-backfills them into live reads.
     db.prepare("INSERT INTO triggers (id, title) VALUES ('tr-pii', 'watch https://secret.example')").run();
     db.prepare("INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count) VALUES ('wf-pii','W','planned','{\"secret\":1}',1)").run();
+    // A COMPLETED run. The method this replaced (`clearLegacyVerbDefs`) kept it on
+    // purpose and said so in its name; keeping the run spine was the defect.
     db.prepare("INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, step_count) VALUES ('run-1','R','completed','{}',1)").run();
 
-    history.clearLegacyVerbDefs();
+    history.deleteAllData();
 
-    // Legacy trigger PII + the planned workflow-def are gone.
     expect((db.prepare('SELECT COUNT(*) c FROM triggers').get() as { c: number }).c).toBe(0);
-    expect(db.prepare("SELECT id FROM pipeline_runs WHERE status='planned'").get()).toBeUndefined();
-    // The run SPINE row (completed) is UNTOUCHED — clearLegacyVerbDefs only removes defs.
-    expect(db.prepare("SELECT id FROM pipeline_runs WHERE status='completed'").get()).toEqual({ id: 'run-1' });
-    // The triggers TABLE itself survives (only its rows are cleared) — idempotent re-run.
-    expect(() => history.clearLegacyVerbDefs()).not.toThrow();
+    expect((db.prepare('SELECT COUNT(*) c FROM pipeline_runs').get() as { c: number }).c).toBe(0);
+    // The tables themselves survive (only their rows are cleared) — idempotent re-run.
+    expect(() => history.deleteAllData()).not.toThrow();
 
     history.close();
   });
