@@ -613,12 +613,18 @@ const REVIEWED_HEADERS = new Set([
  */
 const VERSION_HEADER = /^[a-z0-9]+(?:-[a-z0-9]+)*-version$/;
 
+/**
+ * May a caller set this request header under a reviewed grant? Exported so the place that
+ * accepts a grant can ask the same question of a workflow's step templates.
+ */
+export function isReviewedHeaderName(raw: string): boolean {
+  const name = raw.trim().toLowerCase();
+  return REVIEWED_HEADERS.has(name) || VERSION_HEADER.test(name);
+}
+
 function carriesUnreviewedHeader(headers: unknown): boolean {
   if (headers === null || typeof headers !== 'object') return false;
-  return Object.keys(headers).some((raw) => {
-    const name = raw.trim().toLowerCase();
-    return !REVIEWED_HEADERS.has(name) && !VERSION_HEADER.test(name);
-  });
+  return Object.keys(headers).some((raw) => !isReviewedHeaderName(raw));
 }
 
 /**

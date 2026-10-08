@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDangerous, isCriticalTool, contractGrants, normalizeCommand, splitCommandSegments, withoutLeadingOptions } from './permission-guard.js';
+import { isDangerous, isCriticalTool, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2943,6 +2943,13 @@ describe('reviewed grant — which headers the caller may set', () => {
     ['Notion-Version'], ['Stripe-Version'], ['X-GitHub-Api-Version'], ['anthropic-version'], [' content-type '],
   ])('admits a caller-set %s header', (name) => {
     expect(grants({ [name]: 'x' })).toBe(true);
+  });
+
+  it('answers the same question on its own, for a grant that checks templates ahead of time', () => {
+    expect(isReviewedHeaderName(' Idempotency-Key ')).toBe(true);
+    expect(isReviewedHeaderName('X-GitHub-Api-Version')).toBe(true);
+    expect(isReviewedHeaderName('Forwarded')).toBe(false);
+    expect(isReviewedHeaderName('Version')).toBe(false);
   });
 
   it('CONTROL: no headers at all is admitted', () => {
