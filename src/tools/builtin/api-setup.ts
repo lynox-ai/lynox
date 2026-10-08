@@ -1358,7 +1358,7 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
     ...(kept.length > 0 ? [`the vault keys ${kept.join(', ')}`] : []),
     ...(keptHost !== undefined ? [`the host ${keptHost}`] : []),
   ].join(' and ');
-  const carry = kept.length > 0 ? ' Requests now carry what those keys hold, from the environment too.' : '';
+  const carry = kept.length > 0 ? ' Check what those keys hold: the profile is yours now, so the engine no longer hides any of them from it, values from the environment included.' : '';
   return `${lead} Your save keeps ${what} from that setup.${carry}`;
 }
 

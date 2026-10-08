@@ -606,7 +606,7 @@ describe('api_setup tool', () => {
       const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store));
       expect(stored(store).name).toBe('Changed');
       expect(stored(store).created_by).toBeUndefined();
-      expect(out).toContain('set up in a mandate\'s session; it is now yours. Your save keeps the vault keys SETUP_TOKEN and the host api.openai.com from that setup. Requests now carry what those keys hold');
+      expect(out).toContain('set up in a mandate\'s session; it is now yours. Your save keeps the vault keys SETUP_TOKEN and the host api.openai.com from that setup. Check what those keys hold');
     });
 
     it('the owner\'s save that replaces the mandate\'s keys does not name them as kept', async () => {
@@ -615,7 +615,7 @@ describe('api_setup tool', () => {
       const out = await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
       expect(out).toContain('it is now yours. Your save keeps the host api.openai.com from that setup.');
       expect(out).not.toContain('SETUP_TOKEN');
-      expect(out).not.toContain('Requests now carry');
+      expect(out).not.toContain('Check what those keys hold');
     });
 
     describe('adoptionNote', () => {
@@ -641,6 +641,14 @@ describe('api_setup tool', () => {
         const note = adoptionNote({ ...prior, base_url: odd }, { ...prior, base_url: odd });
         expect(note).toContain('the host <unprintable>');
         expect(note).not.toContain(raw);
+      });
+
+      it.each([
+        ['a trailing dot', 'https://crm.example.com./v1', 'crm.example.com.'],
+        ['an underscore', 'https://a_b.example.com/v1', 'a_b.example.com'],
+        ['a non-special scheme keeping case', 'x-y://Example.com/v1', 'Example.com'],
+      ])('prints a host with %s', (_label, url, host) => {
+        expect(adoptionNote({ ...prior, base_url: url }, { ...prior, base_url: url })).toContain(`the host ${host} from`);
       });
 
       it('prints a bracketed IPv6 host', () => {
