@@ -801,13 +801,17 @@ describe('what a stop can reach — one case per effect class', () => {
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'run_workflow' });
 
     // ⛔ THE POSITIVE HALF, and the reason this test mocks the runner rather than the
-    // handler: it is not merely that nothing was ATTACHED — nothing was PASSED. Three
-    // arguments, none of them a signal; a fix that threads one in changes this
-    // assertion, which is where the next reader will find the gap named.
+    // handler: it is not merely that nothing was ATTACHED — nothing was PASSED. Four
+    // arguments (engine, id, params, run options), none of them a signal, and the options
+    // carry no signal either; a fix that threads one in changes this assertion, which is
+    // where the next reader will find the gap named.
     expect(wf.calls).toHaveLength(1);
-    expect(wf.calls[0]).toHaveLength(3);
+    expect(wf.calls[0]).toHaveLength(4);
     expect(wf.calls[0]!.some(a => a instanceof AbortSignal)).toBe(false);
-    expect(JSON.stringify(wf.calls[0]![2] ?? null)).not.toContain('signal');
+    const runOptions = wf.calls[0]![3] as Record<string, unknown>;
+    expect(Object.keys(runOptions), 'the run options it IS handed').toEqual(expect.arrayContaining(['origin']));
+    expect(Object.values(runOptions).some(v => v instanceof AbortSignal)).toBe(false);
+    expect(Object.keys(runOptions).some(k => /signal|abort/i.test(k))).toBe(false);
     expect(h.sessionCreations()).toBe(0);
   });
 

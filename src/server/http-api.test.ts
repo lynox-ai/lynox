@@ -6230,15 +6230,10 @@ describe('LynoxHTTPApi', () => {
     // The general problem is filed rather than fixed in passing: any new route test can
     // starve a later describe with a 429 that names neither, and the fix is the
     // harness's (a fresh server per describe), not this route's.
-    const rateCounts = (): Map<string, { count: number }> =>
-      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
-    let windowBefore = new Map<string, number>();
-    beforeAll(() => {
-      windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count]));
-    });
-    afterAll(() => {
-      for (const [k, entry] of rateCounts()) entry.count = windowBefore.get(k) ?? 0;
-    });
+    //
+    // The snapshot itself is the one declared above for the run-now cases: both sit in
+    // this describe, so its `beforeAll`/`afterAll` already bracket these requests, and a
+    // second declaration would not parse.
 
     it('POST /api/tasks/:id/stop answers 202 — a stop is DELIVERED, not completed', async () => {
       const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'session' });
