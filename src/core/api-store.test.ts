@@ -1369,6 +1369,8 @@ describe('vault slot derivation — one function, and it must stay injective at 
 
       expect(result.ok).toBe(false);
       expect(result.ok === false && result.reason).toMatch(/MAIL_ACCOUNT_FOO_ACCESS_TOKEN.*belongs to a credential of this instance/);
+      // A save stores nothing, so it says so — the boot's "nothing was deleted" would be wrong here.
+      expect(result.ok === false && result.reason).toMatch(/Nothing was saved/);
       expect(store.get('mail-account-foo')).toBeUndefined();
       warn.mockRestore();
     });

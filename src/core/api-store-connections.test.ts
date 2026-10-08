@@ -191,6 +191,33 @@ describe('ApiStore ⇄ connections projection (Foundation Rework v2 — S4b)', (
     expect(existsSync(join(dir, 'orphan.json'))).toBe(false);
   });
 
+  it('a stored oauth2 profile on a protected slot: the boot names what stays, and remove still reaches it', () => {
+    // A row as an older engine stored it, before the gate refused such ids. The
+    // boot refuses to register it; its stderr line is the operator's only notice,
+    // so it must say that nothing was deleted and how to get rid of the row.
+    const { cs } = makeCs();
+    const { id, name, ...rest } = richProfile({ id: 'mail-account-foo', name: 'Old' });
+    cs.upsert({ id, kind: 'api', name, subjectId: null, direction: 'outbound', configJson: JSON.stringify(rest), vaultKeys: [], status: 'active' });
+    const w = new ApiStore();
+    w.setConnectionStore(cs);
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      w.loadFromConnections(cs);
+      const logged = warn.mock.calls.map((c) => String(c[0])).join('');
+      expect(w.get('mail-account-foo')).toBeUndefined();
+      expect(logged).toMatch(/Skipping profile "mail-account-foo"/);
+      expect(logged).toMatch(/Nothing was deleted/);
+      expect(logged).toMatch(/MAIL_ACCOUNT_FOO_ACCESS_TOKEN and MAIL_ACCOUNT_FOO_REFRESH_TOKEN is left as it is/);
+      expect(logged).not.toMatch(/Nothing was saved/);
+    } finally {
+      warn.mockRestore();
+    }
+    // The way out the line names: deleting by id reaches the unregistered row.
+    expect(cs.count('api')).toBe(1);
+    expect(w.remove('mail-account-foo')).toBe(true);
+    expect(cs.count('api')).toBe(0);
+  });
+
   it('round-trips custom_endpoint_ack faithfully — the BYOK consent gate survives the projection', () => {
     const { cs } = makeCs();
     const w = new ApiStore();
