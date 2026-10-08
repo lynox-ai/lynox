@@ -7,6 +7,7 @@ import {
   validateAgainstSchema,
   BudgetError,
   SchemaValueError,
+  ExtractShapeError,
   type ExtractSchema,
 } from './llm-helper.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
@@ -120,6 +121,10 @@ describe('validateAgainstSchema', () => {
     expect(byPattern).toMatchObject({ path: 'level', rule: 'does not match pattern /^[a-z]+$/' });
     // The message keeps the value for logs; only path and rule are value-free.
     expect((byPattern as Error).message).toContain(value);
+    // A caller may print an ExtractShapeError's message as it is, so a value-carrying
+    // refusal must never count as one, whatever order a catch tests them in.
+    expect(byEnum).not.toBeInstanceOf(ExtractShapeError);
+    expect(byPattern).not.toBeInstanceOf(ExtractShapeError);
   });
 
   it('rejects integer that is a finite decimal', () => {
