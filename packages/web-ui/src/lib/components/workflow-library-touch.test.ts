@@ -44,15 +44,21 @@ describe('the workflow cards on a narrow or touch screen', () => {
     expect(classes, '44 px by default').toContain('min-h-11');
     expect(classes, 'a font size that leaves the line height alone').toContain('text-[12px]');
     expect(classes, 'compact again only with a mouse at md and up').toEqual(expect.arrayContaining([
-      'md:[@media(hover:hover)]:min-h-0', 'md:[@media(hover:hover)]:py-0.5', 'md:[@media(hover:hover)]:text-[10px]',
+      'md:[@media(hover:hover)]:min-h-0', 'md:[@media(hover:hover)]:px-2', 'md:[@media(hover:hover)]:py-0.5', 'md:[@media(hover:hover)]:text-[10px]',
     ]));
     expect(source.match(/\{actionSize\}/g) ?? [], 'the five actions and save/cancel').toHaveLength(7);
   });
 
-  it('hides a disabled Run with the others on a desktop at rest, and shows it dimmed on hover', () => {
+  it('makes the rename field as tall as its buttons on touch', () => {
+    expect(source).toMatch(/aria-label=\{t\('workflow_library\.rename'\)\}\s*class="[^"]*\bmin-h-11 md:\[@media\(hover:hover\)\]:min-h-0\b/);
+  });
+
+  it('hides a disabled Run with the others on a desktop at rest, and shows it dimmed on hover or card focus', () => {
     const run = /class="([^"]*disabled:cursor-not-allowed[^"]*)"/.exec(source)?.[1].split(/\s+/) ?? [];
     expect(run).toEqual(expect.arrayContaining([
-      'disabled:opacity-50', 'md:[@media(hover:hover)]:disabled:opacity-0', 'group-hover:disabled:opacity-50', 'focus-visible:disabled:opacity-50',
+      'disabled:opacity-50', 'md:[@media(hover:hover)]:disabled:opacity-0', 'group-hover:disabled:opacity-50',
+      // A disabled button takes no focus, so the card's focus is what shows it to a keyboard user.
+      'group-focus-within:disabled:opacity-50',
     ]));
   });
 

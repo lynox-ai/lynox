@@ -471,7 +471,7 @@
 									bind:value={editName}
 									onkeydown={(e) => { if (e.key === 'Enter') void saveRename(wf.id); if (e.key === 'Escape') cancelRename(); }}
 									aria-label={t('workflow_library.rename')}
-									class="w-full rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
+									class="w-full min-h-11 md:[@media(hover:hover)]:min-h-0 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-[16px] md:text-sm focus:border-accent focus:outline-none"
 								/>
 							{:else}
 								<p class="text-sm font-medium line-clamp-2 break-words">{wf.name}</p>
@@ -517,7 +517,7 @@
 								<button
 									onclick={() => onRunClick(wf)}
 									disabled={runningId !== null}
-									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 focus-visible:disabled:opacity-50"
+									class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity disabled:cursor-not-allowed disabled:opacity-50 md:[@media(hover:hover)]:disabled:opacity-0 group-hover:disabled:opacity-50 group-focus-within:disabled:opacity-50"
 								>
 									<Icon name="bolt" size="xs" />
 									{runningId === wf.id ? t('workflow_library.running') : t('workflow_library.run')}
