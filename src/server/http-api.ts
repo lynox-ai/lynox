@@ -10027,6 +10027,7 @@ export class LynoxHTTPApi {
         const { getLynoxDir } = await import('../core/config.js');
         const dataDir = getLynoxDir();
         const { AgentMemoryDb } = await import('../core/agent-memory-db.js');
+        const SqliteDatabase = (await import('better-sqlite3')).default;
         for (const id of [...this.runningSessions.keys()]) this.reclaimRunSlot(id);
         const drainStart = Date.now();
         while (this.runningSessions.size > 0 && Date.now() - drainStart < ERASURE_RUN_DRAIN_MS) {
@@ -10300,9 +10301,26 @@ export class LynoxHTTPApi {
         const secretStore = reach('secrets', engine.getSecretStore(), 'vault.db');
         // A SecretStore can stand without its vault (a key problem at boot leaves it
         // in memory only): then the names below are not the vault's, and the deletes
-        // cannot reach `vault.db`. The same rule as a null handle: the file decides.
-        if (secretStore && !secretStore.hasVault && existsSync(join(dataDir, 'vault.db'))) {
-          note('secrets', new Error('vault not attached, but vault.db exists'));
+        // cannot reach `vault.db`. Not the file alone decides here: opening a vault
+        // without a key creates `vault.db` before it throws, so a keyless install
+        // carries an empty one. What decides is whether it holds secret rows, read
+        // without a key; a file that cannot be read, or has no secrets table,
+        // counts as holding them.
+        const vaultHoldsSecrets = (): boolean => {
+          const file = join(dataDir, 'vault.db');
+          if (!existsSync(file)) return false;
+          let db: InstanceType<typeof SqliteDatabase> | undefined;
+          try {
+            db = new SqliteDatabase(file, { readonly: true, fileMustExist: true });
+            return (db.prepare('SELECT COUNT(*) AS n FROM vault_secrets').get() as { n: number }).n > 0;
+          } catch {
+            return true;
+          } finally {
+            db?.close();
+          }
+        };
+        if (secretStore && !secretStore.hasVault && vaultHoldsSecrets()) {
+          note('secrets', new Error('vault not attached, but vault.db holds secrets'));
         }
         if (secretStore) {
           let names: string[] = [];

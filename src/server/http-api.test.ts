@@ -11981,15 +11981,62 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
     });
 
     // A SecretStore can stand without its vault (a key problem at boot): its names
-    // are then the in-memory ones and its deletes cannot reach vault.db.
-    it('DELETE /api/data fails when the secret store has no vault but vault.db exists', async () => {
+    // are then the in-memory ones and its deletes cannot reach vault.db. Three file
+    // states: secret rows (fail), an empty vault as a keyless open leaves behind (no
+    // failure), and a file that cannot be read (fail, it might hold rows).
+    const vaultLessSecrets = {
+      ...reachableExceptEngineDb,
+      getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
+      getSecretStore: () => ({ hasVault: false, scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
+    };
+    // `keyless` takes the real path: the vault opens and migrates its file, then
+    // throws for the missing key, which leaves an empty vault.db behind.
+    async function seedVault(dir: string, mode: 'secret' | 'keyless'): Promise<void> {
+      const { SecretVault } = await import('../core/secret-vault.js');
+      const path = join(dir, 'vault.db');
+      if (mode === 'keyless') {
+        const prior = process.env['LYNOX_VAULT_KEY'];
+        delete process.env['LYNOX_VAULT_KEY'];
+        try {
+          expect(() => new SecretVault({ path })).toThrow(/master key required/);
+        } finally {
+          if (prior !== undefined) process.env['LYNOX_VAULT_KEY'] = prior;
+        }
+        expect(existsSync(path)).toBe(true);
+        return;
+      }
+      const vault = new SecretVault({ path, masterKey: 'k'.repeat(64) });
+      vault.set('API_TOKEN', 'not-a-real-token', 'any');
+      vault.close();
+    }
+
+    it('DELETE /api/data fails when the secret store has no vault but vault.db holds secrets', async () => {
+      await withDataDir(async (dir) => {
+        await seedVault(dir, 'secret');
+        await swapEngine(vaultLessSecrets, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(500);
+          expect((await res.json() as { failed: string[] }).failed).toContain('secrets');
+        });
+      });
+    });
+
+    it('DELETE /api/data does not fail on an empty vault.db left by a keyless open', async () => {
+      await withDataDir(async (dir) => {
+        await seedVault(dir, 'keyless');
+        await swapEngine(vaultLessSecrets, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          const body = await res.json() as { failed?: string[] };
+          expect(body.failed ?? []).not.toContain('secrets');
+          expect(res.status).toBe(200);
+        });
+      });
+    });
+
+    it('DELETE /api/data fails when the secret store has no vault and vault.db cannot be read', async () => {
       await withDataDir(async (dir) => {
         writeFileSync(join(dir, 'vault.db'), 'stands in for a vault the store could not attach');
-        await swapEngine({
-          ...reachableExceptEngineDb,
-          getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
-          getSecretStore: () => ({ hasVault: false, scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
-        }, async () => {
+        await swapEngine(vaultLessSecrets, async () => {
           const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
           expect(res.status).toBe(500);
           const body = await res.json() as { failed: string[] };
