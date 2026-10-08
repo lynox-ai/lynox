@@ -1043,6 +1043,13 @@ export class ApiStore {
     // at boot, the same as a stored collision does.
     const reserved = protectedDerivedSlot(profile);
     if (reserved !== null) {
+      // At boot the profile is already stored, so the save wording ("Nothing was
+      // saved") would misstate it: the record stays, and so does whatever the vault
+      // holds under the two derived names. Say that, and what the operator can do.
+      // The vault is not read here, so this names the slots without claiming a token is in them.
+      if (mode === 'load') {
+        return `profile "${profile.id}" is oauth2 and derives the vault slot ${reserved}, a name that belongs to a credential of this instance, so it is not registered and cannot be used. Nothing was deleted: the stored profile stays, and whatever the vault holds under ${accessTokenKey(profile.id)} and ${refreshTokenKey(profile.id)} is left as it is. To use this API again, delete this profile by its id (api_setup's delete action takes an id that is not registered) and set it up under a different id.`;
+      }
       return `profile "${profile.id}" is oauth2, so its token would live in the vault slot ${reserved}, and that name belongs to a credential of this instance. Nothing was saved. Choose a different id for this profile.`;
     }
 
