@@ -581,9 +581,9 @@ export function wrapUntrustedData(
     /**
      * False when another block of the same message already publishes the security
      * event for the same handed-in result, so one hit is one event. It holds back
-     * only an event that result already carries: a hit only this block's own scan
-     * sees (the two scans cut long text into windows at different offsets) is still
-     * published. The warning in the block is unaffected.
+     * only an event whose patterns that result already carries: a pattern only this
+     * block's own scan finds (the two scans cut long text into windows at different
+     * offsets) is still published. The warning in the block is unaffected.
      */
     publishEvent?: boolean | undefined;
   },
@@ -608,7 +608,9 @@ export function wrapUntrustedData(
 
   if (injection.detected) {
     // Emit security event
-    const publishedElsewhere = opts?.publishEvent === false && given?.detected === true;
+    const givenPatterns = given?.detected ? given.patterns : [];
+    const publishedElsewhere = opts?.publishEvent === false
+      && own.patterns.every(p => givenPatterns.includes(p));
     if (!publishedElsewhere && channels.securityInjection.hasSubscribers) {
       channels.securityInjection.publish({
         event_type: 'injection_detected',
