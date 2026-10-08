@@ -240,7 +240,9 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
       const second = await erase({ remove_unknown: first.body['unknown'] });
       expect(second.status).toBe(409);
       expect(second.body['code']).toBe('linked_entries');
-      expect((second.body['linked'] as Array<{ name: string }>).map(l => l.name)).toEqual(['zz-dir']);
+      const linked = second.body['linked'] as Array<{ name: string; remedy: string }>;
+      expect(linked.map(l => l.name)).toEqual(['zz-dir']);
+      expect(linked[0]!.remedy).toMatch(/move the entry out of the data directory instead of acknowledging it/);
       expect(existsSync(join(dir, 'zz-dir', 'locked'))).toBe(true);
       expect(internals().erasureGeneration).toBe(genBefore);
     } finally {
@@ -265,7 +267,10 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
       const res = await erase();
       expect(res.status).toBe(409);
       expect(res.body['code']).toBe('linked_entries');
-      expect((res.body['linked'] as Array<{ name: string }>).map(l => l.name)).toEqual(['backups']);
+      const linked = res.body['linked'] as Array<{ name: string; remedy: string }>;
+      expect(linked.map(l => l.name)).toEqual(['backups']);
+      // The backups at the target are this instance's data: erased there, not moved aside.
+      expect(linked[0]!.remedy).toMatch(/erase it where it lives/);
       expect(readFileSync(memPath, 'utf8')).toBe(memMark);
       expect(readdirSync(target)).toEqual(['copy.txt']);
       expect(internals().erasureInProgress).toBe(false);

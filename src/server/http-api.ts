@@ -10243,9 +10243,8 @@ export class LynoxHTTPApi {
           jsonResponse(res, 409, {
             code: 'linked_entries',
             linked: scan.linked,
-            error: 'Some entries the erasure would remove or empty are links or mount points it does not follow, or could not be checked, so nothing was erased. '
-              + 'Their content is outside the data directory and would not be erased. '
-              + 'Move each such entry out of the data directory, or replace it with the content it points to, then erase.',
+            error: 'Some entries in the data directory cannot be erased safely, so nothing was erased. '
+              + 'Each one in "linked" says why and what to do about it.',
           });
           return;
         }

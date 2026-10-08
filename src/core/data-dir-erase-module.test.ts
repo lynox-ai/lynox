@@ -112,6 +112,8 @@ describe('data-dir erasure — on disk', () => {
     symlinkSync(outside, join(dir, 'memory'));
     const scan = scanDataDir(dir);
     expect(scan.linked.map(l => l.name)).toEqual(['memory', 'workspace']);
+    // Its content is this instance's data: erased where it lives, not moved out of sight.
+    expect(scan.linked[1]!.remedy).toMatch(/erase it where it lives/);
     // The stretch asks again, and reports rather than unlinking: an unlinked link would
     // read as erased while its content stays at the target.
     const out = removeOwedEntries(scan, []);
@@ -139,7 +141,8 @@ describe('data-dir erasure — on disk', () => {
       return p.endsWith('/proj/mnt') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: dev + 1 }) : st;
     };
     const scan = scanDataDir(dir, { lstat: mountAt });
-    expect(scan.linked).toEqual([{ name: 'workspace', reason: expect.stringContaining('proj/mnt') as unknown as string }]);
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/proj\/mnt/);
     const out = removeOwedEntries(scan, [], mountAt);
     expect(out.failures.map(f => f.name)).toEqual(['workspace']);
     expect(readFileSync(join(dir, 'workspace', 'proj', 'mnt', 'disk.txt'), 'utf8')).toBe('ZZ-disk');
@@ -154,7 +157,11 @@ describe('data-dir erasure — on disk', () => {
       return p.endsWith('/nas/share') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: dev + 1 }) : st;
     };
     expect(scanDataDir(dir, { lstat: mountAt }).linked).toEqual([]);
-    expect(scanDataDir(dir, { lstat: mountAt, acknowledged: new Set(['nas']) }).linked.map(l => l.name)).toEqual(['nas']);
+    const acked = scanDataDir(dir, { lstat: mountAt, acknowledged: new Set(['nas']) }).linked;
+    expect(acked.map(l => l.name)).toEqual(['nas']);
+    // Not this instance's data: taken out of the data dir, never erased where it lives.
+    expect(acked[0]!.remedy).toMatch(/move the entry out of the data directory instead of acknowledging it/);
+    expect(acked[0]!.remedy).not.toMatch(/erase it where it lives/);
   });
 
   it('fails closed on a directory it cannot read, instead of throwing', () => {
@@ -166,10 +173,31 @@ describe('data-dir erasure — on disk', () => {
       // Root reads anything; the property is only observable for an ordinary user.
       if (process.getuid?.() === 0) return;
       const scan = scanDataDir(dir);
-      expect(scan.linked).toEqual([{ name: 'workspace', reason: expect.stringContaining('could not be checked') as unknown as string }]);
+      expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+      expect(scan.linked[0]!.reason).toMatch(/could not be read/);
+      expect(scan.linked[0]!.remedy).toBe('Make it readable to this instance, then erase.');
     } finally {
       chmodSync(locked, 0o700);
     }
+  });
+
+  it('reports a symlinked residue copy it owes, like a declared entry', () => {
+    writeFileSync(join(outside, 'old-vault'), 'ZZ-old');
+    symlinkSync(join(outside, 'old-vault'), join(dir, 'vault.db.rotate-bak'));
+    expect(scanDataDir(dir).linked.map(l => l.name)).toEqual(['vault.db.rotate-bak']);
+  });
+
+  it('skips only an entry that vanished; any other error reaching an owed entry is reported', async () => {
+    seedDir('workspace');
+    const { lstatSync } = await import('node:fs');
+    const failing = (p: string): ReturnType<typeof lstatSync> => {
+      if (p.endsWith('/workspace')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+      return lstatSync(p);
+    };
+    expect(() => scanDataDir(dir, { lstat: failing })).toThrow(/EIO/);
+    const out = removeOwedEntries(scanDataDir(dir), [], failing);
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(readdirSync(join(dir, 'workspace'))).toEqual(['inside.txt']);
   });
 
   it('does not refuse a SQLite store on another device: its handle empties it in place', async () => {

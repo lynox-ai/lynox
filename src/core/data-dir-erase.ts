@@ -52,6 +52,9 @@ export type EntryClass =
   | { readonly kind: 'litter' }
   | { readonly kind: 'unknown' };
 
+/** Only a vanished entry is skipped; any other error reaching it is reported. */
+const isGone = (err: unknown): boolean => (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+
 const BY_NAME = new Map(DATA_DIR_INVENTORY.map(e => [e.name, e]));
 
 const isResidue = (name: string): boolean => ENGINE_RESIDUE.some(re => re.test(name));
@@ -119,35 +122,54 @@ function foreignDeviceInside(dir: string, dev: number, lstat: (path: string) => 
 }
 
 /**
- * Why removing or emptying this entry would reach outside the data dir, or `null`.
- * `followsLink`: a declared entry the erasure removes or empties through its path (not
- * a SQLite store, whose open handle writes the target in place) that is a symlink.
+ * Why removing or emptying this entry would reach outside the data dir or could not be
+ * checked, with what the operator does about it — or `null`. The remedy depends on whose
+ * content it is: for an entry the erasure owes, the content is this instance's data and
+ * has to be erased where it lives; for an unknown entry it is not, and the remedy is to
+ * take the entry out of the data dir instead of acknowledging it. One sentence for both
+ * sends the operator the wrong way in one of them.
  */
-function linkedReason(cls: EntryClass, st: Stats, dataDirDev: number, path: string, lstat: (path: string) => Stats, walk: boolean): string | null {
+function linkedReason(cls: EntryClass, st: Stats, dataDirDev: number, path: string, lstat: (path: string) => Stats, walk: boolean): LinkedReason | null {
   // A SQLite store is emptied through the handle the engine holds open, which writes the
   // file wherever it lives — through a link or on another device alike.
   if (cls.kind === 'declared' && cls.entry.kind === 'sqlite') return null;
+  const ours = cls.kind !== 'unknown';
+  const elsewhere = ours
+    ? 'This instance\'s data is there: erase it where it lives and remove the link or mount, or move the content into the data directory.'
+    : 'This is not this instance\'s data: move the entry out of the data directory instead of acknowledging it.';
   if (st.isSymbolicLink()) {
-    const followsLink = cls.kind === 'declared' && cls.entry.erase.by !== 'keep';
-    return followsLink ? 'a symbolic link; its content is at the target, outside the data dir' : null;
+    // An unknown link is only unlinked, its target untouched. One the erasure owes holds
+    // this instance's data at the target, and unlinking it would answer "all deleted".
+    const followsLink = cls.kind !== 'unknown' && !(cls.kind === 'declared' && cls.entry.erase.by === 'keep');
+    return followsLink ? { reason: 'a symbolic link; its content is at the target, outside the data directory', remedy: elsewhere } : null;
   }
-  if (st.dev !== dataDirDev) return 'a mount point; its content is on another filesystem';
+  if (st.dev !== dataDirDev) return { reason: 'a mount point; its content is on another filesystem', remedy: elsewhere };
   if (walk && st.isDirectory()) {
     // Fail closed: a directory that cannot be read may hold a mount the removal would empty.
     let inside: string | null;
     try {
       inside = foreignDeviceInside(path, dataDirDev, lstat);
     } catch (err) {
-      return `could not be checked for mount points inside (${err instanceof Error ? err.message : String(err)})`;
+      return {
+        reason: `could not be read to check for mount points inside (${err instanceof Error ? err.message : String(err)})`,
+        remedy: ours
+          ? 'Make it readable to this instance, then erase.'
+          : 'Make it readable to this instance, or move the entry out of the data directory instead of acknowledging it.',
+      };
     }
-    if (inside !== null) return `contains a mount point (${inside}); its content is on another filesystem`;
+    if (inside !== null) return { reason: `contains a mount point (${inside}); its content is on another filesystem`, remedy: elsewhere };
   }
   return null;
 }
 
-export interface LinkedEntry {
-  readonly name: string;
+interface LinkedReason {
   readonly reason: string;
+  /** What to do about it — differs by whether the content is this instance's data. */
+  readonly remedy: string;
+}
+
+export interface LinkedEntry extends LinkedReason {
+  readonly name: string;
 }
 
 export interface DataDirScan {
@@ -200,8 +222,9 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
     let st: Stats;
     try {
       st = lstat(path);
-    } catch {
-      continue;   // gone since the listing
+    } catch (err) {
+      if (isGone(err)) continue;   // gone since the listing
+      throw err;                   // the route answers 500, nothing erased
     }
     const inPlace = cls.kind === 'declared' && cls.entry.erase.by === 'step';
     if (cls.kind === 'unknown') unknown.push(identityOf(name, st));
@@ -210,8 +233,8 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
     // Asked of everything the erasure touches through a path: what it removes, what it
     // empties in place, and the unknown entries acknowledged for removal.
     if (!owedBy(cls, ack, name) && !inPlace) continue;
-    const reason = linkedReason(cls, st, dev, path, lstat, walk);
-    if (reason !== null) linked.push({ name, reason });
+    const found = linkedReason(cls, st, dev, path, lstat, walk);
+    if (found !== null) linked.push({ name, ...found });
   }
   unknown.sort((a, b) => a.name.localeCompare(b.name));
   linked.sort((a, b) => a.name.localeCompare(b.name));
@@ -295,13 +318,15 @@ export function removeOwedEntries(
     let st: Stats;
     try {
       st = lstat(path);
-    } catch {
-      continue;   // gone since the listing
+    } catch (err) {
+      if (isGone(err)) continue;   // gone since the listing
+      failures.push({ name, reason: err instanceof Error ? err.message : String(err) });
+      continue;
     }
     // The scan refused these already; asked again because the stretch runs after an await.
-    const reason = linkedReason(cls, st, scan.dev, path, lstat, true);
-    if (reason !== null) {
-      failures.push({ name, reason: `${reason}; not removed` });
+    const found = linkedReason(cls, st, scan.dev, path, lstat, true);
+    if (found !== null) {
+      failures.push({ name, reason: `${found.reason}; not removed` });
       continue;
     }
     try {
