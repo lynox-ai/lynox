@@ -3297,6 +3297,23 @@ describe('mandates and stored credentials', () => {
     expect(calls[0]?.auth).toBe('Bearer stored');
   });
 
+  it.each([
+    ['a profile a mandate wrote does not send', M, false],
+    ['control: the owner\'s profile sends', undefined, true],
+  ])('%s a client secret from the environment to its token endpoint (fetch_token)', async (_label, author, exchanged) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), ...(author === undefined ? {} : { created_by: author }) });
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'from-env' }, ['CRM_CLIENT_SECRET']) as never));
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
+  });
+
   it('a profile a mandate wrote does not get the token of a preset account', async () => {
     const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
     const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
