@@ -11137,6 +11137,35 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/data names a stuck entity ONCE across rounds', async () => {
+      // The case the all-undeletable test cannot reach, and the one the dedupe in
+      // `note` is actually for: when SOME rows delete, the loop makes progress and
+      // runs another round, so a row that is stuck is visited again — and without
+      // the dedupe its key is appended once per round. `failed` is the retry
+      // instruction; an id repeated per round destroys the one thing it is for.
+      let pool = Array.from({ length: 200 }, (_, i) => ({ id: `ent-${i}` }));
+      const listEntities = vi.fn(() => pool.slice(0, 200));
+      const deleteEntity = vi.fn((id: string) => {
+        if (id === 'ent-0') throw new Error('row is locked');
+        pool = pool.filter(e => e.id !== id);
+      });
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({ getDb: () => ({ listEntities, deleteEntity, deactivateAllMemories: () => [] }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        const stuck = body.failed.filter(k => k === 'knowledge_graph_entity:ent-0');
+        expect(stuck, 'the stuck row must be named once, not once per round').toHaveLength(1);
+        // Fixture guard: the other 199 really were deleted, so the loop did take a
+        // second round and the repetition was reachable at all.
+        expect(pool.map(e => e.id)).toEqual(['ent-0']);
+        expect(body.failed.filter(k => k.startsWith('knowledge_graph_entity:'))).toHaveLength(1);
+      });
+    });
+
     it('DELETE /api/data answers rather than hanging when the entity wipe makes no progress', async () => {
       // `attempt` catches a THROW; it cannot catch a non-termination, and the
       // entity wipe is the one loop here that re-lists after deleting. A refuter
