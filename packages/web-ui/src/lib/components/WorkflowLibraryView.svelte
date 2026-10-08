@@ -506,7 +506,7 @@
 								{/if}
 							{/if}
 						</div>
-						<div class="flex flex-wrap items-center gap-2 md:max-w-[50%] md:shrink-0 md:justify-end md:mt-0.5">
+						<div class="flex flex-wrap items-center gap-2 md:max-w-[50%] lg:max-w-none md:shrink-0 md:justify-end md:mt-0.5">
 							{#if editingId === wf.id}
 								<button onclick={() => void saveRename(wf.id)} class="rounded-[var(--radius-sm)] border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] text-success hover:bg-success/20 transition-colors">{t('workflow_library.save')}</button>
 								<button onclick={cancelRename} class="rounded-[var(--radius-sm)] border border-border bg-bg-muted px-2 py-0.5 text-[10px] text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>

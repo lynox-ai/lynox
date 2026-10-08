@@ -36,7 +36,7 @@ describe('the workflow cards on a narrow or touch screen', () => {
     expect(source, 'no button left on the old hover-only classes').not.toMatch(/class="[^"]*\bopacity-0 group-hover:opacity-100/);
   });
 
-  it('stacks the actions under the name below md, and caps them at half the row above it', () => {
+  it('stacks the actions under the name below md, and caps them at half the row between md and lg', () => {
     const classesOf = (marker: string): string[] => {
       const m = new RegExp(`class="([^"]*${marker.replace(/[[\]]/g, '\\$&')}[^"]*)"`).exec(source);
       return m ? m[1]!.split(/\s+/) : [];
@@ -45,6 +45,8 @@ describe('the workflow cards on a narrow or touch screen', () => {
     expect(row, 'the card row stacks by default').toEqual(expect.arrayContaining(['flex', 'flex-col', 'md:flex-row']));
     const actions = classesOf('md:max-w-[50%]');
     expect(actions, 'the action row wraps and never takes more than half the row').toEqual(expect.arrayContaining(['flex-wrap', 'md:max-w-[50%]']));
-    expect(actions, 'it refuses to shrink only beside the name').not.toContain('shrink-0');
+    expect(actions, 'beside the name it keeps its width').toContain('md:shrink-0');
+    expect(actions, 'and only there').not.toContain('shrink-0');
+    expect(actions, 'from lg there is room for one row again, as before').toContain('lg:max-w-none');
   });
 });
