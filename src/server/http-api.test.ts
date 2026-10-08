@@ -186,6 +186,7 @@ const mockSessionInstance = {
 const mockGetOrCreate = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionGet = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionStoreReset = vi.fn();
+const mockSessionStoreResetAll = vi.fn();
 /** The bulk-run routes read a REAL ledger (a temp engine.db) — null = flag off. */
 const bulkHolder: { ledger: BulkLedger | null } = { ledger: null };
 
@@ -339,6 +340,7 @@ vi.mock('../core/session-store.js', () => ({
     this.getOrCreate = mockGetOrCreate;
     this.get = mockSessionGet;
     this.reset = mockSessionStoreReset;
+    this.resetAll = mockSessionStoreResetAll;
     this.setRunningCheck = vi.fn();
     this.startEviction = vi.fn();
     this.stopEviction = vi.fn();
@@ -2241,6 +2243,97 @@ describe('LynoxHTTPApi', () => {
         }
       });
     });
+    // DELETE /api/data (Art. 17) used to wipe beside a running chat: the run's next
+    // persist re-created rows in the emptied stores, or failed on a foreign key
+    // inside the run after the route had answered. It now stops every running run
+    // the way the thread delete stops its own, and waits for the slot BEFORE the
+    // first wipe — so the witness is the slot's state at the moment of the wipe.
+    it('DELETE /api/data stops a parked run and waits for its slot before it erases', async () => {
+      await withParkedRun('erase-parked-1', async ({ prompts, slots }) => {
+        const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown; getMemory: () => unknown } }).engine;
+        const origGetThreadStore = engineRef.getThreadStore;
+        const origGetMemory = engineRef.getMemory;
+        let slotHeldAtWipe: boolean | undefined;
+        const order: string[] = [];
+        engineRef.getThreadStore = (): unknown => ({
+          deleteAllThreads: () => { order.push('threads'); slotHeldAtWipe = slots.has('erase-parked-1'); },
+        });
+        // The flat-file step is the only one that awaits, so it runs BEFORE the
+        // first database wipe: from there to the last scrub nothing else runs.
+        // And it is the one window in which another request can arrive: a run asked
+        // for there must be refused, not take a slot beside the erasure.
+        let runStatusDuringErasure: number | undefined;
+        engineRef.getMemory = (): unknown => ({
+          save: async () => {
+            order.push('memory');
+            if (runStatusDuringErasure === undefined) {
+              const r = await jsonFetch('/api/sessions/erase-parked-1b/run', {
+                method: 'POST',
+                body: JSON.stringify({ task: 'during the erasure', protocol: 1 }),
+              });
+              runStatusDuringErasure = r.status;
+              await r.text();
+            }
+          },
+        });
+        try {
+          await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(slotHeldAtWipe, 'fixture: the thread wipe must have run').toBeDefined();
+          expect(slotHeldAtWipe, 'the run still held its slot when the threads were wiped').toBe(false);
+          expect(prompts.getPending('erase-parked-1')).toBeUndefined();
+          expect(mockSessionStoreResetAll, 'the in-memory sessions of the erased threads must go').toHaveBeenCalled();
+          expect(order.lastIndexOf('memory'), 'every awaiting step before the first wipe').toBeLessThan(order.indexOf('threads'));
+          expect(runStatusDuringErasure, 'a run asked for during the erasure').toBe(409);
+        } finally {
+          engineRef.getThreadStore = origGetThreadStore;
+          engineRef.getMemory = origGetMemory;
+        }
+      });
+    });
+
+    // An erasure beside a live run cannot say what it left behind, so a run that
+    // does not release its slot means nothing is erased, and the answer says so.
+    it('DELETE /api/data erases nothing and answers 409 when a run does not stop', async () => {
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+      const origGetThreadStore = engineRef.getThreadStore;
+      const deleteAllThreads = vi.fn();
+      engineRef.getThreadStore = (): unknown => ({ deleteAllThreads });
+      const takeover = vi.fn(); // a run that ignores the stop: the slot stays
+      slots.set('erase-stuck-1', { streamAlive: true, takeover, lastEventAt: Date.now() });
+      try {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(takeover, 'the route must try to stop it').toHaveBeenCalled();
+        expect(res.status).toBe(409);
+        expect(deleteAllThreads, 'nothing may be erased beside a live run').not.toHaveBeenCalled();
+      } finally {
+        slots.delete('erase-stuck-1');
+        engineRef.getThreadStore = origGetThreadStore;
+      }
+    }, 15_000);
+
+    // No new run may take a slot while the erasure runs: it would write into the
+    // stores being emptied, and it would not be among the runs the erasure stopped.
+    it('POST /run is refused while an erasure is in progress', async () => {
+      const flag = api as unknown as { erasureInProgress: boolean };
+      flag.erasureInProgress = true;
+      try {
+        mockSessionRun.mockClear();
+        const res = await jsonFetch('/api/sessions/erase-run-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'anything', protocol: 1 }),
+        });
+        expect(res.status).toBe(409);
+        expect(mockSessionRun).not.toHaveBeenCalled();
+      } finally {
+        flag.erasureInProgress = false;
+      }
+      // And the flag does not outlive the erasure: after a DELETE /api/data the
+      // next run is not refused for it.
+      await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+      expect(flag.erasureInProgress).toBe(false);
+    });
+
     // Two robustness properties of the reclaim, in one target situation: the
     // prompt store fails while the run is parked (closed db, SQLITE_BUSY).
     //   (a) `takeover` unwinds BEFORE it does bookkeeping — `waitForSettled`
