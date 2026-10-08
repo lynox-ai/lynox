@@ -349,8 +349,9 @@ describe('SYSTEM_PROMPT doc-research hard rules', () => {
     // Rule 1 cited "Settings → Apps → Develop apps" as its example, which is Shopify's
     // admin-created custom-app path: Shopify's help center (read 2026-10-09) manages only
     // custom apps created before 2026-01-01 there. Asked how to connect Shopify, models sent
-    // users down that path, one of them in exactly those words. The example must not be a
-    // real vendor path, nor lynox's own "Settings → API Keys".
+    // users down that path, one of them in exactly those words. Pinned here: the example is
+    // neither that path nor lynox's own "Settings → API Keys" (whether it matches some other
+    // vendor's real path is not something a test can check).
     expect(SYSTEM_PROMPT).not.toContain('Settings → API Keys');
     expect(SYSTEM_PROMPT).toContain('an admin-UI path (e.g. "');
     expect(SYSTEM_PROMPT).not.toMatch(/develop apps/i);
