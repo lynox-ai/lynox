@@ -12,13 +12,15 @@ import { fileURLToPath } from 'node:url';
  * has no svelte plugin). What this pins is the SHAPE of the fix, which is a stand-in for what
  * matters: the rendered page. That was checked at the pixel when this was written — 1440 px
  * (actions on hover, as before), 320/390/640/768 px with and without touch, and a 1024 px touch tablet —
- * and a layout change should be checked there again, not only here.
+ * and a layout change should be checked there again, not only here. Button heights were
+ * measured the same way: 44 px on a phone and a touch tablet, 23 px with a mouse on a desktop.
  */
 const source = readFileSync(
   fileURLToPath(new URL('./WorkflowLibraryView.svelte', import.meta.url)),
   'utf8',
 );
 const reveal = /const revealOnHover = '([^']+)';/.exec(source)?.[1];
+const size = /const actionSize = '([^']+)';/.exec(source)?.[1];
 
 describe('the workflow cards on a narrow or touch screen', () => {
   it('hides the actions only where there is room and a pointer that hovers', () => {
@@ -34,6 +36,24 @@ describe('the workflow cards on a narrow or touch screen', () => {
   it('gives every action button the shared class, and no button its own hover-only one', () => {
     expect(source.match(/\{revealOnHover\}/g) ?? [], 'run, schedule, edit, rename, delete').toHaveLength(5);
     expect(source, 'no button left on the old hover-only classes').not.toMatch(/class="[^"]*\bopacity-0 group-hover:opacity-100/);
+  });
+
+  it('makes every card button a fingertip target except beside a mouse at md and up', () => {
+    expect(size, 'the shared size string exists').toBeDefined();
+    const classes = size!.split(/\s+/);
+    expect(classes, '44 px by default').toContain('min-h-11');
+    expect(classes, 'a font size that leaves the line height alone').toContain('text-[12px]');
+    expect(classes, 'compact again only with a mouse at md and up').toEqual(expect.arrayContaining([
+      'md:[@media(hover:hover)]:min-h-0', 'md:[@media(hover:hover)]:py-0.5', 'md:[@media(hover:hover)]:text-[10px]',
+    ]));
+    expect(source.match(/\{actionSize\}/g) ?? [], 'the five actions and save/cancel').toHaveLength(7);
+  });
+
+  it('hides a disabled Run with the others on a desktop at rest, and shows it dimmed on hover', () => {
+    const run = /class="([^"]*disabled:cursor-not-allowed[^"]*)"/.exec(source)?.[1].split(/\s+/) ?? [];
+    expect(run).toEqual(expect.arrayContaining([
+      'disabled:opacity-50', 'md:[@media(hover:hover)]:disabled:opacity-0', 'group-hover:disabled:opacity-50', 'focus-visible:disabled:opacity-50',
+    ]));
   });
 
   it('stacks the actions under the name below md, and caps them at half the row between md and lg', () => {
