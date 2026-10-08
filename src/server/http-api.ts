@@ -10055,22 +10055,18 @@ export class LynoxHTTPApi {
         // to prevent — and `crm_schema` reproduced it two statements later.
         const failed: string[] = [];
         const degraded: string[] = [];
-        // A THIRD list, and it is deliberately not one of the other two. A `null`
-        // store handle is not a failed wipe (nothing threw) and not a completed one
-        // either — it is a store this route could not open, and a caught boot failure
-        // leaves exactly that state with the file intact on disk. Until this existed
-        // the step was skipped in silence and the answer still read "All user data has
-        // been permanently deleted" over an untouched `engine.db`; the tenant could
-        // not discover it from the export either, because that reads the same null
-        // handle.
+        // A THIRD list, and it is deliberately not one of the other two: a store this
+        // route could not open and cannot tell anything about. A caught boot failure
+        // leaves a `null` handle with the file intact on disk, and the answer used to
+        // read "All user data has been permanently deleted" over it.
         //
-        // Whether a null handle is a fault or a store the instance legitimately
-        // does not have is decided by the FILE, not the handle: every store but the
-        // flat-file memory lives at a known name in the data directory. A null handle
-        // over an existing file is a store holding data this route could not open, so
-        // it is a failure (500, `failed`), not a skip. A null handle with no file has
-        // nothing to erase, and the answer may say "all". Only a store without a
-        // known file still lands in `skipped`.
+        // Whether a null handle is a fault or a store the instance legitimately does
+        // not have is decided by the FILE, not the handle: each database lives at a
+        // known name in the data directory. A null handle over an existing file is a
+        // store holding data this route could not open, so it is a failure (500,
+        // `failed`), not a skip. A null handle with no file has nothing to erase, and
+        // the answer may say "all". `skipped` is left for the flat-file memory, which
+        // is a directory of files rather than one store file.
         const skipped: string[] = [];
         const reach = <T>(key: string, store: T | null, file?: string): T | null => {
           if (store !== null && store !== undefined) return store;
@@ -10199,11 +10195,10 @@ export class LynoxHTTPApi {
         // nothing and counts nothing.
         this.sessionStore.resetAll();
         this.erasureGeneration++;
-        // A missing ThreadStore over a working RunHistory loses nothing: the threads
-        // live in history.db, and its wipe below empties every table of that file.
-        const threadStore = engine.getRunHistory()
-          ? engine.getThreadStore()
-          : reach('threads', engine.getThreadStore(), 'history.db');
+        // A missing ThreadStore loses nothing on its own: the threads live in
+        // history.db, whose wipe below empties every table of that file, and a
+        // missing RunHistory is reported for that file by its own step.
+        const threadStore = engine.getThreadStore();
         if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
 
 
@@ -10251,8 +10246,8 @@ export class LynoxHTTPApi {
         // SINGLE data-subject request, not a tenant-wide wipe.
         //
         // ⚠ A null handle here is NOT an empty database: a caught boot failure leaves
-        // `engineDb === null` with the file intact, and this route then skips it and
-        // still answers success.
+        // `engineDb === null` with the file intact, which is why `reach` looks at the
+        // file and fails the erasure when it is there.
         const engineDb = reach('engine_db', engine.getEngineDb(), 'engine.db');
         // The wipe is one atomic transaction: a failure leaves ALL engine.db PII
         // intact, which is exactly why it has to reach the answer rather than only
@@ -10303,6 +10298,12 @@ export class LynoxHTTPApi {
         // Delete all secrets from the vault. `LYNOX_SECRET_*` env-sourced entries are
         // re-read at every boot, so those return after a restart.
         const secretStore = reach('secrets', engine.getSecretStore(), 'vault.db');
+        // A SecretStore can stand without its vault (a key problem at boot leaves it
+        // in memory only): then the names below are not the vault's, and the deletes
+        // cannot reach `vault.db`. The same rule as a null handle: the file decides.
+        if (secretStore && !secretStore.hasVault && existsSync(join(dataDir, 'vault.db'))) {
+          note('secrets', new Error('vault not attached, but vault.db exists'));
+        }
         if (secretStore) {
           let names: string[] = [];
           attempt('secrets#list', () => { names = secretStore.listNames(); });
@@ -10398,9 +10399,7 @@ export class LynoxHTTPApi {
           // carry a 500 and a positive `error` field, this one carries a 200 and the
           // ABSENCE of `message`, so a client testing `status === 200 && body.deleted`
           // reads unqualified success. `skipped` is the only positive marker, hence
-          // the `warning` beside it — a field a careless reader still misses, which is
-          // why the open half of this (is a null handle a fault or a store this
-          // instance does not have?) is registered rather than papered over.
+          // the `warning` beside it.
           jsonResponse(res, 200, {
             deleted: true,
             skipped,

@@ -215,6 +215,7 @@ vi.mock('../core/engine.js', () => ({
       deleteSecret: mockSecretDelete,
       // The erasure scrubs the vault's free pages and WAL after its deletes (`SecretStore.scrubFreedPages`).
       scrubFreedPages: vi.fn(),
+      hasVault: true,
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
@@ -478,7 +479,15 @@ function mintSessionToken(secret: string, issuedAtSec: number): string {
 
 // === Setup/Teardown ===
 
+// The erasure route looks its stores' files up in the data directory, and with no
+// knowledge layer (the default mock) it opens agent-memory.db there itself. So this
+// file never runs against an exported LYNOX_DATA_DIR or a shared fixed path: every
+// run gets its own empty directory, which tests may point elsewhere and restore.
+let fileDataDir = '';
+
 beforeAll(async () => {
+  fileDataDir = mkdtempSync(join(tmpdir(), 'lynox-http-api-data-'));
+  vi.stubEnv('LYNOX_DATA_DIR', fileDataDir);
   vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
   vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
   vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
@@ -499,6 +508,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api.shutdown();
   vi.unstubAllEnvs();
+  rmSync(fileDataDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -11615,7 +11625,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
         }),
         getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [{ name: 'c1' }], dropCollection }),
-        getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status, 'a recorded failure must not read as success').toBe(500);
@@ -11669,7 +11679,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getRunHistory: () => ({ scrubFreedPages: wal.history, deleteAllData: () => undefined }),
         getKnowledgeLayer: () => ({ getDb: () => ({ scrubFreedPages: wal.memory, deleteAllData: () => undefined }) }),
         getDataStore: () => ({ scrubFreedPages: wal.data, listCollections: () => [], dropCollection: () => undefined }),
-        getSecretStore: () => ({ scrubFreedPages: wal.secrets, listNames: () => [], deleteSecret: () => undefined }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: wal.secrets, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
@@ -11753,7 +11763,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getDataStore: () => null,
         getKnowledgeLayer: () => null,
         getMemory: () => null,
-        getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11835,7 +11845,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getEngineDb: () => ({ scrubFreedPages: scrubbed.engine, deleteAllData: () => { throw new Error('a'); } }),
         getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
         getDataStore: () => ({ scrubFreedPages: scrubbed.data, listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
-        getSecretStore: () => ({ scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
+        getSecretStore: () => ({ hasVault: true, scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(500);
@@ -11944,6 +11954,46 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           expect(body.failed ?? []).not.toContain('threads');
           expect(body.skipped ?? []).not.toContain('threads');
           expect(res.status).toBe(200);
+        });
+      });
+    });
+
+    // The one store without a single file still lands in `skipped`, and that 200
+    // carries a positive marker: a client reading `status === 200 && deleted` would
+    // otherwise take it for unqualified success.
+    it('DELETE /api/data answers 200 with a warning, not the sentence, when the flat-file memory is out of reach', async () => {
+      await withDataDir(async () => {
+        await swapEngine({
+          getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
+          getKnowledgeLayer: () => ({ getDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }) }),
+          getDataStore: () => ({ scrubFreedPages: () => undefined, listCollections: () => [], dropCollection: () => undefined }),
+          getMemory: () => null,
+        }, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(200);
+          const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string; warning?: string };
+          expect(body.deleted).toBe(true);
+          expect(body.skipped).toEqual(['memory']);
+          expect(body.message, 'the completeness claim must be absent').toBeUndefined();
+          expect(body.warning).toContain('could not be opened');
+        });
+      });
+    });
+
+    // A SecretStore can stand without its vault (a key problem at boot): its names
+    // are then the in-memory ones and its deletes cannot reach vault.db.
+    it('DELETE /api/data fails when the secret store has no vault but vault.db exists', async () => {
+      await withDataDir(async (dir) => {
+        writeFileSync(join(dir, 'vault.db'), 'stands in for a vault the store could not attach');
+        await swapEngine({
+          ...reachableExceptEngineDb,
+          getEngineDb: () => ({ scrubFreedPages: () => undefined, deleteAllData: () => undefined }),
+          getSecretStore: () => ({ hasVault: false, scrubFreedPages: () => undefined, listNames: () => [], deleteSecret: () => undefined }),
+        }, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(500);
+          const body = await res.json() as { failed: string[] };
+          expect(body.failed).toContain('secrets');
         });
       });
     });
