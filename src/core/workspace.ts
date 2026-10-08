@@ -88,8 +88,8 @@ export function isPathWithin(child: string, parent: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-/** Allowed read-only roots (besides workspace + /tmp). */
-export const READ_ONLY_ROOTS: readonly string[] = ['/app'];
+/** Allowed read-only roots (besides workspace + /tmp). Frozen: importers must not widen them. */
+export const READ_ONLY_ROOTS: readonly string[] = Object.freeze(['/app']);
 
 /**
  * Resolve a path and validate it's within allowed boundaries.
