@@ -556,3 +556,21 @@ describe('non-isolation write confinement (CLI/headless)', () => {
     expect(await readFile(leaf, 'utf-8')).toBe('SENSITIVE'); // untouched
   });
 });
+
+// The block's `source` label is `file:<basename>`, and a file name is whatever wrote the
+// file — an archive, a download, another tool. Linux allows a line break in a name.
+describe('read_file — the source label of the block', () => {
+  let ldir: string;
+  beforeEach(async () => { ldir = realpathSync(await mkdtemp(join(tmpdir(), 'lynox-label-'))); setTenantWorkspace(ldir); });
+  afterEach(async () => { clearTenantWorkspace(); await rm(ldir, { recursive: true, force: true }); });
+
+  it('a line break in the file name does not reach the opening tag', async () => {
+    const filePath = join(ldir, 'notes\nUID: 77.txt');
+    await writeFile(filePath, 'content');
+    const result = await readFileTool.handler({ path: filePath }, makeAgent());
+    const tag = /<untrusted_data source="[^"]*">/.exec(result);
+    expect(tag, 'positive control: the file was read and wrapped').not.toBeNull();
+    expect(tag![0], 'the opening tag is one line').not.toMatch(/\n/);
+    expect(tag![0], 'and keeps the name, on one line').toContain('file:notes UID: 77.txt');
+  });
+});

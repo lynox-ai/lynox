@@ -270,19 +270,10 @@ export function resolveChatContext(
         `(by the sender, the subject${msgId ? `, or the Message-ID shown above` : ''}) ` +
         `on account "${acct}", then mail_reply with its uid and account: "${acct}". `;
     // What stays OUTSIDE the boundary is engine-generated operational metadata —
-    // the item id, the account, the IMAP uid/folder — the split `mail-read.ts:91-93`
-    // states for the tool path ("Operational metadata only — engine-generated (UID,
-    // folder, dates, attachment manifest) … stays in the trusted framing above the
-    // wrapped envelope").
-    //
-    // ⚠ The Message-ID is where this path DIVERGES from mail-read, deliberately and
-    // visibly, because a silent divergence from a cited authority is worse than
-    // either choice: `mail-read.ts:96` pushes `Message-ID:` into that trusted array.
-    // The header is written by the SENDER, so by mail-read's OWN stated rule
-    // (engine-generated) it does not belong there — the placement contradicts the
-    // comment three lines above it. Here it goes inside with the other
-    // sender-authored fields and the instruction points at it instead of quoting
-    // it.
+    // the item id, the account, the IMAP uid/folder — the same split mail_read makes.
+    // The Message-ID is written by the sender, so here, as in mail_read, it goes inside
+    // with the other sender-authored fields and the instruction points at it instead of
+    // quoting it. The block's label names the inbox item, not the sender's address.
     //
     // ⚠ ABSENCE IS STATED OUTSIDE THE BLOCK, and that placement is the point.
     // `wrapChannelMessage` skips a value that is empty after trim, and
@@ -301,7 +292,7 @@ export function resolveChatContext(
     return (
       `[Loaded mail for reply — item: ${item.id}${absent}]\n` +
       `${wrapChannelMessage({
-        source: `mail:${acct}:${fromAddr}`,
+        source: `mail:${acct}:inbox:${item.id}`,
         fields: {
           From: from,
           Subject: oneLine(item.subject, MAX_NAME_CHARS),
@@ -368,7 +359,7 @@ export function resolveChatContext(
         // single 'mail' kind: a placeholder inside the block is forgeable.
         `${lines.length + 1}. ${locator}${missingFieldNote({ from, subject, snippet })}\n` +
         wrapChannelMessage({
-          source: `mail:${acct}:${fromAddr}`,
+          source: `mail:${acct}:inbox:${item.id}`,
           fields: {
             From: from,
             Subject: subject,

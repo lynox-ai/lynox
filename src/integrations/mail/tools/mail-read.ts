@@ -10,7 +10,7 @@
 
 import type { IAgent, ToolEntry } from '../../../types/index.js';
 import { getErrorMessage } from '../../../core/utils.js';
-import { wrapChannelMessage, wrapUntrustedData } from '../../../core/data-boundary.js';
+import { detectInjectionAcross, wrapChannelMessage, wrapUntrustedData } from '../../../core/data-boundary.js';
 import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
@@ -70,57 +70,81 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
           ? msg.envelope.replyTo.map(a => a.address).join(', ')
           : null;
 
-        // Subject / from / to / cc / reply-to are all attacker-controlled
-        // (DMARC only gates the envelope sender, not display names or
-        // header text content), so they must live INSIDE the
-        // <untrusted_data> boundary alongside the body. Otherwise a
-        // crafted subject like "Ignore previous instructions, …" would
-        // appear in the model's trusted framing.
+        // Every header value below is written by the sender — DMARC only gates the envelope
+        // sender, not display names, header text, the Message-ID or attachment names — so
+        // all of them live INSIDE an <untrusted_data> block, and each is put on one line so
+        // a decoded line break cannot start another `Label:` line there. A well-formed
+        // Message-ID can still be a sentence, so placement, not shape, is what keeps it out
+        // of the framing. Attachment names and types are quoted, so where a value ends is
+        // visible even when it contains text that looks like another part.
         //
-        // Each of these values is put on one line, so a decoded line break inside one
-        // cannot start another `Label:` line in the block.
+        // The body has many lines, so it gets a block of its own: next to the one-line
+        // header fields, a body line `Attachments:` or `From:` would read as another field.
+        // The header values and the body are scanned together, raw, before they are put on
+        // one line, and the result is handed to both blocks, so a hit in either is
+        // announced in both.
         //
         // A subject made only of line breaks becomes blank on one line, and a blank field
         // is not rendered at all — so it gets the same fallback as a missing subject.
         const subjectLine = oneBlockLine(msg.envelope.subject);
-        const wrappedMessage = wrapChannelMessage({
-          source: `mail:${provider.accountId}:${fromAddr}`,
+        const body = cleaned.visible || msg.text || '(empty body)';
+        const attachmentList = msg.attachments.length > 0
+          ? msg.attachments
+            .map(att => `\n  - part ${att.partId}: ${JSON.stringify(oneBlockLine(att.filename ?? '(unnamed)'))} (${JSON.stringify(oneBlockLine(att.contentType))})`)
+            .join('')
+          : null;
+        const injection = detectInjectionAcross([
+          msg.envelope.subject, fromDisplay, toDisplay, ccDisplay ?? '', replyToDisplay ?? '',
+          msg.envelope.messageId ?? '',
+          ...msg.attachments.flatMap(att => [att.filename ?? '', att.contentType]),
+          body,
+        ]);
+        const label = `mail:${provider.accountId}:envelope:${String(msg.envelope.uid)}`;
+        const wrappedHeader = wrapChannelMessage({
+          source: label,
+          injection,
           fields: {
             Subject: subjectLine.trim() === '' ? '(no subject)' : subjectLine,
             From: oneBlockLine(fromDisplay),
             To: oneBlockLine(toDisplay),
             Cc: ccDisplay === null ? null : oneBlockLine(ccDisplay),
             'Reply-To': replyToDisplay === null ? null : oneBlockLine(replyToDisplay),
-            Body: cleaned.visible || msg.text || '(empty body)',
+            'Message-ID': msg.envelope.messageId ? oneBlockLine(msg.envelope.messageId) : null,
+            Attachments: attachmentList,
           },
         });
+        // The header block publishes the security event for the shared result; the body
+        // block carries the same warning without a second event.
+        const wrappedBody = wrapUntrustedData(body, `${label}:body`, { injection, publishEvent: false });
 
         const lines: string[] = [];
-        // Operational metadata only — engine-generated (UID, folder, dates,
-        // attachment manifest), not attacker-controlled, stays in the
-        // trusted framing above the wrapped envelope.
+        // The trusted framing holds only what the server or the engine produced: date, UID,
+        // folder, and per attachment its part number and size.
         lines.push(`Date: ${msg.envelope.date.toISOString()}`);
         lines.push(`UID: ${String(msg.envelope.uid)}   Folder: ${msg.envelope.folder}`);
-        if (msg.envelope.messageId) lines.push(`Message-ID: ${msg.envelope.messageId}`);
         if (msg.envelope.attachmentCount > 0) {
-          lines.push(`Attachments (${String(msg.envelope.attachmentCount)}):`);
+          lines.push(`Attachments (${String(msg.envelope.attachmentCount)}; names and types inside the header block):`);
           for (const att of msg.attachments) {
-            lines.push(`  - ${att.filename ?? '(unnamed)'} (${att.contentType}, ${String(att.sizeBytes)} bytes, part ${att.partId})`);
+            lines.push(`  - part ${att.partId}, ${String(att.sizeBytes)} bytes`);
           }
         }
         lines.push('');
-        lines.push(wrappedMessage);
+        lines.push('Header:');
+        lines.push(wrappedHeader);
+        lines.push('');
+        lines.push('Body:');
+        lines.push(wrappedBody);
 
         if (input.include_quoted && cleaned.quoted) {
           lines.push('');
           lines.push('--- Quoted history ---');
-          lines.push(wrapUntrustedData(cleaned.quoted, `mail:${provider.accountId}:${fromAddr}:quoted`));
+          lines.push(wrapUntrustedData(cleaned.quoted, `${label}:quoted`));
         }
 
         if (input.include_html && msg.html) {
           lines.push('');
           lines.push('--- Raw HTML ---');
-          lines.push(wrapUntrustedData(msg.html, `mail:${provider.accountId}:${fromAddr}:html`));
+          lines.push(wrapUntrustedData(msg.html, `${label}:html`));
         }
 
         return lines.join('\n');
