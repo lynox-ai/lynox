@@ -122,3 +122,35 @@ describe('ThreadStore.updateThread write-restriction (P1 provenance, S4/RI2)', (
     db.close();
   });
 });
+
+/**
+ * The same structural shape, for the bulk thread wipe (Art. 17).
+ *
+ * `deleteAllThreads()` removes every thread row and every message in one
+ * statement. The invariant is simpler than its `updateThread` neighbour above
+ * because the method takes no arguments: there is no caller-shaped map to forge,
+ * so the only thing to check is that the agent-tool surface does not name the
+ * method at all. Today it is unreachable by inspection — one call site, inside a
+ * route behind `denyOnManagedInstance` plus a `DELETE_ALL_DATA` confirm token. The
+ * guard is what keeps it so.
+ *
+ * What it would catch: a future `thread_cleanup` or "clear my history" tool that
+ * calls the store directly. Injected content in a scraped page or an email could
+ * then wipe a tenant's whole thread table with no confirm token and no admin
+ * scope, and nothing mechanical would have objected to that PR.
+ */
+describe('ThreadStore.deleteAllThreads is not agent-reachable (Art. 17 bulk wipe)', () => {
+  it('no file under src/tools mentions deleteAllThreads', () => {
+    const files = getAllTsFiles(TOOLS_DIR);
+    // Positive control in the same run: the walker must actually be reading the
+    // tool surface, or "no mention" is the reassuring answer to a failed search.
+    expect(files.length, 'the tool-surface walker found nothing to read').toBeGreaterThan(10);
+    expect(
+      files.some(f => readFileSync(f, 'utf8').includes('updateThread')),
+      'positive control: the walker sees a method the tool surface DOES call',
+    ).toBe(true);
+
+    const offenders = files.filter(f => readFileSync(f, 'utf8').includes('deleteAllThreads'));
+    expect(offenders, 'an agent-reachable bulk thread wipe').toEqual([]);
+  });
+});

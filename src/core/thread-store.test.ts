@@ -333,3 +333,109 @@ describe('ThreadStore.listBySubjectId (R2b subject footprint)', () => {
     db.close();
   });
 });
+
+describe('ThreadStore — reading and erasing ALL threads (GDPR Art. 15/17)', () => {
+  /** `count` threads with one message each and a DESCENDING `updated_at`, so the
+   *  overview listing would order them t0000, t0001, … */
+  function seedThreads(db: Database.Database, count: number): void {
+    const ins = db.prepare('INSERT INTO threads (id, title, message_count, updated_at) VALUES (?, ?, 1, ?)');
+    db.transaction(() => {
+      for (let i = 0; i < count; i++) {
+        ins.run(`t${String(i).padStart(4, '0')}`, `Thread ${i}`, `2026-01-01T00:00:${String(count - i).padStart(5, '0')}`);
+      }
+    })();
+  }
+
+  it('listThreadsForExport reaches every row the overview listing hides', () => {
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    seedThreads(db, 250);
+    // The three row classes `listThreads` cannot return, each one personal data:
+    //  · past its 200-row cap (the 250 above)
+    //  · `message_count = 0` — never listed, and the TITLE is user-written text
+    //  · archived — a UI gesture, not consent to be left out of an access request
+    db.prepare("INSERT INTO threads (id, title, message_count) VALUES ('empty-but-named', 'Scheidung Mueller', 0)").run();
+    db.prepare("INSERT INTO threads (id, title, message_count, is_archived) VALUES ('archived', 'Alte Sache', 3, 1)").run();
+
+    // The listing, for contrast — this is what the export used to be built on.
+    expect(store.listThreads({ limit: 1000, includeArchived: true })).toHaveLength(200);
+
+    const all: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const batch = store.listThreadsForExport({ after, limit: 100 });
+      all.push(...batch.map(t => t.id));
+      if (batch.length < 100) break;
+      after = batch[batch.length - 1]!.id;
+    }
+
+    expect(all).toHaveLength(252);
+    expect(new Set(all).size, 'no row twice').toBe(252);
+    expect(all).toContain('empty-but-named');
+    expect(all).toContain('archived');
+    db.close();
+  });
+
+  it('listThreadsForExport keeps its place when the table is written mid-walk', () => {
+    // The reason the key is `id` and not an offset into the overview order. A live
+    // engine writes threads while an export runs: `updated_at` bumps and
+    // `is_unread` flips, both of which lead the listing's ORDER BY, so an
+    // OFFSET-based walk re-sorts under itself — one row comes back twice and
+    // another is never returned. An Art. 15 dump that quietly loses a thread is
+    // exactly the defect this method exists for, so the test writes the worst case
+    // between every page.
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    seedThreads(db, 40);
+    const bump = db.prepare("UPDATE threads SET updated_at = ?, is_unread = 1 WHERE id = ?");
+
+    const all: string[] = [];
+    let after: string | undefined;
+    let page = 0;
+    for (;;) {
+      const batch = store.listThreadsForExport({ after, limit: 10 });
+      all.push(...batch.map(t => t.id));
+      if (batch.length < 10) break;
+      after = batch[batch.length - 1]!.id;
+      // Move a row that has NOT been read yet to the very front of the listing
+      // order, which is what breaks an offset walk.
+      bump.run('2027-01-01T00:00:00', `t${String(39 - page).padStart(4, '0')}`);
+      page++;
+    }
+
+    expect(all).toHaveLength(40);
+    expect(new Set(all).size, 'no row twice and none lost').toBe(40);
+    db.close();
+  });
+
+  it('deleteAllThreads removes rows no listing returns — past the cap, unread-count 0, archived', () => {
+    const db = freshDb();
+    const store = new ThreadStore(db);
+    seedThreads(db, 250);
+    db.prepare("INSERT INTO threads (id, title, message_count) VALUES ('empty-but-named', 'Scheidung Mueller', 0)").run();
+    db.prepare("INSERT INTO threads (id, title, message_count, is_archived) VALUES ('archived', 'Alte Sache', 3, 1)").run();
+    db.prepare("INSERT INTO thread_messages (thread_id, seq, role, content_json) VALUES ('t0000', 0, 'user', '\"hi\"')").run();
+    // An orphan: a message whose parent thread row does not exist. It takes a
+    // pragma flip to CREATE one here (better-sqlite3 enforces FKs by default) and
+    // that is precisely its provenance in the wild — a write made while
+    // `foreign_keys` was off, which `run-history.ts` does around migrations. No
+    // cascade can ever reach such a row, because there is no parent to delete.
+    db.pragma('foreign_keys = OFF');
+    db.prepare("INSERT INTO thread_messages (thread_id, seq, role, content_json) VALUES ('vanished-thread', 0, 'user', '\"orphan\"')").run();
+    db.pragma('foreign_keys = ON');
+
+    const before = (db.prepare('SELECT COUNT(*) c FROM threads').get() as { c: number }).c;
+    expect(before, 'fixture guard — the wipe assertion must not be vacuous').toBe(252);
+
+    const removed = store.deleteAllThreads();
+
+    expect(removed).toBe(252);
+    expect((db.prepare('SELECT COUNT(*) c FROM threads').get() as { c: number }).c).toBe(0);
+    // Messages go too, and the ORPHAN is the one that matters: the cascade would
+    // have taken the other message row with its thread, but a row with no parent
+    // survives any number of thread deletions. It is only gone because the wipe
+    // deletes `thread_messages` outright.
+    expect((db.prepare('SELECT COUNT(*) c FROM thread_messages').get() as { c: number }).c).toBe(0);
+    db.close();
+  });
+});

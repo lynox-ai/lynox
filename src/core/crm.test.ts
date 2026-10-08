@@ -12,6 +12,38 @@ function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-crm-test-'));
 }
 
+
+describe('CRM.rebuildSchema — the latch closes even when the rebuild fails', () => {
+  /**
+   * `roles.ts` admits `contacts_search` to the READ-ONLY tool surface with the
+   * justification that `ensureSchema` is "a latch already closed during boot; the
+   * CRM's DDL is therefore unreachable here". `rebuildSchema` opens that latch on
+   * purpose — the Art. 17 erasure drops the collections the memo describes — and
+   * `ensureSchema` sets the flag as its LAST statement, so a throw before it leaves
+   * the latch open and that justification false.
+   *
+   * The price of closing it anyway is documented at the method: a failed rebuild
+   * leaves the memo claiming collections that are missing, so CRM reads throw until
+   * a restart. This test pins the choice, because without it moving the assignment
+   * out of the `finally` is a surviving mutant.
+   */
+  it('leaves the schema latch CLOSED after a throwing ensureSchema', () => {
+    const exploding = {
+      listCollections: (): never => { throw new Error('database is locked'); },
+      createCollection: (): never => { throw new Error('unreachable'); },
+      dropEmptyCrmOverlaps: (): string[] => [],
+    } as unknown as DataStore;
+    const crm = new CRM(exploding);
+
+    // Precondition: the latch starts OPEN on a fresh CRM, so "closed afterwards"
+    // cannot be satisfied by it never having been touched.
+    expect(crm.initialized, 'fixture guard').toBe(false);
+
+    expect(() => { crm.rebuildSchema(); }).toThrow('database is locked');
+    expect(crm.initialized, 'an open latch makes the read-only tool surface a DDL path').toBe(true);
+  });
+});
+
 describe('CRM', () => {
   let tmpDir: string;
   let ds: DataStore;

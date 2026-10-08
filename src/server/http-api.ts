@@ -65,6 +65,8 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
+import type { ThreadRecord } from '../core/thread-store.js';
+import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -9522,7 +9524,50 @@ export class LynoxHTTPApi {
       // Threads + messages
       const threadStore = engine.getThreadStore();
       if (threadStore) {
-        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
+        // Walk ALL threads by PRIMARY KEY, not through the overview listing.
+        //
+        // The listing capped at 200 with no offset, so this route returned an
+        // Art. 15 copy that stopped at thread 200 and said nothing about it. Paging
+        // it would not have been enough: the listing also filters
+        // `message_count > 0` and defaults `is_archived = 0`, so a titled thread
+        // whose rollup counter is 0 and every archived thread stayed out of the
+        // dump — and `OFFSET` over `updated_at DESC` is not a snapshot, so a thread
+        // that receives a message mid-walk shifts the window and makes the export
+        // repeat one row while losing another. `listThreadsForExport` keys on the
+        // immutable `id` instead; its docblock carries the reasoning.
+        //
+        // The cap is a REAL cap, not a page bound: the whole dump is materialised and
+        // then serialised into one string, so an unbounded walk trades a short answer
+        // for no answer at all (a `RangeError` past ~512 MB, or an OOM of the process
+        // that also serves the Web UI).
+        //
+        // ⚠ It bounds THREADS, not the dump. Each thread still carries up to 50 000
+        // messages (below), uncapped in aggregate, so 20 000 threads can materialise
+        // far more than this number suggests. It is tighter than the 200 000-row
+        // ceiling it replaces and it is not the byte bound this route still lacks.
+        //
+        // Surfaced in the PAYLOAD, like the `durable_knowledge` block below and
+        // unlike this route's entity loop, because a recipient who cannot see the
+        // truncation reads a short answer as a complete one — which is the defect
+        // this whole route is being fixed for.
+        const THREAD_PAGE = EXPORT_PAGE_MAX;
+        const THREAD_CAP = 20_000;
+        const threads: ThreadRecord[] = [];
+        let threadsTruncated = false;
+        let after: string | undefined;
+        for (;;) {
+          const batch = threadStore.listThreadsForExport({ after, limit: THREAD_PAGE });
+          threads.push(...batch);
+          if (batch.length < THREAD_PAGE) break;
+          after = batch[batch.length - 1]!.id;
+          if (threads.length >= THREAD_CAP) { threadsTruncated = true; break; }
+        }
+        if (threadsTruncated) {
+          // `may be`, like the payload key: at exactly `THREAD_CAP` rows the dump is
+          // complete and the flag over-reports, which is the safe direction but not
+          // a licence to assert it in a log.
+          process.stderr.write(`⚠ /api/export: thread export hit the ${THREAD_CAP}-row cap — dump may be incomplete\n`);
+        }
         const threadsWithMessages = threads.map(t => ({
           ...t,
           messages: threadStore.getMessages(t.id, { limit: 50000 }).map(m => ({
@@ -9537,9 +9582,11 @@ export class LynoxHTTPApi {
             created_at: m.created_at,
           })),
         }));
+        exportData['threads_may_be_incomplete'] = threadsTruncated;
         exportData['threads'] = threadsWithMessages;
       } else {
         exportData['threads'] = [];
+        exportData['threads_may_be_incomplete'] = false;
       }
 
       // Flat-file memory (all namespaces)
@@ -9702,38 +9749,233 @@ export class LynoxHTTPApi {
         return;
       }
 
-      // Delete all threads + messages
-      const threadStore = engine.getThreadStore();
-      if (threadStore) {
-        const threads = threadStore.listThreads({ limit: 200, includeArchived: true });
-        for (const t of threads) {
-          threadStore.deleteThread(t.id);
+      // Every store is attempted even when an earlier one throws — stopping at the
+      // first failure would leave MORE data behind than carrying on does, and an
+      // erasure request is not a transaction across six independent stores. What
+      // changed is the ANSWER: each failure is recorded, and a route that did not
+      // erase everything must not say it did. Until this list existed, a throwing
+      // wipe was written to stderr and the caller still read
+      // "All user data has been permanently deleted" with HTTP 200 — the one case
+      // in which that sentence is a lie.
+      //
+      // TWO lists, because they mean different things to the person reading the
+      // answer. `failed` is a wipe that did not complete — their data may still be
+      // there. `degraded` is a step AFTER a wipe that did complete: the data is
+      // gone and something else broke. Reporting the second kind as the first tells
+      // a tenant to go looking for data that no longer exists, which is the exact
+      // mislabel that splitting the config reset from the config reload was meant
+      // to prevent — and `crm_schema` reproduced it two statements later.
+      const failed: string[] = [];
+      const degraded: string[] = [];
+      // A THIRD list, and it is deliberately not one of the other two. A `null`
+      // store handle is not a failed wipe (nothing threw) and not a completed one
+      // either — it is a store this route could not open, and a caught boot failure
+      // leaves exactly that state with the file intact on disk. Until this existed
+      // the step was skipped in silence and the answer still read "All user data has
+      // been permanently deleted" over an untouched `engine.db`; the tenant could
+      // not discover it from the export either, because that reads the same null
+      // handle.
+      //
+      // What this does NOT decide: whether a null handle means a fault or a store
+      // the instance legitimately does not have. That needs a per-store answer (the
+      // file exists, or it never did) and a register row carries it. The claim is
+      // what gets fixed here — a route that could not look does not get to say
+      // "all".
+      const skipped: string[] = [];
+      const reach = <T>(key: string, store: T | null): T | null => {
+        if (store === null || store === undefined) skipped.push(key);
+        return store ?? null;
+      };
+      // Store keys only in the body, never the error text: a SQLite message carries
+      // file paths, and this body goes to a browser.
+      //
+      // ⚠ The stderr line masks CREDENTIAL SHAPES — it does NOT remove file paths,
+      // so do not read this as handling the path disclosure. The key is masked too,
+      // because an `attemptEach` key carries a collection or secret NAME, and a
+      // secret stored under a credential-shaped name would otherwise reach the log
+      // in clear. `includeGeneric` because a log IS the machine-read sink the
+      // masker's own docblock reserves it for: without it the generic 40+ token
+      // rule is dropped, and an opaque 48-character credential matches nothing
+      // else.
+      // Each key AT MOST ONCE, and this is a bound rather than tidiness. A loop that
+      // re-lists what it could not delete calls this with the same key every round:
+      // measured on the per-item wrapper below before any bound existed, 10 000
+      // rounds × 200 undeletable rows gave 2 000 000 entries, a 136 MB response body
+      // and 687 MB of RSS — out of ONE locked database. `failed` is the retry
+      // instruction, so a repeated id also destroys the one thing it is for: saying
+      // how many rows actually failed.
+      //
+      // That exact figure is no longer reachable, because the loop now also stops on
+      // the first fruitless round — what this line still covers is the PARTIAL case,
+      // where some rows delete and a stuck one is visited again on the next pass.
+      //
+      // ⚠ It suppresses the LOG line too, first-wins: a second, different failure of
+      // the same key is never written. If a row fails transiently in one round and
+      // permanently in the next, the operator keeps the transient message, which is
+      // the less diagnostic of the two.
+      const noted = new Set<string>();
+      const note = (key: string, err: unknown, list: string[] = failed): void => {
+        if (noted.has(key)) return;
+        noted.add(key);
+        list.push(key);
+        const detail = err instanceof Error ? err.message : String(err);
+        const mask = (t: string): string => maskSecretPatterns(t, { includeGeneric: true });
+        process.stderr.write(`⚠ /api/data: ${mask(key)} failed: ${mask(detail)}\n`);
+      };
+      const attempt = (key: string, fn: () => void): void => {
+        try {
+          fn();
+        } catch (err) {
+          note(key, err);
         }
-      }
+      };
+      /** A step that runs AFTER a wipe: its failure leaves no customer data behind. */
+      const attemptRepair = (key: string, fn: () => void): void => {
+        try {
+          fn();
+        } catch (err) {
+          note(key, err, degraded);
+        }
+      };
+      // ⚠ A separate helper, not an overload, and the reason is a typing hole rather
+      // than a style preference: TypeScript assigns `() => Promise<void>` to
+      // `() => void`, so an async callback handed to `attempt` would return before
+      // it settled, its rejection would never reach the catch, `failed` would stay
+      // empty — and the route would answer 200 with the completeness sentence over
+      // a store it did not wipe. Exactly the lie this block exists to stop. Every
+      // callback below is synchronous today; this is what keeps the next one honest.
+      const attemptAsync = async (key: string, fn: () => Promise<void>, list: string[] = failed): Promise<void> => {
+        try {
+          await fn();
+        } catch (err) {
+          note(key, err, list);
+        }
+      };
+      // Per ITEM, inside a store's own attempt: one wrapper around a whole loop
+      // abandons the rest of the loop on the first throw, so a single locked row
+      // left every later row of that store in place while the answer named only the
+      // store. The item is appended to the key so the answer says which.
+      // Returns how many items SUCCEEDED, because a caller that loops needs to know
+      // whether it is getting anywhere and only the attempt itself can say. Counting
+      // rows before and against after does not: a listing that caps its page size
+      // reports the same number twice while the wipe is working perfectly.
+      const attemptEach = <T>(key: string, items: readonly T[], fn: (item: T) => void, name: (item: T) => string): number => {
+        let done = 0;
+        for (const item of items) {
+          try {
+            fn(item);
+            done++;
+          } catch (err) {
+            note(`${key}:${name(item)}`, err);
+          }
+        }
+        return done;
+      };
 
-      // Delete all flat-file memory
-      const memory = engine.getMemory();
+      // Delete all threads + messages.
+      //
+      // `deleteAllThreads()` rather than a loop over `listThreads`: that listing is
+      // a UI read capped at 200 rows with a `message_count > 0` filter, so the loop
+      // it replaces erased the first 200 threads of a tenant that had more and
+      // answered success — plus it never reached a thread whose rollup counter is 0,
+      // whose title is user-written text. The store owns the completeness of its own
+      // tables; a caller can only delete what some listing chose to return.
+      const threadStore = reach('threads', engine.getThreadStore());
+      if (threadStore) attempt('threads', () => { threadStore.deleteAllThreads(); });
+
+      // Delete all flat-file memory — the DEFAULT scope only. A tenant whose agent
+      // wrote under a second context or a `user-…` scope keeps those files, and the
+      // export cannot show them either, so neither route sees that half.
+      const memory = reach('memory', engine.getMemory());
       if (memory) {
         for (const ns of ['knowledge', 'methods', 'status', 'learnings'] as const) {
-          await memory.save(ns, '');
+          await attemptAsync(`memory:${ns}`, async () => { await memory.save(ns, ''); });
         }
       }
 
       // Delete all knowledge graph entities (cascades to relations, mentions, cooccurrences)
-      const kg = engine.getKnowledgeLayer();
+      const kg = reach('knowledge_graph', engine.getKnowledgeLayer());
       if (kg) {
-        try {
+        attempt('knowledge_graph', () => {
+          // Bounded, like both loops in the export route — and for a reason
+          // `attempt` cannot cover: it catches a THROW, not a non-termination. The
+          // loop re-lists after deleting, so the day `deleteEntity` stops removing
+          // a row the listing returns (a scope filter added on one side only, a
+          // delete that silently no-ops), this spins forever: the request never
+          // answers, the event loop is held by synchronous SQLite calls, and the
+          // caller sees a timeout rather than `failed: ['knowledge_graph']`.
+          // Measured by a refuter with `deleteEntity` stubbed to a no-op: the
+          // request never returned and the run was killed at 120 s.
           const db = kg.getDb();
+          const MAX_ROUNDS = 10_000;
           let entities = db.listEntities({ limit: 200 });
-          while (entities.length > 0) {
-            for (const entity of entities) {
-              db.deleteEntity(entity.id);
+          for (let round = 0; entities.length > 0; round++) {
+            if (round >= MAX_ROUNDS) {
+              // Rounds, not progress — and deliberately NOT a claim about how much
+              // was removed. An earlier version of this comment said reaching the
+              // bound "means two million entities were genuinely removed", which runs
+              // the arithmetic backwards: 200 per page is an UPPER bound, the floor is
+              // one success per round (10 000), and for a delete that neither throws
+              // nor removes the row it is ZERO — the shape the note below says this
+              // bound exists for. Measured: that shape reaches the bound with 2 000 000
+              // calls and nothing removed; a second process writing the same file
+              // reaches it after 500 250. So the message says what it knows, which is
+              // that the loop did not finish, and the progress check below is what
+              // normally stops it.
+              throw new Error(`entity wipe did not finish within ${MAX_ROUNDS} rounds`);
+            }
+            // Per ITEM, and this is the loop where it matters most: one undeletable
+            // row used to abort the whole attempt, leaving every other entity in
+            // `agent-memory.db` in place while the answer named only the store. It
+            // is also the largest table this route touches.
+            //
+            // ⚠ These four guards — per item, dedupe, progress, round bound — cost
+            // three review rounds and introduced two regressions of their own, so
+            // putting the loop back to its pre-change form was considered and
+            // REJECTED on a measurement: without the bound, a delete that neither
+            // throws nor removes the row spins forever on the event loop, and the
+            // test below wedges the worker rather than failing. A demonstrated hang
+            // in an HTTP handler is worse than the guards' residual risk — and that
+            // risk is understated by the test that drives it, whose store is an O(1)
+            // closure answering in 18 ms: the same shape against the real store cost
+            // 5.58 s and 949 MB for 200 of the 10 000 rounds, and a probe replaying it
+            // reached 9,1 GiB before it was killed by hand. Finite still beats
+            // infinite; the suite cannot see the size of what it is choosing against.
+            //
+            // What the history does mean is that this loop is where a reader should
+            // look first. The two regressions are named at the progress note just
+            // below and at the dedupe note beside `note` further up — not both below,
+            // as an earlier version of this line said.
+            //
+            // ⚠ Stop when a round DELETED NOTHING, and read that from the deletes
+            // rather than from the row count. The first version of this check
+            // compared the length of the next listing against the last one, which is
+            // wrong in a way that only shows past one page: `listEntities` clamps its
+            // limit to 200, so a working wipe of 400 rows removes 200, lists 200
+            // again and "no progress" fires over a success. Measured on the real
+            // store: 399 rows completed, 400 threw after 200 successful deletes with
+            // 200 surviving, 500 threw with 300 surviving. A count is not progress;
+            // whether an attempt succeeded is.
+            //
+            // (An earlier version of this comment, and of its commit message, said
+            // "400 threw with 300 surviving" — it spliced a 400-row run's throw with
+            // a 500-row run's survivor count. The boundary is right, the number was
+            // not, and it is the number that justifies the fix.)
+            const removed = attemptEach('knowledge_graph_entity', entities, e => { db.deleteEntity(e.id); }, e => e.id);
+            if (removed === 0) {
+              throw new Error(`entity wipe made no progress — ${String(entities.length)} entities remain`);
             }
             entities = db.listEntities({ limit: 200 });
           }
-          // Also deactivate all memories
-          db.deactivateAllMemories();
-        } catch { /* best effort */ }
+        });
+        // Its own attempt: a throw in the entity loop above used to skip this line,
+        // so one undeletable entity left every memory row active.
+        //
+        // ⚠ And this is a SOFT delete — `UPDATE memories SET is_active = 0`. The
+        // text stays on disk, in plaintext by design on this legacy store, until a
+        // later `gc()` run reaps it. The hard-delete primitive exists
+        // (`purgeMemoriesByIds`) and only the single-subject path uses it.
+        attempt('knowledge_graph_memories', () => { kg.getDb().deactivateAllMemories(); });
       }
 
       // Delete all subject-graph data (engine.db) — Foundation Rework v2 tables.
@@ -9742,56 +9984,132 @@ export class LynoxHTTPApi {
       // artifacts, …) so a Right-to-Erasure request leaves no PII once the S1b/c
       // mirror writes are enabled. Mirror writes are flag-gated, so this lands with
       // the same release that turns them on — the engine.db is empty until then.
-      const engineDb = engine.getEngineDb();
-      if (engineDb) {
-        try {
-          engineDb.deleteAllData();
-        } catch (err) {
-          // The wipe is one atomic transaction: a failure leaves ALL engine.db
-          // PII intact while the route still 200s. Surface it (an Art.17 erasure
-          // must not silently fail) rather than swallowing best-effort.
-          process.stderr.write(`⚠ /api/data: engine.db wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
-        }
-      }
+      //
+      // It is ALSO the path that erases the Durable Knowledge Substrate:
+      // `KnowledgeStore` shares this connection (`knowledge_entries`,
+      // `memory_blocks` are engine.db tables) and `deleteAllData()` enumerates
+      // every table from `sqlite_master`, so DK is reached without being named
+      // here (asserted per-table in `engine-db.test.ts`, through the route in
+      // `erasure-covers-export.test.ts`). The store's own targeted deletes
+      // (`deleteEntry`/`deleteBySubject`) stay unwired by design — they serve a
+      // SINGLE data-subject request, not a tenant-wide wipe.
+      //
+      // ⚠ A null handle here is NOT an empty database: a caught boot failure leaves
+      // `engineDb === null` with the file intact, and this route then skips it and
+      // still answers success.
+      const engineDb = reach('engine_db', engine.getEngineDb());
+      // The wipe is one atomic transaction: a failure leaves ALL engine.db PII
+      // intact, which is exactly why it has to reach the answer rather than only
+      // stderr.
+      if (engineDb) attempt('engine_db', () => { engineDb.deleteAllData(); });
 
       // Clear the DORMANT legacy verb-def rows the B1 self-heal keeps alive (the
       // non-destructive v44 no longer drops the legacy `triggers` + workflow-def
       // `pipeline_runs`). Without this an Art.17 erasure would leave trigger/workflow
       // PII on disk, and an engine.db recreate would re-backfill it into live reads.
-      const runHistoryForWipe = engine.getRunHistory();
-      if (runHistoryForWipe) {
-        try {
-          runHistoryForWipe.clearLegacyVerbDefs();
-        } catch (err) {
-          process.stderr.write(`⚠ /api/data: legacy verb-def wipe failed: ${err instanceof Error ? err.message : String(err)}\n`);
-        }
-      }
+      const runHistoryForWipe = reach('legacy_verb_defs', engine.getRunHistory());
+      if (runHistoryForWipe) attempt('legacy_verb_defs', () => { runHistoryForWipe.clearLegacyVerbDefs(); });
 
       // Delete all DataStore collections (includes CRM tables)
-      const ds = engine.getDataStore();
+      const ds = reach('datastore', engine.getDataStore());
       if (ds) {
-        const collections = ds.listCollections();
-        for (const col of collections) {
-          ds.dropCollection(col.name);
+        try {
+          // The LISTING is wrapped too, and that is not symmetry for its own sake:
+          // as an argument to `attemptEach` it sat OUTSIDE the wrapper, so a store
+          // whose `listCollections` throws took the whole route down — 500 from the
+          // outer handler, no `failed` list, and the answer could not say which
+          // store had failed. The same holds for the secret names below.
+          let collections: ReturnType<typeof ds.listCollections> = [];
+          attempt('datastore#list', () => { collections = ds.listCollections(); });
+          attemptEach('datastore', collections, col => { ds.dropCollection(col.name); }, col => col.name);
+        } finally {
+          // In a `finally`, and the position IS the fix rather than a detail of it:
+          // anything holding a cached view of those collections is now wrong, and
+          // only the code that dropped them knows it. `CRM.ensureSchema` memoises
+          // "the contacts/deals collections exist", so without this every CRM read
+          // threw `Collection "contacts" not found` for the rest of the process —
+          // the read inside `GET /api/export` included, so the tenant could not
+          // export their data to verify the erasure. Running the repair after the
+          // drop loop inside the same try skipped it on exactly the path where a
+          // partial drop had already broken the memo.
+          // `attemptRepair`, not `attempt`: the collections ARE dropped by the time
+          // this runs, so a failure here means the tenant's data is gone and the
+          // CRM's schema is not back — not that a store still holds their data.
+          attemptRepair('crm_schema', () => { engine.getCRM()?.rebuildSchema(); });
         }
       }
 
-      // Delete all secrets from vault
-      const secretStore = engine.getSecretStore();
+      // Delete all secrets from the vault. `LYNOX_SECRET_*` env-sourced entries are
+      // re-read at every boot, so those return after a restart.
+      const secretStore = reach('secrets', engine.getSecretStore());
       if (secretStore) {
-        const names = secretStore.listNames();
-        for (const name of names) {
-          secretStore.deleteSecret(name);
-        }
+        let names: string[] = [];
+        attempt('secrets#list', () => { names = secretStore.listNames(); });
+        attemptEach('secrets', names, name => { secretStore.deleteSecret(name); }, name => name);
       }
 
-      // Reset config to defaults
-      try {
+      // Reset config to defaults. The reset and the engine's reload are separate
+      // attempts on purpose: a failed reload leaves no customer data behind, so
+      // reporting it as `config` would tell the caller that a store still holds
+      // their data when the file on disk is already `{}`.
+      await attemptAsync('config', async () => {
         const { saveUserConfig } = await import('../core/config.js');
         saveUserConfig({});
-        await engine.reloadUserConfig();
-      } catch { /* best effort */ }
+      });
+      // Same class as `crm_schema`: the file on disk is already `{}` and both GDPR
+      // routes read config from disk, so a failed reload leaves nothing readable.
+      await attemptAsync('config_reload', async () => { await engine.reloadUserConfig(); }, degraded);
 
+      // ⚠ `skipped` rides along in EVERY branch, which it did not at first — and the
+      // omission reinstated the false claim these branches exist to remove. A store
+      // this route could not open is the one fact the answer must never drop: with
+      // it missing, `failed` read as the complete list of where to look, and the
+      // degraded branch said "Data erased" over an intact `engine.db`.
+      const extra = {
+        ...(degraded.length > 0 ? { degraded } : {}),
+        ...(skipped.length > 0 ? { skipped } : {}),
+      };
+      if (failed.length > 0) {
+        // 500, not a 200 with `deleted: false`: a client that reads the status code
+        // alone must not conclude the erasure succeeded, and an Art. 17 answer is
+        // the last place to be optimistic. `failed` names which stores may still
+        // hold data, so a retry (or a human) knows where to look.
+        jsonResponse(res, 500, { deleted: false, failed, ...extra, error: 'Erasure incomplete — some stores may still hold data' });
+        return;
+      }
+      if (degraded.length > 0) {
+        // Every wipe that RAN completed, so `deleted` is true — but a post-erasure
+        // step failed and the caller has to know, so the status is 500 and the
+        // completeness claim stays out. The sentence is qualified when a store could
+        // not be opened, because then "data erased" is only true of what was reached.
+        jsonResponse(res, 500, {
+          deleted: true,
+          ...extra,
+          error: skipped.length > 0
+            ? 'Erased what could be reached, but a store could not be opened and a post-erasure step failed — this instance may need a restart'
+            : 'Data erased, but a post-erasure step failed — this instance may need a restart',
+        });
+        return;
+      }
+      if (skipped.length > 0) {
+        // 200 and `deleted: true`, because every store this route COULD open was
+        // erased and nothing failed — but no completeness sentence, because one it
+        // could not open may hold data.
+        //
+        // ⚠ The signal is NOT the same strength as in the two branches above: those
+        // carry a 500 and a positive `error` field, this one carries a 200 and the
+        // ABSENCE of `message`, so a client testing `status === 200 && body.deleted`
+        // reads unqualified success. `skipped` is the only positive marker, hence
+        // the `warning` beside it — a field a careless reader still misses, which is
+        // why the open half of this (is a null handle a fault or a store this
+        // instance does not have?) is registered rather than papered over.
+        jsonResponse(res, 200, {
+          deleted: true,
+          skipped,
+          warning: 'Erased what could be reached — a store could not be opened and may still hold data',
+        });
+        return;
+      }
       jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
     });
 

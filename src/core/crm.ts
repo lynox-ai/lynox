@@ -132,6 +132,60 @@ export class CRM {
 
   // ── Schema ──
 
+  /**
+   * Re-create the CRM's collections after something dropped them, and close the
+   * `ensureSchema` latch again in the same call.
+   *
+   * `ensureSchema` memoises in `_initialized`, and that memo asserts something
+   * about ANOTHER store: that the CRM's DataStore collections exist. The Art. 17
+   * erasure drops every collection, which made the memo a lie for the rest of the
+   * process — every CRM read then threw `Collection "contacts" not found`,
+   * including the one inside `GET /api/export`, so a tenant who erased their data
+   * could not afterwards export it to check: 500 until a restart. A cache that
+   * outlives the thing it describes has to be repaired by whoever destroyed it;
+   * nothing else knows it happened.
+   *
+   * ⚠ It re-ensures rather than only clearing the flag, and that is the whole
+   * reason this is one method instead of a setter. `_initialized` is not only a
+   * cache — `roles.ts` admits `contacts_search` to the READ-ONLY tool surface with
+   * the justification that `ensureSchema` is "a latch already closed during boot;
+   * the CRM's DDL is therefore unreachable here". A method that merely re-opened
+   * the latch would falsify that sentence for the rest of the process: the next
+   * `contacts_search` from a read-only agent would run `CREATE TABLE`. Closing it
+   * again inside this synchronous call keeps the latch one-way as far as any other
+   * caller can observe, so the read-only surface stays read-only.
+   */
+  rebuildSchema(): void {
+    this._initialized = false;
+    try {
+      this.ensureSchema();
+    } finally {
+      // In a `finally`, and the trade is deliberate — but stated correctly, which
+      // the first version of this comment was not.
+      //
+      // `ensureSchema` sets the flag as its LAST statement, so a throw before it
+      // (`listCollections` on a locked database, a `createCollection` that hits
+      // SQLITE_BUSY) left the latch open **until the next `ensureSchema` that
+      // completed**, not for the life of the process — and on a transient lock that
+      // next caller was most likely a CRM read, which would have closed the latch
+      // and re-created the collections, i.e. done the repair that was wanted. So
+      // the old window was narrow and self-healing, not a standing hole.
+      //
+      // What it was not is BOUNDED by anything. `roles.ts` admits `contacts_search`
+      // to the read-only tool surface on the strength of the latch being closed,
+      // and a justification that depends on who happens to call next is not a
+      // justification. (That nobody can observe the latch open DURING this call
+      // rests on `ensureSchema` being fully synchronous — an `await` added to it
+      // later would reopen the window silently.) Closing it here makes that
+      // sentence unconditional, at a real price:
+      // a failed rebuild leaves the memo claiming collections that are
+      // missing, so CRM reads — including the one inside `GET /api/export` — throw
+      // until a restart. The route reports it (`degraded: ['crm_schema']`) and
+      // nobody is told the data survived.
+      this._initialized = true;
+    }
+  }
+
   /** Ensure CRM tables exist. Idempotent — safe to call multiple times. */
   ensureSchema(): void {
     if (this._initialized) return;

@@ -229,6 +229,18 @@ vi.mock('../core/engine.js', () => ({
       // The enabled-toggle (kill-switch) PATCH branch reads the row back via
       // getTrigger (setEnabled toggles a `triggers` row), not getTask.
       getTrigger: vi.fn().mockReturnValue({ id: 'sched-1', enabled: 0 }),
+      // The Art.17 erasure calls this. It was MISSING here for as long as the
+      // route has had the call, so every erasure test ran against a route whose
+      // legacy verb-def wipe threw a TypeError on its first line.
+      //
+      // ⚠ And the catch that hid it was NOT silent — it wrote
+      // `⚠ /api/data: legacy verb-def wipe failed: …` to the same stderr this
+      // suite prints, on every one of those runs, naming the broken call. So the
+      // lesson is not "a silent catch hides a fixture that cannot answer"; it is
+      // that a logged warning no assertion reads is exactly as invisible as
+      // silence. What found it was not virtue either: the route now RECORDS a
+      // failure, which turned a 200-expecting test red.
+      clearLegacyVerbDefs: vi.fn(),
       isAmbiguousTriggerId: vi.fn().mockReturnValue(false),
     });
     this.getBulkLedger = vi.fn(() => bulkHolder.ledger);
@@ -242,6 +254,20 @@ vi.mock('../core/engine.js', () => ({
       confirmTrigger: mockConfirmTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
+    // Null is a real state of this accessor (`getCRM(): CRM | null`), and the
+    // erasure reads it to invalidate the CRM's cached schema after dropping the
+    // DataStore collections. Defined here rather than per-test because the method
+    // MISSING is not a state the real Engine has — an undefined accessor made
+    // three erasure cases report a `datastore` failure that production cannot
+    // produce.
+    this.getCRM = vi.fn().mockReturnValue(null);
+    // Same argument as `getCRM`, and it was not applied to these two: the mock
+    // Engine had NO `getEngineDb`/`getDataStore` at all, while both routes call the
+    // accessor before they can guard on its result. The TypeError escaped as a 500,
+    // which `does NOT guard GET /api/export` could not see — it asserts only
+    // `not.toBe(403)`, so a route that threw read as a route that answered.
+    this.getEngineDb = vi.fn().mockReturnValue(null);
+    this.getDataStore = vi.fn().mockReturnValue(null);
     this.getApiStore = mockGetApiStore;
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
@@ -10921,12 +10947,52 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
   });
 
   describe('GDPR export + erasure — engine.db coverage (Foundation Rework v2 — S2-pre0)', () => {
+    // This file shares ONE per-IP rate window, and this describe sits after every
+    // other refund block, so its spend lands on the tail with no headroom left.
+    // Measured rather than feared: the cases added for the erasure work tipped
+    // `clears the revocation the new authorization replaced`, four hundred lines
+    // away, into a 429. Same snapshot/restore as the three blocks above.
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
     function swapEngine(overrides: Record<string, unknown>, test: () => Promise<void>): Promise<void> {
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
       const origs: Record<string, unknown> = {};
       for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
       return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
     }
+
+    it('DELETE /api/data never reads a capped thread listing — it asks the store to wipe', async () => {
+      // This is the CALL SHAPE, not the outcome, and the distinction is the point.
+      // The erasure used to loop over `listThreads({ limit: 200 })` and delete what
+      // came back: 200 threads of a tenant that had more, and never a thread whose
+      // `message_count` rollup is 0 (its title is user-written text). A mock cannot
+      // show what survived — it clears a Map — but it can show that the route no
+      // longer derives the set it erases from a UI listing. How much
+      // `deleteAllThreads` actually removes is asserted on a real database in
+      // `thread-store.test.ts`, and end-to-end in `erasure-covers-export.test.ts`.
+      const listThreads = vi.fn(() => []);
+      const deleteAllThreads = vi.fn(() => 0);
+      const deleteThread = vi.fn();
+      await swapEngine({
+        getThreadStore: () => ({ listThreads, deleteAllThreads, deleteThread, getMessages: () => [] }),
+        // Redundant since the mock Engine gained both accessors (see its
+        // constructor); kept explicit here because this case is about what the
+        // thread store is asked, and pinning the rest to null keeps that the only
+        // moving part.
+        getEngineDb: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        expect(deleteAllThreads).toHaveBeenCalledTimes(1);
+        expect(listThreads, 'the erasure must not derive its set from a listing').not.toHaveBeenCalled();
+        expect(deleteThread, 'nor delete row by row from one').not.toHaveBeenCalled();
+      });
+    });
 
     it('GET /api/export pages through ALL entities (no silent 200-cap drop)', async () => {
       // 250 entities: the old single { limit: 200 } call silently dropped 50 from
@@ -11026,6 +11092,58 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('GET /api/export marks the thread list incomplete when it hits the cap', async () => {
+      // Same shape as the entity-cap case below, and for the same reason: a store
+      // that always hands back a FULL page drives the route to its bound in cheap
+      // mock calls, so the cap is reachable without seeding twenty thousand real
+      // threads. Without this the truncation flag had no witness at all — a
+      // mutation that hard-codes it to `false` survived every test in the repo,
+      // and the one input that discriminates it is a tenant past the cap.
+      //
+      // The flag is the whole point of the cap. An Art. 15 answer that is short
+      // and says so is a different thing from one that is short and looks
+      // complete, which is the defect this route was fixed for; a cap without the
+      // marker would have reproduced it one bound higher.
+      let served = 0;
+      const listThreadsForExport = vi.fn(({ limit }: { limit: number }) => {
+        const page = Array.from({ length: limit }, (_, i) => ({ id: `cap-${served + i}`, title: 't', message_count: 1 }));
+        served += limit;
+        return page;
+      });
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages: () => [] }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { threads: unknown[]; threads_may_be_incomplete: boolean };
+        expect(body.threads_may_be_incomplete, 'the dump is short and must say so').toBe(true);
+        // And the walk stopped AT the cap rather than running on: the page size is
+        // the store's own `EXPORT_PAGE_MAX`, so the count is a multiple of it.
+        expect(body.threads.length).toBeGreaterThanOrEqual(20_000);
+        expect(body.threads.length).toBeLessThan(21_000);
+      });
+    });
+
+    it('GET /api/export does NOT mark the thread list incomplete on a short page', async () => {
+      // The other direction, because a flag that is always true is as useless as
+      // one that is always false — and `true` is the value a careless fix would
+      // reach for after the case above.
+      const listThreadsForExport = vi.fn(() => [{ id: 'only', title: 't', message_count: 1 }]);
+      await swapEngine({
+        getThreadStore: () => ({ listThreadsForExport, getMessages: () => [] }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const body = await (await jsonFetch('/api/export')).json() as { threads_may_be_incomplete: boolean };
+        expect(body.threads_may_be_incomplete).toBe(false);
+        expect(listThreadsForExport).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {
       // A store that always returns a full PAGE would loop forever without the
       // MAX_PAGES bound — assert the loop stops at the 1000-page cap.
@@ -11100,7 +11218,48 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data still 200s (best-effort) when deleteAllData throws', async () => {
+    it('DELETE /api/data keeps wiping every other store when one throws (best-effort ORDER)', async () => {
+      // The half of the old `still 200s (best-effort)` test that was right, and is
+      // kept verbatim in intent: stopping at the first failure would leave MORE
+      // data behind, so every later store is still attempted.
+      //
+      // ⚠ Scope, because the name overstates it: this property is PRE-EXISTING —
+      // the old route already ran the DataStore and secret wipes after its own
+      // engine.db catch, so the three call assertions below are green against
+      // `ae4fc63d` too. What it uniquely holds is the mutation this change made
+      // possible: an early `return` once `failed` is non-empty. The status is
+      // asserted as well, because without it the case is equally green against the
+      // old route that answered 200 while a wipe had failed.
+      const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
+      const dropCollection = vi.fn();
+      const deleteSecret = vi.fn();
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+        }),
+        getDataStore: () => ({ listCollections: () => [{ name: 'c1' }], dropCollection }),
+        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status, 'a recorded failure must not read as success').toBe(500);
+        expect(deleteAllData).toHaveBeenCalledTimes(1);
+        expect(dropCollection, 'a later store must still be wiped').toHaveBeenCalledWith('c1');
+        expect(deleteSecret, 'and the last one too').toHaveBeenCalledWith('S1');
+      });
+    });
+
+    it('DELETE /api/data does NOT claim success when a wipe failed — 500 + the failed store', async () => {
+      // The sentence is the subject. Until this test the route wrote the failure to
+      // stderr and answered HTTP 200 with "All user data has been permanently
+      // deleted" — while the entire engine.db half (people.email/phone,
+      // memories.text, subjects.name, knowledge_entries) was still on disk. An
+      // Art. 17 answer that overstates itself is worse than an error: the one
+      // person who would have retried reads that they are done.
+      //
+      // Asserted together on purpose — a route that keeps the sentence while
+      // losing a wipe is exactly the defect, so status, flag, list and the absence
+      // of the sentence all hang on one failure.
       const deleteAllData = vi.fn(() => { throw new Error('disk full'); });
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
@@ -11110,8 +11269,266 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
         const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { deleted: boolean; failed: string[]; message?: string; error: string };
+        expect(body.deleted).toBe(false);
+        expect(body.failed).toEqual(['engine_db']);
+        expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
+        expect(JSON.stringify(body)).not.toContain('permanently deleted');
+        // The store key, never the SQLite message — it carries file paths and this
+        // body goes to a browser.
+        expect(JSON.stringify(body)).not.toContain('disk full');
+      });
+    });
+
+    it('DELETE /api/data clears the legacy verb-def rows', async () => {
+      // An IDENTIFIER witness, and here that is the honest instrument rather than
+      // a lazy one: those rows are dormant trigger and workflow definitions that
+      // `GET /api/export` does not read, so the set property in
+      // `erasure-covers-export.test.ts` structurally cannot see them — a mutation
+      // round confirmed that deleting this call survives every other test in the
+      // repo. The call exists for a resurrection path, not a read path: an
+      // engine.db recreate re-backfills the legacy rows into live reads.
+      const clearLegacyVerbDefs = vi.fn();
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => null,
+        getRunHistory: () => ({ clearLegacyVerbDefs }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
         expect(res.status).toBe(200);
-        expect(deleteAllData).toHaveBeenCalledTimes(1);
+        expect(clearLegacyVerbDefs).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('DELETE /api/data keeps the failure list BOUNDED when every entity delete throws', async () => {
+      // The regression a delta round measured, in the shape that caused it: the
+      // per-item wrapper does not rethrow, so a database that refuses every delete
+      // used to run the full 10 000-round bound and append one key PER ROW PER
+      // ROUND — 2 000 000 entries, a 136 MB response body and 687 MB of RSS, out of
+      // one locked file. Two things bound it now: the loop stops as soon as a round
+      // removes nothing, and `note` records each key at most once.
+      //
+      // `failed` is the retry instruction, so the repetition also destroyed the one
+      // thing it is for — saying how many rows actually failed.
+      const page = Array.from({ length: 200 }, (_, i) => ({ id: `ent-${i}` }));
+      const listEntities = vi.fn(() => page);
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({
+          getDb: () => ({
+            listEntities,
+            deleteEntity: () => { throw new Error('database is locked'); },
+            deactivateAllMemories: () => [],
+          }),
+        }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        const entityKeys = body.failed.filter(k => k.startsWith('knowledge_graph_entity:'));
+        // One per ROW, not one per row per round.
+        expect(entityKeys).toHaveLength(200);
+        expect(new Set(entityKeys).size, 'a key must not repeat').toBe(200);
+        // And the loop stopped on the first fruitless round rather than spinning to
+        // the bound: two listings, the initial one and the progress check.
+        expect(listEntities.mock.calls.length).toBeLessThanOrEqual(3);
+        expect(body.failed).toContain('knowledge_graph');
+      });
+    });
+
+    it('DELETE /api/data wipes an entity table LARGER than one listing page', async () => {
+      // The case no test drained before, and the one a working wipe fails without
+      // this fix: `listEntities` clamps its limit to 200, so a progress check that
+      // compares the length of two listings sees 200 twice while 200 rows were
+      // genuinely deleted. Measured on the real store: 399 rows completed; 400 threw
+      // after 200 successful deletes with 200 surviving; 500 threw with 300
+      // surviving — an Art. 17 request on any instance with a used knowledge graph
+      // answering 500. (The first version of this comment said "400 … with 300
+      // surviving", splicing one run's throw with another's survivor count.)
+      //
+      // The mock caps at 200 exactly as `AgentMemoryDb` does; that clamp IS the
+      // property under test, so a fixture without it would witness nothing.
+      let pool = Array.from({ length: 450 }, (_, i) => ({ id: `big-${i}` }));
+      const listEntities = vi.fn(() => pool.slice(0, 200));
+      const deleteEntity = vi.fn((id: string) => { pool = pool.filter(e => e.id !== id); });
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({ getDb: () => ({ listEntities, deleteEntity, deactivateAllMemories: () => [] }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status, 'a wipe past one page is not a failure').toBe(200);
+        const body = await res.json() as { deleted: boolean; failed?: string[] };
+        expect(body.deleted).toBe(true);
+        expect(body.failed ?? []).toEqual([]);
+        expect(pool, 'every entity must be gone, not just the first page').toEqual([]);
+        expect(deleteEntity).toHaveBeenCalledTimes(450);
+      });
+    });
+
+    it('DELETE /api/data names a stuck entity ONCE across rounds', async () => {
+      // The case the all-undeletable test cannot reach, and the one the dedupe in
+      // `note` is actually for: when SOME rows delete, the loop makes progress and
+      // runs another round, so a row that is stuck is visited again — and without
+      // the dedupe its key is appended once per round. `failed` is the retry
+      // instruction; an id repeated per round destroys the one thing it is for.
+      let pool = Array.from({ length: 200 }, (_, i) => ({ id: `ent-${i}` }));
+      const listEntities = vi.fn(() => pool.slice(0, 200));
+      const deleteEntity = vi.fn((id: string) => {
+        if (id === 'ent-0') throw new Error('row is locked');
+        pool = pool.filter(e => e.id !== id);
+      });
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({ getDb: () => ({ listEntities, deleteEntity, deactivateAllMemories: () => [] }) }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        const stuck = body.failed.filter(k => k === 'knowledge_graph_entity:ent-0');
+        expect(stuck, 'the stuck row must be named once, not once per round').toHaveLength(1);
+        // Fixture guard: the other 199 really were deleted, so the loop did take a
+        // second round and the repetition was reachable at all.
+        expect(pool.map(e => e.id)).toEqual(['ent-0']);
+        expect(body.failed.filter(k => k.startsWith('knowledge_graph_entity:'))).toHaveLength(1);
+      });
+    });
+
+    it('DELETE /api/data answers rather than hanging when the entity wipe makes no progress', async () => {
+      // `attempt` catches a THROW; it cannot catch a non-termination, and the
+      // entity wipe is the one loop here that re-lists after deleting. A refuter
+      // stubbed `deleteEntity` to a no-op and the request never answered at all —
+      // the event loop held by synchronous SQLite calls, the caller left with a
+      // timeout instead of `failed: ['knowledge_graph']`. That is reachable from a
+      // scope filter added on one side of the pair only, or a delete that starts
+      // silently no-opping.
+      const entity = { id: 'e1' };
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => ({
+          getDb: () => ({
+            listEntities: () => [entity],
+            deleteEntity: () => undefined,
+            deactivateAllMemories: () => [],
+          }),
+        }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        expect(body.failed).toContain('knowledge_graph');
+      });
+    }, 30_000);
+
+    it('DELETE /api/data names an unopened store in the FAILURE answer too', async () => {
+      // `skipped` was dropped from both 500 bodies, and the omission reinstated the
+      // claim those branches exist to remove: `failed` reads as the complete list of
+      // where to look, so a tenant whose engine.db never opened — PII intact on disk
+      // — would have recorded an answer that does not mention it, and learned of it
+      // only from a later retry that happened to succeed everywhere else.
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => null,
+        getSecretStore: () => ({ listNames: () => ['S1'], deleteSecret: () => { throw new Error('vault is locked'); } }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { deleted: boolean; failed: string[]; skipped?: string[] };
+        expect(body.failed).toContain('secrets:S1');
+        expect(body.skipped, 'the store that never opened must be in the answer').toContain('engine_db');
+        expect(body.deleted).toBe(false);
+      });
+    });
+
+    it('DELETE /api/data does not report `config` when only the RELOAD failed', async () => {
+      // The direction nobody checks: a 500 that says "some stores still hold data"
+      // about a store that holds nothing. `saveUserConfig({})` can succeed — the
+      // file on disk IS reset — and `reloadUserConfig()` then throw on a refused
+      // endpoint. Reporting that as `config` sends the tenant looking for data that
+      // is already gone, so the two are separate attempts with separate keys.
+      await swapEngine({
+        getEngineDb: () => null,
+        getDataStore: () => null,
+        getKnowledgeLayer: () => null,
+        reloadUserConfig: () => Promise.reject(new Error('endpoint refused')),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed?: string[]; degraded: string[]; deleted: boolean };
+        // `degraded`, not `failed`, and that is the whole point of the case: the
+        // file on disk IS `{}` and both GDPR routes read config from disk, so no
+        // customer config is readable. Putting it in `failed` would answer "some
+        // stores may still hold data" about a store that holds none.
+        expect(body.degraded).toContain('config_reload');
+        expect(body.failed ?? [], 'a post-erasure step is not a store that still holds data').toEqual([]);
+        expect(body.deleted, 'the data IS gone — saying otherwise is the same false alarm').toBe(true);
+      });
+    });
+
+    it('DELETE /api/data repairs the CRM schema even when a drop throws mid-loop', async () => {
+      // The POSITION of the repair, which is the whole fix: it used to be the last
+      // statement of the datastore callback, so a `dropCollection` that threw
+      // part-way through skipped it — and that is precisely the path where its bug
+      // still bites. `contacts` is already gone, `CRM._initialized` still says it
+      // exists, so every later CRM read throws `Collection "contacts" not found`,
+      // including the one inside `GET /api/export`: the tenant is told to retry and
+      // cannot export to see what survived their partial erasure.
+      const rebuildSchema = vi.fn();
+      await swapEngine({
+        getEngineDb: () => null,
+        getKnowledgeLayer: () => null,
+        getDataStore: () => ({
+          listCollections: () => [{ name: 'contacts' }, { name: 'boom' }],
+          dropCollection: (n: string) => { if (n === 'boom') throw new Error('database is locked'); },
+        }),
+        getCRM: () => ({ rebuildSchema }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[]; degraded?: string[] };
+        // Named per ITEM: one locked collection used to abandon the rest of the
+        // loop and report only the store.
+        expect(body.failed).toContain('datastore:boom');
+        expect(rebuildSchema, 'the repair must run on the failing path, not only the happy one').toHaveBeenCalledTimes(1);
+        // The repair itself is not a wipe: when IT fails the drops have already
+        // happened, so it belongs in `degraded`. Here it succeeds, so neither list
+        // carries it.
+        expect(body.degraded ?? []).toEqual([]);
+      });
+    });
+
+    it('DELETE /api/data reports EVERY failed store, not just the first', async () => {
+      // `failed` is the retry instruction, so a list that stops at the first entry
+      // sends a human to look in one place out of three.
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData: () => { throw new Error('a'); } }),
+        getKnowledgeLayer: () => ({ getDb: () => { throw new Error('b'); } }),
+        getDataStore: () => ({ listCollections: () => { throw new Error('c'); }, dropCollection: () => undefined }),
+        getSecretStore: () => ({ listNames: () => [], deleteSecret: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(500);
+        const body = await res.json() as { failed: string[] };
+        // As a SET: which stores failed is the contract, the order in which the
+        // route happens to visit them is not. `toEqual` on the array pinned the
+        // visiting order, so re-sequencing the wipe would have failed this case for
+        // no semantic reason.
+        // Four, not three, and the fourth is the point: `knowledge_graph_memories`
+        // is its own attempt, so a KG handle that throws no longer takes the
+        // memory deactivation down with the entity loop silently — it is named.
+        // `#`, not `:` — a collection or secret literally named `list` would
+        // otherwise produce the same key as "enumerating the store failed", and
+        // those two call for different next steps. `#` cannot occur in a
+        // collection name (`^[a-z][a-z0-9_]{0,62}$`).
+        expect([...body.failed].sort()).toEqual([
+          'datastore#list', 'engine_db', 'knowledge_graph', 'knowledge_graph_memories',
+        ]);
       });
     });
 
@@ -11130,7 +11547,19 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
-    it('DELETE /api/data still 200s when engine.db is absent (getEngineDb null)', async () => {
+    it('DELETE /api/data still 200s when engine.db is absent — but claims no completeness', async () => {
+      // The 200 is kept and the SENTENCE is withdrawn, which is the whole change
+      // here. A `null` handle is not a failed wipe (nothing threw) and not a
+      // completed one: a caught boot failure leaves exactly that state with the
+      // file intact on disk, so `knowledge_entries`, `subjects` and
+      // `people.email/phone` can all still be there while this route reports
+      // success — and the tenant cannot discover it from the export either, because
+      // that reads the same null handle.
+      //
+      // What this route is NOT deciding is whether a null handle is a fault or a
+      // store the instance legitimately does not have. That needs a per-store
+      // answer and is registered. A route that could not look does not get to say
+      // "all"; that part needs no decision.
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
@@ -11143,6 +11572,79 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }),
         });
         expect(res.status).toBe(200);
+        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string; warning?: string };
+        expect(body.deleted, 'what could be reached WAS erased').toBe(true);
+        expect(body.skipped, 'the store it could not open must be named').toContain('engine_db');
+        expect(body.message, 'the completeness claim must be absent, not just false').toBeUndefined();
+        expect(JSON.stringify(body)).not.toContain('permanently deleted');
+        // A positive marker, not only an absence: this branch answers 200 with no
+        // `error`, so a client testing `status === 200 && body.deleted` would read
+        // unqualified success off the two fields it is most likely to read.
+        expect(body.warning, 'the one positive marker on a 200').toContain('could not be opened');
+      });
+    });
+
+    it('DELETE /api/data masks an opaque credential in its stderr line', async () => {
+      // The masker's own docblock reserves `includeGeneric` for a machine-read sink
+      // rather than something a person reads, and a log line collected by the host's
+      // log driver is one. Without the flag the generic 40+ token rule is dropped,
+      // and an opaque credential — no vendor prefix — matches nothing else, so it
+      // would ship verbatim. Asserted on the stream because that is where it goes;
+      // nothing about this is visible in the response body.
+      const written: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+        written.push(String(chunk));
+        return true;
+      });
+      const OPAQUE = 'Zq7Z'.repeat(12); // 48 chars, no vendor prefix
+      try {
+        await swapEngine({
+          getEngineDb: () => ({ deleteAllData: () => { throw new Error(`write failed for ${OPAQUE}`); } }),
+          getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
+          getThreadStore: () => ({ deleteAllThreads: () => 0 }),
+          getKnowledgeLayer: () => ({
+            getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+          }),
+          getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+          getCRM: () => ({ rebuildSchema: () => undefined }),
+        }, async () => {
+          const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+          expect(res.status).toBe(500);
+        });
+      } finally {
+        spy.mockRestore();
+      }
+      const ours = written.filter(l => l.includes('/api/data'));
+      expect(ours.length, 'the route must have logged its failure').toBeGreaterThan(0);
+      expect(ours.join('\n'), 'an opaque credential reached the log in clear').not.toContain(OPAQUE);
+    });
+
+    it('DELETE /api/data claims completeness only when every store was reachable', async () => {
+      // A POLARITY CONTROL rather than a witness, and worth having as one: a
+      // `skipped` list that is always non-empty would withdraw the sentence from
+      // every erasure, the same loss of information in the other direction. No
+      // minimal edit to the `skipped` machinery makes this red — deleting it
+      // entirely leaves `message` present and this green — so it kills only
+      // over-reporting mutants.
+      //
+      // The accessors not listed below (`getMemory`, `getSecretStore`) come from the
+      // mock Engine's constructor defaults, not from nowhere; an earlier version of
+      // this comment claimed every one was handed over here, which is false.
+      await swapEngine({
+        getEngineDb: () => ({ deleteAllData: () => undefined }),
+        getRunHistory: () => ({ clearLegacyVerbDefs: () => undefined }),
+        getThreadStore: () => ({ deleteAllThreads: () => 0 }),
+        getKnowledgeLayer: () => ({
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
+        }),
+        getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
+        getCRM: () => ({ rebuildSchema: () => undefined }),
+      }, async () => {
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { deleted: boolean; skipped?: string[]; message?: string; warning?: string };
+        expect(body.skipped, 'nothing was unreachable').toBeUndefined();
+        expect(body.message).toBe('All user data has been permanently deleted');
       });
     });
   });

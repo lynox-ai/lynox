@@ -59,6 +59,17 @@ export interface DisplayNoteInput {
   content: unknown;
 }
 
+/**
+ * The largest page {@link ThreadStore.listThreadsForExport} will return.
+ *
+ * Exported because an exhaustive caller has to know it: such a walk stops when a
+ * page comes back SHORT, so a caller that asks for more than this gets a short
+ * page on the first call and concludes it has everything. Two independent
+ * constants that merely happen to be equal is the version of this that breaks
+ * silently the day one of them moves.
+ */
+export const EXPORT_PAGE_MAX = 500;
+
 export class ThreadStore {
   private readonly db: Database.Database;
 
@@ -107,6 +118,76 @@ export class ThreadStore {
       ? 'SELECT * FROM threads WHERE message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?'
       : 'SELECT * FROM threads WHERE is_archived = 0 AND message_count > 0 ORDER BY is_unread DESC, is_favorite DESC, updated_at DESC LIMIT ?';
     return this.db.prepare(sql).all(limit) as ThreadRecord[];
+  }
+
+  /**
+   * Every thread row, for an exhaustive read — the GDPR Art. 15 export.
+   *
+   * ⚠ Deliberately NOT `listThreads` with an offset, and the three differences are
+   * each a defect that version had:
+   *
+   *  · **`message_count > 0` is gone.** That filter belongs to the thread OVERVIEW:
+   *    a started, empty thread should not appear in the sidebar. But a thread row
+   *    carries `title` — written by the user or composed from their conversation —
+   *    and `primary_subject_id`, which names a person. An export driven by the
+   *    listing omitted all of it, and `message_count` is a rollup counter, so a
+   *    missed update hides a thread that HAS messages (`escalation.ts` creates the
+   *    row and appends in two separate transactions; anything between them leaves
+   *    a titled thread at 0).
+   *  · **`is_archived` is not consulted.** Archiving is a UI gesture, not consent
+   *    to be left out of a data-subject access request.
+   *  · **The key is `id`, not the sort order.** `OFFSET` over `updated_at DESC` is
+   *    not a snapshot: a thread that receives a message mid-walk moves to the front
+   *    and shifts the window, so one row is returned twice and another never. `id`
+   *    is the primary key and immutable, so a walk over `id > last` cannot repeat
+   *    or skip an existing row however the table is written during it. A row
+   *    INSERTED mid-walk may or may not appear — unavoidable without a snapshot,
+   *    and not a loss.
+   *
+   * ⚠ One caveat on that last guarantee, because it was stated unconditionally and
+   * is not. SQLite permits NULL in a non-INTEGER `PRIMARY KEY`, so several NULL ids
+   * can coexist; `ORDER BY id ASC` puts them first and `WHERE id > NULL` matches
+   * nothing, so a page that ENDS on a NULL id breaks the walk and silently drops
+   * every remaining thread. Those two facts are not cause and effect: it takes at
+   * least `EXPORT_PAGE_MAX` NULL-id rows for a page to end on one — with two, the
+   * page ends on a real id and nothing is lost. And it is not reachable from this
+   * codebase at all (`createThread` takes a `string` and is the only insert path),
+   * only through a foreign or restored `history.db`. The guarantee therefore
+   * belongs to our writes rather than to the primary key.
+   *
+   * Pass the previous page's last `id` as `after`; omit it for the first page.
+   */
+  listThreadsForExport(opts: { after?: string | undefined; limit: number }): ThreadRecord[] {
+    const limit = Math.max(1, Math.min(opts.limit, EXPORT_PAGE_MAX));
+    const after = opts.after;
+    return (after === undefined
+      ? this.db.prepare('SELECT * FROM threads ORDER BY id ASC LIMIT ?').all(limit)
+      : this.db.prepare('SELECT * FROM threads WHERE id > ? ORDER BY id ASC LIMIT ?').all(after, limit)
+    ) as ThreadRecord[];
+  }
+
+  /**
+   * GDPR Art. 17: drop EVERY thread row and its messages, in one transaction.
+   *
+   * Not a loop over {@link listThreads} — deliberately, and the difference is the
+   * whole point of the method. That listing is a UI read: it caps at 200 rows and
+   * filters `message_count > 0`. An erasure driven by it therefore left behind
+   * (a) every thread past the cap and (b) every thread whose rollup counter is 0,
+   * whose `title` is user-written text and whose `primary_subject_id` names a
+   * person. A store is the only place that can answer "all of it" for its own
+   * tables; a caller can only ever delete what some listing chose to return.
+   *
+   * `thread_messages` is deleted explicitly rather than relying on the
+   * `ON DELETE CASCADE`: the cascade needs `foreign_keys = ON` on the connection
+   * that runs the DELETE, and a row whose parent thread never existed (writes made
+   * while the pragma was off, e.g. mid-migration) is not reachable by any cascade
+   * at all. Returns the number of thread rows removed.
+   */
+  deleteAllThreads(): number {
+    return this.db.transaction(() => {
+      this.db.prepare('DELETE FROM thread_messages').run();
+      return this.db.prepare('DELETE FROM threads').run().changes;
+    })();
   }
 
   /**
