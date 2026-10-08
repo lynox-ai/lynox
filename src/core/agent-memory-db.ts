@@ -336,8 +336,15 @@ export class AgentMemoryDb {
     this.db.pragma('journal_mode = WAL');
     zeroDeletedContent(this.db);
     this.db.pragma('foreign_keys = ON');
-    this._ensureSchemaVersion();
-    this._migrate();
+    // A migration that throws leaves no object to close, so the connection it
+    // opened is closed here instead of leaking with every failed open.
+    try {
+      this._ensureSchemaVersion();
+      this._migrate();
+    } catch (err) {
+      this.db.close();
+      throw err;
+    }
   }
 
   get path(): string { return this.dbPath; }

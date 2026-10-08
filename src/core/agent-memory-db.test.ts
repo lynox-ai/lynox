@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -811,5 +811,28 @@ describe('AgentMemoryDb', () => {
     it('an unknown id is not dormant — absence is not death', () => {
       expect(db.entityIsDormant('no-such-entity')).toBe(false);
     });
+  });
+});
+
+describe('AgentMemoryDb construction', () => {
+  // A migration that throws leaves no object to call close() on, so the
+  // connection the constructor opened would stay open with every failed open
+  // (the erasure route opens this file itself when the knowledge layer is off).
+  // Counted on Linux, where /proc lists this process's open files.
+  it.runIf(process.platform === 'linux')('closes its connection when a migration throws', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'lynox-am-open-'));
+    try {
+      const file = join(dir, 'agent-memory.db');
+      const seed = new Database(file);
+      seed.exec('CREATE TABLE memories (id TEXT)'); // too old a shape for the migrations
+      seed.close();
+      const openHandles = (): number => readdirSync('/proc/self/fd').filter((fd) => {
+        try { return readlinkSync(`/proc/self/fd/${fd}`) === file; } catch { return false; }
+      }).length;
+      expect(() => new AgentMemoryDb(file), 'fixture: the migration must throw').toThrow();
+      expect(openHandles()).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
