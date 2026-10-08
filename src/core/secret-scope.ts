@@ -285,6 +285,9 @@ export function scopeSecretStore(
     // unresolved infra ref really is absent.
     explainUnresolved: (name) =>
       (!allowed.has(name) && !isInfraSecret(name) ? 'out-of-scope' : undefined),
+    // Where a value came from is the store's to say; a store that cannot say reads as the
+    // environment, so a mandate's turn is refused rather than handed it.
+    isEnvironmentSecret: (name) => inner.isEnvironmentSecret?.(name) ?? true,
 
     // Writes are NOT narrowed, and this is a stated limit of this piece rather
     // than an oversight. This scope is about what a child can REACH;

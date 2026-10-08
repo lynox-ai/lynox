@@ -28,13 +28,28 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, copyFileSync, statSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, copyFileSync, statSync, mkdirSync, openSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, extname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { ToolEntry } from '../../types/index.js';
 import { resolveFileAreaPath, getFileAreaDir } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
+
+/** Whether a file starts like a list of other files ffmpeg would follow: an HLS playlist
+ *  (`#EXTM3U`) or an ffconcat script. Leading whitespace and a UTF-8 byte-order mark are
+ *  skipped, as the demuxers' own probes skip them. */
+export function isPlaylist(path: string): boolean {
+  const fd = openSync(path, 'r');
+  try {
+    const head = Buffer.alloc(256);
+    const n = readSync(fd, head, 0, head.length, 0);
+    const text = head.subarray(0, n).toString('latin1').replace(/^\xEF\xBB\xBF/, '').trimStart();
+    return /^#EXTM3U/i.test(text) || /^ffconcat/i.test(text);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 // ── Resource bounds (safe-by-construction ceilings) ──────────────────────────
 const FFMPEG_TIMEOUT_MS = 60_000;               // hard wall-clock kill
@@ -279,6 +294,10 @@ export const mediaProcessTool: ToolEntry<MediaProcessInput> = {
     const localOutput = join(dir, `output.${spec.ext}`);
     try {
       copyFileSync(resolvedInput, localInput);
+      // A playlist is not media: an HLS or ffconcat list names further files, which ffmpeg
+      // opens over the `file` protocol it needs for the input itself — paths outside the
+      // file area included. Refused on the content ffmpeg would read, not on the extension.
+      if (isPlaylist(localInput)) throw new Error('playlists are not supported as input.');
 
       const args = buildFfmpegArgs(input.operation, input.format, localInput, localOutput, {
         start: input.start,

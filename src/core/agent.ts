@@ -4042,10 +4042,14 @@ export class Agent implements IAgent {
         // and the consent and destination prompts below are no bar for a mandate, which
         // answers its own session's prompts. Every provider slot is refused, the tenant's own
         // keys included: a mandate sets the instance up and has no use for them in a request.
-        // Refused on the name, before the vault is asked: the value is never bound, and the
-        // answer is the same whether the vault holds the name or not.
+        // Refused on the name, before the vault is asked: the value is never bound, and for a
+        // protected name the answer is the same whether the vault holds it or not.
         if (this._toolLock !== null) {
-          const held = secretNames.filter(n => isProtectedSecretWrite(n));
+          // And every value the engine took from its environment, under whatever name: those
+          // are the engine's, not something the setup stored. A store that cannot say where a
+          // value came from is read as the environment.
+          const store = this.secretStore;
+          const held = secretNames.filter(n => isProtectedSecretWrite(n) || (store.isEnvironmentSecret?.(n) ?? true));
           if (held.length > 0) {
             return {
               type: 'tool_result',

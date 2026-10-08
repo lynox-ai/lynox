@@ -10,6 +10,7 @@ import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
+import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -2411,6 +2412,21 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // headless write actually execute; without it the gate below would block
     // every unattended write (no `promptUser` in a background run).
     // Asked for writes only: a read is never gated by the contract here.
+    // A mandate's turn does not write to an account connected through a provider preset
+    // (PRD customer-granted-operator-access §3.13). The consent prompt below is no bar here:
+    // a mandate answers its own session's prompts, and an approval holds for the host for the
+    // rest of the session. The write goes to the owner as a proposal instead. Checked before
+    // the contract as well, so no grant opens it either.
+    if (isWriteMethod(method) && !isOwnerPrincipal(agent.principal)) {
+      const presetProfile = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname);
+      if (presetProfile?.auth?.oauth?.preset_id !== undefined) {
+        blockedVerbatim(
+          `Blocked: ${method} to ${new URL(input.url).hostname} writes to an account the owner connected, which this session may not do. ` +
+          'Propose the change as a task instead (task_create); it runs once the owner approves it.',
+        );
+      }
+    }
+
     const governing = isWriteMethod(method) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const contractGrantsWrite =

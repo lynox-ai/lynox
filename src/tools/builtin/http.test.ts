@@ -12,6 +12,8 @@ import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../.
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
@@ -78,7 +80,7 @@ const TEST_USER_CONFIG = {} as LynoxUserConfig;
 let testCtx: ToolContext;
 let testCounters: SessionCounters;
 
-function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted' } = {}): never {
+function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted'; principal?: RequestPrincipal } = {}): never {
   const c = extras.capabilityContract;
   return {
     promptUser: extras.promptUser,
@@ -87,6 +89,7 @@ function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityCo
       : { contract: undefined, withheld: extras.withheld ?? 'none' }),
     toolContext: testCtx,
     sessionCounters: testCounters,
+    principal: extras.principal ?? OWNER_PRINCIPAL,
   } as never;
 }
 
@@ -897,6 +900,79 @@ describe('httpRequestTool', () => {
           makeAgent({ capabilityContract: contract, withheld: 'untrusted' }),
         );
         expect(res).toContain('read external content before this call');
+      });
+
+      // PRD customer-granted-operator-access §3.13: a mandate answers its own session's
+      // prompts, so the consent prompt is no bar to a write on an account the owner connected.
+      describe('a mandate and an account connected through a preset', () => {
+        const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+        async function withProfile(presetId: string | undefined): Promise<void> {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            auth: {
+              type: 'oauth2',
+              vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: {
+                grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+                ...(presetId === undefined ? { token_url: 'https://example.com/oauth/token' } : { preset_id: presetId, preset_params: { shop: 'acme' } }),
+              },
+            },
+          });
+          testCtx.apiStore = store;
+        }
+
+        it.each([
+          ['an interactive turn that would allow it', { promptUser: vi.fn().mockResolvedValue('Allow') }],
+          ['a contract that grants it', { capabilityContract: contract }],
+        ])('refuses the write in %s, and nothing is sent', async (_label, extras) => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await visible(
+            { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+            makeAgent({ ...extras, principal: mandate }),
+          );
+          expect(res).toContain('writes to an account the owner connected');
+          expect(res).toContain('task_create');
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(extras.promptUser ?? vi.fn()).not.toHaveBeenCalled();
+        });
+
+        it('control: the owner\'s same write goes out', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler(
+            { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+            makeAgent({ capabilityContract: contract }),
+          );
+          expect(fetchMock).toHaveBeenCalled();
+        });
+
+        it('control: the mandate\'s read of the same account goes out', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler({ url: 'https://example.com/v1/report' }, makeAgent({ principal: mandate }));
+          expect(fetchMock).toHaveBeenCalled();
+        });
+
+        it('control: the mandate\'s write to a profile without a preset goes out', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler(
+            { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+            makeAgent({ capabilityContract: contract, principal: mandate }),
+          );
+          expect(fetchMock).toHaveBeenCalled();
+        });
       });
 
       describe('a redirect after a reviewed write', () => {
@@ -2043,7 +2119,7 @@ describe('httpRequestTool', () => {
           resolvePrompt = res;
         }),
       );
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL } as never;
 
       const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -2077,7 +2153,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
         new Promise<string>((res) => { resolvePrompt = res; }),
       );
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL } as never;
 
       const url = `https://api-parallel-deny-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -2104,7 +2180,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>()
         .mockResolvedValueOnce('Deny')
         .mockResolvedValueOnce('Allow');
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL } as never;
 
       const url = `https://api-reprompt-${Date.now()}.example.com/v1/x`;
       const first = await visible({ url, method: 'POST', body: '{}' }, agent);
