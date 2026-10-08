@@ -491,9 +491,10 @@ describe('error-reporting scrubbing', () => {
 
   it('reads camelCase and joined names too', async () => {
     const { beforeSend } = await hooks();
-    const out = beforeSend({ request: { query_string: 'apiKey=a1&accessToken=a2&apikey=a3&pageSize=20' } });
+    // `userPassword` is found only by splitting the camelCase; `apikey` only by the joined list.
+    const out = beforeSend({ request: { query_string: 'apiKey=a1&accessToken=a2&apikey=a3&userPassword=a4&pageSize=20' } });
     const qs = (out as { request: Record<string, string> }).request['query_string'];
-    expect(qs).toBe('apiKey=***&accessToken=***&apikey=***&pageSize=20');
+    expect(qs).toBe('apiKey=***&accessToken=***&apikey=***&userPassword=***&pageSize=20');
   });
 
   it('reads a string that starts with a pair as a query string, since one arrives on its own too', async () => {
