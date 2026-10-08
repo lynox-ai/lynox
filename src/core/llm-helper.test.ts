@@ -311,6 +311,39 @@ describe('callForStructuredJson', () => {
     await expect(callForStructuredJson({ ...BASE_OPTS, client })).rejects.toThrow(/did not call the extract tool/);
   });
 
+  it('names the block types of a response without a tool call only in their shape', async () => {
+    const client = mockClient({
+      contentBlocks: [
+        { type: 'text', text: 'no', citations: null } as Anthropic.ContentBlock,
+        { type: 'SENTINEL from the server' } as unknown as Anthropic.ContentBlock,
+      ],
+    });
+    const err: unknown = await callForStructuredJson({ ...BASE_OPTS, client }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExtractShapeError);
+    expect((err as Error).message).toBe('Model did not call the extract tool. Got content types: [text, <unprintable>]');
+  });
+
+  it('raises every value-free refusal as an ExtractShapeError', () => {
+    const cases: Array<[unknown, Record<string, unknown>]> = [
+      [3, { type: 'string' }],
+      ['x', { type: 'integer' }],
+      [1.5, { type: 'integer' }],
+      [-1, { type: 'number', minimum: 0 }],
+      [9, { type: 'number', maximum: 5 }],
+      ['x', { type: 'boolean' }],
+      ['x', { type: 'array', items: { type: 'string' } }],
+      [['a', 'b'], { type: 'array', items: { type: 'string' }, maxItems: 1 }],
+      ['x', { type: 'object', properties: {} }],
+    ];
+    for (const [value, prop] of cases) {
+      let caught: unknown;
+      try {
+        validateAgainstSchema({ v: value }, { type: 'object', properties: { v: prop } } as never);
+      } catch (err) { caught = err; }
+      expect(caught, JSON.stringify(prop)).toBeInstanceOf(ExtractShapeError);
+    }
+  });
+
   it('throws when the tool_use block has a malformed input shape (missing required field)', async () => {
     const client = mockClient({
       toolInput: { name: 'foo' }, // missing count + level
