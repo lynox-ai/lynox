@@ -10,7 +10,7 @@
  * integration tests pass through to the real binary.
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
-import { mkdtempSync, readdirSync, existsSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // node:child_process is mocked below; execFileSync is preserved via `...actual`,
@@ -48,7 +48,7 @@ const {
   buildFfmpegArgs,
   validateMediaInput,
   checkOutputSize,
-  isPlaylist,
+  INPUT_DEMUXERS,
   MEDIA_FORMATS,
   MEDIA_OPERATIONS,
 } = await import('./media-process.js');
@@ -156,27 +156,6 @@ describe('validateMediaInput / pre-spawn rejections', () => {
     expect(h.spawnCount).toBe(0);
   });
 
-  // A playlist names further files, which ffmpeg would open over the `file` protocol it needs
-  // for the input itself — outside the file area too. Refused on content, whatever the name.
-  it.each([
-    ['an HLS playlist named like a clip', 'clip.mp4', '#EXTM3U\n#EXTINF:1,\n/etc/passwd\n'],
-    ['an ffconcat script', 'list.txt', 'ffconcat version 1.0\nfile /etc/passwd\n'],
-    ['a playlist behind a byte-order mark and blank lines', 'clip.mov', '\uFEFF\n  #EXTM3U\n/etc/passwd\n'],
-  ])('rejects %s before ffmpeg runs, and leaves no work dir', async (_label, name, body) => {
-    writeFileSync(join(getFileAreaDir(), name), body);
-    const before = workDirCount();
-    await expect(run({ operation: 'transcode', input: name, format: 'mp4' }))
-      .rejects.toThrow(/playlists are not supported/);
-    expect(h.spawnCount).toBe(0);
-    expect(workDirCount()).toBe(before);
-  });
-
-  it('isPlaylist: control — a media header is not a playlist', () => {
-    const p = join(getFileAreaDir(), 'real.wav');
-    writeFileSync(p, Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(40)]));
-    expect(isPlaylist(p)).toBe(false);
-  });
-
   it('rejects a valid-but-nonexistent input (stat gate) before ffmpeg runs', async () => {
     await expect(run({ operation: 'transcode', input: 'does-not-exist.mov', format: 'mp4' }))
       .rejects.toThrow(/not found in your files area/);
@@ -193,6 +172,7 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     expect(args).toEqual([
       '-hide_banner', '-nostdin', '-y',
       '-protocol_whitelist', 'file,pipe',
+      '-format_whitelist', INPUT_DEMUXERS.join(','),
       '-i', IN,
       '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-movflags', '+faststart', '-f', 'mp4',
@@ -201,13 +181,25 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     ]);
     // protocol_whitelist must be an INPUT option (before -i).
     expect(args.indexOf('-protocol_whitelist')).toBeLessThan(args.indexOf('-i'));
+    expect(args.indexOf('-format_whitelist')).toBeLessThan(args.indexOf('-i'));
   });
+
+  // A demuxer that reads a list of further files would open them over `file`, outside the
+  // file area too. None of them may be on the list ffmpeg chooses from by content.
+  it.each(['hls', 'applehttp', 'dash', 'imf', 'concat', 'image2', 'image2pipe', 'm3u', 'tee', 'lavfi', 'subfile'])(
+    'the input demuxer list leaves out %s', (demuxer) => {
+      expect(INPUT_DEMUXERS).not.toContain(demuxer);
+      const args = buildFfmpegArgs('transcode', 'mp4', IN, OUT, {});
+      expect(args[args.indexOf('-format_whitelist') + 1]!.split(',')).not.toContain(demuxer);
+    },
+  );
 
   it('trim → wav: seek+range are OUTPUT options rendered as \\d+.\\d{3}', () => {
     const args = buildFfmpegArgs('trim', 'wav', IN, '/tmp/priv/output.wav', { start: 1.5, duration: 2 });
     expect(args).toEqual([
       '-hide_banner', '-nostdin', '-y',
       '-protocol_whitelist', 'file,pipe',
+      '-format_whitelist', INPUT_DEMUXERS.join(','),
       '-i', IN,
       '-ss', '1.500',
       '-vn', '-c:a', 'pcm_s16le', '-f', 'wav',
@@ -221,7 +213,7 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     const args = buildFfmpegArgs('extract_audio', 'mp3', IN, '/tmp/priv/output.mp3', {});
     expect(args).toContain('-vn');
     expect(args).toContain('libmp3lame');
-    expect(args.slice(0, 5)).toEqual(['-hide_banner', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe']);
+    expect(args.slice(0, 7)).toEqual(['-hide_banner', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_DEMUXERS.join(',')]);
   });
 
   it('caps an oversized requested duration to the hard ceiling (600s)', () => {

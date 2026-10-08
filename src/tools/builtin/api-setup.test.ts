@@ -25,6 +25,8 @@ import * as llmHelper from '../../core/llm-helper.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { scanToolResult } from '../../core/output-guard.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -72,8 +74,10 @@ function createMockAgent(
   apiStore?: ApiStore | null,
   secretStore?: unknown,
   promptUser?: (question: string, options?: string[]) => Promise<string>,
+  principal: RequestPrincipal = OWNER_PRINCIPAL,
 ) {
   return {
+    principal,
     // Bootstrap fetches now charge against sessionCounters.httpRequests
     // (matches http.ts). The stub just provides a writable counter; tests
     // that care about exact request budgets can assert on it.
@@ -540,6 +544,74 @@ describe('api_setup tool', () => {
 
       const saved = JSON.parse(readFileSync(join(mockLynoxDir, 'apis', 'test-api.json'), 'utf-8')) as ApiProfile;
       expect(saved.name).toBe('Updated API');
+    });
+  });
+
+  // PRD customer-granted-operator-access §3.13 (H2): a mandate's turn changes only a profile
+  // the mandate wrote; the author is the engine's to record. The owner is the control each time.
+  describe('who may change a profile', () => {
+    const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+    const other: RequestPrincipal = { kind: 'mandate', email: 'other@example.org' };
+    const stored = (store: ApiStore): ApiProfile => store.get('test-api')!;
+
+    it('a mandate\'s create records the mandate as author; one passed in the input is not taken', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, created_by: 'mandate:someone@example.org' } }, createMockAgent(store, undefined, undefined, mandate));
+      expect(stored(store).created_by).toBe('mandate:setup@example.org');
+    });
+
+    it('control: the owner\'s create records no author, whatever the input says', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, created_by: 'mandate:setup@example.org' } }, createMockAgent(store));
+      expect(stored(store).created_by).toBeUndefined();
+    });
+
+    it.each([
+      ['update', { action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }],
+      ['create over the same id', { action: 'create', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }],
+      ['refine', { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } }],
+      ['delete', { action: 'delete', id: 'test-api' }],
+      ['connect', { action: 'connect', id: 'test-api' }],
+      ['fetch_token into a name of its choosing', { action: 'fetch_token', id: 'test-api', output_secret_name: 'COPY_TOKEN' }],
+    ])('a mandate may not %s a profile the owner set up, and nothing changes', async (_label, input) => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store));
+      const before = JSON.stringify(stored(store));
+      const result = await apiSetupTool.handler(input as never, createMockAgent(store, undefined, undefined, mandate));
+      expect(result).toContain('was not set up in this session\'s name');
+      expect(JSON.stringify(stored(store))).toBe(before);
+    });
+
+    it('a mandate may not change a profile another mandate set up', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store, undefined, undefined, other));
+      const result = await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, createMockAgent(store, undefined, undefined, mandate));
+      expect(result).toContain('was not set up in this session\'s name');
+      expect(store.get('test-api')).toBeDefined();
+    });
+
+    it('a mandate changes and deletes a profile it set up itself', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, undefined, mandate);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      expect(await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, agent)).toContain('Updated API profile');
+      expect(stored(store).name).toBe('Changed');
+      expect(stored(store).created_by).toBe('mandate:setup@example.org');
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent)).toContain('Deleted');
+    });
+
+    it('control: the owner\'s update of a mandate\'s profile makes it the owner\'s', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store, undefined, undefined, mandate));
+      await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
+      expect(stored(store).created_by).toBeUndefined();
+    });
+
+    it('a mandate\'s fetch_token on the owner\'s profile without a name of its own is not refused here (a read renews the same way)', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store));
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'test-api' }, createMockAgent(store, undefined, undefined, mandate));
+      expect(result).not.toContain('was not set up in this session\'s name');
     });
   });
 

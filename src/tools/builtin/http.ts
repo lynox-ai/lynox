@@ -11,6 +11,7 @@ import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { secretsForProfile } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -1429,10 +1430,10 @@ async function attachEngineManagedAuth(
   toolContext: ToolContext | undefined,
   agent: import('../../types/index.js').IAgent,
 ): Promise<AttachedAuth> {
-  const secretStore = agent.secretStore;
+  const vault = agent.secretStore;
   const apiStore = toolContext?.apiStore;
   if (apiStore) stampResolvedConnection(url, apiStore);
-  if (!apiStore || !secretStore) return {};
+  if (!apiStore || !vault) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
   let hostname: string;
@@ -1462,6 +1463,9 @@ async function attachEngineManagedAuth(
   }
   const auth = profile.auth;
   if (!auth) return {};
+  // Every read below, the renewal's included, goes through the profile's view: a profile a
+  // mandate wrote does not get the environment's values or a preset account's credentials.
+  const secretStore = secretsForProfile(vault, profile, apiStore);
 
   /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
   const put = (name: string, value: string): AttachedAuth => {
@@ -2133,6 +2137,27 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // A mandate's turn does not write to an account connected through a provider preset
+    // (PRD customer-granted-operator-access §3.13). The consent prompt is no bar here: a
+    // mandate answers its own session's prompts, and an approval holds for the host for the
+    // rest of the session. The write goes to the owner as a proposal instead. Checked before
+    // the credential is attached (so a refused write renews no token) and before the
+    // contract (so no grant opens it). Every profile on the host counts, a host two profiles
+    // share included, and the host is read without a trailing root dot, which names the same
+    // host to DNS and a different key to the profile map.
+    if (isWriteMethod(method) && !isOwnerPrincipal(agent.principal)) {
+      const apiStore = toolContext?.apiStore;
+      const host = new URL(input.url).hostname.replace(/\.$/, '');
+      const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
+        .map((id) => (id === undefined ? undefined : apiStore.get(id)));
+      if (onHost.some((p) => p?.auth?.oauth?.preset_id !== undefined)) {
+        blockedVerbatim(
+          `Blocked: ${method} to ${host} writes to an account the owner connected, which this session may not do. ` +
+          'Propose the change as a task instead (task_create); it runs once the owner approves it.',
+        );
+      }
+    }
+
     // Engine-managed auth runs BEFORE the egress scan, and reports back the slot
     // it actually filled. The scan then skips exactly that slot.
     //
@@ -2412,21 +2437,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // headless write actually execute; without it the gate below would block
     // every unattended write (no `promptUser` in a background run).
     // Asked for writes only: a read is never gated by the contract here.
-    // A mandate's turn does not write to an account connected through a provider preset
-    // (PRD customer-granted-operator-access §3.13). The consent prompt below is no bar here:
-    // a mandate answers its own session's prompts, and an approval holds for the host for the
-    // rest of the session. The write goes to the owner as a proposal instead. Checked before
-    // the contract as well, so no grant opens it either.
-    if (isWriteMethod(method) && !isOwnerPrincipal(agent.principal)) {
-      const presetProfile = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname);
-      if (presetProfile?.auth?.oauth?.preset_id !== undefined) {
-        blockedVerbatim(
-          `Blocked: ${method} to ${new URL(input.url).hostname} writes to an account the owner connected, which this session may not do. ` +
-          'Propose the change as a task instead (task_create); it runs once the owner approves it.',
-        );
-      }
-    }
-
     const governing = isWriteMethod(method) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const contractGrantsWrite =

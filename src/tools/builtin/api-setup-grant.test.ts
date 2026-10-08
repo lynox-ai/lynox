@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -131,8 +133,10 @@ function makeAgent(
   vault: MockVault,
   promptUser?: () => Promise<string>,
   granted: readonly string[] = ['http_request', 'api_setup'],
+  principal: RequestPrincipal = OWNER_PRINCIPAL,
 ): never {
   return {
+    principal,
     sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
     secretStore: vault,
     getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
@@ -3191,5 +3195,111 @@ describe('the two properties the comments claim, which nothing was checking', ()
     // the recorder were simply not wired up, which is the failure that produced
     // the wrong verdict in the first place.
     expect(reads, 'the read recorder captured nothing at all, so the two assertions above prove nothing').toContain('CRM_API_REFRESH_TOKEN');
+  });
+});
+
+// PRD customer-granted-operator-access §3.13 (H2), through the real attach and renewal: a
+// mandate does not write to an account connected through a preset, and a profile a mandate
+// wrote does not get the environment's values or a preset account's credentials. The owner is
+// the control each time.
+describe('mandates and stored credentials', () => {
+  const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+  const M = 'mandate:setup@example.org';
+  const PRESET_ACK = { accepted: true as const, hosts: ['api.crm.example', 'auth.bexio.com'], accepted_at: '2026-09-22T00:00:00.000Z' };
+  const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
+
+  /** The mock vault, able to say where a value came from and to name the refs in an input. */
+  function vault(seed: Record<string, string>, env: readonly string[] = []): MockVault {
+    return {
+      ...makeVault(seed),
+      isEnvironmentSecret: (n: string) => env.includes(n),
+      extractSecretNames: (input: unknown) => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
+    } as MockVault;
+  }
+
+  /** The crm profile, connected through the bexio preset, with a token that is due. */
+  const presetProfile = (): ApiProfile => crmProfile({
+    custom_endpoint_ack: PRESET_ACK,
+    auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, preset_id: 'bexio', token_expires_at: Date.now() - 1000 } },
+  });
+
+  async function send(
+    profiles: ApiProfile[],
+    v: MockVault,
+    req: { url: string; method?: string; body?: string },
+    principal: RequestPrincipal,
+  ): Promise<{ calls: Array<{ url: string; auth: string | undefined }>; out: string }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    for (const p of profiles) apiStore.register(p);
+    const calls: Array<{ url: string; auth: string | undefined }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      calls.push({ url, auth: h['Authorization'] ?? h['authorization'] });
+      if (url.includes('/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const out = await httpRequestTool.handler(
+      { method: 'GET', ...req } as never,
+      makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal),
+    ).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    return { calls, out: String(out) };
+  }
+
+  it('control: the owner\'s read of a preset account renews the due token and goes out with it', async () => {
+    const { calls } = await send([presetProfile()], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls.some((c) => c.url.includes('auth.bexio.com') && c.url.includes('/token'))).toBe(true);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
+  });
+
+  it('control: the mandate\'s read of the same account does the same', async () => {
+    const { calls } = await send([presetProfile()], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
+  });
+
+  it.each([
+    ['the host as the profile names it', 'https://api.crm.example/v1/contacts'],
+    ['the host with a trailing root dot', 'https://api.crm.example./v1/contacts'],
+  ])('a mandate\'s write to a preset account (%s) is refused before the credential is attached: no renewal, nothing sent', async (_label, url) => {
+    const { calls, out } = await send([presetProfile()], vault(SEED), { url, method: 'POST', body: '{}' }, mandate);
+    expect(out).toContain('writes to an account the owner connected');
+    expect(calls).toEqual([]);
+  });
+
+  it('a mandate\'s write is refused on a host a preset profile shares with another profile', async () => {
+    const second: ApiProfile = { ...crmProfile({ id: 'crm-two', auth: { type: 'none' } }) };
+    const { calls, out } = await send([presetProfile(), second], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(out).toContain('writes to an account the owner connected');
+    expect(calls).toEqual([]);
+  });
+
+  const bearer = (vaultKey: string, created_by?: string): ApiProfile => ({
+    ...crmProfile({ auth: { type: 'bearer', vault_keys: [vaultKey] } }),
+    ...(created_by === undefined ? {} : { created_by }),
+  });
+
+  it('a profile a mandate wrote does not get a value the engine took from its environment', async () => {
+    const { calls } = await send([bearer('ENV_TOKEN', M)], vault({ ENV_TOKEN: 'from-env' }, ['ENV_TOKEN']), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls[0]?.auth).toBeUndefined();
+  });
+
+  it('control: the owner\'s profile gets the same value', async () => {
+    const { calls } = await send([bearer('ENV_TOKEN')], vault({ ENV_TOKEN: 'from-env' }, ['ENV_TOKEN']), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls[0]?.auth).toBe('Bearer from-env');
+  });
+
+  it('control: a profile a mandate wrote gets what the setup stored', async () => {
+    const { calls } = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example/v1/contacts' }, mandate);
+    expect(calls[0]?.auth).toBe('Bearer stored');
+  });
+
+  it('a profile a mandate wrote does not get the token of a preset account', async () => {
+    const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
+    const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
   });
 });

@@ -32,6 +32,8 @@ import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
 import { isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -1333,6 +1335,19 @@ function deletedMeanwhile(
   return `Token exchange completed, but api_profile "${profile.id}" was deleted while it ran.${purgeMessage(purge)}`;
 }
 
+/**
+ * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
+ * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
+ * host, the names the engine resolves — holds only while the profile is the one its author
+ * saved, and `update` replaces a profile whole. A profile without an author is the owner's,
+ * so the answer for one from before authors were recorded is no. `null` = go ahead.
+ */
+export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | undefined, id: string): string | null {
+  if (existing === undefined || isOwnerPrincipal(agent.principal)) return null;
+  if (existing.created_by === principalTag(agent.principal)) return null;
+  return `Error: API profile "${id}" was not set up in this session's name, so this session may not change, connect or delete it. Nothing was changed. Ask the owner to make the change.`;
+}
+
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
@@ -1538,6 +1553,8 @@ ${draftJson}
       if (!apiStore) return 'No API profiles registered.';
       const existing = apiStore.get(input.id);
       if (!existing) return `API profile "${input.id}" not found.`;
+      const foreignRefine = foreignProfileRefusal(agent, existing, input.id);
+      if (foreignRefine) return foreignRefine;
 
       if (input.refine.response_shape) {
         const shapeErr = validateShape(input.refine.response_shape);
@@ -1589,6 +1606,13 @@ ${draftJson}
       if (error) {
         return `Validation error: ${error}`;
       }
+      // `create` overwrites an existing id as well, so both ask. The author is the engine's
+      // to record, never the input's: the owner's save makes the profile the owner's, and a
+      // mandate's save records the mandate.
+      const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
+      if (foreignSave) return foreignSave;
+      delete profile.created_by;
+      if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
 
       // Wave 5d BYOK liability gate: a profile pointed at a host outside
       // lynox's vetted sub-processor list cannot be saved without explicit
@@ -1866,6 +1890,8 @@ ${draftJson}
       if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
+      const foreignConnect = foreignProfileRefusal(agent, profile, id);
+      if (foreignConnect) return foreignConnect;
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
@@ -2000,6 +2026,8 @@ ${draftJson}
       // Read before the delete: what the vault holds for this profile is decided
       // by the profile, and afterwards there is no profile to ask.
       const existing = apiStore.get(id);
+      const foreignDelete = foreignProfileRefusal(agent, existing, id);
+      if (foreignDelete) return foreignDelete;
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
@@ -2028,6 +2056,13 @@ ${draftJson}
       const apiStore = agent.toolContext?.apiStore;
       const profile = apiStore?.get(input.id);
       if (!profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
+      // A renewal on someone else's profile is what a read through it does anyway, and it
+      // writes where that profile's tokens live. A name of the caller's choosing would copy
+      // that account's token to where the profile's rules no longer reach it.
+      if (input.output_secret_name !== undefined) {
+        const foreignFetch = foreignProfileRefusal(agent, profile, input.id);
+        if (foreignFetch) return foreignFetch;
+      }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
@@ -2079,7 +2114,9 @@ ${draftJson}
       if (!clientIdKey || !clientSecretKey) {
         return `Error: profile "${input.id}" auth.oauth is missing client_id_key or client_secret_key. Update the profile with the vault key names that hold the OAuth credentials.`;
       }
-      const secretStore = agent.secretStore;
+      // The profile's view of the vault: a profile a mandate wrote does not get the
+      // environment's values or a preset account's credentials (`profile-secret-view.ts`).
+      const secretStore = agent.secretStore && apiStore ? secretsForProfile(agent.secretStore, profile, apiStore) : undefined;
       if (!secretStore) {
         return 'Error: no secret store wired in this context — cannot resolve OAuth credentials.';
       }

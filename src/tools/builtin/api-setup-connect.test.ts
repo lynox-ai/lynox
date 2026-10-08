@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -132,6 +133,7 @@ const CLIENT_SECRET_VALUE = 'not-a-real-client-secret-only-a-fixture';
 
 function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE }): never {
   return {
+    principal: OWNER_PRINCIPAL,
     sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
     secretStore: {
       resolveSecretRefs: (input: unknown): unknown => {
