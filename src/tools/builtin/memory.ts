@@ -6,6 +6,7 @@ import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTI
 import { estimateTokens } from '../../core/llm-helper.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
+import { privateThreadRefusal } from './private-thread.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
@@ -260,6 +261,8 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     },
   },
   handler: async (input: MemoryStoreInput, agent: IAgent): Promise<string> => {
+    const privateRefusal = privateThreadRefusal(agent);
+    if (privateRefusal) return privateRefusal;
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
     }
@@ -481,6 +484,8 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
     },
   },
   handler: async (input: MemoryUpdateInput, agent: IAgent): Promise<string> => {
+    const privateRefusal = privateThreadRefusal(agent);
+    if (privateRefusal) return privateRefusal;
     if (!agent.memory) {
       return 'Memory is not configured for this agent.';
     }

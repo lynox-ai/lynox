@@ -1156,6 +1156,30 @@ export class KnowledgeStore {
     return removed;
   }
 
+  /**
+   * Hard-delete every entry captured in one conversation, whatever its status.
+   *
+   * The retroactive half of private mode. The toggle tells the user "this chat is kept out
+   * of memory", and people switch it on AFTER something sensitive was said — so the entries
+   * that conversation already produced have to go, not only the ones it would produce next.
+   * `source_thread_id` is a soft reference (no cascade reaches it), which is why this is a
+   * targeted delete and not a side effect of anything else.
+   *
+   * Every status, `superseded` and `rejected` included: an entry kept "for audit" still holds
+   * the text, and the promise is about the text. The seeded `profile` line goes with it, as in
+   * {@link deleteBySubject} — the always-loaded block is where a surviving copy keeps being read.
+   */
+  deleteByThread(threadId: string): number {
+    const doomed = this.db.prepare(
+      'SELECT text FROM knowledge_entries WHERE source_thread_id = ?',
+    ).all(threadId) as Array<{ text: string }>;
+    const removed = this.db.prepare('DELETE FROM knowledge_entries WHERE source_thread_id = ?').run(threadId).changes;
+    if (removed > 0) {
+      for (const row of doomed) this._dropSeededProfileLine(this.engine.dec(row.text));
+    }
+    return removed;
+  }
+
   // ── Focus derivation (H2-gated) ──
 
   private _renderFocus(turnText: string, threadAnchorSubjectId: string | null, focusOverrideSubjectId: string | null): string | null {

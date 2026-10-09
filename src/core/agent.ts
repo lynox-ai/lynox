@@ -1790,6 +1790,10 @@ export class Agent implements IAgent {
         source: 'capture',
       });
       if (facts.length === 0) return;
+      // Re-read after the extractor call. The gate in `_captureAtTurnEnd` ran before it, and
+      // private mode can be switched on while the call is out: the switch purges what the
+      // thread already stored, so a write landing after it would survive the purge.
+      if (this.skipMemoryExtraction) return;
 
       for (const fact of facts) {
         // The SAME gate the `remember` tool passes, not just the same write. The

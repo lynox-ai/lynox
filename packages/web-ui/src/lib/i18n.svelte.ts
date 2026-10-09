@@ -52,6 +52,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.run_interrupted': { de: 'Lauf unterbrochen — erneut starten', en: 'Run interrupted — retry' },
 	'threads.private_on': { de: 'Privat-Modus an — dieser Chat wird nicht ins Gedächtnis aufgenommen', en: 'Private mode on — this chat is kept out of memory' },
 	'threads.private_off': { de: 'Privat-Modus aus — klicken, um diesen Chat vom Gedächtnis auszunehmen', en: 'Private mode off — click to keep this chat out of memory' },
+	'threads.error_extraction': { de: 'Privat-Modus konnte nicht umgestellt werden', en: 'Could not change private mode' },
+	'threads.private_purge_incomplete': { de: 'Privat-Modus ist an. Was dieser Chat schon ins Gedächtnis geschrieben hatte, ließ sich aber nicht vollständig entfernen.', en: 'Private mode is on, but not everything this chat had already put into memory could be removed.' },
 	'threads.rename': { de: 'Umbenennen', en: 'Rename' },
 	'threads.delete': { de: 'Löschen', en: 'Delete' },
 	'threads.confirm_delete': { de: 'Thread endgültig löschen?', en: 'Permanently delete this thread?' },

@@ -897,6 +897,28 @@ describe('KnowledgeStore write-path dedup — subject-null resolution (completes
     expect(ks.deleteBySubject(dup)).toBe(1);
     expect(ks.getEntry(entry.id)).toBeNull();
   });
+
+  it('deleteByThread removes every entry one conversation captured, whatever its status, and nothing else', () => {
+    // The retroactive half of private mode. `source_thread_id` is a soft reference, so no
+    // cascade reaches these rows; before this there was no delete keyed on it at all.
+    const { ks } = make();
+    const active = ks.write({ text: 'Jana Reber lives in Bern', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'private-chat' });
+    const queued = ks.write({ text: 'Jana Reber earns 9000', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'private-chat' });
+    const retired = ks.write({ text: 'Jana Reber prefers email', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'private-chat' });
+    ks.retireEntry(retired.id, 'user_asserted'); // kept "for audit" still holds the text
+    const elsewhere = ks.write({ text: 'ACME pays by invoice', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'other-chat' });
+    const unthreaded = ks.write({ text: 'ACME renews in March', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(queued.status).toBe('pending_review');
+
+    expect(ks.deleteByThread('private-chat')).toBe(3);
+
+    expect(ks.getEntry(active.id)).toBeNull();
+    expect(ks.getEntry(queued.id)).toBeNull();
+    expect(ks.getEntry(retired.id)).toBeNull();
+    expect(ks.getEntry(elsewhere.id)).not.toBeNull();
+    expect(ks.getEntry(unthreaded.id)).not.toBeNull();
+    expect(ks.deleteByThread('private-chat')).toBe(0);
+  });
 });
 
 describe('pendingCountForThread', () => {
@@ -1093,6 +1115,14 @@ describe('the always-loaded profile block and who may reach into it', () => {
     const { ks } = make();
     const id = seed(ks, 'agent');
     expect(ks.deleteEntry(id)).toBe(true);
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('a private-mode purge removes the line too — the block is where a surviving copy keeps being read', () => {
+    const { ks } = make();
+    ks.setBlockContent('profile', LINE);
+    ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'private-chat' });
+    expect(ks.deleteByThread('private-chat')).toBe(1);
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
   });
 });

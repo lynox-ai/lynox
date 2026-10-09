@@ -1,5 +1,6 @@
 import { getApiBase } from '../config.svelte.js';
 import { addToast } from './toast.svelte.js';
+import { privateToggleFailure } from './private-toggle.js';
 import { t } from '../i18n.svelte.js';
 import { dropPersistedThread, forgetDroppedThread } from './chat.svelte.js';
 import { parseActiveRuns, type ActiveRunStatus } from '../utils/active-runs.js';
@@ -183,9 +184,10 @@ export async function toggleExtraction(id: string): Promise<void> {
 		body: JSON.stringify({ skip_extraction: newValue }),
 	});
 	if (!res.ok) {
-		// Rollback to previous state
-		thread.skip_extraction = oldValue;
-		addToast(t('threads.error_extraction'), 'error');
+		// Back to the state the server holds, which is not always the previous one.
+		const failure = privateToggleFailure(oldValue === 1, await res.json().catch(() => null));
+		thread.skip_extraction = failure.skip ? 1 : 0;
+		addToast(t(failure.messageKey), 'error');
 	}
 }
 
