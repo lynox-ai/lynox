@@ -175,11 +175,16 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           return `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}`;
         }
 
-        // Reply-all: union with original To + Cc, minus our own address
+        // Reply-all: union with original To + Cc, minus our own address and
+        // minus whoever the explicit cc already names (that entry is kept as given)
         let ccAddrs: MailAddress[] = input.cc ? parseAddressList(input.cc) : [];
         if (input.reply_all) {
           const ourAddress = sendingAddress;
-          const seen = new Set<string>([...toAddrs.map(a => a.address.toLowerCase()), ourAddress.toLowerCase()]);
+          const seen = new Set<string>([
+            ...toAddrs.map(a => a.address.toLowerCase()),
+            ...ccAddrs.map(a => a.address.toLowerCase()),
+            ourAddress.toLowerCase(),
+          ]);
           for (const addr of [...original.envelope.to, ...original.envelope.cc]) {
             const key = addr.address.toLowerCase();
             if (seen.has(key)) continue;
