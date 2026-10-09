@@ -61,6 +61,8 @@ interface MockVault {
   set(name: string, value: string): void;
   deleteSecret?(name: string): boolean;
   peek(name: string): string | undefined;
+  /** Every name the store holds, as the real store's `listNames`. */
+  listNames(): string[];
   /** Optional, as on the real store — the renewal's log sink calls it if present. */
   maskAll?(text: string): string;
 }
@@ -102,6 +104,7 @@ function makeVault(
       store[name] = value;
     },
     peek: (name) => store[name],
+    listNames: () => Object.keys(store),
   };
   if (opts.mask !== undefined) {
     const mask = opts.mask;
@@ -3688,6 +3691,140 @@ describe('mandates and stored credentials', () => {
     const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
     const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
+  });
+
+  describe('where a profile a mandate wrote may store its tokens', () => {
+    const minting = (): string[] => {
+      const calls: string[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+        return new Response(JSON.stringify({ access_token: 'MINTED', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      return calls;
+    };
+    const mandateStore = (): ApiStore => {
+      const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+      engines.push(db);
+      const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+      apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+      return apiStore;
+    };
+
+    it('fetch_token refuses a name of the mandate\'s choosing that nothing else guards, and sends nothing', async () => {
+      const apiStore = mandateStore();
+      const calls = minting();
+      const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', GCP_PROJECT_ID: 'owner-project' });
+      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'GCP_PROJECT_ID' }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
+      expect(out).toContain('is not available for this profile');
+      expect(calls).toEqual([]);
+      expect(v.peek('GCP_PROJECT_ID')).toBe('owner-project');
+    });
+
+    it('control: the same exchange writes its own slot', async () => {
+      const apiStore = mandateStore();
+      const calls = minting();
+      const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
+      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: ACCESS }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
+      expect(out).not.toContain('is not available for this profile');
+      expect(calls.some((u) => u.includes('/oauth/token'))).toBe(true);
+      expect(v.peek(ACCESS)).toBe('MINTED');
+    });
+
+    it('control: the owner\'s profile may still name where its token goes', async () => {
+      const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+      engines.push(db);
+      const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+      apiStore.register(crmProfile({}, 'client_credentials'));
+      const calls = minting();
+      const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
+      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_TOKEN' }, makeAgent(apiStore, v as never));
+      expect(out).not.toContain('is not available for this profile');
+      expect(v.peek('CRM_TOKEN')).toBe('MINTED');
+      expect(calls.some((u) => u.includes('/oauth/token'))).toBe(true);
+    });
+
+    const create = (apiStore: ApiStore, v: MockVault, principal: RequestPrincipal, over: Partial<ApiProfile> = {}): Promise<string> =>
+      apiSetupTool.handler({ action: 'create', profile: crmProfile(over) }, makeAgent(apiStore, v as never, async () => 'allow', undefined, principal)) as Promise<string>;
+
+    it.each([
+      ['the access slot', { [ACCESS]: 'owner-token' }, [ACCESS]],
+      ['only the refresh slot', { [REFRESH]: 'owner-refresh' }, [REFRESH]],
+      ['both slots', { [ACCESS]: 'owner-token', [REFRESH]: 'owner-refresh' }, [ACCESS, REFRESH]],
+    ] as const)('refuses a mandate an oauth2 profile whose %s already holds a value, naming it and not the value', async (_label, held, named) => {
+      const apiStore = new ApiStore();
+      const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', ...held });
+      const out = await create(apiStore, v, mandate);
+      expect(out).toContain(named.length === 1 ? 'already holds a value' : `"${ACCESS}" and "${REFRESH}", where the tokens of "crm-api" would go, already hold a value`);
+      for (const n of named) expect(out).toContain(`"${n}"`);
+      expect(out).not.toContain('owner-');
+      expect(apiStore.get('crm-api')).toBeUndefined();
+    });
+
+    it('refuses a mandate the oauth2 profile from a session with a secret scope, which cannot see every slot', async () => {
+      const apiStore = new ApiStore();
+      const scoped = { ...vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' }), [Symbol.for('lynox.vaultScope')]: ['CRM_CLIENT_ID'] } as MockVault;
+      const out = await create(apiStore, scoped, mandate);
+      expect(out).toContain('cannot be checked from here');
+      expect(apiStore.get('crm-api')).toBeUndefined();
+    });
+
+    it('refuses a mandate who turns its own bearer profile into oauth2 over filled slots', async () => {
+      const apiStore = new ApiStore();
+      apiStore.register({ ...crmProfile(), auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, created_by: M });
+      const out = await create(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', [ACCESS]: 'owner-token' }), mandate);
+      expect(out).toContain('already holds a value');
+      expect(apiStore.get('crm-api')?.auth?.type).toBe('bearer');
+    });
+
+    it('refuses a mandate the oauth2 profile when the session has no store to check', async () => {
+      const apiStore = new ApiStore();
+      const agent = { ...(makeAgent(apiStore, vault({}) as never, async () => 'allow', undefined, mandate) as object), secretStore: undefined } as never;
+      const out = await apiSetupTool.handler({ action: 'create', profile: crmProfile() }, agent) as string;
+      expect(out).toContain('cannot be checked from here');
+      expect(apiStore.get('crm-api')).toBeUndefined();
+    });
+
+    it('answers an id whose slots this instance guards the same, whether or not the guarded name holds a value', async () => {
+      const ask = async (held: Record<string, string>): Promise<string> =>
+        create(new ApiStore(), vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', ...held }), mandate, { id: 'mail-account-x' });
+      const empty = await ask({});
+      const filled = await ask({ MAIL_ACCOUNT_X_ACCESS_TOKEN: 'infra-value' });
+      expect(filled).toBe(empty);
+      expect(filled).not.toContain('already holds a value');
+    });
+
+    it('refuses the owner a name of their choosing on a profile a mandate wrote: its token endpoint is the mandate\'s', async () => {
+      const apiStore = mandateStore();
+      const calls = minting();
+      const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
+      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_TOKEN' }, makeAgent(apiStore, v as never));
+      expect(out).toContain('is not available for this profile');
+      expect(calls).toEqual([]);
+    });
+
+    it('control: a mandate sets up an oauth2 profile under a free id', async () => {
+      const apiStore = new ApiStore();
+      const out = await create(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' }), mandate);
+      expect(out).not.toContain('already hold');
+      expect(apiStore.get('crm-api')?.created_by).toBe(M);
+    });
+
+    it('control: a later save of the mandate\'s own oauth2 profile goes through with its tokens in place', async () => {
+      // The retry after a connect whose save failed is the same case: the profile is already
+      // oauth2 under this id, and its slots hold the tokens that connect wrote.
+      const apiStore = new ApiStore();
+      apiStore.register({ ...crmProfile(), created_by: M });
+      const out = await create(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', [ACCESS]: 'its-token', [REFRESH]: 'its-refresh' }), mandate);
+      expect(out).not.toContain('already hold');
+      expect(apiStore.get('crm-api')?.created_by).toBe(M);
+    });
+
+    it('control: the owner sets up an oauth2 profile over filled slots as before', async () => {
+      const apiStore = new ApiStore();
+      const out = await create(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', [ACCESS]: 'owner-token' }), OWNER_PRINCIPAL);
+      expect(out).not.toContain('already hold');
+      expect(apiStore.get('crm-api')).toBeDefined();
+    });
   });
 });
 

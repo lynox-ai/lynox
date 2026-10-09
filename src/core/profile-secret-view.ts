@@ -16,6 +16,7 @@ import type { SecretStoreLike } from '../types/index.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, refreshTokenKey } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { isProtectedSecretWrite } from './secret-store.js';
+import { VAULT_SCOPE_ALL, vaultScopeOf } from './secret-scope.js';
 import type { ApiProfile, ApiStore } from './api-store.js';
 
 /**
@@ -99,6 +100,25 @@ export function mandateMayConnect(
 ): boolean {
   return [accessTokenKey(profile.id), refreshTokenKey(profile.id)]
     .every((name) => mandateMayRead(store, apiStore, tag, name, profile, true));
+}
+
+/**
+ * The token slots an oauth2 profile `id` would write — the derived access and refresh pair —
+ * that already hold a value, or `null` when `store` cannot say. Asked when a mandate sets up an
+ * oauth2 profile under an id: the id is its choice, so the pair it derives can be a name the
+ * owner stored a value under, and the first exchange would write over it.
+ *
+ * Read from the store itself, never through a profile's view: the view hides a slot no consent
+ * is recorded for yet, which would read as empty. A scoped store lists only its scope, so it
+ * cannot tell either, and answers `null`.
+ *
+ * Asked at setup rather than at the exchange: the callback writes the tokens before it saves
+ * the profile, and a retry under the same id is how a failed save heals.
+ */
+export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[] | null {
+  if (vaultScopeOf(store) !== VAULT_SCOPE_ALL) return null;
+  const held = new Set(store.listNames());
+  return [accessTokenKey(id), refreshTokenKey(id)].filter((name) => held.has(name));
 }
 
 /**

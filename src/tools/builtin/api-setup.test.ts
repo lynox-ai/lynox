@@ -683,7 +683,10 @@ describe('api_setup tool', () => {
       ['update of its own profile', 'update'],
     ])('a mandate\'s %s naming a provider preset is saved as the mandate\'s', async (_label, action) => {
       const store = new ApiStore();
-      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'), mandate);
+      // A store with nothing in it: a mandate's oauth2 setup is refused where no store can say
+      // that the profile's token slots are free.
+      const vault = { listNames: () => [], resolve: () => null };
+      const agent = createMockAgent(store, vault, vi.fn(async () => 'Allow'), mandate);
       if (action === 'update') await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
       const preset = { ...SAMPLE_PROFILE, auth: { type: 'oauth2', vault_keys: ['C_ID'], oauth: { preset_id: 'bexio', client_id_key: 'C_ID' } } };
       const out = await apiSetupTool.handler({ action, profile: preset } as never, agent);
