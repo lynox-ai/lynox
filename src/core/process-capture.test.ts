@@ -100,7 +100,6 @@ describe('captureProcess', () => {
     mockCreate.mockResolvedValueOnce({ ...makeMockResponse(), usage: { input_tokens: 5_000, output_tokens: 1_000 } });
     const counters: import('../types/index.js').SessionCounters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
-      approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     await captureProcess('run1', 'Ad Report', makeToolCalls(), { apiKey: 'test-key', modelId: 'ministral-14b-2512', sessionCounters: counters });
     expect((mockCreate.mock.calls[0]![0] as { model: string }).model).toBe('ministral-14b-2512');
@@ -277,8 +276,6 @@ describe('captureProcess', () => {
       httpRequests: 0,
       writeBytes: 0,
       costUSD: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     await captureProcess('run1', 'Report', makeToolCalls(), {
       apiKey: 'k',

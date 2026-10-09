@@ -1845,6 +1845,12 @@ async function executeThinker(
       } else if (childCause !== 'none') {
         parentAgent.noteUntrustedData?.();
       }
+      // New content for the parent's write approvals. Here, at the hand-back, and not
+      // inside the two calls above: both also serve hand-downs and rebuilds, which bring
+      // no new content. The counters are shared with the child, so its own reads have
+      // usually moved the epoch already; this covers a child whose taint has no read of
+      // its own behind it.
+      if (childCause !== 'none') parentAgent.noteForeignContent?.();
     }
 
     // T2-X1 part 5: record the child's actual LLM spend into the same

@@ -137,7 +137,7 @@ function makeAgent(
 ): never {
   return {
     principal,
-    sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+    sessionCounters: { httpRequests: 0 },
     secretStore: vault,
     getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
     promptUser,
@@ -1964,7 +1964,7 @@ describe('who may have a token renewed on their behalf', () => {
    */
   function agentWith(over: Record<string, unknown>): never {
     return {
-      sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+      sessionCounters: { httpRequests: 0 },
       toolContext: { apiStore: null },
       getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
       ...over,

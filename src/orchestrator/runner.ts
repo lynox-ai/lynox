@@ -459,8 +459,6 @@ export async function runManifest(
     httpRequests: 0,
     writeBytes: 0,
     costUSD: 0,
-    approvedOutboundDomains: new Set<string>(),
-    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
 
   // A caller that holds a claim on this run passes the id in; it cannot wait for one

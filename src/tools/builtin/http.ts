@@ -34,7 +34,10 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { pv } from '../../core/prompt-value.js';
-import { noteCallConnection } from '../../core/call-connection.js';
+import { noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
+import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
+import { bodyFieldNames, effectiveWriteMethod, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
+import { inSessionPromptChain } from '../../core/prompt-chain.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -152,17 +155,27 @@ function blockedVerbatim(message: string): never {
  * class so the handler can say that instead of "blocked", ahead of the generic rewrite.
  */
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(method: string, sentUrl: string, redirectUrl: string) {
+  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' = 'grant') {
     super(
       `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
-      `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
-      `Do not repeat the request: check the target system for whether it was carried out.`,
+      (why === 'grant'
+        ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
+          `Do not repeat the request: check the target system for whether it was carried out.`
+        : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
+          `Check the target system for whether the request was carried out. A request sent to that address directly asks first.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Write approvals denied in a tool batch, keyed by the batch's identity (`IAgent.approvalBatch`):
+ *  a call of the same batch that waited on that question is refused without asking again. */
+const deniedInBatch = new WeakMap<object, Set<string>>();
+/** In-flight consent questions of a tool batch, keyed like `deniedInBatch`, by the question:
+ *  parallel calls with the same question share one answer instead of asking twice. */
+const pendingInBatch = new WeakMap<object, Map<string, Promise<boolean>>>();
 const MAX_REDIRECTS = 5;
 const DEFAULT_RESPONSE_BYTES = 100_000;
 
@@ -211,7 +224,11 @@ export async function fetchWithValidatedRedirects(
   // host would carry the POST body past the contract's host/path pin (S1).
   // Returns true if the hop is permitted. Omitted for non-contract calls (no
   // redirect-behaviour change).
-  redirectGuard?: ((nextUrl: string, method: string) => boolean) | undefined,
+  //
+  // `'consent'` refuses the hop as one that needs its own approval (an interactive write whose
+  // target the approval did not show), with the note that says so; `false` refuses it as
+  // outside the contract.
+  redirectGuard?: ((nextUrl: string, method: string) => boolean | 'consent') | undefined,
   // An engine-attached credential header whose name is NOT in the fixed
   // cross-origin drop set. `CROSS_ORIGIN_DROP_HEADERS` covers Authorization,
   // Cookie and the common `X-Api-Key`/`X-Auth-Token` spellings, but an
@@ -232,8 +249,11 @@ export async function fetchWithValidatedRedirects(
   // paths to the origin the agent trusts, which it will then call WITH the
   // credentials that origin's api_profile carries. `response.url` cannot serve
   // here: fetchPinned constructs its Responses, so that field is always empty.
-): Promise<{ response: Response; finalUrl: string }> {
+): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
   let currentUrl = url;
+  // Every host the request reached, the final one included: an answer counts as the approved
+  // host's own only when all of them are that host.
+  const hosts: string[] = [];
   let method = (init.method ?? 'GET').toUpperCase();
   const originalMethod = method;
   let body = init.body;
@@ -257,9 +277,10 @@ export async function fetchWithValidatedRedirects(
     // fetchPinned does the DNS-resolve + IP validation + connection-pinning in
     // one shot — no rebind window between validate and connect.
     const response = await fetchPinned(currentUrl, requestInit);
+    hosts.push(new URL(currentUrl).hostname);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
-      return { response, finalUrl: currentUrl };
+      return { response, finalUrl: currentUrl, hosts };
     }
 
     const location = response.headers.get('location');
@@ -288,11 +309,14 @@ export async function fetchWithValidatedRedirects(
       method = 'GET';
       body = undefined;
     }
-    if (redirectGuard && !redirectGuard(nextUrl, method)) {
+    const verdict = redirectGuard ? redirectGuard(nextUrl, method) : true;
+    if (verdict !== true) {
       // Decided on the method the call STARTED with: after a 303 (or a cross-origin hop)
       // `method` is already GET, and a POST that reached the host would then read as a
       // read that was merely redirected.
-      if (isWriteMethod(originalMethod)) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl);
+      if (verdict === 'consent' || isWriteMethod(originalMethod)) {
+        throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, verdict === 'consent' ? 'consent' : 'grant');
+      }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
     currentUrl = nextUrl;
@@ -353,13 +377,12 @@ export async function readBodyLimited(response: Response, maxBytes: number): Pro
   }
 }
 
-// `approvedOutboundDomains` (per-Session approved hosts) and
-// `pendingOutboundPrompts` (per-Session in-flight prompt dedup) used to
-// live as module-level state. They moved onto `agent.sessionCounters`
-// in step 3 of the Wave 4.1 migration — approval no longer leaks
-// between conversations, and dedup is naturally bounded to the Session
-// that issued the prompt. See SessionCounters JSDoc on types/agent.ts
-// for the per-Session ownership contract.
+// The write approvals (`approvedWrites`, see `core/untrusted-epoch.ts`) live on
+// `agent.sessionCounters`, so an approval never leaks between conversations. The
+// consent questions are asked one at a time on the Session's prompt chain
+// (`core/prompt-chain.ts`: the PromptStore holds one pending prompt per Session),
+// and parallel calls of one batch with the same question share its answer
+// (`pendingInBatch`).
 /**
  * The undo class of a method's effect on the remote; `null` for the two methods this
  * tool treats as reads.
@@ -2137,22 +2160,39 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // The method this call is gated as: the strongest of the method and any override form the
+    // request carries (`outbound-write.ts`). It is what is sent that stays `method`; every gate
+    // below that asks "is this a write, and which one" reads `gatedMethod`.
+    const effective = effectiveWriteMethod(method, headers, input.url);
+    if (effective === null) {
+      // The value is not repeated: it is whatever the request put there.
+      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header or a `_method` query parameter), is not an HTTP method. Send the request with a method name, or without the override.');
+    }
+    const gatedMethod = effective;
+    // The approval and the outbound-effect table are keyed by the URL's host. A header a
+    // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
+    // would send the write somewhere the question did not name.
+    const retarget = isWriteMethod(gatedMethod) ? retargetingHeader(headers) : undefined;
+    if (retarget !== undefined) {
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
+    }
+
     // A mandate's turn does not write to an account connected through a provider preset
     // (PRD customer-granted-operator-access §3.13). The consent prompt is no bar here: a
-    // mandate answers its own session's prompts, and an approval holds for the host for the
-    // rest of the session. The write goes to the owner as a proposal instead. Checked before
+    // mandate answers its own session's prompts (each write there is asked on its own, see the
+    // consent gate below). The write goes to the owner as a proposal instead. Checked before
     // the credential is attached (so a refused write renews no token) and before the
     // contract (so no grant opens it). Every profile on the host counts, a host two profiles
     // share included, and the host is read without trailing root dots, which name the same
     // host to DNS and a different key to the profile map.
-    if (isWriteMethod(method) && !isOwnerPrincipal(agent.principal)) {
+    if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
       const apiStore = toolContext?.apiStore;
       const host = new URL(input.url).hostname.replace(/\.+$/, '');
       const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
         .map((id) => (id === undefined ? undefined : apiStore.get(id)));
       if (onHost.some((p) => p?.auth?.oauth?.preset_id !== undefined)) {
         blockedVerbatim(
-          `Blocked: ${method} to ${host} writes to an account the owner connected, which this session may not do. ` +
+          `Blocked: ${gatedMethod} to ${host} writes to an account the owner connected, which this session may not do. ` +
           'Propose the change as a task instead (task_create); it runs once the owner approves it.',
         );
       }
@@ -2437,43 +2477,86 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // headless write actually execute; without it the gate below would block
     // every unattended write (no `promptUser` in a background run).
     // Asked for writes only: a read is never gated by the contract here.
-    const governing = isWriteMethod(method) ? agent.governingContract() : null;
+    //
+    // 270: the approval is per (method, host) and holds only in the untrusted-content epoch it
+    // was given in (`core/untrusted-epoch.ts`): content from a source the person did not
+    // approve, which reached the conversation after the approval, makes the next write ask
+    // again. Three kinds of write are never remembered and ask every time: a DELETE, a path
+    // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
+    // session — there the person who set the mandate up gives each approval, and the approval
+    // is what protects the account against an injected instruction (PRD
+    // customer-granted-operator-access 4.11). A grant covers neither a table path nor, for a
+    // mandate, anything H2b refused above.
+    const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
+    const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
     const contractGrantsWrite =
       contract !== undefined &&
-      contractGrants('http_request', input, contract);
-    if (isWriteMethod(method) && !contractGrantsWrite) {
-      const hostname = new URL(input.url).hostname;
-      const approved = agent.sessionCounters.approvedOutboundDomains;
-      const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
-      if (!approved.has(hostname)) {
+      !outboundEffect &&
+      contractGrants('http_request', { ...input, method: gatedMethod }, contract);
+    const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
+    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && isOwnerPrincipal(agent.principal);
+    if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
+      const counters = agent.sessionCounters;
+      const hostname = approvalHost;
+      const key = approvalKey(gatedMethod, hostname);
+      const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
+      const batch = agent.approvalBatch?.();
+      if (!(remembers && isApproved(counters, key, epoch))) {
         if (!agent.promptUser) {
           blockedVerbatim(
-            `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
-            `\n${ungrantedWriteNote(method, input.url, governing?.withheld === 'untrusted')}`,
+            `Blocked: outbound ${gatedMethod} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
+            `\n${ungrantedWriteNote(gatedMethod, input.url, governing?.withheld === 'untrusted')}`,
           );
         }
         const promptUser = agent.promptUser;
-        let pending = pendingMap.get(hostname);
+        const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
+        const path = pathForQuestion(input.url, mask);
+        const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
+        // Parallel calls of the same batch with the SAME question share one answer. Only within
+        // the batch: a sub-agent shares the Session counters but not the parent's epoch, and an
+        // answer given for the parent's epoch must not let the child's call through. Anything
+        // that is asked every time is never shared: each such call shows its own target.
+        const shareKey = remembers && batch !== undefined ? `${key}\u0000${path}\u0000${fields}` : undefined;
+        let pendingMap = batch === undefined ? undefined : pendingInBatch.get(batch);
+        if (batch !== undefined && !pendingMap) { pendingMap = new Map(); pendingInBatch.set(batch, pendingMap); }
+        let pending = shareKey === undefined ? undefined : pendingMap?.get(shareKey);
         if (!pending) {
-          pending = (async () => {
-            try {
-              const answer = await promptUser(
-                pv`⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
-                ['Allow', 'Deny', '\x00'],
-              );
-              const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
-              if (allowed) approved.add(hostname);
-              return allowed;
-            } finally {
-              pendingMap.delete(hostname);
+          pending = inSessionPromptChain(counters, async () => {
+            // Re-read once it is this call's turn: the question before it may have answered it.
+            if (remembers && isApproved(counters, key, epoch)) return true;
+            if (remembers && batch !== undefined && deniedInBatch.get(batch)?.has(key)) {
+              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the same write was denied earlier in this batch.`);
             }
-          })();
-          pendingMap.set(hostname, pending);
+            // A call that waited in the queue raises no prompt once the run is aborted: the
+            // prompt would outlive the run as a pending row and block the Session's next one.
+            if (agent.runSignal?.aborted) {
+              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the run was stopped.`);
+            }
+            // Why this write is asked although the host may hold an approval. Engine text, so
+            // spliced in as frame (a nested `pv`), never as a value.
+            const note = remembers ? pv``
+              : outboundEffect ? pv` This sends or issues something and is asked every time.`
+                : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
+                  : pv` In this session every write is asked.`;
+            const answer = await promptUser(
+              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}`,
+              ['Allow', 'Deny', '\x00'],
+            );
+            const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
+            if (remembers && allowed) recordApproval(counters, key, epoch);
+            if (remembers && !allowed && batch !== undefined) {
+              let denied = deniedInBatch.get(batch);
+              if (!denied) { denied = new Set(); deniedInBatch.set(batch, denied); }
+              denied.add(key);
+            }
+            return allowed;
+          }).finally(() => { if (shareKey !== undefined) pendingMap?.delete(shareKey); });
+          if (shareKey !== undefined) pendingMap?.set(shareKey, pending);
         }
         const allowed = await pending;
         if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${method} to ${hostname} denied by user.`);
+          blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} denied by user.`);
         }
       }
     }
@@ -2512,7 +2595,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       wallTimeoutId = setTimeout(() => {
         timedOut = 'wall';
         controller.abort();
-        reject(new Error(httpTimeoutMessage(timeoutMs, method, true, answeredStatus)));
+        reject(new Error(httpTimeoutMessage(timeoutMs, gatedMethod, true, answeredStatus)));
       }, timeoutMs + HTTP_WALL_GRACE_MS);
     });
 
@@ -2520,14 +2603,44 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       agent.sessionCounters.httpRequests++;
       // For a contract-governed write, re-validate every redirect hop against
       // the contract so a 307/308 can't carry the body past the host/path pin.
+      //
+      // An interactive write is followed only where the approval it had still covers the hop:
+      // a hop that keeps a write method is refused when its target would need its own
+      // question — another host, or another path for a write that is asked every time or for
+      // a path of the outbound-effect table. Compared on the normalized form, so `/items`
+      // redirected to `/items/` is followed. Headers ride along on a same-host hop, so the
+      // hop's method is read with them.
+      const askedPath = normalizeWritePath(new URL(input.url).pathname).path;
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
-        ? (nextUrl: string, redirectMethod: string): boolean =>
-            contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
-        : undefined;
-      const { response, finalUrl: finalRequestUrl } = await Promise.race([
+        ? (nextUrl: string, redirectMethod: string): boolean => {
+            // The hop's own method, with the override forms its target may carry: a
+            // `?_method=` in a Location raises it like one in the request.
+            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl);
+            return hop !== null &&
+              contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
+              !isOutboundEffectWrite(nextUrl, hop);
+          }
+        : isWriteMethod(gatedMethod)
+          ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
+              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl);
+              if (hop === null) return 'consent';
+              if (!isWriteMethod(hop)) return true;
+              // Another write than the one asked (a Location with `?_method=DELETE`) needs
+              // its own question, whatever the path.
+              if (hop !== gatedMethod) return 'consent';
+              const next = new URL(nextUrl);
+              if (normalizeApprovalHost(next.hostname) !== approvalHost) return 'consent';
+              const pathDiffers = normalizeWritePath(next.pathname).path !== askedPath;
+              return pathDiffers && (!remembers || isOutboundEffectWrite(nextUrl, hop)) ? 'consent' : true;
+            }
+          : undefined;
+      const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false),
         wallTimeout,
       ]);
+      // The hosts that answered, for the answer's untrusted marker: every hop on one host lets
+      // the answer keep that host's write approvals; anything else makes it foreign content.
+      for (const h of answeredHosts) noteAnsweredBy(normalizeApprovalHost(h));
       const status = `${response.status} ${response.statusText}`;
       answeredStatus = status;
       // Strip sensitive response headers to prevent credential leakage to agent
@@ -2800,7 +2913,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
-        throw new Error(httpTimeoutMessage(timeoutMs, method, timedOut === 'wall', answeredStatus) + repairNote);
+        throw new Error(httpTimeoutMessage(timeoutMs, gatedMethod, timedOut === 'wall', answeredStatus) + repairNote);
       }
       // Translate SSRF/network errors into business-friendly messages
       if (err instanceof Error && err.message.startsWith('Blocked:')) {
