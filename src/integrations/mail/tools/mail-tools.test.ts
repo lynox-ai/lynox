@@ -802,7 +802,7 @@ describe('mail_reply tool', () => {
   it('reply_all with an explicit cc keeps it, adds the original recipients once, and keeps their names', async () => {
     provider.fetch.mockResolvedValue({
       envelope: {
-        ...envelope(9, { messageId: '<o9@x>', from: 'alice@example.com', subject: 'Plan' }),
+        ...envelope(9, { messageId: '<o9@x>', from: 'Alice@Example.com', subject: 'Plan' }),
         to: [{ address: 'colleague@example.com' }, { address: 'ALICE@example.com' }],
         cc: [{ name: 'The Manager', address: 'Manager@Example.com' }, { address: 'Colleague@example.com' }],
       },
@@ -813,7 +813,7 @@ describe('mail_reply tool', () => {
     await createMailReplyTool(registry).handler({ uid: 9, body: 'reply', reply_all: true, cc: 'Extra Person <extra@example.org>' }, yesAgent);
 
     const sent = provider.send.mock.calls[0]![0];
-    expect(sent.to?.map(a => a.address), 'the reply goes to the sender').toEqual(['alice@example.com']);
+    expect(sent.to?.map(a => a.address), 'the reply goes to the sender, as the original spelled it').toEqual(['Alice@Example.com']);
     const cc = sent.cc ?? [];
     const keys = cc.map(a => a.address.toLowerCase());
     expect(keys, 'the explicit cc is kept').toContain('extra@example.org');
