@@ -1049,6 +1049,20 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(secondPrompt).not.toContain('G'.repeat(60));
   });
 
+  it('A10 — a long QUESTION is capped like the answer (N12-4: a write question carries its body)', async () => {
+    const h = makeHarness({ maxToolResultChars: 40 });
+    await h.parked;
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', `Which client? ${'Q'.repeat(500)}`, 'Acme');
+
+    await h.loop.tick();   // re-arms it
+    await h.loop.tick();   // dispatches it
+    await waitUntil('the second run to start', () => h.dispatches() >= 2);
+
+    const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
+    expect(secondPrompt).toMatch(/<asked>[\s\S]*\[truncated\][\s\S]*<\/asked>/);
+    expect(secondPrompt).not.toContain('Q'.repeat(60));
+  });
+
   it('A10 — the re-armed run is told the question AND the answer', async () => {
     // The acceptance criterion with its own red: reusing the thread is not
     // enough, because answering writes a `pending_prompts` row and touches no

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  bodyFieldNames, effectiveWriteMethod, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -126,5 +126,95 @@ describe('masking reaches a secret the encoding hides (270, delta D2, D3)', () =
   });
   it('a form field name is masked before + turns into a space', () => {
     expect(bodyFieldNames('ab+cd=1&x=2', mask('ab+cd'))).toBe('fields "[s]", "x"');
+  });
+});
+
+describe('bodyForQuestion (N12-4)', () => {
+  const none = (t: string) => t;
+  it('indents a canonical JSON body', () => {
+    expect(bodyForQuestion('{"a":1,"b":[2]}', none)).toEqual({ text: '{\n  "a": 1,\n  "b": [\n    2\n  ]\n}' });
+    expect(bodyForQuestion('{ "a" : 1 }', none)).toEqual({ text: '{\n  "a": 1\n}' });
+  });
+  it('shows a non-canonical JSON body as it is sent', () => {
+    expect(bodyForQuestion('{"a":"\\u0041"}', none)).toEqual({ text: '{"a":"\\u0041"}' });
+    expect(bodyForQuestion('{"a":1,"a":2}', none)).toEqual({ text: '{"a":1,"a":2}' });
+  });
+  it('masks each decoded string of a canonical body, and refuses an escaped secret in another', () => {
+    const mask = (t: string) => t.replaceAll('s"x', '[s]');
+    expect(bodyForQuestion(JSON.stringify({ k: 's"x' }), mask)).toEqual({ text: '{\n  "k": "[s]"\n}' });
+    expect(bodyForQuestion('{"k":"\\u0073\\"x"}', mask)).toEqual({ unshowable: 'escaped-secret' });
+  });
+  const FORM = 'application/x-www-form-urlencoded; charset=utf-8';
+  it('shows a form body one pair per line, masked raw and decoded', () => {
+    const mask = (t: string) => t.replaceAll('a+b', '[s]');
+    expect(bodyForQuestion('x=a+b&y=%41', mask, FORM)).toEqual({ text: 'x = [s]\ny = A' });
+  });
+  it('masks a form body WHOLE before cutting it, so a secret holding = or & stays one value', () => {
+    const mask = (t: string) => t.replaceAll('k=v&w', '[s]');
+    const shown = bodyForQuestion('token=k=v&w&n=1', mask, FORM);
+    expect(shown).toEqual({ text: 'token = [s]\nn = 1' });
+  });
+  it('shows a form-shaped body pair by pair ONLY when it is sent as a form', () => {
+    expect(bodyForQuestion('x=a+b', none, 'text/plain')).toEqual({ text: 'x=a+b' });
+    expect(bodyForQuestion('x=a+b', none)).toEqual({ text: 'x=a+b' });
+  });
+  it('shows a line break inside a decoded form value as \\n, so it cannot add a line', () => {
+    expect(bodyForQuestion('note=ok%0Aamount+%3D+1', none, FORM)).toEqual({ text: 'note = ok\\namount = 1' });
+  });
+  it('shows a secret written plainly in a non-canonical body masked, not refused', () => {
+    const mask = (t: string) => t.replaceAll('sk-plain', '[s]');
+    expect(bodyForQuestion('{"a":"sk-plain","a":"x"}', mask)).toEqual({ text: '{"a":"[s]","a":"x"}' });
+    // Non-canonical without a duplicate key (`1.0` is sent, `1` would be re-serialized), so the
+    // secret is still in the parsed body and only masking the TEXT first removes it.
+    expect(bodyForQuestion('{"a":"sk-plain","n":1.0}', mask)).toEqual({ text: '{"a":"[s]","n":1.0}' });
+    expect(bodyForQuestion('{ "a" :"sk-plain" }', mask)).toEqual({ text: '{\n  "a": "[s]"\n}' });
+  });
+  // The secret below, percent-encoded: the text mask does not see it, the server may decode it.
+  const enc = (t: string) => [...t].map((c) => `%${c.charCodeAt(0).toString(16)}`).join('');
+  const vault = (t: string) => t.replaceAll('hunter2secret', '[s]').replaceAll('Key=abcd', '[k]');
+  it('refuses a body whose percent-decoded form still holds a secret, sent as any type', () => {
+    expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`x=${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = [s]' });
+    // Positive control on the same machinery: an encoded value that is no secret is shown.
+    expect(bodyForQuestion(`x=${enc('harmless')}`, vault, 'text/plain')).toEqual({ text: `x=${enc('harmless')}` });
+  });
+  it('refuses a secret whose space is sent as +, a form server reads it decoded', () => {
+    const spaced = (t: string) => t.replaceAll('pass word', '[s]');
+    expect(bodyForQuestion('x=pass+word', spaced, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion('x=pass+port', spaced, 'text/plain')).toEqual({ text: 'x=pass+port' });
+  });
+  it('refuses a non-canonical JSON body the mask turned into something no longer JSON', () => {
+    const across = (t: string) => t.replaceAll('.0,"b', '[s]');
+    expect(bodyForQuestion('{"a":1.0,"b":2}', across)).toEqual({ unshowable: 'escaped-secret' });
+  });
+  it('refuses a form whose masked secret removed its structure while another pair is encoded', () => {
+    expect(bodyForQuestion(`Key=abcd&y=${enc('hunter2secret')}`, vault, FORM)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion('Key=abcd&y=1', vault, FORM)).toEqual({ text: '[k]&y=1' });
+  });
+  it('refuses an escaped secret under a key a later duplicate shadows', () => {
+    expect(bodyForQuestion('{"a":"\\u0068unter2secret","a":"x"}', vault)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion('{"\\u0068unter2secret":1,"a":1.0}', vault)).toEqual({ unshowable: 'escaped-secret' });
+  });
+  it('shows pairs only for the form type alone, not for a list of types or a parameter naming it', () => {
+    expect(bodyForQuestion('x=1', none, 'Application/X-WWW-Form-Urlencoded ; charset=utf-8')).toEqual({ text: 'x = 1' });
+    expect(bodyForQuestion('x=1', none, 'text/plain, application/x-www-form-urlencoded')).toEqual({ text: 'x=1' });
+    expect(bodyForQuestion('x=1', none, 'text/plain; x=application/x-www-form-urlencoded')).toEqual({ text: 'x=1' });
+  });
+  it('makes invisible characters visible as their code point instead of removing them', () => {
+    expect(bodyForQuestion('ad\u200bmin\u2028x', none)).toEqual({ text: 'ad⟨U+200B⟩min⟨U+2028⟩x' });
+  });
+});
+
+describe('carriesInlineBinary (N12-4)', () => {
+  const b64 = 'QUJD'.repeat(300);
+  it.each([
+    [b64, true],
+    [`data:image/png;base64,${b64}`, true],
+    [JSON.stringify({ image: { attachment: b64 } }), true],
+    [JSON.stringify({ text: 'word '.repeat(400) }), false],
+    ['QUJD'.repeat(10), false],
+  ])('%#', (body, want) => {
+    expect(carriesInlineBinary(body)).toBe(want);
   });
 });

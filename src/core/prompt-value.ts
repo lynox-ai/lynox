@@ -118,8 +118,12 @@ export function pv(strings: TemplateStringsArray, ...values: unknown[]): PromptT
   const push = (segment: PromptSegment): void => {
     if (segment.text === '') return;
     const last = segments[segments.length - 1];
-    if (last?.kind === 'frame' && segment.kind === 'frame') {
-      segments[segments.length - 1] = { kind: 'frame', text: last.text + segment.text };
+    // Merged only within one visibility: a frame shown on the instance only (`onBoxBlock`)
+    // never runs into one that leaves it.
+    if (last?.kind === 'frame' && segment.kind === 'frame' && last.onBoxOnly === segment.onBoxOnly) {
+      segments[segments.length - 1] = segment.onBoxOnly === true
+        ? { kind: 'frame', text: last.text + segment.text, onBoxOnly: true }
+        : { kind: 'frame', text: last.text + segment.text };
       return;
     }
     segments.push(segment);
@@ -150,6 +154,28 @@ export function pv(strings: TemplateStringsArray, ...values: unknown[]): PromptT
  */
 export function promptValue(text: string): PromptText {
   return { [PROMPT_TEXT_BRAND]: true, segments: text === '' ? [] : [{ kind: 'value', text }] };
+}
+
+/**
+ * A block shown on the instance only: `value` inside a code fence the FRAME opens (so a line
+ * break in the value shows, and nothing in it can close the fence: it stays a text node).
+ * Fence and value are both marked, so the copy that leaves the box carries neither.
+ */
+export function onBoxBlock(value: string): PromptText {
+  return {
+    [PROMPT_TEXT_BRAND]: true,
+    segments: [
+      { kind: 'frame', text: '\n\n```\n', onBoxOnly: true },
+      ...(value === '' ? [] : [{ kind: 'value' as const, text: value, onBoxOnly: true as const }]),
+      { kind: 'frame', text: '\n```', onBoxOnly: true },
+    ],
+  };
+}
+
+/** The question as it may leave the instance: every segment marked on-box-only removed. */
+export function offBoxPrompt(prompt: string | PromptText): string | PromptText {
+  if (!isPromptText(prompt)) return prompt;
+  return { [PROMPT_TEXT_BRAND]: true, segments: prompt.segments.filter((s) => s.onBoxOnly !== true) };
 }
 
 /** Segments of either form — a plain string is all frame (the legacy meaning). */

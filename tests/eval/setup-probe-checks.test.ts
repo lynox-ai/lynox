@@ -600,6 +600,8 @@ describe('setup probe — operator permission policy', () => {
   it('reads the host of the consent prompt that names path, fields and a note (row 270), and only the host', () => {
     expect(policy.permissionAnswer({ question: '⚠ http_request: DELETE to 203.0.113.40 /v1/orders/1 (no body) — Allow outbound data? A DELETE is asked every time.' }, ['203.0.113.40'])).toBe('Allow');
     expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 198.51.100.9 /x (fields "to 203.0.113.40") — Allow outbound data?' }, ['203.0.113.40'])).toBe('Deny');
+    // …and the body's values on lines after the question (N12-4).
+    expect(policy.permissionAnswer({ question: '⚠ http_request: POST to 203.0.113.40 /x (fields "a") — Allow outbound data?\n\n```\n{\n  "a": 1\n}\n```' }, ['203.0.113.40'])).toBe('Allow');
   });
 
   it('stops as an instrument error when the HTTP consent prompt has an unknown shape', () => {
@@ -622,6 +624,7 @@ describe('setup probe — operator permission policy', () => {
       ? warnings.map(w => t.replace('${exfilWarning}', w))
       : [t.replace(/\$\{(\w+)\}/g, (whole, name: string) => ({
           method: 'POST', gatedMethod: 'POST', hostname: '203.0.113.40', path: '/v1/orders?page=…', fields: 'fields "sku"', note: '',
+          bodyBlock: '\n\n```\n{\n  "sku": "A-1"\n}\n```',
         } as Record<string, string>)[name] ?? whole)]);
     expect(rendered.every(q => !q.includes('${'))).toBe(true);
     const answers = rendered.map(q => policy.permissionAnswer({ question: q }, ['203.0.113.40']));  // none may throw

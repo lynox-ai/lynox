@@ -203,3 +203,134 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
   const query = keys.length > 0 ? `?${keys.map((k) => `${k}=…`).join('&')}` : '';
   return clipName(`${path}${query}`, MAX_PATH_CHARS);
 }
+
+/**
+ * The most of a write's body a question shows whole, in bytes of what is SENT (not of what
+ * is shown: masking and indenting change the length of the display, never the decision).
+ * Measured against request bodies shaped like real set-up steps (`~/lynox-plans/n12-measure/`:
+ * a bexio contact 0.5 KB, an invoice with 15 positions 8.7 KB, an offer with 30 positions
+ * 20.7 KB, a Shopify product with 100 variants 33.3 KB); only an inline binary upload went
+ * past it. A body above it is never shown cut short.
+ */
+export const SHOWN_BODY_MAX_BYTES = 64 * 1024;
+
+/** The size of a body as it is sent. */
+export function sentBytes(body: string): number {
+  return new TextEncoder().encode(body).byteLength;
+}
+
+/** Base64 (or a data: URI) long enough to be a file rather than a field. */
+const INLINE_BINARY = /^(?:data:[^,]{0,100},)?[A-Za-z0-9+/_-]{1024,}={0,2}$/;
+
+/** Whether a body carries a file inline: base64 as the whole body or as one JSON string. */
+export function carriesInlineBinary(body: string): boolean {
+  // Line breaks only: base64 is wrapped with them, prose is separated by spaces.
+  const compact = (s: string) => s.replace(/[\r\n]+/g, '');
+  if (INLINE_BINARY.test(compact(body))) return true;
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return false; }
+  const stack: unknown[] = [parsed];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (typeof v === 'string' && v.length >= 1024 && INLINE_BINARY.test(compact(v))) return true;
+    if (v !== null && typeof v === 'object') stack.push(...Object.values(v));
+  }
+  return false;
+}
+
+/**
+ * Characters a reader cannot see, or that break a line where the display shows none, made
+ * VISIBLE as `⟨U+XXXX⟩` rather than removed: the display must show what is sent, and a body
+ * whose `ad\u200bmin` is shown as `admin` shows something else. Line breaks and tabs stay.
+ */
+function visible(text: string): string {
+  return text.replace(/[\p{Cf}\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/gu,
+    (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
+}
+
+/** A JSON text with the whitespace between tokens removed (strings left as they are). */
+function minifyJson(text: string): string {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (inString) {
+      out += c;
+      if (c === '\\') { out += text[i + 1] ?? ''; i++; } else if (c === '"') inString = false;
+    } else if (c === '"') { inString = true; out += c; } else if (!/\s/.test(c)) out += c;
+  }
+  return out;
+}
+
+/**
+ * The body as the question shows it, every value with each secret the vault knows masked;
+ * or why it cannot be shown.
+ *
+ * A JSON body is indented only when it is CANONICAL — re-serialising the parsed value gives
+ * the same text, up to whitespace. Then every string (key and value) is masked as the decoded
+ * string, so a secret is matched as the value it is. Any other JSON body (a duplicate key,
+ * which a parser keeps one of and a server may read the other; an escape such as `A`)
+ * is shown as it is sent, masked as text — and is not showable when a decoded string literal
+ * holds a secret, because the escaped form is not one the mask recognises.
+ * A body sent as `application/x-www-form-urlencoded` is shown one `name = value` per line,
+ * masked whole, then each part decoded and masked again. Any other body is masked as text, and
+ * is not showable when its percent-decoded form still holds a secret. Invisible characters are
+ * shown as their code point.
+ * Whether the body is small enough to show is the caller's decision (`SHOWN_BODY_MAX_BYTES`).
+ */
+export function bodyForQuestion(body: string, mask: (text: string) => string, contentType = ''): { text: string } | { unshowable: 'escaped-secret' } {
+  let parsed: unknown;
+  let isJson = true;
+  try { parsed = JSON.parse(body); } catch { isJson = false; }
+  if (isJson) {
+    if (JSON.stringify(parsed) === minifyJson(body)) {
+      const walk = (v: unknown): unknown => {
+        if (typeof v === 'string') return mask(v);
+        if (Array.isArray(v)) return v.map(walk);
+        if (v !== null && typeof v === 'object') {
+          return Object.fromEntries(Object.entries(v).map(([k, x]) => [mask(k), walk(x)]));
+        }
+        return v;
+      };
+      return { text: visible(mask(JSON.stringify(walk(parsed), null, 2))) };
+    }
+    // Shown as sent, masked as text. Decided on what is LEFT after that mask: every string
+    // literal of the masked TEXT, decoded one by one. One still holding a secret was written in
+    // a form the text mask did not see (an escape); a secret written plainly is gone. Read from
+    // the text, not from a parse, because a parse keeps only the last of two equal keys and the
+    // shadowed one is sent all the same.
+    const shownRaw = mask(body);
+    try { JSON.parse(shownRaw); } catch { return { unshowable: 'escaped-secret' }; }
+    for (const [literal] of shownRaw.matchAll(/"(?:[^"\\]|\\.)*"/g)) {
+      const decoded = JSON.parse(literal) as string;
+      if (mask(decoded) !== decoded) return { unshowable: 'escaped-secret' };
+    }
+    return { text: visible(shownRaw) };
+  }
+  const shown = mask(body);
+  // A form body is shown pair by pair only when it is SENT as one (its Content-Type): the same
+  // text sent as text/plain is not `x = a b` but `x=a+b`. Masked WHOLE before it is cut at `&`
+  // and `=`, so a secret holding either (base64 padding) is still one value to the mask; then
+  // each part again once decoded. A line break inside a decoded part is shown as `\n`, so a
+  // value cannot add a `name = value` line of its own.
+  if (FORM_CONTENT_TYPE.test(contentType) && /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(shown)) {
+    const part = (raw: string) => mask(lenientDecode(raw.replace(/\+/g, ' '))).replace(/\r?\n/g, '\\n');
+    return {
+      text: visible(shown.split('&').map((pair) => {
+        const at = pair.indexOf('=');
+        return `${part(pair.slice(0, at))} = ${part(pair.slice(at + 1))}`;
+      }).join('\n')),
+    };
+  }
+  // Any other body is shown as text, and the server may still read it percent-decoded (a form
+  // sent without its Content-Type, or one whose masked secret removed its `=`/`&` structure).
+  // A secret left in the decoded form was written in a form the text mask did not see.
+  const decodedHides = (t: string) => mask(t) !== t;
+  if (decodedHides(lenientDecode(shown)) || decodedHides(lenientDecode(shown.replace(/\+/g, ' ')))) {
+    return { unshowable: 'escaped-secret' };
+  }
+  return { text: visible(shown) };
+}
+
+/** The form media type alone, parameters allowed; a list of two types is not one form. */
+const FORM_CONTENT_TYPE = /^\s*application\/x-www-form-urlencoded\s*(?:;[^,]*)?$/i;

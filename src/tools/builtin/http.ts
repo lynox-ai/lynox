@@ -35,10 +35,10 @@ import {
   MIN_USEFUL_EXTRACT_CHARS,
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
-import { pv } from '../../core/prompt-value.js';
+import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { bodyFieldNames, effectiveWriteMethod, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -2563,11 +2563,35 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
         const path = pathForQuestion(input.url, mask);
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
+        // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
+        // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
+        // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
+        // shown cut short. In a mandate's session a write whose body cannot be shown is refused,
+        // with the way out that fits it; the owner is asked with the field names, as before.
+        const sentBody = repairedBody?.body ?? input.body;
+        const bodyGoesOut = typeof sentBody === 'string' && sentBody !== '' && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';
+        const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
+        const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ')) : undefined;
+        if (bodyGoesOut && !isOwnerPrincipal(agent.principal) && (shown === undefined || 'unshowable' in shown)) {
+          blockedVerbatim(
+            shown !== undefined
+              ? `Blocked: the body of this ${gatedMethod} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
+              : carriesInlineBinary(sentBody)
+                ? `Blocked: the body of this ${gatedMethod} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
+                : `Blocked: the body of this ${gatedMethod} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`,
+          );
+        }
+        const bodyBlock = shown !== undefined && 'text' in shown
+          ? onBoxBlock(shown.text)
+          : !bodyGoesOut ? pv``
+            : shown !== undefined ? pv` The body holds a stored secret and is not shown.`
+              : pv` The body (${bodySize} bytes) is too large to show; its field names are listed.`;
         // Parallel calls of the same batch with the SAME question share one answer. Only within
         // the batch: a sub-agent shares the Session counters but not the parent's epoch, and an
         // answer given for the parent's epoch must not let the child's call through. Anything
         // that is asked every time is never shared: each such call shows its own target.
-        const shareKey = remembers && batch !== undefined ? `${key}\u0000${path}\u0000${fields}` : undefined;
+        // The question shows the body, so only calls with the SAME body share an answer.
+        const shareKey = remembers && batch !== undefined ? `${key}\u0000${path}\u0000${sentBody ?? ''}` : undefined;
         let pendingMap = batch === undefined ? undefined : pendingInBatch.get(batch);
         if (batch !== undefined && !pendingMap) { pendingMap = new Map(); pendingInBatch.set(batch, pendingMap); }
         let pending = shareKey === undefined ? undefined : pendingMap?.get(shareKey);
@@ -2576,7 +2600,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // Re-read once it is this call's turn: the question before it may have answered it.
             if (remembers && isApproved(counters, key, epoch)) return true;
             if (remembers && batch !== undefined && deniedInBatch.get(batch)?.has(key)) {
-              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the same write was denied earlier in this batch.`);
+              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: a ${gatedMethod} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
             // prompt would outlive the run as a pending row and block the Session's next one.
@@ -2590,7 +2614,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
                 : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
                   : pv` In this session every write is asked.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}`,
+              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { onBoxBlock, pv } from './prompt-value.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1520,6 +1521,44 @@ describe('WorkerLoop', () => {
       // The marker, not a sentence: a cancellation must not be mistakable for
       // an answer by the model that receives it.
       expect(answer).toBe('__dismissed__');
+    } finally {
+      history.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('(N12-4) the notification carries the question without its on-box values; the stored row keeps them', async () => {
+    vi.useRealTimers();
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-onbox-'));
+    const history = new RunHistory(join(dir, 'history.db'));
+    const store = new PromptStore(history.getDb());
+    try {
+      const asked = pv`⚠ http_request: POST to h.example /v1/x (fields "name") — Allow outbound data?${onBoxBlock('{\n  "name": "CANARY-VALUE"\n}')}`;
+      const session = {
+        sessionId: 'thread-worker-onbox',
+        _recreateAgent: vi.fn(),
+        promptUser: undefined as ((q: unknown, o?: string[]) => Promise<string>) | undefined,
+        run: vi.fn(async () => { await session.promptUser!(asked, ['Allow', 'Deny']); return 'Done.'; }),
+      };
+      const task = makeTask();
+      const engine = makeEngine({ taskManager: makeTaskManager([task]), session: session as unknown as Session, promptStore: store });
+      const router = makeNotificationRouter();
+      const loop = new WorkerLoop(engine, router, 60_000);
+      await loop.tick();
+      for (let i = 0; i < 200 && !store.getPending('thread-worker-onbox'); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const sent = vi.mocked(router.notify).mock.calls.map(([m]) => m).find((m) => m.inquiry !== undefined);
+      expect(sent?.inquiry?.question).toBe('⚠ http_request: POST to h.example /v1/x (fields "name") — Allow outbound data?');
+      expect(sent?.body).not.toContain('CANARY-VALUE');
+      expect(loop.getTaskPendingInput(task.id)!.question).toContain('"name": "CANARY-VALUE"');
+      // The stored row carries the SEGMENTS, so the owner's UI renders the value as a value
+      // and never parses it as markdown that could close the frame's code fence.
+      const row = store.getPending('thread-worker-onbox')!;
+      expect(row.segments_json).not.toBeNull();
+      const segs = JSON.parse(row.segments_json!) as Array<{ kind: string; text: string }>;
+      expect(segs.filter((x) => x.kind === 'value').map((x) => x.text).join('')).toContain('"name": "CANARY-VALUE"');
+      loop.stop();
     } finally {
       history.close();
       rmSync(dir, { recursive: true, force: true });

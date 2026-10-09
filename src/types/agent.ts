@@ -94,8 +94,14 @@ export interface PromptMeta extends PromptOrigin {
  * construct however many lines it has.
  */
 export type PromptSegment =
-  | { readonly kind: 'frame'; readonly text: string }
-  | { readonly kind: 'value'; readonly text: string };
+  | { readonly kind: 'frame'; readonly text: string; readonly onBoxOnly?: true | undefined }
+  | {
+    readonly kind: 'value';
+    readonly text: string;
+    /** Shown where the question is answered on the instance, left out of every copy that
+     *  leaves it (a notification, an escalation mail): see `offBoxPrompt`. */
+    readonly onBoxOnly?: true | undefined;
+  };
 
 /**
  * Registered globally so the type here and the `pv` implementation in
