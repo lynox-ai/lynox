@@ -57,6 +57,23 @@ describe('escalateToUser (the Agent→User escalation primitive, Slice B3)', () 
     expect(pushed.priority).toBe('high');
   });
 
+  it('never lands the owner\'s detail in a thread a mandate holds — a bare push instead', () => {
+    // An escalation thread is the owner's; a row with that id stamped by a mandate is refused
+    // up front by POST /api/sessions, and this is the second layer.
+    store.createThread('escalation-task-9', { created_by: 'mandate:setup@example.org' });
+    const r = escalateToUser(store, router, { key: 'task-9', title: '✗ Report', body: 'Step 3 failed', data: { taskId: 'task-9' } });
+    expect(r).toBeNull();
+    expect(store.getMessages('escalation-task-9')).toEqual([]);
+    expect(store.getThread('escalation-task-9')!.is_unread).toBe(0);
+    expect((notify.mock.calls[0]![0] as NotificationMessage).data).toEqual({ taskId: 'task-9' });
+  });
+
+  it('control: an owner-opened escalation thread is bumped as before', () => {
+    store.createThread('escalation-task-9', { created_by: 'owner' });
+    expect(escalateToUser(store, router, { key: 'task-9', title: 't', body: 'b' })).toEqual({ threadId: 'escalation-task-9' });
+    expect(store.getMessages('escalation-task-9')).toHaveLength(2);
+  });
+
   it('BUMPS the same thread on a repeat event (one thread per source, history accumulates)', () => {
     escalateToUser(store, router, { key: 'task-1', title: 'Watch', body: 'first finding' });
     // Mark it read as if the user opened it...

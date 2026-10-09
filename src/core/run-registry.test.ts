@@ -29,6 +29,15 @@ describe('RunRegistry', () => {
   beforeEach(() => { db = makeDb(); reg = new RunRegistry(db); });
   afterEach(() => { db.close(); });
 
+  it('records who started a run, and finds the thread\'s run (v57, §3.13 E7)', () => {
+    reg.start('thread-1', 'run-1', 'mandate:setup@example.org');
+    expect(reg.getByRunId('run-1')!.created_by).toBe('mandate:setup@example.org');
+    expect(reg.getByThread('thread-1')!.run_id).toBe('run-1');
+    expect(reg.getByThread('thread-2')).toBeUndefined();
+    reg.start('thread-2', 'run-2');
+    expect(reg.getByRunId('run-2')!.created_by).toBeNull();
+  });
+
   it('start registers a running run that getActive returns', () => {
     reg.start('thread-1', 'run-1');
     const active = reg.getActive();

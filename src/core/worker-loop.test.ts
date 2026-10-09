@@ -3372,6 +3372,113 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     b.loop.stop();
   });
 
+  // Register: hand-run question origin. After a restart the run that asked is gone, and with
+  // it the in-memory hand-run mark; only the question row still says who asked and whether a
+  // run by hand did. Each case below is the state a restart leaves — a proposal the owner
+  // stamped while its test question was open — read by a loop that never ran it.
+  function parkedAfterRestart(stamp: { createdBy: string; handRun?: boolean }, stamped = true): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
+    const store = new PromptStore(history.getDb());
+    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M }) as TriggerRecord;
+    const promptId = store.insertAskUser(`ask-${t.id}`, 'Which list?', ['A', 'B'], undefined, undefined, undefined, t.id, stamp);
+    history.updateTrigger(t.id, { status: 'waiting', waitingUntil: store.getById(promptId)!.expires_at });
+    if (stamped) tm.confirmTrigger(t.id, undefined, 'owner');
+    const session = makeSession('Resumed.');
+    const engine = Object.assign(
+      makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store }),
+      { getRunHistory: () => history },
+    ) as unknown as Engine;
+    return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), store, t, promptId, engine };
+  }
+  const expireQuestion = (store: PromptStore, promptId: string, triggerId: string): void => {
+    history.getDb().prepare(`UPDATE pending_prompts SET expires_at = datetime('now','-1 hour') WHERE id = ?`).run(promptId);
+    expect(store.expireOld()).toBe(1);
+    history.updateTrigger(triggerId, { waitingUntil: '2020-01-01T00:00:00.000Z' });
+  };
+
+  it('255-a: a test question of a run by hand is recorded with who asked and that a hand asked', async () => {
+    const h = await startParked(false);
+    const row = h.store.getPending(`ask-${h.t.id}`)!;
+    expect(row.created_by).toBe(M);
+    expect(row.hand_run).toBe(1);
+    h.loop.stop();
+    const o = await startParked(true);
+    const ordinary = o.store.getPending(`ask-${o.t.id}`)!;
+    expect(ordinary.created_by).toBe('owner');
+    expect(ordinary.hand_run).toBe(0);
+    o.loop.stop();
+  });
+
+  it('255-b: after a restart, the engine expired the test question first — the stamped one-shot ends open and keeps its time', async () => {
+    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    // Recorded as the failed test it was, and only that: the proposal is open again on its own time.
+    expect(after.status).toBe('open');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('255-b twin: an ordinary question expired the same way ends the wait failed, as before', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' });
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).toBe('failed');
+    expect(after.next_run_at ?? null).toBeNull();
+    h.loop.stop();
+  });
+
+  it('255-c: after a restart, the test question is answered — the stamped proposal keeps its own time', async () => {
+    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).toBe('open');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('255-c twin: an ordinary answered question is due again at once', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const before = Date.now();
+    // Stop the dispatch the re-arm makes possible from reaching the row in this tick.
+    const engine = h.engine as unknown as { getTaskManager: () => TaskManager };
+    const real = engine.getTaskManager();
+    const due = vi.spyOn(real as unknown as { getDueTriggers: () => TriggerRecord[] }, 'getDueTriggers').mockReturnValue([]);
+    await h.loop.tick();
+    due.mockRestore();
+    const next = tm.getTrigger(h.t.id)!.next_run_at;
+    expect(next).not.toBeNull();
+    expect(Date.parse(next!)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(next!)).toBeLessThan(Date.parse('2030-01-01T00:00:00.000Z'));
+    h.loop.stop();
+  });
+
+  it('255-d: the run that picks up a mandate\'s answer after a restart runs under the mandate, never as a hand run', async () => {
+    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+    expect(opts?.['principal']).toEqual(EVA);
+    // Read from a question, the principal narrows the tools and nothing else: no hand-run
+    // marker exists for it, so the proposal is not let through as a test.
+    expect(h.loop.runningStarterTag(h.t.id)).toBeUndefined();
+    h.loop.stop();
+  });
+
+  it('255-d twin: an owner\'s answered question resumes as the owner\'s run', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+    expect(opts?.['principal']).toBeUndefined();
+    h.loop.stop();
+  });
+
   it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
     const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
     const { session, started, release } = heldSession(new Error('provider down'));

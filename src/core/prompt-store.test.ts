@@ -41,6 +41,39 @@ describe('PromptStore', () => {
     closeDb();
   });
 
+  describe('who asked (v57)', () => {
+    it('records the asker and a run by hand on every kind of question', () => {
+      const stamp = { createdBy: 'mandate:setup@example.org', handRun: true };
+      const ids = [
+        store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1', stamp),
+        store.insertAskUserTabs('s-2', [{ question: 'a?' }], undefined, stamp),
+        store.insertAskSecret('s-3', 'KEY', 'secret?', undefined, undefined, stamp),
+        store.insertConnectMail('s-4', 'mail?', '{}', undefined, stamp),
+        store.insertOnboardingBasics('s-5', [{ question: 'b?' }], ['k'], stamp),
+      ];
+      for (const id of ids) {
+        const row = store.getById(id)!;
+        expect(row.created_by).toBe('mandate:setup@example.org');
+        expect(row.hand_run).toBe(1);
+      }
+      const plain = store.getById(store.insertAskUser('s-6', 'q?'))!;
+      expect(plain.created_by).toBeNull();
+      expect(plain.hand_run).toBe(0);
+    });
+
+    it('finds a trigger\'s newest question whatever became of it — also after the engine\'s own expiry', () => {
+      const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1', { createdBy: 'owner', handRun: true });
+      db.prepare(`UPDATE pending_prompts SET expires_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
+      store.expireOld();
+      expect(store.getPendingForTrigger('trg-1')).toBeUndefined();
+      const latest = store.getLatestForTrigger('trg-1')!;
+      expect(latest.id).toBe(id);
+      expect(latest.status).toBe('expired');
+      expect(latest.hand_run).toBe(1);
+      expect(store.getLatestForTrigger('trg-other')).toBeUndefined();
+    });
+  });
+
   describe('single-question ask_user', () => {
     it('round-trips insert -> answer -> waitForAnswer', async () => {
       const id = store.insertAskUser('s1', 'hello?', ['yes', 'no']);

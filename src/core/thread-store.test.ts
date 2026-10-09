@@ -440,3 +440,16 @@ describe('ThreadStore — reading and erasing ALL threads (GDPR Art. 15/17)', ()
     db.close();
   });
 });
+
+describe('ThreadStore.createThread records who opened it (v57)', () => {
+  it('keeps the creator of a new thread and never changes it on a resume', () => {
+    const store = new ThreadStore(freshDb());
+    store.createThread('t-1', { created_by: 'mandate:setup@example.org' });
+    expect(store.getThread('t-1')!.created_by).toBe('mandate:setup@example.org');
+    store.createThread('t-1', { created_by: 'owner' });
+    expect(store.getThread('t-1')!.created_by).toBe('mandate:setup@example.org');
+    store.createThread('t-2');
+    expect(store.getThread('t-2')!.created_by).toBeNull();
+  });
+});
+
