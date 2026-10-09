@@ -48,13 +48,14 @@ function makeStubContext(accounts: ReadonlyArray<MailAccountConfig>): MailContex
 
 class FakeProvider implements MailProvider {
   readonly accountId: string;
+  readonly address: string;
   list = vi.fn(async (_opts?: MailListOptions): Promise<ReadonlyArray<MailEnvelope>> => []);
   fetch = vi.fn(async (_opts: MailFetchOptions): Promise<MailMessage> => { throw new Error('not configured'); });
   search = vi.fn(async (_q: MailSearchQuery, _o?: MailSearchOptions): Promise<ReadonlyArray<MailEnvelope>> => []);
   send = vi.fn(async (_input: MailSendInput): Promise<MailSendResult> => ({ messageId: '<sent@x>', accepted: [], rejected: [] }));
   watch = vi.fn(async (): Promise<MailWatchHandle> => ({ stop: async () => {} }));
   close = vi.fn(async () => {});
-  constructor(id: string) { this.accountId = id; }
+  constructor(id: string, address = `${id}@example.com`) { this.accountId = id; this.address = address; }
 }
 
 function envelope(uid: number, opts: { messageId: string; from?: string; subject?: string; flags?: string[]; date?: string; snippet?: string } = { messageId: `<${String(uid)}@x>` }): MailEnvelope {
@@ -107,6 +108,50 @@ beforeEach(() => {
   // Mail rate limit + dedup state is module-level; reset between tests so
   // ordering doesn't matter and the dedup map can't leak across cases.
   resetMailRateLimits();
+});
+
+// ── account named by its address ───────────────────────────────────────────
+
+// A user names a mailbox by its address; the tools must reach the same account they reach
+// through its id. Two accounts, so a lookup that fell back to the default or to the first
+// account would hit the wrong one.
+describe('the account parameter takes an id or an address', () => {
+  let office: FakeProvider;
+  beforeEach(() => {
+    office = new FakeProvider('office', 'office@example.ch');
+    registry.add(office);
+  });
+
+  for (const [how, account] of [['address', ' Office@Example.CH '], ['id', 'office']] as const) {
+    it(`mail_triage reaches the account by its ${how}`, async () => {
+      await createMailTriageTool(registry).handler({ account }, noPromptAgent);
+      expect(office.list, 'the named account was listed').toHaveBeenCalledTimes(1);
+      expect(provider.list, 'the other account was not').not.toHaveBeenCalled();
+    });
+
+    it(`mail_search reaches the account by its ${how}`, async () => {
+      await createMailSearchTool(registry).handler({ account, subject: 'x' }, noPromptAgent);
+      expect(office.search, 'the named account was searched').toHaveBeenCalledTimes(1);
+      expect(provider.search, 'the other account was not').not.toHaveBeenCalled();
+    });
+
+    it(`mail_read reaches the account by its ${how}`, async () => {
+      office.fetch.mockResolvedValue(makeMessage(envelope(7, { messageId: '<o-7@x>' }), 'Body.'));
+      const out = await createMailReadTool(registry).handler({ uid: 7, account }, noPromptAgent);
+      expect(office.fetch, 'the named account was read').toHaveBeenCalledTimes(1);
+      expect(provider.fetch, 'the other account was not').not.toHaveBeenCalled();
+      expect(out).toContain('Body.');
+    });
+  }
+
+  it('an address two accounts share names neither, and the error lists both by id', async () => {
+    registry.add(new FakeProvider('office-imap', 'office@example.ch'));
+    const out = await createMailReadTool(registry).handler({ uid: 7, account: 'office@example.ch' }, noPromptAgent);
+    expect(office.fetch).not.toHaveBeenCalled();
+    expect(out).toContain('More than one mail account has the address');
+    expect(out).toContain('office (office@example.ch)');
+    expect(out).toContain('office-imap (office@example.ch)');
+  });
 });
 
 // ── mail_search ────────────────────────────────────────────────────────────

@@ -235,6 +235,9 @@ export interface MailProvider {
   /** Stable identifier for this provider instance (account id). */
   readonly accountId: string;
 
+  /** The account's mail address, so a tool call can name the account by it. */
+  readonly address: string;
+
   /** Auth/transport flavor of this provider. */
   readonly authType: MailAuthType;
 

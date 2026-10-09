@@ -412,6 +412,7 @@ export function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
 
 export class ImapSmtpProvider implements MailProvider {
   readonly accountId: string;
+  readonly address: string;
   readonly authType: MailAuthType = 'imap';
 
   private readonly account: MailAccountConfig;
@@ -430,6 +431,7 @@ export class ImapSmtpProvider implements MailProvider {
 
   constructor(account: MailAccountConfig, resolveCredentials: CredentialsResolver, options?: ImapSmtpProviderOptions) {
     this.accountId = account.id;
+    this.address = account.address;
     this.account = account;
     this.resolveCredentials = resolveCredentials;
     this.tlsRejectUnauthorized = !(options?.insecureTls ?? insecureTlsFromEnv());
