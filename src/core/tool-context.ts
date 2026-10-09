@@ -75,6 +75,10 @@ export interface ToolContext {
 
   // ── API Store (per-API rate limiting + knowledge) ──
   apiStore: import('./api-store.js').ApiStore | null;
+  /** The actor trail (`audit-log.ts`): written for a mandate's acts, never read by a tool.
+   *  Null when engine.db is unavailable — a mandate then writes nothing outside the
+   *  instance, because nothing it would write could be recorded. */
+  auditLog: import('./audit-log.js').AuditLog | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -124,6 +128,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     dailyRateLimit: Infinity,
     enforceHttps: false,
     apiStore: null,
+    auditLog: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

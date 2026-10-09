@@ -106,6 +106,8 @@ import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
+import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
+import type { AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 
@@ -3928,6 +3930,45 @@ export class Agent implements IAgent {
     return this._recordedToolCalls;
   }
 
+  /**
+   * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
+   * or `null` when there is nothing to record: the owner's call, or a call that writes
+   * nothing outside. `'refused'` when the row cannot be written — no trail store, or the
+   * insert threw — and the call must not run. The target is built from the call as the model
+   * sent it (`tc.input`), before any secret was resolved into it.
+   */
+  private _beginOutwardTrail(tc: BetaToolUseBlock, tool: ToolEntry): { correlationId: string; action: string; target: string; ended: boolean } | null | 'refused' {
+    if (this.principal.kind !== 'mandate') return null;
+    const label = tool.outwardWrite ? tool.outwardWrite(tc.input as never) : null;
+    if (label === null) return null;
+    const input = tc.input as { url?: unknown; action?: unknown };
+    const target = tc.name === 'http_request' && typeof input.url === 'string'
+      ? httpTarget(label, input.url)
+      : `${tc.name} ${label}`;
+    const entry = { correlationId: newCorrelationId(), action: `${tc.name}:${label}`, target, ended: false };
+    const log = this.toolContext?.auditLog ?? null;
+    if (log === null) return 'refused';
+    try {
+      log.record({ principal: this.principal, correlationId: entry.correlationId, action: entry.action, target, phase: 'attempt', runId: this.currentRunId });
+    } catch {
+      return 'refused';
+    }
+    return entry;
+  }
+
+  /** The outcome row for a trail `_beginOutwardTrail` opened. A failure to write it changes
+   *  nothing about the call, which has already run: the attempt row stands without an
+   *  outcome, which is what it then is. */
+  private _endOutwardTrail(trail: { correlationId: string; action: string; target: string; ended: boolean } | null, phase: AuditPhase): void {
+    // One outcome per attempt: the success path records it before streaming the result, and
+    // a throw from the stream would otherwise reach the catch and record a second one.
+    if (trail === null || trail.ended) return;
+    trail.ended = true;
+    try {
+      this.toolContext?.auditLog?.record({ principal: this.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: this.currentRunId });
+    } catch { /* the attempt row stands alone */ }
+  }
+
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
@@ -4202,6 +4243,15 @@ export class Agent implements IAgent {
       };
     }
 
+    // A mandate's call that writes outside the instance is recorded before it runs, and does
+    // not run unrecorded (PRD customer-granted-operator-access §3.13 "Verbundene Konten").
+    // After every gate the dispatch itself holds; the gates inside the handler come later,
+    // which is why the outcome is a second row and not part of this one.
+    const trail = this._beginOutwardTrail(tc, tool);
+    if (trail === 'refused') {
+      return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE, is_error: true };
+    }
+
     const timer = measureTool(tc.name);
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
@@ -4346,6 +4396,7 @@ export class Agent implements IAgent {
           : { name: tc.name, agent: this.name, duration, success: false, error: softMasked, input: safeInput, threadId: this.currentThreadId },
       );
 
+      this._endOutwardTrail(trail, softFailureReason === null ? 'returned' : 'failed');
       if (this.onStream) {
         await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });
       }
@@ -4355,6 +4406,7 @@ export class Agent implements IAgent {
         content: sanitizedResult,
       };
     } catch (err: unknown) {
+      this._endOutwardTrail(trail, 'failed');
       const duration = timer.end();
       // A question nobody can answer is re-built with the question MASKED before anything
       // below reads it: its message leaves the agent, into the ledger here and into the

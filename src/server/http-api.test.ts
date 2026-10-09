@@ -19,6 +19,7 @@ import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
+import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BulkTriggerLockedError, TriggerTierUnsupportedError } from '../core/task-manager.js';
@@ -969,7 +970,8 @@ describe('LynoxHTTPApi', () => {
         return (mockSessionRun.mock.calls[0] as unknown[])[1];
       };
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
-      expect(await runAs(mandate)).toMatchObject({ principal: { kind: 'mandate', email: MANDATE_LOGIN.email } });
+      // The actor trail names who acted: the display name and the mandate id ride along (H2h).
+      expect(await runAs(mandate)).toMatchObject({ principal: { kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id } });
       const owner = webUiLoginSession(TEST_SECRET, null)!.token;
       expect(await runAs(owner)).toMatchObject({ principal: { kind: 'owner' } });
     });
@@ -13603,3 +13605,199 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
   });
 });
 
+
+// PRD customer-granted-operator-access §3.6 (piece H2h): the actor trail of a mandate's
+// request. Each recorded act leaves an `attempt` row BEFORE it runs and its outcome row
+// after, joined by one correlation id; a request whose attempt cannot be written is refused
+// and does not act. The owner leaves no trail here. The rows are read from a real engine.db.
+describe('actor trail — what a mandate\'s request leaves in audit_log', () => {
+  const MANDATE: RequestPrincipal = {
+    kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1',
+  };
+  const TAG = 'mandate:recipient@example.invalid';
+  interface Row { actor_kind: string; actor_email: string | null; actor_display: string | null; mandate_id: string | null; action: string; target: string | null; phase: string; correlation_id: string }
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  let dir = '';
+  let db: EngineDb;
+  let log: AuditLog;
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-audit-'));
+    db = new EngineDb(join(dir, 'engine.db'));
+    log = new AuditLog(db.getDb());
+  });
+  afterEach(() => {
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const rows = (): Row[] => db.getDb().prepare('SELECT * FROM audit_log ORDER BY id').all() as Row[];
+  const asMandate = (): void => api.setPrincipalResolverForTesting(() => MANDATE);
+
+  /** Swap engine accessors for one test; the log defaults to the real one over engine.db. */
+  async function withEngine(over: Record<string, unknown>, body: () => Promise<void>): Promise<void> {
+    const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const all: Record<string, unknown> = { getAuditLog: () => log, ...over };
+    const orig = new Map(Object.keys(all).map((k) => [k, engineRef[k]]));
+    for (const [k, v] of Object.entries(all)) engineRef[k] = v;
+    try { await body(); } finally { for (const [k, v] of orig) engineRef[k] = v; }
+  }
+  const failingLog = { record: (): void => { throw new Error('disk full'); } };
+
+  /** The two rows of one recorded act, read in full. */
+  function expectPair(action: string, target: string, outcome: 'done' | 'refused'): void {
+    const r = rows();
+    expect(r.map((x) => x.phase)).toEqual(['attempt', outcome]);
+    for (const x of r) {
+      expect(x).toMatchObject({
+        actor_kind: 'mandate', actor_email: 'recipient@example.invalid', actor_display: 'TEST-DISPLAY',
+        mandate_id: 'TEST-MANDATE-1', action, target,
+      });
+    }
+    expect(r[0]!.correlation_id).toBe(r[1]!.correlation_id);
+  }
+
+  describe('DELETE /api/data is the owner\'s alone', () => {
+    it('refuses a mandate with 403, erases nothing and leaves the log as it was', async () => {
+      log.record({ principal: MANDATE, action: 'earlier act', phase: 'attempt', correlationId: 'c-0' });
+      const deleteAllData = vi.fn();
+      await withEngine({ getRunHistory: () => ({ deleteAllData, scrubFreedPages: vi.fn() }) }, async () => {
+        asMandate();
+        const res = await jsonFetch('/api/data', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL_DATA' }) });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete all data.');
+      });
+      expect(deleteAllData).not.toHaveBeenCalled();
+      expect(rows().map((x) => x.correlation_id)).toEqual(['c-0']);
+    });
+  });
+
+  describe('DELETE /api/tasks/:id', () => {
+    const history = (deleted: boolean): Record<string, unknown> => ({
+      deleteTask: vi.fn().mockReturnValue(false), deleteTrigger: vi.fn().mockReturnValue(deleted),
+    });
+
+    it('records attempt and done around a mandate\'s delete', async () => {
+      const h = history(true);
+      await withEngine({ getRunHistory: () => h }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
+      });
+      expect(h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done');
+    });
+
+    it('records refused when nothing was deleted', async () => {
+      await withEngine({ getRunHistory: () => history(false) }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/tasks/nope', { method: 'DELETE' })).status).toBe(404);
+      });
+      expectPair('DELETE /api/tasks/:id', 'nope', 'refused');
+    });
+
+    it('answers 503 and deletes nothing when the attempt cannot be written', async () => {
+      for (const auditLog of [failingLog, null]) {
+        const h = history(true);
+        await withEngine({ getRunHistory: () => h, getAuditLog: () => auditLog }, async () => {
+          asMandate();
+          const res = await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' });
+          expect(res.status, String(auditLog)).toBe(503);
+        });
+        expect(h['deleteTask']).not.toHaveBeenCalled();
+        expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      }
+    });
+
+    it('leaves no row for the owner, and the owner\'s delete does not depend on the log', async () => {
+      const h = history(true);
+      await withEngine({ getRunHistory: () => h, getAuditLog: () => failingLog }, async () => {
+        expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
+      });
+      expect(rows()).toEqual([]);
+    });
+  });
+
+  describe('DELETE /api/workflows/:id', () => {
+    it('records attempt and done around a mandate\'s delete, and refused on a 404', async () => {
+      const deletePlannedPipeline = vi.fn().mockReturnValue(true);
+      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' })).status).toBe(200);
+      });
+      expectPair('DELETE /api/workflows/:id', 'wf-1', 'done');
+      db.getDb().exec('DROP TRIGGER audit_log_no_update; DELETE FROM audit_log;');
+      deletePlannedPipeline.mockReturnValue(false);
+      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/workflows/wf-2', { method: 'DELETE' })).status).toBe(404);
+      });
+      expectPair('DELETE /api/workflows/:id', 'wf-2', 'refused');
+    });
+
+    it('answers 503 and deletes nothing when the attempt cannot be written', async () => {
+      const deletePlannedPipeline = vi.fn().mockReturnValue(true);
+      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }), getAuditLog: () => failingLog }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' })).status).toBe(503);
+      });
+      expect(deletePlannedPipeline).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /api/triggers/:id/run', () => {
+    const own = { id: 'trg-full-id', edited_by: TAG, created_by: TAG };
+    function loop(run: () => Promise<unknown>): { loop: Record<string, unknown>; mint: ReturnType<typeof vi.fn>; runTriggerNow: ReturnType<typeof vi.fn> } {
+      const mint = vi.fn().mockReturnValue({});
+      const runTriggerNow = vi.fn(run);
+      return { loop: { runTriggerNow, claimHandRunMinter: () => mint }, mint, runTriggerNow };
+    }
+    const tm = { getTrigger: vi.fn().mockReturnValue(own) };
+
+    it('records attempt and done around a mandate\'s hand start, naming the canonical id', async () => {
+      const l = loop(() => Promise.resolve({ ok: true }));
+      await withEngine({ getWorkerLoop: () => l.loop, getTaskManager: () => tm }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/triggers/trg-full/run', { method: 'POST' })).status).toBe(202);
+      });
+      expectPair('POST /api/triggers/:id/run', 'trg-full-id', 'done');
+    });
+
+    it('records refused when the start is refused, and when it throws', async () => {
+      const refused = loop(() => Promise.resolve({ ok: false, reason: 'already_running' }));
+      await withEngine({ getWorkerLoop: () => refused.loop, getTaskManager: () => tm }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(409);
+      });
+      expectPair('POST /api/triggers/:id/run', 'trg-full-id', 'refused');
+      db.getDb().exec('DROP TRIGGER audit_log_no_update; DELETE FROM audit_log;');
+      const threw = loop(() => Promise.reject(new Error('boom')));
+      await withEngine({ getWorkerLoop: () => threw.loop, getTaskManager: () => tm }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(500);
+      });
+      expectPair('POST /api/triggers/:id/run', 'trg-full-id', 'refused');
+    });
+
+    it('answers 503, mints no marker and starts nothing when the attempt cannot be written', async () => {
+      const l = loop(() => Promise.resolve({ ok: true }));
+      await withEngine({ getWorkerLoop: () => l.loop, getTaskManager: () => tm, getAuditLog: () => failingLog }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(503);
+      });
+      expect(l.mint).not.toHaveBeenCalled();
+      expect(l.runTriggerNow).not.toHaveBeenCalled();
+    });
+
+    it('leaves no row for the owner', async () => {
+      const l = loop(() => Promise.resolve({ ok: true }));
+      await withEngine({ getWorkerLoop: () => l.loop, getTaskManager: () => tm }, async () => {
+        expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(202);
+      });
+      expect(l.runTriggerNow).toHaveBeenCalledTimes(1);
+      expect(rows()).toEqual([]);
+    });
+  });
+});

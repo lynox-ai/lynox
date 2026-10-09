@@ -89,6 +89,17 @@ export interface ToolEntry<TInput = unknown> {
     check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
+   * What a call writes OUTSIDE the instance — sends, creates or changes something at a
+   * provider or a third party — as a short label (the method, the action), or `null` for a
+   * call that writes nothing outside. A mandate's call that returns a label leaves an actor
+   * trail (`audit-log.ts`). Separate from `destructive`, which answers a different question
+   * (what to ask before running): creating a new spreadsheet risks no existing data and asks
+   * nothing, and it still writes at the provider. A tool whose `destructive.mode` is
+   * `'external'`, and every mail write tool, must declare this; a test over the registry
+   * enforces it, so a new outward tool is classified before it ships.
+   */
+  outwardWrite?: ((input: TInput) => string | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a

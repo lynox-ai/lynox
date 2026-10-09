@@ -44,6 +44,7 @@ interface MailSendToolInput {
 
 export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): ToolEntry<MailSendToolInput> {
   return {
+    outwardWrite: () => 'send',
     definition: {
       name: 'mail_send',
       description:

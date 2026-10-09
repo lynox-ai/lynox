@@ -46,6 +46,7 @@ interface MailReplyToolInput {
  */
 export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): ToolEntry<MailReplyToolInput> {
   return {
+    outwardWrite: () => 'reply',
     definition: {
       name: 'mail_reply',
       description:
