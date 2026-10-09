@@ -3224,8 +3224,9 @@ export class RunHistory {
     return this._triggerStore?.isAmbiguousId(id) ?? false;
   }
 
-  /** The rows {@link deleteTask} would remove for this exact id, read from the legacy table it
-   *  deletes from (never the mirror, whose parent links can be NULL for older rows), unbounded. */
+  /** This exact id's row and every task under it, at any depth, read from the legacy table
+   *  {@link deleteTask} deletes from (never the mirror, whose parent links can be NULL for
+   *  older rows), unbounded. */
   getTaskDeleteSet(id: string): ReturnType<typeof persistence.getTaskDeleteSet> {
     return persistence.getTaskDeleteSet(this.db, id);
   }

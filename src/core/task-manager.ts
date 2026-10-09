@@ -145,10 +145,10 @@ export interface TaskCreateParams {
    *  workflow run the trigger starts is seeded from it. */
   createdUntrusted?: string | undefined;
   /** Principal tag of the creating request (request-principal.ts): `owner` or
-   *  `mandate:<address>`. The HTTP create route and the `task_create` tool supply it for a
-   *  mandate; the engine leaves it absent. A trigger a mandate created is due only once the
-   *  owner stamped it; a to-do records it as who created it, and a mandate's subtask hangs only
-   *  under a to-do of its own. */
+   *  `mandate:<address>`. The HTTP create route always supplies it, the `task_create` tool for
+   *  a mandate; the engine leaves it absent. A trigger a mandate created is due only once the
+   *  owner stamped it. A to-do records it only for a mandate (the owner's stays NULL), and a
+   *  mandate's subtask hangs only under a to-do of its own. */
   createdBy?: string | undefined;
   /** Principal tag of whoever supplied `confirmedAt` — only ever the owner. */
   confirmedBy?: string | undefined;
@@ -394,15 +394,15 @@ export class TaskManager {
    * Returns false when there is no such to-do (the caller tries the triggers next). A mandate
    * deletes only a to-do of its own, and only while every subtask under it is its own too:
    * the delete takes the subtasks along, and those the owner added are not the mandate's to
-   * delete. Checked on exactly the rows the delete removes, read from the table it deletes
-   * from. The owner's delete is the legacy one, unchanged: by exact id, without a read first.
+   * delete. Checked on every row under it, at any depth, read from the table the delete
+   * removes from: a subtask of the owner's further down is the owner's as much. The owner's delete is the legacy one, unchanged: by exact id, without a read first.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
     if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
-    const { task, children } = this.history.getTaskDeleteSet(id);
+    const { task, descendants } = this.history.getTaskDeleteSet(id);
     if (task === undefined) return false;
     refuseForeignTodo(task, by, 'delete');
-    if (children.some((sub) => !ownedBy(sub, by))) throw new TodoHasForeignSubtasksError();
+    if (descendants.some((sub) => !ownedBy(sub, by))) throw new TodoHasForeignSubtasksError();
     return this.history.deleteTask(id);
   }
 

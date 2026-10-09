@@ -1256,6 +1256,15 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
       expect(gone(late)).toBe(false);
     });
 
+    it('refuses with 409 for a subtask of the owner\'s further down, and changes no row', () => {
+      const parent = mine();
+      const sub = mine('own sub', parent);
+      owners('owner grandchild', sub);
+      const before = snapshot();
+      expect(() => tm.deleteTodo(parent, M)).toThrow(TodoHasForeignSubtasksError);
+      expect(snapshot()).toEqual(before);
+    });
+
     it('refuses a mandate the owner\'s to-do, and changes nothing', () => {
       const id = owners();
       const before = snapshot();

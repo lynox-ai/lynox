@@ -605,17 +605,25 @@ export function deleteTask(db: Database.Database, id: string): boolean {
  *  remove the same set: the mirror's own `parent_task_id` may be FK-guarded to
  *  NULL for a pre-flag orphan (parent created before the mirror was enabled), so
  *  it can't reliably recompute the cascade from its own links. */
-/** What {@link deleteTask} removes for this exact id: the row itself and its direct
- *  subtasks, read unbounded from the table it deletes from, with who created each. */
-export function getTaskDeleteSet(db: Database.Database, id: string): { task: TaskRecord | undefined; children: Array<Pick<TaskRecord, 'id' | 'created_by'>> } {
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRecord | undefined;
-  const children = db.prepare('SELECT id, created_by FROM tasks WHERE parent_task_id = ?').all(id) as Array<Pick<TaskRecord, 'id' | 'created_by'>>;
-  return { task, children };
-}
-
 export function getTaskChildIds(db: Database.Database, id: string): string[] {
   return (db.prepare('SELECT id FROM tasks WHERE parent_task_id = ?').all(id) as Array<{ id: string }>)
     .map(r => r.id);
+}
+
+/** The row with exactly this id and every task under it, at any depth, with who created
+ *  each — read unbounded from the table {@link deleteTask} deletes from. Every depth, not only
+ *  the direct subtasks the delete takes: a row further down holds the delete back too. */
+export function getTaskDeleteSet(db: Database.Database, id: string): { task: TaskRecord | undefined; descendants: Array<Pick<TaskRecord, 'id' | 'created_by'>> } {
+  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRecord | undefined;
+  const descendants = db.prepare(`
+    WITH RECURSIVE sub(id, created_by) AS (
+      SELECT id, created_by FROM tasks WHERE parent_task_id = ?
+      UNION
+      SELECT t.id, t.created_by FROM tasks t JOIN sub ON t.parent_task_id = sub.id
+    )
+    SELECT id, created_by FROM sub
+  `).all(id) as Array<Pick<TaskRecord, 'id' | 'created_by'>>;
+  return { task, descendants };
 }
 
 export function getTasks(db: Database.Database, opts?: {
