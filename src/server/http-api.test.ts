@@ -13561,7 +13561,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       const ok = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
       expect(ok.status).toBe(200);
       expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
-      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }), undefined, expect.objectContaining({ kind: 'mandate' }));
+      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }), undefined, MANDATE);
     });
 
     it('marks a trigger before switching it on or off, and before completing it', async () => {

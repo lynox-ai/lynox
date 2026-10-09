@@ -1286,6 +1286,14 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
       expect(gone(ownerSub)).toBe(true);
     });
 
+    it('control: the engine (no principal) deletes a mandate\'s to-do with the owner\'s subtask under it', () => {
+      const parent = mine();
+      const ownerSub = owners('owner sub', parent);
+      expect(tm.deleteTodo(parent)).toBe(true);
+      expect(gone(parent)).toBe(true);
+      expect(gone(ownerSub)).toBe(true);
+    });
+
     it('answers false for an unknown id', () => {
       expect(tm.deleteTodo('nope', M)).toBe(false);
       expect(tm.deleteTodo('nope', OTHER)).toBe(false);
