@@ -1757,6 +1757,14 @@ ${draftJson}
       }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.get(profile.id);
+      // A save may not take a profile off the built-in provider it was set up with. A model
+      // that wanted a write scope the preset refuses saved over a working read connection as
+      // its own OAuth app; connect then refused that, and the user had neither. The answer
+      // names what is possible, so the next attempt is not another way around it.
+      const priorPreset = prior ? builtInPresetOf(prior) : undefined;
+      if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. A scope outside that list cannot be added through any profile, so tell the user it is not available here. To connect a different provider, create a new profile with its own id.`;
+      }
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
       // The owner's save of a mandate's profile makes it the owner's, and the answer says what
       // the mandate had chosen, so the owner adopts it knowingly rather than by a re-save.
