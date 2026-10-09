@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import type { RequestPrincipal } from './request-principal.js';
 import { oneLineForLog } from './profile-value-shape.js';
+import { maskSecretPatterns } from './secret-store.js';
 
 /**
  * - `attempt` — about to run; written first, and the act does not run without it.
@@ -76,15 +77,22 @@ export function newCorrelationId(): string {
   return randomUUID();
 }
 
+/** A path segment that reads as a key rather than a name: long, letters and digits mixed. */
+const OPAQUE_SEGMENT = /^(?=[^/]*[0-9])(?=[^/]*[A-Za-z])[^/]{16,}$/;
+
 /**
  * Where an HTTP write goes, as a row may name it: method, host and path. No userinfo, no
- * query, no fragment — those carry tokens and content. A URL that does not parse is named
- * as such rather than echoed.
+ * query, no fragment — those carry tokens and content. The path can carry one too (a
+ * webhook URL, `/bot<token>/`), so a segment that reads as a key is replaced, and known
+ * secret shapes are masked over the whole line. A key that is short, or letters only,
+ * stays readable: the row records where a write went, and a path is mostly names. A URL
+ * that does not parse is named as such rather than echoed.
  */
 export function httpTarget(method: string, url: string): string {
   try {
     const u = new URL(url);
-    return `${method} ${u.host}${u.pathname}`;
+    const path = u.pathname.split('/').map((seg) => (OPAQUE_SEGMENT.test(seg) ? '<key>' : seg)).join('/');
+    return maskSecretPatterns(`${method} ${u.host}${path}`, { includeGeneric: true });
   } catch {
     return `${method} <unparsed url>`;
   }

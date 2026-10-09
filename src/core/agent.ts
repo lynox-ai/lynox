@@ -107,7 +107,7 @@ import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
 import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
-import type { AuditPhase } from './audit-log.js';
+import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 
@@ -242,6 +242,16 @@ function stableStringify(value: unknown): string {
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
+
+/** An open actor-trail entry: the attempt row is written, the outcome not yet. */
+interface OutwardTrail {
+  readonly log: AuditLog | null;
+  readonly principal: RequestPrincipal;
+  readonly runId: string | undefined;
+  readonly correlationId: string;
+  readonly action: string;
+  readonly target: string;
+}
 
 export interface SendStop {
   cause: SendStopCause;
@@ -3938,7 +3948,7 @@ export class Agent implements IAgent {
    * insert threw — and the call must not run. The target is built from the call as the model
    * sent it (`tc.input`), before any secret was resolved into it.
    */
-  private _beginOutwardTrail(tc: BetaToolUseBlock, tool: ToolEntry): { correlationId: string; action: string; target: string; ended: boolean } | null | 'refused' {
+  private _beginOutwardTrail(tc: BetaToolUseBlock, tool: ToolEntry): OutwardTrail | null | 'refused' {
     if (isOwnerPrincipal(this.principal)) return null;
     const label = tool.outwardWrite ? tool.outwardWrite(tc.input as never) : null;
     if (label === null) return null;
@@ -3946,11 +3956,16 @@ export class Agent implements IAgent {
     const target = tc.name === 'http_request' && typeof input.url === 'string'
       ? httpTarget(label, input.url)
       : `${tc.name} ${label}`;
-    const entry = { correlationId: newCorrelationId(), action: `${tc.name}:${label}`, target, ended: false };
-    const log = this.toolContext?.auditLog ?? null;
-    if (log === null) return 'refused';
+    // Who acted and in which run are fixed here, at the attempt: a session reuses its agent
+    // across runs and resets `principal` per run, and an abandoned call can settle after the
+    // next run, the owner's, has begun.
+    const entry: OutwardTrail = {
+      log: this.toolContext?.auditLog ?? null, principal: this.principal, runId: this.currentRunId,
+      correlationId: newCorrelationId(), action: `${tc.name}:${label}`, target,
+    };
+    if (entry.log === null) return 'refused';
     try {
-      log.record({ principal: this.principal, correlationId: entry.correlationId, action: entry.action, target, phase: 'attempt', runId: this.currentRunId });
+      entry.log.record({ principal: entry.principal, correlationId: entry.correlationId, action: entry.action, target, phase: 'attempt', runId: entry.runId });
     } catch {
       return 'refused';
     }
@@ -3959,15 +3974,27 @@ export class Agent implements IAgent {
 
   /** The outcome row for a trail `_beginOutwardTrail` opened. A failure to write it changes
    *  nothing about the call, which has already run: the attempt row stands without an
-   *  outcome, which is what it then is. */
-  private _endOutwardTrail(trail: { correlationId: string; action: string; target: string; ended: boolean } | null, phase: AuditPhase): void {
-    // One outcome per attempt: the success path records it before streaming the result, and
-    // a throw from the stream would otherwise reach the catch and record a second one.
-    if (trail === null || trail.ended) return;
-    trail.ended = true;
+   *  outcome, which is what it then is. Written exactly once per attempt: by the handler's
+   *  settling (`_trailOnSettle`), or by the dispatch's catch when no handler started. */
+  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase): void {
     try {
-      this.toolContext?.auditLog?.record({ principal: this.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: this.currentRunId });
+      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: trail.runId });
     } catch { /* the attempt row stands alone */ }
+  }
+
+  /**
+   * The outcome is read from the HANDLER's own settling, not from the dispatch around it.
+   * The dispatch can give up on a call that goes on running — the per-tool timeout and a
+   * stopped run both stop waiting without cancelling it — and a step after the handler
+   * (scan, ledger, stream) can throw for a call whose write already happened. Read from the
+   * dispatch, both would say `failed` for a mail that went out. Read here, an abandoned call
+   * gets its outcome when it really ends, and its attempt stands alone until then.
+   */
+  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail): void {
+    work.then(
+      () => { Agent._endOutwardTrail(trail, 'returned'); },
+      () => { Agent._endOutwardTrail(trail, 'failed'); },
+    );
   }
 
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
@@ -4257,6 +4284,7 @@ export class Agent implements IAgent {
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
+    let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
     const callSlot: CallSlot = {};
     try {
@@ -4270,6 +4298,7 @@ export class Agent implements IAgent {
       const rawResult = runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
         : tool.handler(processedInput, this));
+      if (trail !== null) { Agent._trailOnSettle(Promise.resolve(rawResult), trail); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching
@@ -4397,7 +4426,6 @@ export class Agent implements IAgent {
           : { name: tc.name, agent: this.name, duration, success: false, error: softMasked, input: safeInput, threadId: this.currentThreadId },
       );
 
-      this._endOutwardTrail(trail, softFailureReason === null ? 'returned' : 'failed');
       if (this.onStream) {
         await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });
       }
@@ -4407,7 +4435,9 @@ export class Agent implements IAgent {
         content: sanitizedResult,
       };
     } catch (err: unknown) {
-      this._endOutwardTrail(trail, 'failed');
+      // Reached with the trail still open only when the handler never started (it threw while
+      // being called); a started handler records its own outcome when it settles.
+      if (trail !== null && !trailWatched) Agent._endOutwardTrail(trail, 'failed');
       const duration = timer.end();
       // A question nobody can answer is re-built with the question MASKED before anything
       // below reads it: its message leaves the agent, into the ledger here and into the

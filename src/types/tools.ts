@@ -95,8 +95,11 @@ export interface ToolEntry<TInput = unknown> {
    * trail (`audit-log.ts`). Separate from `destructive`, which answers a different question
    * (what to ask before running): creating a new spreadsheet risks no existing data and asks
    * nothing, and it still writes at the provider. A tool whose `destructive.mode` is
-   * `'external'`, and every mail write tool, must declare this; a test over the registry
-   * enforces it, so a new outward tool is classified before it ships.
+   * `'external'`, and every mail write tool, must declare this. Two tests check it: one over
+   * the registry a booted engine builds (`audit-log-boot.test.ts`), and one over the
+   * integration tools, which a booted engine registers only once an account is connected
+   * (`audit-log.test.ts`, a list it names). A new integration tool is checked once it is on
+   * that list, so add it there.
    */
   outwardWrite?: ((input: TInput) => string | null) | undefined;
   /**

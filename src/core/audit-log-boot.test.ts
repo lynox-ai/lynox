@@ -46,4 +46,23 @@ describe('Engine boot — the actor trail is wired', () => {
     const rows = engine.getEngineDb()!.getDb().prepare('SELECT correlation_id FROM audit_log').all() as Array<{ correlation_id: string }>;
     expect(rows.map(r => r.correlation_id)).toEqual(['c-boot']);
   });
+
+  it('finds every tool of the booted registry that writes outside classified', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-audit-boot-'));
+    dirs.push(dir);
+    for (const k of ['LYNOX_VAULT_KEY', 'LYNOX_MANAGED_INSTANCE_ID']) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+    const entries = engine.getRegistry().getEntries();
+    expect(entries.length).toBeGreaterThan(20);
+    const unclassified = entries
+      .filter(e => e.destructive?.mode === 'external' && typeof e.outwardWrite !== 'function')
+      .map(e => e.definition.name);
+    expect(unclassified, 'declare outwardWrite on each tool that changes data outside').toEqual([]);
+    // The filter is not empty by accident: the http writer is in the registry and declares it.
+    expect(entries.find(e => e.definition.name === 'http_request')?.outwardWrite).toBeTypeOf('function');
+  });
 });

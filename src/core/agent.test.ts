@@ -6261,6 +6261,39 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     }
   });
 
+  it('names the actor of the attempt in the outcome, though the agent\'s principal changed meanwhile', async () => {
+    // A session reuses its agent and resets `principal` per run; an abandoned call can end
+    // after the owner's next run has begun.
+    const { log, recs } = recorder();
+    const handler = vi.fn(async (_input: unknown, agent: unknown) => {
+      (agent as { principal: unknown; currentRunId: unknown }).principal = { kind: 'owner' };
+      (agent as { currentRunId: unknown }).currentRunId = 'run-owner-2';
+      return 'sent';
+    });
+    await run(outward('mail_send', () => 'send', handler as never), {}, { principal: MANDATE, auditLog: log });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    for (const r of recs) expect(r).toMatchObject({ principal: MANDATE, runId: 'run-trail-1' });
+  });
+
+  it('records the outcome of a call the dispatch gave up on when the call really ends, not `failed` at the timeout', async () => {
+    const statics = Agent as unknown as { TOOL_TIMEOUT_MS: number };
+    const before = statics.TOOL_TIMEOUT_MS;
+    statics.TOOL_TIMEOUT_MS = 20;
+    try {
+      const { log, recs } = recorder();
+      let finish: (v: string) => void = () => {};
+      const handler = vi.fn(() => new Promise<string>((r) => { finish = r; }));
+      await run(outward('mail_send', () => 'send', handler), {}, { principal: MANDATE, auditLog: log });
+      // The dispatch timed out and moved on; the send is still pending.
+      expect(recs.map(r => r.phase)).toEqual(['attempt']);
+      finish('sent');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    } finally {
+      statics.TOOL_TIMEOUT_MS = before;
+    }
+  });
+
   it('records any principal that is not the owner, whatever its kind', async () => {
     // Only the owner is exempt: a kind added later is recorded, not waved through.
     const { log, recs } = recorder();
@@ -6282,6 +6315,13 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     const soft = recorder();
     await run(outward('mail_send', () => 'send', vi.fn().mockRejectedValue(new ToolSoftFailure('HTTP 500', 'HTTP 500'))), {}, { principal: MANDATE, auditLog: soft.log });
     expect(soft.recs.map(r => r.phase)).toEqual(['attempt', 'failed']);
+  });
+
+  it('records failed for a handler that throws before it returns a promise', async () => {
+    const { log, recs } = recorder();
+    const handler = vi.fn((): Promise<string> => { throw new Error('thrown while called'); });
+    await run(outward('mail_send', () => 'send', handler), {}, { principal: MANDATE, auditLog: log });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'failed']);
   });
 
   it('writes one outcome even when streaming the result throws afterwards', async () => {

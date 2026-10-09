@@ -73,6 +73,16 @@ describe('httpTarget', () => {
   it('names method, host and path — no userinfo, no query, no fragment', () => {
     expect(httpTarget('POST', 'https://user:pw@api.example.invalid:8443/v1/items?token=abc#frag')).toBe('POST api.example.invalid:8443/v1/items');
   });
+  it('replaces a path segment that reads as a key, and keeps names and plain ids', () => {
+    // Webhook-shaped paths, built at run time so no key-shaped literal sits in the file.
+    const key24 = ['k9m', 'Q2x', 'W7p', 'Lr4', 'Zt8', 'Vb3', 'Nc6', 'Hd1'].join('');
+    expect(httpTarget('POST', `https://hooks.example.invalid/services/T0AB12CD3/B0EF45GH6/${key24}`))
+      .toBe('POST hooks.example.invalid/services/T0AB12CD3/B0EF45GH6/<key>');
+    expect(httpTarget('POST', `https://api.example.invalid/bot123456789:${key24}/sendMessage`))
+      .toBe('POST api.example.invalid/<key>/sendMessage');
+    expect(httpTarget('DELETE', 'https://api.example.invalid/v1/customers/123456789012345678/notes'))
+      .toBe('DELETE api.example.invalid/v1/customers/123456789012345678/notes');
+  });
   it('does not echo a URL it cannot parse', () => {
     expect(httpTarget('POST', 'not a url ?token=abc')).toBe('POST <unparsed url>');
   });
