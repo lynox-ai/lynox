@@ -144,6 +144,17 @@ describe('the account parameter takes an id or an address', () => {
     });
   }
 
+  it('an id that looks like another account\'s address wins, and the confirmation shows where the mail really goes out from', async () => {
+    const lookalike = new FakeProvider('office@example.ch', 'someone-else@example.org');
+    registry.add(lookalike);
+    lookalike.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
+    await createMailSendTool(registry).handler({ account: 'office@example.ch', to: 'a@x.com', subject: 's', body: 'b' }, agent);
+    expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** office@example.ch (sends as someone-else@example.org)');
+    expect(lookalike.send, 'declined, so nothing went out').not.toHaveBeenCalled();
+  });
+
   it('an address two accounts share names neither, and the error lists both by id', async () => {
     registry.add(new FakeProvider('office-imap', 'office@example.ch'));
     const out = await createMailReadTool(registry).handler({ uid: 7, account: 'office@example.ch' }, noPromptAgent);
@@ -609,6 +620,15 @@ describe('mail_reply tool', () => {
   // is markdown-rendered in the web UI. A newline there opens a block-level
   // HTML comment that swallows the recipients, the body quote and the oversize
   // warning, leaving a blank prompt to approve. The subject must stay one line.
+  it('the reply confirmation shows the address the reply goes out from', async () => {
+    provider.fetch.mockResolvedValue(makeMessage(envelope(78, { messageId: '<o78@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    await createMailReplyTool(registry).handler({ uid: 78, body: 'Thanks.' }, agent);
+    expect(prompt).toContain('**From:** rafael-gmail (sends as rafael-gmail@example.com)');
+  });
+
   it('keeps a remote sender newline in the subject from swallowing the prompt', async () => {
     const orig = envelope(78, {
       messageId: '<orig@x>',

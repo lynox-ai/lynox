@@ -117,17 +117,10 @@ describe('an account named by its address', () => {
     expect(resolveProviders(twoAccounts(), 'office').map(p => p.accountId)).toEqual(['office']);
   });
 
-  it('an id that is another account\'s address names neither; each stays reachable by its other name', () => {
+  it('an exact id wins over another account whose address is the same string', () => {
     const r = twoAccounts();
     r.add(fakeProvider('office@example.ch', 'other@example.ch'));
-    for (const resolve of [() => resolveProvider(r, 'office@example.ch'), () => resolveProviders(r, 'office@example.ch')]) {
-      const err = errorOf(resolve);
-      expect(err?.code).toBe('not_found');
-      expect(err?.message).toContain('office@example.ch (other@example.ch)');
-      expect(err?.message).toContain('office (office@example.ch)');
-    }
-    expect(resolveProvider(r, 'other@example.ch').accountId, 'the id holder by its address').toBe('office@example.ch');
-    expect(resolveProvider(r, 'office').accountId, 'the address holder by its id').toBe('office');
+    expect(resolveProvider(r, 'office@example.ch').accountId).toBe('office@example.ch');
   });
 
   it('an id that is the same account\'s own address resolves to it', () => {

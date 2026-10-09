@@ -386,6 +386,17 @@ export function previewAddressList(addrs: ReadonlyArray<MailAddress>): string {
 }
 
 /**
+ * The sending account as the user should see it before approving: its id, and the address
+ * the mail goes out from. An id is free text and can look like an address it is not, so the
+ * address is shown whenever it differs.
+ */
+export function previewSendingAccount(provider: MailProvider): string {
+  const id = singleLine(provider.accountId);
+  const address = typeof provider.address === 'string' ? singleLine(provider.address) : '';
+  return address !== '' && address !== id ? `${id} (sends as ${address})` : id;
+}
+
+/**
  * Build the agent-prompt preview text the tool wrapper shows to the
  * user. Kept in send-core so the inbox-pane (if it ever surfaces a
  * preview elsewhere) can render the same shape.
@@ -398,7 +409,7 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): PromptText {
   if (ctx.isMassSend) {
     return pv`⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients
 
-**Account:** ${ctx.provider.accountId}${personaLine ? pv`
+**Account:** ${previewSendingAccount(ctx.provider)}${personaLine ? pv`
 **Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
 **Recipients:**
 ${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}
@@ -412,7 +423,7 @@ ${bodyPreview}`;
 **Cc:** ${previewAddressList(ctx.cc)}` : ''}${ctx.bcc.length > 0 ? pv`
 **Bcc:** ${previewAddressList(ctx.bcc)}` : ''}
 **Subject:** ${singleLine(ctx.subject)}
-**From:** ${ctx.provider.accountId}${personaLine ? pv`
+**From:** ${previewSendingAccount(ctx.provider)}${personaLine ? pv`
 **Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
 
 ${bodyPreview}`;

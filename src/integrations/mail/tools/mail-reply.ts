@@ -15,7 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -214,7 +214,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
 **To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
 **Cc:** ${previewAddressList(ccAddrs)}` : ''}
 **Subject:** ${singleLine(subject)}
-**From:** ${sendProvider.accountId}${smartNote}${personaNote}
+**From:** ${previewSendingAccount(sendProvider)}${smartNote}${personaNote}
 
 ${bodyPreview}`;
 

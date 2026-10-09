@@ -72,27 +72,24 @@ export function resolveProvider(registry: MailRegistry, requested: string | unde
 /**
  * Find the account a tool call names, by id or by address.
  *
- * A user names a mailbox by its address, while the registry is keyed by account id, so both
- * are tried, the address ignoring case and surrounding spaces. A name that reaches two
- * accounts reaches neither, and the error lists them so the caller can name one by the
- * other form shown for it:
- * - two accounts share an address (the same mailbox connected twice);
- * - one account's id is another account's address. Letting the id win here would send
- *   "from boss@…" through whichever account was given that string as its id.
+ * A user names a mailbox by its address, while the registry is keyed by account id, so an
+ * exact id is tried first and then the address, ignoring case and surrounding spaces. Two
+ * accounts can share an address (the same mailbox connected twice); then the address names
+ * neither, and the error lists both so the caller can pick by id.
+ *
+ * An id can be any string, including another account's address; the id still wins. Which
+ * account that is stays visible where it matters: the send and reply previews show the
+ * address the mail goes out from, not only the account id.
  */
 function findRequested(registry: MailRegistry, requested: string): MailProvider {
+  const byId = registry.get(requested);
+  if (byId) return byId;
+
   const providers = registry.list()
     .map(id => registry.get(id))
     .filter((p): p is MailProvider => p !== null);
   const wanted = requested.trim().toLowerCase();
   const byAddress = providers.filter(p => typeof p.address === 'string' && p.address.trim().toLowerCase() === wanted);
-  const byId = registry.get(requested);
-
-  if (byId) {
-    const others = byAddress.filter(p => p.accountId !== byId.accountId);
-    if (others.length === 0) return byId;
-    throw new MailError('not_found', `"${requested}" is the id of one mail account and the address of another: ${[byId, ...others].map(describeAccount).join(', ')}. Name the account by the other id or address shown for it.`);
-  }
   if (byAddress.length === 1) return byAddress[0]!;
 
   if (byAddress.length > 1) {
