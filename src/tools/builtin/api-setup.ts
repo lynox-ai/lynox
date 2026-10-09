@@ -1763,7 +1763,7 @@ ${draftJson}
       // names what is possible, so the next attempt is not another way around it.
       const priorPreset = prior ? builtInPresetOf(prior) : undefined;
       if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
-        return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. A scope outside that list cannot be added through any profile, so tell the user it is not available here. To connect a different provider, create a new profile with its own id.`;
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
       // The owner's save of a mandate's profile makes it the owner's, and the answer says what

@@ -1049,8 +1049,46 @@ describe('a save cannot take a profile off its built-in provider', () => {
   it('names the way that exists instead of only saying no', async () => {
     const { reply } = await saveOver('update', { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] });
 
-    expect(reply).toContain('tell the user it is not available here');
-    expect(reply).toContain('To connect a different provider, create a new profile with its own id.');
+    expect(reply).toContain('Scopes this provider allows: .');
+    expect(reply).toContain('tell the user it is not available rather than offering it');
+    // Not "create a new profile": one host holds one profile, so that advice would loop
+    // back to the update this refused.
+    expect(reply).toContain('ask the user first, then delete this profile and create the new one.');
+  });
+
+  it('lists the scopes of the provider the profile is set up with', async () => {
+    const store = new ApiStore();
+    store.register({ ...prior, auth: { type: 'oauth2', oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
+    } }, base_url: 'https://acme.shops.example.com/admin', custom_endpoint_ack: { accepted: true, hosts: ['acme.shops.example.com'], redirect_hosts: ['acme.shops.example.com'], accepted_at: '2026-10-09T00:00:00.000Z' } });
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action: 'update', profile: { ...prior, base_url: 'https://acme.shops.example.com/admin', auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] } } }, agent) as string;
+
+    expect(reply).toContain('Scopes this provider allows: read_orders.');
+  });
+
+  it('still saves new preset_params on the same provider', async () => {
+    const { store, reply } = await saveOver('update', { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_params: { region: 'eu' } } });
+
+    expect(reply).not.toContain('cannot remove or change');
+    expect(store.get('vetted-api')?.description).toBe('changed');
+  });
+
+  it('lets a profile off a provider the engine no longer knows', async () => {
+    // A preset retired from the register cannot connect anyway; holding the profile to it
+    // would make even the save that repairs it impossible.
+    const store = new ApiStore();
+    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'retired-shop' } } });
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action: 'update', profile: {
+      ...prior, description: 'changed', auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent) as string;
+
+    expect(reply).not.toContain('cannot remove or change');
+    expect(store.get('vetted-api')?.auth?.type).toBe('bearer');
   });
 
   it('still saves a change that keeps the provider', async () => {
