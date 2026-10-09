@@ -51,10 +51,16 @@
 
 import type { NotificationChannel, NotificationMessage } from '../../core/notification-router.js';
 import type { MailRegistry } from './tools/registry.js';
-import { sendMail, parseAddressList } from './send-core.js';
+import { accountLookupOnly, sendMail, parseAddressList, type MailAccountLookup } from './send-core.js';
 
 export interface EscalationMailChannelOptions {
   registry: MailRegistry;
+  /**
+   * Account configurations, so a receive-only account is refused as it is for
+   * every other send. Required: without it `sendMail` cannot see the account
+   * type.
+   */
+  accounts: MailAccountLookup;
   /**
    * Addresses this channel may deliver to, set by the operator wiring it up.
    * Omitted or empty means the channel refuses every message — see the header.
@@ -74,12 +80,14 @@ export interface EscalationMailChannelOptions {
 export class EscalationMailChannel implements NotificationChannel {
   readonly name = 'escalation-mail';
   private readonly registry: MailRegistry;
+  private readonly accounts: MailAccountLookup;
   /** normalised form → the entry as the operator wrote it. */
   private readonly allowed: ReadonlyMap<string, string>;
   private readonly account: string | undefined;
 
   constructor(opts: EscalationMailChannelOptions) {
     this.registry = opts.registry;
+    this.accounts = accountLookupOnly(opts.accounts);
     const allowed = new Map<string, string>();
     const configured = opts.allowedRecipients ?? [];
     let dropped = 0;
@@ -178,7 +186,7 @@ export class EscalationMailChannel implements NotificationChannel {
         to: [{ address }],
         subject: msg.title,
         body: formatEscalationBody(msg),
-      });
+      }, {}, this.accounts);
       if (!result.ok) {
         process.stderr.write(`[escalation-mail] send failed (${result.status}): ${result.message}\n`);
         return false;

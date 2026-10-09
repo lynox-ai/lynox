@@ -1839,6 +1839,7 @@ export class Engine {
         const scheduledPoller = startScheduledSendPoller({
           state: mailStateDb,
           registry: mailCtx.registry,
+          accounts: mailCtx,
         });
         this._scheduledSendPoller = scheduledPoller;
       }
