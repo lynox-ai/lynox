@@ -130,6 +130,8 @@ const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'comple
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
 const mockTaskMarkEditedBy = vi.fn().mockReturnValue(true);
+// A to-do lookup: none by default, so an unmarked id reads as "no such row" (the route's 404).
+const mockTaskGetTask = vi.fn().mockReturnValue(undefined);
 const mockTaskGetTrigger = vi.fn().mockReturnValue({ id: 'task-1', effect: 'run_agent' });
 const mockConfirmTrigger = vi.fn().mockReturnValue({ id: 'task-1', confirmed_at: '2026-06-01T00:00:00.000Z' });
 const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
@@ -280,6 +282,7 @@ vi.mock('../core/engine.js', () => ({
       setEnabled: mockTaskSetEnabled,
       confirmTrigger: mockConfirmTrigger,
       markEditedBy: mockTaskMarkEditedBy,
+      getTask: mockTaskGetTask,
       getTrigger: mockTaskGetTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
@@ -13854,10 +13857,8 @@ describe('mandate stance of every route that writes', () => {
       'POST /api/onboarding/derive-domain free',
       'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
-      'POST /api/speak free',
       'POST /api/tasks mark',
       'POST /api/tasks/stance-probe/complete mark',
-      'POST /api/transcribe free',
       'POST /api/triggers/stance-probe/run own',
       'POST /api/workflows/stance-probe/grant-preview free',
     ]);
@@ -13930,10 +13931,60 @@ describe('PUT /api/secrets/:name and a mandate', () => {
     expect(r.set).not.toHaveBeenCalled();
   });
 
-  it('control: the owner stores a secret', async () => {
+  it('control: the owner stores a secret, and replaces one that exists', async () => {
+    const replaced = await put(OWNER_PRINCIPAL, 'ANTHROPIC_API_KEY');
+    expect(replaced.status).toBe(200);
+    expect(replaced.set).toHaveBeenCalledWith('ANTHROPIC_API_KEY', 'NEW-VALUE');
+  });
+
+  it('control: the owner stores a new name', async () => {
     const r = await put(OWNER_PRINCIPAL, 'CRM_CLIENT_ID');
     expect(r.status).toBe(200);
     expect(r.set).toHaveBeenCalledWith('CRM_CLIENT_ID', 'NEW-VALUE');
   });
 });
 
+
+describe('a mandate and a to-do', () => {
+  // A to-do has no stamp to drop and records no one who set it up, so a mandate's change to
+  // one can be neither marked nor bound to the mandate: it is refused. A trigger is marked.
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  afterEach(() => {
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    mockTaskMarkEditedBy.mockReturnValue(true);
+    mockTaskGetTask.mockReturnValue(undefined);
+  });
+
+  it.each([
+    ['PATCH', '/api/tasks/todo-1', { title: 'changed' }],
+    ['POST', '/api/tasks/todo-1/complete', {}],
+  ] as const)('refuses %s %s for a to-do, and changes nothing', async (method, path, body) => {
+    mockTaskMarkEditedBy.mockReturnValue(false);
+    mockTaskGetTask.mockReturnValue({ id: 'todo-1', title: 'a to-do' });
+    mockTaskUpdate.mockClear(); mockTaskComplete.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch(path, { method, body: JSON.stringify(body) });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can change a to-do.');
+    expect(mockTaskUpdate).not.toHaveBeenCalled();
+    expect(mockTaskComplete).not.toHaveBeenCalled();
+  });
+
+  it('control: a mandate\'s change to a trigger is marked and goes through', async () => {
+    mockTaskUpdate.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
+    expect(res.status).toBe(200);
+    expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', 'mandate:recipient@example.invalid', true);
+    expect(mockTaskUpdate).toHaveBeenCalled();
+  });
+
+  it('control: the owner changes a to-do', async () => {
+    mockTaskMarkEditedBy.mockReturnValue(false);
+    mockTaskGetTask.mockReturnValue({ id: 'todo-1', title: 'a to-do' });
+    mockTaskUpdate.mockClear();
+    const res = await jsonFetch('/api/tasks/todo-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
+    expect(res.status).toBe(200);
+    expect(mockTaskUpdate).toHaveBeenCalled();
+  });
+});

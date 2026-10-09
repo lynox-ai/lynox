@@ -118,7 +118,8 @@ type RouteHandler = (
  *   enforces it, so for this stance "declared" also means "applied".
  * - `mark`: a mandate may; the handler marks the act (the owner's stamp drops, or the actor
  *   trail gets a row).
- * - `own`: a mandate may act only on what it set up itself; the handler checks that.
+ * - `own`: a mandate may act only on what it set up or last changed itself; the handler
+ *   checks that.
  * - `free`: a mandate may, for the reason given.
  *
  * Only `owner-only` is applied here. For the other three the declaration states what the
@@ -134,7 +135,7 @@ export type MandateStance =
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
 /** A mandate may; the handler marks the act. */
 const MARK: MandateStance = { kind: 'mark' };
-/** A mandate may act on what it set up itself; the handler checks it. */
+/** A mandate may act on what it set up or last changed itself; the handler checks it. */
 const OWN: MandateStance = { kind: 'own' };
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
@@ -1788,17 +1789,24 @@ export class LynoxHTTPApi {
    * Before a mandate's request changes a trigger, record it and drop the stamp (PRD
    * customer-granted-operator-access §3.12 point 3): every kind of change — fields,
    * schedule, the enabled switch, completion — not only the instruction. The owner's
-   * changes are left exactly as they were: they neither mark nor clear. Returns true
-   * when it answered the request itself (a bulk trigger, which no request may change).
+   * changes are left exactly as they were: they neither mark nor clear. A to-do has no
+   * stamp to drop and records no one who set it up, so a mandate's change to one could be
+   * neither marked nor bound to the mandate: it is refused. Returns true when it answered
+   * the request itself (a refused to-do, or a bulk trigger, which no request may change).
    */
   private _markMandateEdit(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string): boolean {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return false;
+    let marked: boolean;
     try {
-      taskManager.markEditedBy(id, principalTag(principal), true);
+      marked = taskManager.markEditedBy(id, principalTag(principal), true);
     } catch (err: unknown) {
       if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return true; }
       throw err;
+    }
+    if (!marked && taskManager.getTask(id) !== undefined) {
+      errorResponse(res, 403, 'Only the owner of this instance can change a to-do.');
+      return true;
     }
     return false;
   }
@@ -8177,7 +8185,7 @@ export class LynoxHTTPApi {
         res.write(`data: ${JSON.stringify({ error: 'TTS synthesis failed' })}\n\n`);
       }
       res.end();
-    }, free('turns text into audio and stores nothing'));
+    }, ownerOnly('turn text into audio'));
 
     // ── Transcription (streaming via SSE) ──
     this.addStatic('user', 'POST /api/transcribe', async (_req, res, _params, body) => {
@@ -8307,7 +8315,7 @@ export class LynoxHTTPApi {
         res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);
       }
       res.end();
-    }, free('turns audio into text and stores nothing'));
+    }, ownerOnly('turn audio into text'));
 
     // ── Push Notifications ──
 
