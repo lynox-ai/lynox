@@ -123,7 +123,6 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // from personal@, automatically.
 
         let sendProvider: MailProvider = readProvider;
-        let sendFromAddress: string = readProvider.accountId;
 
         if (ctx) {
           const candidates = [...original.envelope.to, ...original.envelope.cc];
@@ -137,7 +136,6 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
             const matched = registry.get(match.id);
             if (!matched) continue;
             sendProvider = matched;
-            sendFromAddress = match.address;
             break;
           }
         }
@@ -166,10 +164,21 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         }
         if (toAddrs.length === 0) return 'mail_reply error: could not determine recipient — original message has no From or Reply-To, and no "to" override was given.';
 
+        // The address the reply goes out from, read from the same source the
+        // provider sends from — not from the stored account row, which can lag
+        // behind a reconnected Gmail account. Reply-all leaves it out and the
+        // confirmation shows it.
+        let sendingAddress: string;
+        try {
+          sendingAddress = await resolveSendingAddress(sendProvider);
+        } catch (err) {
+          return `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}`;
+        }
+
         // Reply-all: union with original To + Cc, minus our own address
         let ccAddrs: MailAddress[] = input.cc ? parseAddressList(input.cc) : [];
         if (input.reply_all) {
-          const ourAddress = sendFromAddress;
+          const ourAddress = sendingAddress;
           const seen = new Set<string>([...toAddrs.map(a => a.address.toLowerCase()), ourAddress.toLowerCase()]);
           for (const addr of [...original.envelope.to, ...original.envelope.cc]) {
             const key = addr.address.toLowerCase();
@@ -208,13 +217,6 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // sender's subject, and a newline in it can swallow the rest of this
         // prompt (see singleLine's doc).
         const bodyPreview = buildBodyBlock(input.body);
-
-        let sendingAddress: string;
-        try {
-          sendingAddress = await resolveSendingAddress(sendProvider);
-        } catch (err) {
-          return `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}`;
-        }
 
         const preview = pv`**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**
 
