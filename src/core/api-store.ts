@@ -18,6 +18,7 @@ import { ConnectionStore, type ConnectionRow } from './connection-store.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
+import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
@@ -1549,6 +1550,22 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
       }
       if (p.auth.instructions) {
         lines.push(`Auth note: ${p.auth.instructions}`);
+      }
+      // What a connection may ask for, from the preset rather than from memory. Without
+      // it a model offered the user a write scope the preset refuses ("I add contact_edit,
+      // you click the link again") and quoted a token lifetime nothing here had said.
+      // Every scope printed comes from the preset's own lists, never from profile text.
+      const presetId: unknown = p.auth.type === 'oauth2' ? p.auth.oauth?.preset_id : undefined;
+      const preset = typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+      if (preset) {
+        const scopeField: unknown = p.auth.oauth?.scope;
+        const requested = presetScopeRequest(preset, typeof scopeField === 'string' ? scopeField : undefined);
+        if ('scopes' in requested) lines.push(`OAuth scopes this connection asks for: ${requested.scopes.join(' ')}`);
+        lines.push(`OAuth scopes the "${preset.id}" preset allows: ${[...preset.requiredScopes, ...preset.allowedScopes].join(' ')}. No other scope can be added, not even by editing this profile; tell the user so instead of offering one.`);
+        const expiresAt: unknown = p.auth.oauth?.token_expires_at;
+        if (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) {
+          lines.push(`Access token expires: ${new Date(expiresAt).toISOString()}`);
+        }
       }
     }
 
