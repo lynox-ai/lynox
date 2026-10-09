@@ -33,7 +33,7 @@ export function createMailSearchTool(registry: MailRegistry): ToolEntry<MailSear
       input_schema: {
         type: 'object' as const,
         properties: {
-          account: { type: 'string', description: 'Account id. Omit to use the default account.' },
+          account: { type: 'string', description: 'Account id or its mail address. Omit to use the default account.' },
           text: { type: 'string', description: 'Free-text search across headers and body.' },
           from: { type: 'string', description: 'Match the From: address (substring).' },
           to: { type: 'string', description: 'Match the To: address (substring).' },

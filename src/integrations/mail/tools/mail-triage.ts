@@ -37,7 +37,7 @@ export function createMailTriageTool(registry: MailRegistry): ToolEntry<MailTria
       input_schema: {
         type: 'object' as const,
         properties: {
-          account: { type: 'string', description: 'Account id. Omit to use the default account.' },
+          account: { type: 'string', description: 'Account id or its mail address. Omit to use the default account.' },
           folder: { type: 'string', description: 'Mailbox folder. Default: INBOX.' },
           since: { type: 'string', description: 'ISO date — only consider messages received on or after this date.' },
           limit: { type: 'number', description: 'Max envelopes to consider per tick. Default 50, hard cap 50.' },

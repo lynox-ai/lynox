@@ -310,6 +310,17 @@ describe('sendMail — provider errors', () => {
 });
 
 describe('buildSendPreview', () => {
+  it('shows the sending address next to the account id, once when they are the same', () => {
+    const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1 };
+    const single = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: { accountId: 'office', address: 'office@example.ch' } as MailProvider }));
+    expect(single).toContain('**From:** office (sends as office@example.ch)');
+    const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: { accountId: 'office', address: 'office@example.ch' } as MailProvider }));
+    expect(mass).toContain('**Account:** office (sends as office@example.ch)');
+    const same = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: { accountId: 'm@example.ch', address: 'm@example.ch' } as MailProvider }));
+    expect(same).toContain('**From:** m@example.ch\n');
+    expect(same).not.toContain('sends as');
+  });
+
   it('renders the single-send preview with from/to/subject', () => {
     const preview = flattenPrompt(buildSendPreview({
       provider: { accountId: 'acct-1' } as MailProvider,
