@@ -203,8 +203,8 @@ describe('connect refuses a scope the preset does not allow', () => {
   });
 
   // The tool asks for the client pair as the route reads it, through the profile's view of the
-  // vault, so it does not hand out a link the route then refuses. A preset profile with a
-  // mandate as author cannot be saved any more; one stored before that is the case here.
+  // vault, so it does not hand out a link the route then refuses. The owner's session asks
+  // here, for a profile a mandate wrote: the view applies to the profile, not to the turn.
   it.each([
     ['hands out no link for a profile a mandate wrote, whose client pair the route would not read', 'mandate:setup@example.org', false],
     ['control: hands out the link for the owner\'s profile', undefined, true],
@@ -1181,5 +1181,48 @@ describe('view tells the model what a preset connection may ask for', () => {
     const reply = await apiSetupTool.handler({ action: 'view', id: 'shop-api' }, agentWith(store)) as string;
 
     expect(reply).not.toContain('OAuth scopes');
+  });
+});
+
+// The two refusals the connect route gives before anything is sent, given by the tool as well,
+// so it does not hand out a link the route then turns away.
+describe('connect refuses before the link what the route would refuse', () => {
+  const TAG = 'mandate:setup@example.org';
+  const mandateAgent = (store: ApiStore): never => {
+    const secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE };
+    const base = agentWith(store, secrets) as unknown as { secretStore: Record<string, unknown> };
+    return {
+      ...base,
+      principal: { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' },
+      secretStore: { ...base.secretStore, resolve: (n: string) => secrets[n] ?? null, isEnvironmentSecret: () => false },
+    } as never;
+  };
+  const scoped = (over: Partial<ApiProfile> = {}): ApiProfile => {
+    const base = shopProfile(over);
+    return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders', ...over.auth?.oauth } } };
+  };
+
+  it('hands out no link whose client id is a name some profile reads as its secret', async () => {
+    const store = new ApiStore();
+    const p = scoped();
+    store.register({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, client_id_key: 'SHOP_CLIENT_SECRET' } } });
+    const result = await connect(agentWith(store));
+    expect(result).toContain('reads that name as a credential');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
+  it('hands a mandate no link when its token slot is a name the owner\'s profile reads', async () => {
+    const store = new ApiStore();
+    store.register({ ...scoped(), created_by: TAG });
+    store.register({ id: 'shop-pat', name: 'Shop PAT', base_url: 'https://acme.shops.example.com/admin', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_API_ACCESS_TOKEN'] } });
+    const result = await connect(mandateAgent(store));
+    expect(result).toContain('a profile of somebody else reads');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
+  it('control: the same mandate gets the link when no one else reads the slot', async () => {
+    const store = new ApiStore();
+    store.register({ ...scoped(), created_by: TAG });
+    expect(await connect(mandateAgent(store))).toContain('/api/oauth/connect/shop-api');
   });
 });

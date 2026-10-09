@@ -20,7 +20,7 @@ import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
 import type { SecretStoreLike } from '../types/index.js';
-import { MANDATE_TAG_PREFIX } from './request-principal.js';
+import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 
 // ── Errors ──
 
@@ -378,6 +378,22 @@ export interface OAuthGrantRecord {
    * under it later, and a name derived from the id can hold one from the start.
    */
   written?: WrittenSecret[] | undefined;
+  /**
+   * Who gave the consent this grant came from: the principal tag of the session that started
+   * the connection (`owner`, or `mandate:<address>`), carried through the provider's page in
+   * the signed state cookie and stamped by the callback. Absent on every grant from before it
+   * was recorded, which reads as the owner's. It decides whose the tokens are (PRD
+   * customer-granted-operator-access §3.13): a profile a mandate wrote reads them only when
+   * the mandate connected them itself.
+   */
+  connected_by?: string | undefined;
+  /**
+   * The mandate whose consent this is, when {@link connected_by} names one. The tokens are not
+   * resolved once that mandate has ended, by anyone, until the owner connects the account
+   * again and so records the owner's consent. Adopting the profile does not: its save keeps the
+   * grant as it is. A later mandate for the same address is another grant and does not revive it.
+   */
+  connected_mandate_id?: string | undefined;
 }
 
 /** One entry of {@link OAuthGrantRecord.written}. */
@@ -505,18 +521,31 @@ export function isMandateAuthored(profile: ApiProfile): boolean {
 }
 
 /**
- * Every vault name a profile connected through a provider preset reads: its credentials,
- * its token pair and what its exchanges wrote. A mandate's turn may not write to such an
- * account (`http_request`), so it may not hold what authenticates there either. A mandate
- * connects no preset account of its own (`api_setup`), so there is no exception here.
+ * The vault names that hold a profile's tokens: the derived pair of an oauth2 profile and what
+ * its exchanges wrote. Its client pair and other configured credentials are not among them.
  */
-export function presetCredentialNames(store: Pick<ApiStore, 'getAll'>): Set<string> {
+export function grantTokenNames(profile: ApiProfile): Set<string> {
   const names = new Set<string>();
-  for (const p of store.getAll()) {
-    if (p.auth?.oauth?.preset_id === undefined) continue;
-    for (const k of collectVaultKeys(p)) names.add(k);
+  if (profile.auth?.type === 'oauth2') {
+    names.add(accessTokenKey(profile.id));
+    names.add(refreshTokenKey(profile.id));
   }
+  for (const w of recordedWrites(profile)) names.add(w.name);
   return names;
+}
+
+/** Whether a mandate gave the consent this profile's tokens came from. */
+export function isMandateConnection(profile: ApiProfile): boolean {
+  return isMandateTag(profile.oauth_grant?.connected_by);
+}
+
+/**
+ * A name of the shape the derived token pair has (`<ID>_ACCESS_TOKEN`, `<ID>_REFRESH_TOKEN`).
+ * A profile's own pair is decided by its id; this answers only whether a name LOOKS like one,
+ * which is what a profile naming another id's slot is caught by after that profile is gone.
+ */
+export function hasTokenSlotShape(name: string): boolean {
+  return /_(ACCESS|REFRESH)_TOKEN$/.test(name);
 }
 
 /** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). */
@@ -752,8 +781,14 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
   // `notVisible` under a sentence inviting its deletion. A guard that has to be
   // remembered once per pass is the wrong shape; this is the multiplication made
   // into one name.
+  //
+  // Another profile naming the name does not hold back a token a MANDATE's consent wrote. That
+  // naming is the way such a token would outlive its connection: a second profile names the
+  // first one's slot, the first is deleted, and the token now authenticates wherever the second
+  // points. What the owner's exchanges wrote keeps the rule, since the owner may share a name.
+  const mandateConnection = isMandateConnection(profile);
   const notOursToOffer = (name: string): boolean =>
-    isProtectedSecretWrite(name) || inUseElsewhere.has(name);
+    isProtectedSecretWrite(name) || (!mandateConnection && inUseElsewhere.has(name));
 
   const removed: string[] = [];
   const notRemovable: string[] = [];

@@ -3379,39 +3379,122 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
-  // PRD customer-granted-operator-access §3.13 (H2): the link a connection starts with reads
-  // the vault through the profile's view, so a profile a mandate wrote does not put a value
-  // from the environment into it. The owner's profile is the control.
-  // Interim scope (register row on who owns a connection): connecting an account is the
-  // owner's, and a mandate's session is refused before the profile is looked up.
+  // PRD customer-granted-operator-access §3.13 (H2i): a session under a mandate starts a
+  // connection on a profile it set up itself, and on nothing else; the state cookie carries who
+  // started it, so the callback can record whose consent it is. The owner's session is the control.
   describe('GET /api/oauth/connect/:id and a mandate\'s session', () => {
     const MANDATE_LOGIN = {
       kind: 'mandate' as const, email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
       mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
     };
-    it.each([
-      ['refuses a mandate\'s session before it looks the profile up', true],
-      ['control: lets the owner\'s session through to the lookup', false],
-    ])('%s', async (_label, asMandate) => {
+    const TAG = 'mandate:recipient@example.invalid';
+    const OWN_ONLY = 'In this session you can connect only an API profile you set up yourself.';
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
+    async function connect(
+      author: string | undefined, asMandate: boolean, id = 'books',
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[] } = {},
+    ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
-      const lookup = vi.spyOn(store, 'get');
+      store.register({
+        id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: opts.clientIdKey ?? 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope: 'openid offline_access' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      for (const other of opts.others ?? []) store.register(other);
       mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
+      const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+      mockDerivePresetEndpoints.mockImplementation((pid: string, params: Record<string, unknown> | undefined) => presets.derivePresetEndpoints(pid, params));
       const priorSecret = process.env['LYNOX_HTTP_SECRET'];
       process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
       try {
         const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
-        const res = await fetch(`${baseUrl}/api/oauth/connect/books`, {
+        const res = await fetch(`${baseUrl}/api/oauth/connect/${id}`, {
           redirect: 'manual',
           headers: { cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Dest': 'document' },
         });
-        expect(res.status === 403 && (await res.text()).includes('for the owner of this instance')).toBe(asMandate);
-        expect(lookup.mock.calls.length > 0).toBe(!asMandate);
+        const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
+        const state = set === undefined ? null : decodeURIComponent(set.split(';')[0]!.slice('lynox_profile_oauth_state='.length));
+        return { status: res.status, text: await res.text(), state, location: res.headers.get('location') ?? '' };
       } finally {
+        mockDerivePresetEndpoints.mockReset();
         if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
         else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
         mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
       }
+    }
+
+    it.each([
+      ['the owner\'s profile', undefined],
+      ['another mandate\'s profile', 'mandate:someone-else@example.invalid'],
+    ])('refuses a mandate\'s session on %s, and starts nothing', async (_label, author) => {
+      const r = await connect(author, true);
+      expect(r.status).toBe(403);
+      expect(r.text).toContain(OWN_ONLY);
+      expect(r.state).toBeNull();
+    });
+
+    it('gives a mandate\'s session the same answer for an id that does not exist', async () => {
+      const r = await connect(TAG, true, 'no-such-profile');
+      expect(r.status).toBe(403);
+      expect(r.text).toContain(OWN_ONLY);
+    });
+
+    it('starts a mandate\'s connection on a profile it wrote, signing the mandate into the state', async () => {
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const r = await connect(TAG, true);
+      expect(r.status).toBe(302);
+      expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
+        .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
+    });
+
+    it('control: the owner\'s session starts on a mandate\'s profile, signed as the owner', async () => {
+      const { verifyProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const r = await connect(TAG, false);
+      expect(r.status).toBe(302);
+      expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by).toEqual({ tag: 'owner' });
+    });
+
+    // The owner's bearer profile reads a token stored under the name the mandate's connection
+    // would write its access token to. Connecting would overwrite it and hand the owner's
+    // profile the mandate's token.
+    const OWNERS_PAT = {
+      id: 'books-pat', name: 'Books PAT', base_url: 'https://api.bexio.com/3.0', description: 'd',
+      auth: { type: 'bearer' as const, vault_keys: ['BOOKS_ACCESS_TOKEN'] },
+    };
+
+    it('refuses a mandate\'s connection whose token slot another author\'s profile reads, and starts nothing', async () => {
+      const r = await connect(TAG, true, 'books', { others: [OWNERS_PAT] });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('to fill. Nothing was sent to the provider.');
+      expect(r.state).toBeNull();
+    });
+
+    it('control: the owner may connect over a slot the owner\'s own profile reads', async () => {
+      const r = await connect(undefined, false, 'books', { others: [OWNERS_PAT] });
+      expect(r.status).toBe(302);
+    });
+
+    it.each([
+      ['a mandate\'s session', TAG, true],
+      ['the owner\'s session', undefined, false],
+    ])('does not put a client secret into the link for %s', async (_label, author, asMandate) => {
+      const r = await connect(author, asMandate, 'books', { clientIdKey: 'BOOKS_CLIENT_SECRET' });
+      expect(r.status).toBe(409);
+      expect(r.location).not.toContain('client-secret-stored');
+      expect(r.text).toContain('also holds a credential');
+      expect(r.state).toBeNull();
     });
   });
 
@@ -12991,6 +13074,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     grant?: import('../core/api-store.js').OAuthGrantRecord;
     oauthExtra?: Record<string, unknown>;
     profileId?: string;
+    by?: import('../core/oauth-state-cookie.js').ConnectingPrincipal;
   } = {}): Promise<{
     cookie: string; store: Awaited<ReturnType<typeof makeStore>>;
   }> {
@@ -13009,7 +13093,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }),
     });
     const signed = signProfileOAuthState(
-      { state: STATE, profileId, verifier: VERIFIER },
+      { state: STATE, profileId, verifier: VERIFIER, by: opts.by ?? { tag: 'owner' } },
       TEST_SECRET, Math.floor(Date.now() / 1000),
     );
     if (signed === null) throw new Error('fixture could not be signed');
@@ -13084,6 +13168,106 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(await res.text()).toContain('Connected');
     expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0]))
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
+  });
+
+  // PRD §3.13 (H2i): the callback records whose consent the tokens came from, taken from the
+  // signed start — and stores nothing for a mandate whose profile changed hands, or whose
+  // mandate ended, while the consent was on the provider's page.
+  describe('whose consent it is', () => {
+    const TAG = 'mandate:helper@example.invalid';
+    const MID = 'TEST-MANDATE-7';
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+    let live = true;
+    let orig: unknown;
+    const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    const complete = (cookie: string): Promise<Response> =>
+      fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+    beforeEach(() => {
+      live = true;
+      orig = engineRef()['getMandateEnds'];
+      engineRef()['getMandateEnds'] = () => ({ isLive: (id: string) => live && id === MID });
+    });
+    afterEach(() => { engineRef()['getMandateEnds'] = orig; });
+
+    it('stamps a mandate\'s consent with the mandate and its id', async () => {
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      const res = await complete(cookie);
+      expect(res.status).toBe(200);
+      expect(store.get(PROFILE)?.oauth_grant).toMatchObject({ connected_by: TAG, connected_mandate_id: MID });
+    });
+
+    it('stamps the owner\'s consent as the owner\'s, replacing a mandate\'s earlier one', async () => {
+      const { cookie, store } = await arrange({ grant: { connected_by: TAG, connected_mandate_id: MID } });
+      const res = await complete(cookie);
+      expect(res.status).toBe(200);
+      const grant = store.get(PROFILE)?.oauth_grant;
+      expect(grant?.connected_by).toBe('owner');
+      expect(grant?.connected_mandate_id).toBeUndefined();
+    });
+
+    it.each([
+      ['the mandate has ended', TAG, false],
+      ['the profile is no longer the mandate\'s', undefined, true],
+      ['the profile is another mandate\'s', 'mandate:other@example.invalid', true],
+    ])('stores nothing when %s', async (_label, author, mandateLive) => {
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      if (author !== undefined) store.register({ ...store.get(PROFILE)!, created_by: author });
+      live = mandateLive;
+      mockExchangeToken.mockClear();
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('can no longer be completed for the session that started it');
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    it('control: the same mandate and profile complete while the mandate is live', async () => {
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      expect((await complete(cookie)).status).toBe(200);
+    });
+
+    it('stores nothing when another author\'s profile reads the slot the token would go to', async () => {
+      const { accessTokenKey } = await import('../core/api-store.js');
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      // Set up by the owner while the mandate's human was on the provider's page.
+      store.register({
+        id: 'crm-pat', name: 'CRM PAT', base_url: 'https://crm.example/v1', description: 'd',
+        auth: { type: 'bearer', vault_keys: [accessTokenKey(PROFILE)] },
+      });
+      mockExchangeToken.mockClear();
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    // The exchange is an await. Whatever changes during it is read again before a token is
+    // stored: the profile changing hands, or the mandate ending.
+    it.each([
+      ['the owner adopted the profile', (s: Awaited<ReturnType<typeof makeStore>>) => { const { created_by: _, ...rest } = s.get(PROFILE)!; s.register(rest); }],
+      ['the mandate ended', () => { live = false; }],
+    ])('stores nothing when %s during the exchange', async (_label, during) => {
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      mockExchangeToken.mockImplementationOnce(async () => {
+        during(store);
+        return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1' }) };
+      });
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('Nothing was stored.');
+      expect(mockSecretSet).not.toHaveBeenCalled();
+      expect(store.get(PROFILE)?.oauth_grant?.connected_by).toBeUndefined();
+    });
   });
 
   // PRD §3.13 (H2): the exchange reads the client credentials through the profile's view of

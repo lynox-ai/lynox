@@ -1656,6 +1656,22 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek(ACCESS)).toBe('shared');
   });
 
+  // PRD §3.13 (H2i): a token a mandate's consent wrote leaves with its profile, even when
+  // another profile names it — that naming is how it would outlive its connection.
+  it.each([
+    ['removes it when a mandate\'s consent wrote it', 'mandate:setup@example.org', undefined],
+    ['control: keeps it when the owner\'s consent wrote it', 'owner', 'shared'],
+  ])('a recorded token another profile names: %s', async (_label, connectedBy, left) => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { connected_by: connectedBy, written: wrote({ [ACCESS]: 'shared' }) } }));
+    store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: ACCESS } } });
+    const vault = makeVault({ [ACCESS]: 'shared' });
+
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(makeAgent(store, vault)));
+
+    expect(vault.peek(ACCESS)).toBe(left);
+  });
+
   it('keeps a recorded token that another profile has on its own record', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } }));
@@ -3576,6 +3592,16 @@ describe('mandates and stored credentials', () => {
     expect(calls).toEqual([]);
   });
 
+  // PRD §3.13 (H2i): on the account this session connected itself, a task would run on a
+  // connection that stops working when the mandate ends, so the refusal does not offer one.
+  it('a mandate\'s write to the account it connected itself is refused without proposing a task', async () => {
+    const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M } };
+    const { calls, out } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(out).toContain('writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.');
+    expect(out).not.toContain('task_create');
+    expect(calls).toEqual([]);
+  });
+
   it('a mandate\'s write is refused on a host a preset profile shares with another profile', async () => {
     const second: ApiProfile = { ...crmProfile({ id: 'crm-two', auth: { type: 'none' } }) };
     const { calls, out } = await send([presetProfile(), second], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
@@ -3744,5 +3770,92 @@ describe('a mandate\'s renewal in the actor trail', () => {
     const { calls } = await renewAs(OWNER_PRINCIPAL, { record: (e) => { recs.push(e); } });
     expect(calls.filter((u) => u.includes('/oauth/token'))).toHaveLength(1);
     expect(recs).toEqual([]);
+  });
+});
+
+// PRD §3.13 (H2i): the first exchange records whose consent a grant is, and no renewal changes
+// it — whoever's turn renews, in either direction. A mandate counts only on a profile it wrote.
+describe('fetch_token — whose consent a grant records', () => {
+  const A: RequestPrincipal = { kind: 'mandate', email: 'a@example.invalid', mandateId: 'TEST-MANDATE-A' };
+  const B: RequestPrincipal = { kind: 'mandate', email: 'b@example.invalid', mandateId: 'TEST-MANDATE-B' };
+  const TAG_A = 'mandate:a@example.invalid';
+  // Client credentials: no token exists before the first exchange, so the stamp is all that differs.
+  const ok = (): void => { tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', expires_in: 3600 })); };
+  // A profile a mandate wrote reads the vault through its view, which asks where a value came
+  // from and which names an input refers to; the plain fixture vault answers neither.
+  const vault = (): MockVault => Object.assign(makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }), {
+    isEnvironmentSecret: (): boolean => false,
+    extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
+  });
+  const consent = (store: ApiStore): Pick<OAuthGrantRecord, 'connected_by' | 'connected_mandate_id'> => {
+    const g = store.get('crm-api')?.oauth_grant;
+    return { connected_by: g?.connected_by, connected_mandate_id: g?.connected_mandate_id };
+  };
+
+  // A provider may rotate the refresh token on any exchange, and the rotation is written to the
+  // profile's derived refresh slot. When another author's profile reads that name, the exchange
+  // is refused before anything is sent, as for the access slot.
+  it('refuses a mandate\'s exchange whose refresh slot another author\'s profile reads', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ created_by: TAG_A }, 'client_credentials'));
+    store.register({ id: 'owners-refresh', name: 'Owner', base_url: 'https://crm.example/v1', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_API_REFRESH_TOKEN'] } });
+    const post = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-mandate', expires_in: 3600 }));
+    const out = await fetchToken(makeAgent(store, vault(), undefined, undefined, A));
+    expect(out).toContain('where a renewed refresh token of this profile would go');
+    expect(post).not.toHaveBeenCalled();
+    expect(consent(store).connected_by).toBeUndefined();
+  });
+
+  it('records a mandate and its id for its first exchange on a profile it wrote', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ created_by: TAG_A }, 'client_credentials'));
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, A))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual({ connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' });
+  });
+
+  it.each([
+    ['a mandate on the owner\'s profile', undefined, A],
+    ['a mandate on another mandate\'s profile', 'mandate:b@example.invalid', A],
+    ['the owner on a mandate\'s profile', TAG_A, OWNER_PRINCIPAL],
+  ])('records the owner for the first exchange of %s', async (_label, author, actor) => {
+    const store = new ApiStore();
+    store.register(crmProfile(author === undefined ? {} : { created_by: author }, 'client_credentials'));
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, actor))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual({ connected_by: 'owner', connected_mandate_id: undefined });
+  });
+
+  it.each([
+    ['another mandate', TAG_A, { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' }, B],
+    ['the owner', TAG_A, { connected_by: TAG_A, connected_mandate_id: 'TEST-MANDATE-A' }, OWNER_PRINCIPAL],
+    ['a mandate, of the owner\'s consent on the owner\'s profile', undefined, { connected_by: 'owner' }, A],
+  ])('leaves the recorded consent as it was when %s renews', async (_label, author, recorded, actor) => {
+    const store = new ApiStore();
+    store.register(crmProfile({ ...(author === undefined ? {} : { created_by: author }), oauth_grant: { ...stamp('client-1', 'rt-1'), ...recorded } }, 'client_credentials'));
+    ok();
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, actor))).toContain('Token exchange OK');
+    expect(consent(store)).toEqual({ connected_mandate_id: undefined, ...recorded });
+  });
+
+  it('refuses a mandate\'s exchange into its own profile\'s slot when the owner\'s consent filled it, and keeps the stamp', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ created_by: TAG_A, oauth_grant: { connected_by: 'owner' } }, 'client_credentials'));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    expect(await fetchToken(makeAgent(store, vault(), undefined, undefined, A))).toContain('is a credential this profile may not write. Nothing was sent.');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consent(store)).toEqual({ connected_by: 'owner', connected_mandate_id: undefined });
+  });
+
+  it('does not hand a profile a mandate wrote a refresh token it did not obtain itself', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ created_by: TAG_A }));
+    const v = Object.assign(vaultWithRefresh(), {
+      isEnvironmentSecret: (): boolean => false,
+      extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    expect(await fetchToken(makeAgent(store, v, undefined, undefined, A))).toContain('vault is missing the OAuth credentials for profile "crm-api": "CRM_API_REFRESH_TOKEN"');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

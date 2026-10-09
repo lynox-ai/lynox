@@ -97,7 +97,8 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys, presetCredentialNames } from './api-store.js';
+import { collectVaultKeys } from './api-store.js';
+import { mandateMayRead } from './profile-secret-view.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
@@ -105,7 +106,7 @@ import { runInCallSlot } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag } from './request-principal.js';
 import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -4158,15 +4159,16 @@ export class Agent implements IAgent {
         // Refused on the name, before the vault is asked: the value is never bound, and for a
         // protected name the answer is the same whether the vault holds it or not.
         if (this._toolLock !== null) {
-          // And every value the engine took from its environment, under whatever name: those
-          // are the engine's, not something the setup stored. A store that cannot say where a
-          // value came from is read as the environment. And what authenticates an account
-          // connected through a provider preset: a mandate does not write there
-          // (`http_request`), so it does not get the token to write with.
+          // Past that, the same rule as a profile this mandate wrote (`mandateMayRead`), with no
+          // profile to go through: no value from the environment, nothing another author's
+          // profile reads, no credential of a provider preset connection, its own included (those
+          // reach their provider through the profile, not through a reference), and no token
+          // somebody else consented to. Without an API store only the environment rule is left.
           const store = this.secretStore;
           const apiStore = this.toolContext?.apiStore;
-          const preset = apiStore ? presetCredentialNames(apiStore) : new Set<string>();
-          const held = secretNames.filter(n => isProtectedSecretWrite(n) || (store.isEnvironmentSecret?.(n) ?? true) || preset.has(n));
+          const tag = principalTag(this.principal);
+          const held = secretNames.filter(n => isProtectedSecretWrite(n)
+            || (apiStore ? !mandateMayRead(store, apiStore, tag, n) : (store.isEnvironmentSecret?.(n) ?? true)));
           if (held.length > 0) {
             return {
               type: 'tool_result',

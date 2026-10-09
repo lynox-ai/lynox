@@ -40,7 +40,7 @@ let dataDir: string;
 
 /** A cookie this engine would itself have minted. */
 function mintCookie(profileId = 'bexio', atSec = Math.floor(Date.now() / 1000)): string {
-  const signed = signProfileOAuthState({ state: STATE, profileId, verifier: VERIFIER }, SECRET, atSec);
+  const signed = signProfileOAuthState({ state: STATE, profileId, verifier: VERIFIER, by: { tag: 'owner' } }, SECRET, atSec);
   if (signed === null) throw new Error('fixture could not be signed');
   return `${COOKIE}=${encodeURIComponent(signed)}`;
 }

@@ -491,11 +491,29 @@ export class SecretStore implements SecretStoreLike {
     return maskValue(secret.value);
   }
 
+  /**
+   * A check every {@link resolve} asks before it hands a value out, set by the engine once the
+   * stores it reads exist (`connectionTokenAllowed`: a token of a connection whose mandate has
+   * ended). A guard that throws withholds the value.
+   */
+  private resolveGuard: ((name: string) => boolean) | null = null;
+
+  setResolveGuard(guard: ((name: string) => boolean) | null): void {
+    this.resolveGuard = guard;
+  }
+
   resolve(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;
     if (this.isExpired(name)) return null;
     if (!this.hasConsent(name)) return null;
+    if (this.resolveGuard !== null) {
+      try {
+        if (!this.resolveGuard(name)) return null;
+      } catch {
+        return null;
+      }
+    }
 
     channels.secretAccess.publish({ name, action: 'resolve' });
     return secret.value;

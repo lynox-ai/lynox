@@ -27,7 +27,7 @@ import {
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { secretsForProfile } from '../core/profile-secret-view.js';
+import { mandateMayConnect, mayServeAsClientId, secretsForProfile } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -9014,14 +9014,17 @@ export class LynoxHTTPApi {
       //   - `authenticated` is passed as a fact rather than assumed inside
       //     `decideConnect`, because the same function answers for the tool,
       //     where there is no dispatch to have done it.
-      // Connecting an account is the owner's (PRD §3.13, interim scope — see the register row
-      // on who owns a connection). Asked before the profile is looked up, so a mandate's
-      // session learns nothing about which ids exist.
-      if (!isOwnerPrincipal(this._principalOf(req))) {
-        sendOAuthHtml(res, 403, 'Connecting an account is for the owner of this instance. Nothing was sent to the provider.');
+      // A session under a mandate connects a profile it set up itself, and nothing else (PRD
+      // §3.13): the consent is recorded as its own, and an account the owner, or another
+      // mandate, prepared is theirs to connect. One answer whether the id exists or not, so the
+      // session learns nothing about which ids do.
+      const principal = this._principalOf(req);
+      const profile = engine.getApiStore()?.get(id);
+      if (principal.kind === 'mandate'
+        && (profile === undefined || profile.created_by !== principalTag(principal) || principal.mandateId === undefined)) {
+        sendOAuthHtml(res, 403, 'In this session you can connect only an API profile you set up yourself. Nothing was sent to the provider.');
         return;
       }
-      const profile = engine.getApiStore()?.get(id);
 
       const decision = decideConnect({
         authenticated: true,
@@ -9040,24 +9043,45 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // The tokens of this connection land under the profile's derived names. A profile the
+      // owner, or another mandate, set up may read one of those names, and storing this
+      // mandate's token there would hand that profile the token.
+      const slotStore = engine.getSecretStore();
+      const slotApis = engine.getApiStore();
+      if (principal.kind === 'mandate' && profile && slotApis
+        && (!slotStore || !mandateMayConnect(slotStore, slotApis, principalTag(principal), profile))) {
+        sendOAuthHtml(res, 409, 'This connection would store its token under a name that is not this session\'s to fill. Nothing was sent to the provider.');
+        return;
+      }
+
       const { verifier, challenge, method } = createPkcePair();
       const state = randomUUID();
       const signed = signProfileOAuthState(
-        { state, profileId: id, verifier },
+        {
+          state, profileId: id, verifier,
+          by: principal.kind === 'mandate' ? { tag: principalTag(principal), mandateId: principal.mandateId } : { tag: 'owner' },
+        },
         httpSecret,
         Math.floor(Date.now() / 1000),
       );
       if (!signed) {
-        // Unreachable by construction: `decideConnect` has already established
-        // the secret and the profile, and the id it saw is the id signed here.
-        // Refused rather than asserted, because "unreachable" is a claim about
-        // today's callers and this is the one place where a wrong one would
-        // mint a cookie that verifies as a DIFFERENT profile.
+        // `decideConnect` has already established the secret and the profile, and
+        // the id it saw is the id signed here. What still lands here is a value the
+        // format cannot carry: a mandate address with enough non-ASCII characters
+        // that its encoding exceeds what the reader accepts. Refused before the
+        // user is sent anywhere, and never asserted, because this is the one place
+        // where a wrong value would mint a cookie that verifies as a DIFFERENT one.
         sendOAuthHtml(res, 500, 'This engine could not start the authorization. Nothing was sent to the provider.');
         return;
       }
 
       const clientIdKey = profile?.auth?.oauth?.client_id_key ?? '';
+      // The client id travels in the link, to the browser and on to the provider. A name some
+      // profile reads as a credential would put that credential there instead.
+      if (clientIdKey && slotApis && !mayServeAsClientId(slotApis, clientIdKey)) {
+        sendOAuthHtml(res, 409, 'The client id of this profile is stored under a name that also holds a credential, and a client id is sent in the link. Store the client id under its own name, then ask for a new link. Nothing was sent to the provider.');
+        return;
+      }
       // Through the profile's view of the vault, as every other read for a profile: one a
       // mandate wrote does not put an environment value or another account's credential into
       // the link (`profile-secret-view.ts`).
@@ -9171,6 +9195,27 @@ export class LynoxHTTPApi {
         sendOAuthHtml(res, 409, 'That connection no longer exists on this engine. Nothing was changed.');
         return;
       }
+      // A mandate's consent lands only where the start allowed it: on a profile the mandate
+      // still wrote, while the mandate is still live. The profile may have changed hands, and
+      // the mandate may have ended, during the minutes on the provider's page; a token stored
+      // then would be one nobody may use.
+      const by = signed.by;
+      // Asked twice: here, before anything goes to the provider, and again just before the
+      // tokens are stored, because the exchange is an await and the profile, the mandate and
+      // the names around them can all change while it runs.
+      const mayStillConnect = (current: typeof profile): boolean => {
+        if (by.tag === 'owner') return true;
+        const store = engine.getSecretStore();
+        return current.created_by === by.tag
+          && by.mandateId !== undefined
+          && engine.getMandateEnds()?.isLive(by.mandateId) === true
+          && store !== null && store !== undefined
+          && mandateMayConnect(store, apiStore, by.tag, current);
+      };
+      if (!mayStillConnect(profile)) {
+        sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was changed.');
+        return;
+      }
 
       const endpoints = derivePresetEndpoints(oauth.preset_id ?? '', oauth.preset_params);
       if ('kind' in endpoints) {
@@ -9224,6 +9269,15 @@ export class LynoxHTTPApi {
       const accessToken = parsed.access_token;
       if (typeof accessToken !== 'string' || accessToken === '') {
         sendOAuthHtml(res, 502, 'The provider answered without an access token. Nothing was stored.');
+        return;
+      }
+
+      // The last await before the writes: from the check below to the save, nothing yields, so
+      // the profile the check reads is the one that gets stamped.
+      const { getLynoxDir } = await import('../core/config.js');
+      const current = apiStore.get(signed.profileId);
+      if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
+        sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
         return;
       }
 
@@ -9294,7 +9348,6 @@ export class LynoxHTTPApi {
         // the very harm the re-read below exists to prevent, reintroduced two
         // statements later. `persistGrant` awaits nothing between its get and
         // its save; this now matches it.
-        const { getLynoxDir } = await import('../core/config.js');
         const fresh = apiStore.get(signed.profileId);
         if (fresh !== undefined) {
           const expiry = tokenExpiryFrom(parsed.expires_in);
@@ -9381,7 +9434,12 @@ export class LynoxHTTPApi {
             // mechanism sound built that was not.
             state: refreshToken !== null ? 'connected' : 'no-refresh',
             written: [...recordedWrites(fresh).filter((w) => !rewritten.has(w.name)), ...written],
+            // Whose consent this is, from the signed start. A new consent replaces the old
+            // record whole: the owner connecting again is the owner's grant from now on.
+            connected_by: by.tag,
           };
+          if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
+          else delete grantNext.connected_mandate_id;
           // A revocation verdict is about a grant this authorization just
           // replaced. Leaving it would let `hasRevokedGrant` keep reporting a
           // connection the user has just re-established as revoked — and the

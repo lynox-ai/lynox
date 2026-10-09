@@ -676,28 +676,32 @@ describe('api_setup tool', () => {
       expect(out).not.toContain('mandate');
     });
 
-    // Interim scope (register row on who owns a connection): connecting an account through a
-    // provider preset is the owner's.
+    // PRD §3.13 (H2i): a session under a mandate sets up a provider preset profile of its own and
+    // connects it; the profile is recorded as the mandate's, as every profile it saves.
     it.each([
       ['create', 'create'],
       ['update of its own profile', 'update'],
-    ])('a mandate\'s %s naming a provider preset is refused, and nothing is saved', async (_label, action) => {
+    ])('a mandate\'s %s naming a provider preset is saved as the mandate\'s', async (_label, action) => {
       const store = new ApiStore();
-      const agent = createMockAgent(store, undefined, undefined, mandate);
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'), mandate);
       if (action === 'update') await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
-      const before = store.get('test-api') === undefined ? undefined : JSON.stringify(stored(store));
       const preset = { ...SAMPLE_PROFILE, auth: { type: 'oauth2', vault_keys: ['C_ID'], oauth: { preset_id: 'bexio', client_id_key: 'C_ID' } } };
       const out = await apiSetupTool.handler({ action, profile: preset } as never, agent);
-      expect(out).toContain('connecting an account through one is for the owner');
-      expect(store.get('test-api') === undefined ? undefined : JSON.stringify(stored(store))).toBe(before);
+      expect(out).not.toContain('for the owner');
+      expect(stored(store).auth?.oauth?.preset_id).toBe('bexio');
+      expect(stored(store).created_by).toBe('mandate:setup@example.org');
     });
 
-    it('a mandate gets no connect link, on any profile', async () => {
+    it.each([
+      ['the owner\'s profile', false, true],
+      ['another mandate\'s profile', true, true],
+      ['its own profile', true, false],
+    ])('a mandate asking for a connect link on %s is refused only when it did not write it', async (_label, byMandate, refused) => {
       const store = new ApiStore();
-      const agent = createMockAgent(store, undefined, undefined, mandate);
-      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
-      const out = await apiSetupTool.handler({ action: 'connect', id: 'test-api' }, agent);
-      expect(out).toContain('connecting an account is for the owner');
+      const author = !byMandate ? undefined : (refused ? { kind: 'mandate' as const, email: 'other@example.org' } : mandate);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store, undefined, undefined, author));
+      const out = await apiSetupTool.handler({ action: 'connect', id: 'test-api' }, createMockAgent(store, undefined, undefined, mandate));
+      expect(out.includes('was not set up in this session\'s name, so this session does not hand out a link')).toBe(refused);
     });
 
     it('a mandate\'s fetch_token on the owner\'s profile without a name of its own is not refused here (a read renews the same way)', async () => {

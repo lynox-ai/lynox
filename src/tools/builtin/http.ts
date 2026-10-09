@@ -10,7 +10,7 @@ import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
-import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { secretsForProfile } from '../../core/profile-secret-view.js';
@@ -2240,11 +2240,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const host = new URL(input.url).hostname.replace(/\.+$/, '');
       const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
         .map((id) => (id === undefined ? undefined : apiStore.get(id)));
-      if (onHost.some((p) => p?.auth?.oauth?.preset_id !== undefined)) {
-        blockedVerbatim(
-          `Blocked: ${gatedMethod} to ${host} writes to an account the owner connected, which this session may not do. ` +
-          'Propose the change as a task instead (task_create); it runs once the owner approves it.',
-        );
+      const presetOnHost = onHost.filter((p) => p?.auth?.oauth?.preset_id !== undefined);
+      if (presetOnHost.length > 0) {
+        // Whose connection it is decides the way forward. The owner's account: a task the owner
+        // approves runs with the owner's connection. This session's own: a task would run on a
+        // connection that stops working when the mandate ends, so the change goes to the owner.
+        const tag = principalTag(agent.principal);
+        const ownConnection = presetOnHost.every((p) => p?.created_by === tag && p?.oauth_grant?.connected_by === tag);
+        blockedVerbatim(ownConnection
+          ? `Blocked: ${gatedMethod} to ${host} writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.`
+          : `Blocked: ${gatedMethod} to ${host} writes to an account the owner connected, which this session may not do. ` +
+            'Propose the change as a task instead (task_create); it runs once the owner approves it.');
       }
     }
 
