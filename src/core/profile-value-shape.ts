@@ -73,6 +73,15 @@ export const DERIVED_NAME_SHAPE = /^[A-Z0-9][A-Z0-9_]{0,77}$/;
 /** `new Date().toISOString()`, which is what the engine writes into `revoked_at`. */
 export const ISO_TIMESTAMP_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 export const GRANT_TYPE_SHAPE = /^[A-Za-z0-9_:.\-]{1,40}$/;
+/**
+ * A host as a sentence may name it. `new URL()` keeps characters like quotes, braces and `;` in
+ * the hostname of a non-special scheme and sets no length bound, so a parsed host is not shaped
+ * by being parsed: dot-separated labels of letters, digits, `-` and `_` (the parser keeps the case
+ * of a non-special scheme's host), with at most one trailing dot, or a bracketed IPv6 address. 254 characters at most, counting
+ * the dot, and the caller passes `shapedForLog` a larger cut: `oneLineForLog` truncates WITHOUT a
+ * marker, so a longer host would print its head and lose the tail that names the domain.
+ */
+export const HOSTNAME_SHAPE = /^(?=.{1,254}$)(?:[A-Za-z0-9_-]{1,63}\.)*[A-Za-z0-9_-]{1,63}\.?$|^\[[0-9a-f:.]{2,45}\]$/;
 
 /**
  * A header name as HTTP defines one (a `token`), at most 64 characters. Deliberately the

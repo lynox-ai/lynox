@@ -17,7 +17,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-import { apiSetupTool, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
+import { apiSetupTool, adoptionNote, OPENAPI_SPEC_MAX_BYTES } from './api-setup.js';
 import { MAX_REQUESTS_PER_SESSION } from './http.js';
 import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
@@ -25,6 +25,8 @@ import * as llmHelper from '../../core/llm-helper.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import { scanToolResult } from '../../core/output-guard.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -72,8 +74,10 @@ function createMockAgent(
   apiStore?: ApiStore | null,
   secretStore?: unknown,
   promptUser?: (question: string, options?: string[]) => Promise<string>,
+  principal: RequestPrincipal = OWNER_PRINCIPAL,
 ) {
   return {
+    principal,
     // Bootstrap fetches now charge against sessionCounters.httpRequests
     // (matches http.ts). The stub just provides a writable counter; tests
     // that care about exact request budgets can assert on it.
@@ -540,6 +544,169 @@ describe('api_setup tool', () => {
 
       const saved = JSON.parse(readFileSync(join(mockLynoxDir, 'apis', 'test-api.json'), 'utf-8')) as ApiProfile;
       expect(saved.name).toBe('Updated API');
+    });
+  });
+
+  // PRD customer-granted-operator-access §3.13 (H2): a mandate's turn changes only a profile
+  // the mandate wrote; the author is the engine's to record. The owner is the control each time.
+  describe('who may change a profile', () => {
+    const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+    const other: RequestPrincipal = { kind: 'mandate', email: 'other@example.org' };
+    const stored = (store: ApiStore): ApiProfile => store.get('test-api')!;
+
+    it('a mandate\'s create records the mandate as author; one passed in the input is not taken', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, created_by: 'mandate:someone@example.org' } }, createMockAgent(store, undefined, undefined, mandate));
+      expect(stored(store).created_by).toBe('mandate:setup@example.org');
+    });
+
+    it('control: the owner\'s create records no author, whatever the input says', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, created_by: 'mandate:setup@example.org' } }, createMockAgent(store));
+      expect(stored(store).created_by).toBeUndefined();
+    });
+
+    it.each([
+      ['update', { action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }],
+      ['create over the same id', { action: 'create', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }],
+      ['refine', { action: 'refine', id: 'test-api', refine: { addNotes: ['x'] } }],
+      ['delete', { action: 'delete', id: 'test-api' }],
+      ['fetch_token into a name of its choosing', { action: 'fetch_token', id: 'test-api', output_secret_name: 'COPY_TOKEN' }],
+    ])('a mandate may not %s a profile the owner set up, and nothing changes', async (_label, input) => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store));
+      const before = JSON.stringify(stored(store));
+      const result = await apiSetupTool.handler(input as never, createMockAgent(store, undefined, undefined, mandate));
+      expect(result).toContain('was not set up in this session\'s name');
+      expect(JSON.stringify(stored(store))).toBe(before);
+    });
+
+    it('a mandate may not change a profile another mandate set up', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store, undefined, undefined, other));
+      const result = await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, createMockAgent(store, undefined, undefined, mandate));
+      expect(result).toContain('was not set up in this session\'s name');
+      expect(store.get('test-api')).toBeDefined();
+    });
+
+    it('a mandate changes and deletes a profile it set up itself', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, undefined, mandate);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      expect(await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, agent)).toContain('Updated API profile');
+      expect(stored(store).name).toBe('Changed');
+      expect(stored(store).created_by).toBe('mandate:setup@example.org');
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent)).toContain('Deleted');
+    });
+
+    it('the owner\'s update of a mandate\'s profile makes it the owner\'s, and names what the save keeps from it', async () => {
+      const store = new ApiStore();
+      const withKey = { ...SAMPLE_PROFILE, auth: { type: 'bearer' as const, vault_keys: ['SETUP_TOKEN'] } };
+      await apiSetupTool.handler({ action: 'create', profile: withKey }, createMockAgent(store, undefined, undefined, mandate));
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...withKey, name: 'Changed' } }, createMockAgent(store));
+      expect(stored(store).name).toBe('Changed');
+      expect(stored(store).created_by).toBeUndefined();
+      expect(out).toContain('set up in a mandate\'s session; it is now yours. Your save keeps the vault keys SETUP_TOKEN and the host api.openai.com from that setup. Check what those keys hold');
+    });
+
+    it('the owner\'s save that replaces the mandate\'s keys does not name them as kept', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type: 'bearer', vault_keys: ['SETUP_TOKEN'] } } }, createMockAgent(store, undefined, undefined, mandate));
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
+      expect(out).toContain('it is now yours. Your save keeps the host api.openai.com from that setup.');
+      expect(out).not.toContain('SETUP_TOKEN');
+      expect(out).not.toContain('Check what those keys hold');
+    });
+
+    describe('adoptionNote', () => {
+      const prior: ApiProfile = { ...SAMPLE_PROFILE, base_url: 'https://crm.example.com/v1', auth: { type: 'bearer', vault_keys: ['MANDATE_KEY', 'SHARED_KEY'] } };
+
+      it('names only the keys the saved profile shares with the replaced one', () => {
+        const saved: ApiProfile = { ...prior, auth: { type: 'bearer', vault_keys: ['SHARED_KEY', 'OWNER_KEY'] } };
+        const note = adoptionNote(prior, saved);
+        expect(note).toContain('Your save keeps the vault keys SHARED_KEY and the host crm.example.com from that setup.');
+        expect(note).not.toContain('MANDATE_KEY');
+        expect(note).not.toContain('OWNER_KEY');
+      });
+
+      it('says nothing was kept when keys and host both changed', () => {
+        const saved: ApiProfile = { ...prior, base_url: 'https://other.example.com/v1', auth: { type: 'bearer', vault_keys: ['OWNER_KEY'] } };
+        expect(adoptionNote(prior, saved)).toContain('Your save keeps none of the vault keys or the host that setup named.');
+      });
+
+      it('does not print a host the parser kept unusual characters in', () => {
+        const odd = 'x-y://a"b;c{d}.example/';
+        const raw = new URL(odd).hostname;
+        expect(raw).toContain('"');
+        const note = adoptionNote({ ...prior, base_url: odd }, { ...prior, base_url: odd });
+        expect(note).toContain('the host <unprintable>');
+        expect(note).not.toContain(raw);
+      });
+
+      it.each([
+        ['a trailing dot', 'https://crm.example.com./v1', 'crm.example.com.'],
+        ['an underscore', 'https://a_b.example.com/v1', 'a_b.example.com'],
+        ['a non-special scheme keeping case', 'x-y://Example.com/v1', 'Example.com'],
+      ])('prints a host with %s', (_label, url, host) => {
+        expect(adoptionNote({ ...prior, base_url: url }, { ...prior, base_url: url })).toContain(`the host ${host} from`);
+      });
+
+      it('does not print the head of a host too long to be one', () => {
+        const long = `https://${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.${'d'.repeat(60)}.evil.example/v1`;
+        const note = adoptionNote({ ...prior, base_url: long }, { ...prior, base_url: long });
+        expect(note).toContain('the host <unprintable>');
+        expect(note).not.toContain('aaaa');
+      });
+
+      it('prints a host of 254 characters with its trailing dot', () => {
+        const host = `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}.`;
+        expect(host.length).toBe(254);
+        const url = `https://${host}/v1`;
+        expect(adoptionNote({ ...prior, base_url: url }, { ...prior, base_url: url })).toContain(`the host ${host} from`);
+      });
+
+      it('prints a bracketed IPv6 host', () => {
+        const v6 = 'https://[2001:db8::1]/v1';
+        expect(adoptionNote({ ...prior, base_url: v6 }, { ...prior, base_url: v6 })).toContain('the host [2001:db8::1]');
+      });
+    });
+
+    it('control: the owner\'s update of their own profile says nothing about a mandate', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store));
+      const out = await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, createMockAgent(store));
+      expect(out).not.toContain('mandate');
+    });
+
+    // Interim scope (register row on who owns a connection): connecting an account through a
+    // provider preset is the owner's.
+    it.each([
+      ['create', 'create'],
+      ['update of its own profile', 'update'],
+    ])('a mandate\'s %s naming a provider preset is refused, and nothing is saved', async (_label, action) => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, undefined, mandate);
+      if (action === 'update') await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const before = store.get('test-api') === undefined ? undefined : JSON.stringify(stored(store));
+      const preset = { ...SAMPLE_PROFILE, auth: { type: 'oauth2', vault_keys: ['C_ID'], oauth: { preset_id: 'bexio', client_id_key: 'C_ID' } } };
+      const out = await apiSetupTool.handler({ action, profile: preset } as never, agent);
+      expect(out).toContain('connecting an account through one is for the owner');
+      expect(store.get('test-api') === undefined ? undefined : JSON.stringify(stored(store))).toBe(before);
+    });
+
+    it('a mandate gets no connect link, on any profile', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, undefined, mandate);
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, agent);
+      const out = await apiSetupTool.handler({ action: 'connect', id: 'test-api' }, agent);
+      expect(out).toContain('connecting an account is for the owner');
+    });
+
+    it('a mandate\'s fetch_token on the owner\'s profile without a name of its own is not refused here (a read renews the same way)', async () => {
+      const store = new ApiStore();
+      await apiSetupTool.handler({ action: 'create', profile: SAMPLE_PROFILE }, createMockAgent(store));
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'test-api' }, createMockAgent(store, undefined, undefined, mandate));
+      expect(result).not.toContain('was not set up in this session\'s name');
     });
   });
 

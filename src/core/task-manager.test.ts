@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1043,13 +1044,13 @@ describe('a bulk run\'s trigger', () => {
     expect(() => tm.update(previewId, { scheduleCron: '1h' })).toThrow(BulkTriggerLockedError);
     expect(() => tm.setEnabled(previewId, false)).toThrow(BulkTriggerLockedError);
     expect(() => tm.complete(previewId)).toThrow(BulkTriggerLockedError);
-    const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
+    const agent = { toolContext: { taskManager: tm }, principal: OWNER_PRINCIPAL } as unknown as IAgent;
     expect(await taskUpdateTool.handler({ task_id: previewId, status: 'completed' }, agent)).toBe(`Error: ${new BulkTriggerLockedError().message}`);
     expect(tm.getTrigger(previewId)).toEqual(before);
   });
 
   it('is refused to the model\'s task_update, which says why', async () => {
-    const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
+    const agent = { toolContext: { taskManager: tm }, principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const before = row();
     for (const input of [{ task_id: id, schedule: '1h' }, { task_id: id, status: 'completed' }, { task_id: id, run_at: '2030-01-01T00:00:00Z' }]) {
       expect(await taskUpdateTool.handler(input, agent)).toBe(`Error: ${new BulkTriggerLockedError().message}`);

@@ -10,6 +10,7 @@
  * leave every unit green.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -103,7 +104,7 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
     ctx.runHistory = history;
     return {
       name: 'creator', model: 'claude-haiku-4-5-20251001', memory: null, tools: [], onStream: null,
-      toolContext: ctx, ...(tainted ? { conversationSawUntrusted: true } : {}),
+      toolContext: ctx, principal: OWNER_PRINCIPAL, ...(tainted ? { conversationSawUntrusted: true } : {}),
     } as unknown as IAgent;
   }
 

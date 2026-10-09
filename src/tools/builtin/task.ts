@@ -3,6 +3,7 @@ import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
+import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -364,6 +365,10 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         dueDate: input.due_date,
         tags: input.tags,
         parentTaskId: input.parent_task_id,
+        // A mandate's turn writes under the mandate's name, so what it schedules waits for the
+        // owner's stamp exactly as it does when created over HTTP (PRD customer-granted-operator-
+        // access §3.12, H2). The owner's turns leave it absent, as before.
+        ...(isOwnerPrincipal(agent.principal) ? {} : { createdBy: principalTag(agent.principal) }),
       };
 
       if (input.workflow_id) {
@@ -508,6 +513,15 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       : undefined;
 
     try {
+      // A mandate's change of a schedule — any field, the schedule, completion — takes the
+      // owner's stamp off it, the rule the HTTP routes apply (`_markMandateEdit`), so a stamped
+      // schedule stops until the owner stamps it again (PRD §3.12 point 3, H2). Resolved under
+      // the same scope as the write below, and before it: the mark must land on the trigger
+      // the write changes. A TODO is not a trigger and has no stamp.
+      if (!isOwnerPrincipal(agent.principal)) {
+        const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
+        if (trigger) managerRef.markEditedBy(trigger.id, principalTag(agent.principal), true);
+      }
       if (input.status === 'completed') {
         const task = managerRef.complete(input.task_id, scopeFilter);
         if (!task) return `Task not found: ${input.task_id}`;

@@ -27,6 +27,7 @@ import {
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
+import { secretsForProfile } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -8680,6 +8681,13 @@ export class LynoxHTTPApi {
       //   - `authenticated` is passed as a fact rather than assumed inside
       //     `decideConnect`, because the same function answers for the tool,
       //     where there is no dispatch to have done it.
+      // Connecting an account is the owner's (PRD §3.13, interim scope — see the register row
+      // on who owns a connection). Asked before the profile is looked up, so a mandate's
+      // session learns nothing about which ids exist.
+      if (!isOwnerPrincipal(this._principalOf(req))) {
+        sendOAuthHtml(res, 403, 'Connecting an account is for the owner of this instance. Nothing was sent to the provider.');
+        return;
+      }
       const profile = engine.getApiStore()?.get(id);
 
       const decision = decideConnect({
@@ -8717,7 +8725,13 @@ export class LynoxHTTPApi {
       }
 
       const clientIdKey = profile?.auth?.oauth?.client_id_key ?? '';
-      const clientId = clientIdKey ? engine.getSecretStore()?.resolve(clientIdKey) : null;
+      // Through the profile's view of the vault, as every other read for a profile: one a
+      // mandate wrote does not put an environment value or another account's credential into
+      // the link (`profile-secret-view.ts`).
+      const rawStore = engine.getSecretStore();
+      const connectApis = engine.getApiStore();
+      const connectStore = rawStore && profile && connectApis ? secretsForProfile(rawStore, profile, connectApis) : rawStore;
+      const clientId = clientIdKey ? connectStore?.resolve(clientIdKey) : null;
       if (!clientId) {
         // `decideConnect` does not ask this: it decides whether the user may be
         // SENT somewhere, and the vault's contents are not part of that. The
@@ -8836,9 +8850,12 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Read through the profile's view of the vault, as at the start of the connection;
+      // the tokens below are written to the store itself.
       const secretStore = engine.getSecretStore();
-      const clientId = oauth.client_id_key ? secretStore?.resolve(oauth.client_id_key) : null;
-      const clientSecret = oauth.client_secret_key ? secretStore?.resolve(oauth.client_secret_key) : null;
+      const readable = secretStore ? secretsForProfile(secretStore, profile, apiStore) : null;
+      const clientId = oauth.client_id_key ? readable?.resolve(oauth.client_id_key) : null;
+      const clientSecret = oauth.client_secret_key ? readable?.resolve(oauth.client_secret_key) : null;
       if (!secretStore || !clientId || !clientSecret) {
         sendOAuthHtml(res, 409, 'The credentials for this connection are no longer in the vault. Set them again, then ask for a new link.');
         return;
