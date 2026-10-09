@@ -14,7 +14,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-import { apiSetupTool } from './api-setup.js';
+import { apiSetupTool, providerBodyForModel, sentCredentials } from './api-setup.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { EngineDb } from '../../core/engine-db.js';
@@ -380,6 +380,169 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
     await fetchToken(agent);
 
     expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+  });
+});
+
+describe('fetch_token — what of the provider\'s answer the model reads', () => {
+  it('a refused exchange whose answer repeats the client secret and the refresh token shows neither', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    tokenEndpoint(401, JSON.stringify({ error: 'invalid_client', error_description: 'client secret-1 rejected for rt-1', client_secret: 'secret-1' }));
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(result).toContain('invalid_client');
+    expect(result).toContain('"client_secret":"<redacted>"');
+    expect(result).not.toContain('secret-1');
+    expect(result).not.toContain('rt-1');
+  });
+
+  it('an answer without access_token shows the fields it has, not the tokens in them', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    tokenEndpoint(200, JSON.stringify({ refresh_token: 'rt-unrequested-9', id_token: 'idt-unrequested-9', token_type: 'bearer' }));
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(result).toContain('no `access_token`');
+    expect(result).toContain('"refresh_token":"<redacted>"');
+    expect(result).toContain('"token_type":"bearer"');
+    expect(result).not.toContain('rt-unrequested-9');
+    expect(result).not.toContain('idt-unrequested-9');
+  });
+
+  it('an answer that repeats the client secret JSON-escaped does not show it', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'Sec/ret+Value', [REFRESH]: 'rt-1' });
+    tokenEndpoint(401, '{"error":"invalid_client","echo":"Sec\\/ret\\u002BValue"}');
+
+    const result = await fetchToken(makeAgent(store, vault));
+
+    expect(result).toContain('invalid_client');
+    expect(result).toContain('"echo":"<redacted>"');
+    expect(result).not.toContain('Sec/ret+Value');
+  });
+
+  it('a form-encoded answer shows its error and not the token in it', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    tokenEndpoint(200, 'error=odd&refresh_token=rt-form-9&state=x');
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(result).toContain("wasn't valid JSON");
+    expect(result).toContain('error=odd');
+    expect(result).toContain('refresh_token=<redacted>');
+    expect(result).not.toContain('rt-form-9');
+  });
+});
+
+describe('providerBodyForModel', () => {
+  it('keeps the grant type, whose value is a field name', () => {
+    const sent = sentCredentials({ grant_type: 'refresh_token', client_id: 'client-1', client_secret: 'secret-1', refresh_token: 'rt-1' });
+    expect(sent).toEqual(['secret-1', 'rt-1']);
+    const out = providerBodyForModel('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1"}', sent, 500);
+    expect(out).toBe('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1"}');
+  });
+
+  it('counts an authorization code it sends as a credential, though an answer\'s code field is not one', () => {
+    expect(sentCredentials({ grant_type: 'authorization_code', code: 'auth-code-9', code_verifier: 'ver-9' })).toEqual(['auth-code-9', 'ver-9']);
+  });
+
+  it('replaces a sent credential wherever the answer repeats it', () => {
+    expect(providerBodyForModel('<html>bad secret secret-1 here</html>', ['secret-1'], 500)).toBe('<html>bad secret <redacted> here</html>');
+  });
+
+  it('in text, replaces only the named credential fields, and keeps error codes', () => {
+    expect(providerBodyForModel('status_code=400 error_code=x code=AADSTS50011 password: hunter2 api_key="k-9" refreshToken=rt-9</p>', [], 500))
+      .toBe('status_code=400 error_code=x code=AADSTS50011 password: <redacted> api_key="<redacted>" refreshToken=<redacted></p>');
+  });
+
+  it('hides credential names with the word in the middle, as providers use them', () => {
+    expect(providerBodyForModel('{"SecretAccessKey":"wJal9","secret_key":"ab12","tokenValue":"tv9","AccessKeyId":"AKIA9"}', [], 500))
+      .toBe('{"SecretAccessKey":"<redacted>","secret_key":"<redacted>","tokenValue":"<redacted>","AccessKeyId":"<redacted>"}');
+  });
+
+  it('keeps a boolean under a credential name, and descriptive fields with their endings', () => {
+    const body = '{"has_refresh_token":true,"refresh_token_expires_in":3600,"id_token_hint":"x","token_uri":"https://p/t","token_endpoint":"https://p/e","token_format":"jwt"}';
+    expect(providerBodyForModel(body, [], 500)).toBe(body);
+  });
+
+  it('in text, hides a middle-word credential name and keeps a descriptive one', () => {
+    expect(providerBodyForModel('SecretAccessKey=wJal9 token_type=bearer', [], 500)).toBe('SecretAccessKey=<redacted> token_type=bearer');
+  });
+
+  it.each([
+    ['a redirect URL', 'redirect: https://app/cb?access_token=ya29abc123', 'redirect: https://app/cb?access_token=<redacted>'],
+    ['a fragment', 'Location: https://app/cb#access_token=ya29abc123&state=x', 'Location: https://app/cb#access_token=<redacted>&state=x'],
+    ['an error label', 'error: refresh_token=r1abc23 is invalid', 'error: refresh_token=<redacted> is invalid'],
+    ['a detail label', 'detail: refresh_token: r1abc23 expired', 'detail: refresh_token: <redacted> expired'],
+    ['a message label', 'msg=client_secret:s3cr3tv', 'msg=client_secret:<redacted>'],
+  ])('in text, reads the value of another name again: %s', (_label, input, expected) => {
+    expect(providerBodyForModel(input, [], 500)).toBe(expected);
+  });
+
+  it('hides a credential value that holds a colon', () => {
+    expect(providerBodyForModel('client_secret=abc:def password: user:pw9', [], 500)).toBe('client_secret=<redacted> password: <redacted>');
+  });
+
+  it('reads the value of a describing name again', () => {
+    expect(providerBodyForModel('token_uri=https://p/t?access_token=at9', [], 500)).toBe('token_uri=https://p/t?access_token=<redacted>');
+  });
+
+  it('hides any bearer value after an authorization label, short ones too', () => {
+    expect(providerBodyForModel('Authorization: Bearer abc', [], 500)).toBe('Authorization: Bearer <redacted>');
+  });
+
+  it('keeps the word bearer in prose and the label after it', () => {
+    expect(providerBodyForModel('token_type=bearer error=invalid_client', [], 500)).toBe('token_type=bearer error=invalid_client');
+    expect(providerBodyForModel('scheme bearer v2.0 is unsupported', [], 500)).toBe('scheme bearer v2.0 is unsupported');
+  });
+
+  it('replaces a lower-case or quoted bearer value in text', () => {
+    expect(providerBodyForModel('authorization: bearer abc123def', [], 500)).toBe('authorization: bearer <redacted>');
+    expect(providerBodyForModel('Authorization: Bearer "abc123def" end', [], 500)).toBe('Authorization: Bearer <redacted> end');
+  });
+
+  it('replaces a Bearer value in text', () => {
+    expect(providerBodyForModel('got Authorization: Bearer abc.k9m-ghi for this', [], 500)).toBe('got Authorization: Bearer <redacted> for this');
+  });
+
+  it('in JSON, keeps fields that describe a credential and error codes', () => {
+    const body = '{"code":"invalid_grant","token_type":"bearer","token_endpoint_auth_method":"client_secret_post","client_secret_expires_at":0}';
+    expect(providerBodyForModel(body, [], 500)).toBe(body);
+  });
+
+  it('in JSON, hides a credential field whatever it holds, under any credential name', () => {
+    expect(providerBodyForModel('{"id_token":["a1","b2"],"token":{"value":"v9"},"accessToken":"at9","api_key":"k9","jwt":"j9"}', [], 500))
+      .toBe('{"id_token":"<redacted>","token":"<redacted>","accessToken":"<redacted>","api_key":"<redacted>","jwt":"<redacted>"}');
+  });
+
+  it('replaces a sent credential the answer repeats URL-encoded', () => {
+    expect(providerBodyForModel('echo=Sec%2Fret%2BValue', ['Sec/ret+Value'], 500)).toBe('echo=<redacted>');
+  });
+
+  it('replaces a sent credential the answer repeats JSON-escaped', () => {
+    expect(providerBodyForModel('{"echo":"Sec\\/ret\\u002BValue"}', ['Sec/ret+Value'], 500)).toBe('{"echo":"<redacted>"}');
+  });
+
+  it('masks a long opaque run in text', () => {
+    const opaque = 'Q'.repeat(10) + 'w8'.repeat(20);
+    expect(providerBodyForModel(`unexpected ${opaque} end`, [], 500)).not.toContain(opaque);
+  });
+
+  it('redacts a credential field nested in an array', () => {
+    expect(providerBodyForModel('{"errors":[{"access_token":"at-9","msg":"m"}]}', [], 500)).toBe('{"errors":[{"access_token":"<redacted>","msg":"m"}]}');
+  });
+
+  it('marks a cut', () => {
+    const out = providerBodyForModel('x'.repeat(20), [], 10);
+    expect(out).toBe(`${'x'.repeat(10)}…[truncated]`);
+  });
+
+  it('leaves a short sent value alone, which would otherwise erase ordinary words', () => {
+    expect(providerBodyForModel('{"error":"abc"}', ['abc'], 500)).toBe('{"error":"abc"}');
   });
 });
 

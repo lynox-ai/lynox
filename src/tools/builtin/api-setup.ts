@@ -31,7 +31,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { hiddenFromProfile, secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -1335,6 +1335,94 @@ function deletedMeanwhile(
   return `Token exchange completed, but api_profile "${profile.id}" was deleted while it ran.${purgeMessage(purge)}`;
 }
 
+/**
+ * Field names whose values a token endpoint's answer must not carry into a sentence: any name
+ * that CONTAINS a credential word (`access_token`, `accessToken`, `SecretAccessKey`,
+ * `secret_key`, `tokenValue`, `api_key`, `jwt`), plus `authorization`, `key` and
+ * `code_verifier`. Matching the middle too keeps provider shapes like AWS's `SecretAccessKey`
+ * hidden; what that would also hide, a field that only DESCRIBES a credential (`token_type`,
+ * `token_endpoint_auth_method`, `client_secret_expires_at`, `refresh_token_expires_in`), is
+ * named by its ending in `DESCRIPTIVE_FIELD` and stays readable. `code` is not among them,
+ * because error bodies use it for the error code; the authorization code this engine sends is
+ * replaced as a sent value instead.
+ */
+const CREDENTIAL_WORD = /token|secret|password|assertion|api_?key|access_?key|jwt|^key$|^authorization$|^code_verifier$/i;
+const DESCRIPTIVE_FIELD = /(?:_?type|_?expires_?(?:at|in)|_?auth_?method|_?endpoint|_?ur[il]|_?hint|_?format)$/i;
+const isCredentialField = (name: string): boolean => CREDENTIAL_WORD.test(name) && !DESCRIPTIVE_FIELD.test(name);
+/** What this engine SENDS that counts as a credential: the fields above, and the authorization code. */
+const isSentCredential = (name: string): boolean => isCredentialField(name) || name === 'code';
+
+function redactCredentialFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactCredentialFields);
+  if (value === null || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    // Whatever shape a credential field holds — a string, a list of them, an object — none of
+    // it is shown. A boolean (`has_refresh_token: true`) carries no credential and stays.
+    out[k] = isCredentialField(k) && v !== null && typeof v !== 'boolean' ? '<redacted>' : redactCredentialFields(v);
+  }
+  return out;
+}
+
+/**
+ * A token endpoint's answer as the model may read it: enough to diagnose (error codes,
+ * descriptions, field names), never a credential. Providers answer a failed exchange with
+ * bodies that repeat what was sent, a client secret included, and a body without
+ * `access_token` can still hold a `refresh_token` or `id_token`. So:
+ * - every credential this exchange sent (`sentCredentials`) is replaced wherever it appears, as
+ *   sent and URL-encoded, and once more after a JSON body is parsed and written back, because
+ *   parsing undoes an escaped echo (`\/`, `\u002B`) that the first pass could not see;
+ * - a JSON body has the values of credential-named fields replaced, at any depth;
+ * - any other body has `name=value` / `name: value` pairs of those names replaced, and a
+ *   `Bearer` value;
+ * - long opaque runs are masked as the error reporter masks them.
+ * Then it is cut to `max`, with a marker.
+ */
+export function sentCredentials(params: Readonly<Record<string, string>>): string[] {
+  return Object.entries(params).filter(([k]) => isSentCredential(k)).map(([, v]) => v);
+}
+
+function withoutSent(text: string, sent: readonly string[]): string {
+  let body = text;
+  for (const value of sent) {
+    if (value.length < 4) continue;
+    for (const form of new Set([value, encodeURIComponent(value)])) body = body.split(form).join('<redacted>');
+  }
+  return body;
+}
+
+/**
+ * `name=value` / `name: value` pairs in a text body whose name carries a credential word. Only
+ * such names are matched, so a label in front (`detail:`, `redirect:`, `msg=`) consumes nothing
+ * and the pair behind it is matched on its own. A credential name loses its whole value, colons
+ * included. A name that only describes a credential (`token_uri`) keeps its value, but the
+ * value is read again, because a URL can hold a pair of its own; the value is strictly shorter
+ * than the match, so the recursion ends.
+ */
+function redactTextPairs(text: string): string {
+  return text.replace(/\b([A-Za-z_]*(?:token|secret|password|assertion|api_?key|access_?key|jwt)[A-Za-z_]*|key|authorization|code_verifier)\b(["']?\s*[=:]\s*["']?)(?!Bearer\b)([^\s&"',}<]+)/gi,
+    (_whole, name: string, sep: string, value: string) => `${name}${sep}${isCredentialField(name) ? '<redacted>' : redactTextPairs(value)}`);
+}
+
+export function providerBodyForModel(text: string, sent: readonly string[], max: number): string {
+  let body = withoutSent(text, sent);
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { parsed = undefined; }
+  if (parsed !== null && typeof parsed === 'object') {
+    body = withoutSent(JSON.stringify(redactCredentialFields(parsed)), sent);
+  } else {
+    // The scheme word first, so `Authorization: Bearer x` loses `x` and keeps `Bearer`; the
+    // field pass then skips the scheme word instead of taking it for the value. A bearer value
+    // is token-shaped (eight characters or more, with a digit or punctuation), so the word in
+    // prose — `token_type=bearer error=…` — does not take the next label with it.
+    // After an `Authorization` label any bearer value goes, whatever its shape.
+    body = body.replace(/\b(authorization["']?\s*[=:]\s*["']?bearer)\s+"?[^\s"',}&<]+"?/gi, '$1 <redacted>');
+    body = redactTextPairs(body.replace(/\b(Bearer)\s+"?(?=[A-Za-z0-9._~+/-]*[0-9._~+/-])[A-Za-z0-9._~+/-]{8,}=*"?/gi, '$1 <redacted>'));
+  }
+  body = maskSecretPatterns(body, { includeGeneric: true });
+  return body.length > max ? `${body.slice(0, max)}…[truncated]` : body;
+}
+
 function hostOf(profile: ApiProfile): string | undefined {
   try { return new URL(profile.base_url).hostname; } catch { return undefined; }
 }
@@ -2345,8 +2433,7 @@ ${draftJson}
       if (!exchanged.responseOk) {
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
-        const snippet = respText.length > 500 ? respText.slice(0, 500) + '…[truncated]' : respText;
-        const responseBody = `Response body:\n${snippet}`;
+        const responseBody = `Response body:\n${providerBodyForModel(respText, sentCredentials(params), 500)}`;
         const notOurs = 'This is the external provider\'s answer — NOT a lynox tool limitation. Do NOT recommend self-host or tier changes for this kind of failure.';
         // Which of three things failed decides what happens to the grant: a
         // revocation ends it, a client problem leaves it intact, and anything
@@ -2432,11 +2519,11 @@ ${draftJson}
       try {
         parsed = JSON.parse(respText) as typeof parsed;
       } catch {
-        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
+        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. Its start:\n${providerBodyForModel(respText, sentCredentials(params), 500)}`;
       }
       const accessToken = parsed.access_token;
       if (!accessToken || typeof accessToken !== 'string') {
-        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
+        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${providerBodyForModel(respText, sentCredentials(params), 300)}.`;
       }
       // A refresh token counts as new only if it differs from the one this exchange
       // sent. A provider that does not rotate can answer with the very token it was
