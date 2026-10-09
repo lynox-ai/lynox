@@ -79,6 +79,16 @@ describe('mail-scheduled-poller', () => {
     expect(db.listScheduledForAccount('acct-1')[0]!.failReason).toMatch(/receive_only/);
   });
 
+  it('sends nothing from an account the lookup has no configuration for, and fails the row', async () => {
+    queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'unconfigured probe' });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts: { getAccountConfig: () => null } });
+    const result = await poller.tickNow();
+    poller.stop();
+    expect(sendCalls).toHaveLength(0);
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(db.listScheduledForAccount('acct-1')[0]!.failReason).toMatch(/account_not_configured/);
+  });
+
   it('sends from the same account once its type allows sending', async () => {
     // The positive half: without it the test above also passes against a
     // poller that sends nothing at all. Its own subject: the recipient dedup

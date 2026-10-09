@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { sendMail, parseAddressList, buildSendPreview, previewAddressList, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
+import { checkSendAccount, sendMail, parseAddressList, buildSendPreview, previewAddressList, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
 import { singleLine } from '../../core/prompt-value.js';
 import type { MailAddress, MailAccountConfig, MailProvider, MailSendResult } from './provider.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
@@ -17,6 +17,13 @@ vi.mock('../../tools/builtin/http.js', () => ({
 }));
 
 const RECIPIENT: MailAddress = { address: 'alice@example.com' };
+
+/** The configuration of the account the fake provider sends from; a lookup without one is refused. */
+const SENDING_ACCOUNT = {
+  id: 'acct-1', displayName: 'A', address: 'a@x', preset: 'custom' as const,
+  imap: { host: 'i', port: 1, secure: true }, smtp: { host: 's', port: 1, secure: true },
+  authType: 'imap' as const, type: 'personal' as const,
+};
 
 function fakeProvider(opts: { sendResult?: MailSendResult; sendThrows?: Error } = {}): MailProvider {
   return {
@@ -222,6 +229,36 @@ describe('sendMail — gates', () => {
       },
     );
     expect(capturedMassSend).toBe(true);
+  });
+
+  it('refuses an account the lookup has no configuration for — fail-closed, not skipped', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const ctx = { getAccountConfig: () => null } as unknown as import('./context.js').MailContext;
+    const result = await sendMail(registry, { to: [RECIPIENT], subject: 'unconfigured', body: 'b' }, {}, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe('account_not_configured');
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('sends from the same account once the lookup knows it', async () => {
+    // The positive half of the test above, on the same registry: the refusal
+    // comes from the missing configuration, not from anything else.
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const ctx = { getAccountConfig: () => SENDING_ACCOUNT } as unknown as import('./context.js').MailContext;
+    const result = await sendMail(registry, { to: [RECIPIENT], subject: 'configured', body: 'b' }, {}, ctx);
+    expect(result.ok).toBe(true);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('checkSendAccount: no lookup lets through, a null entry and a receive-only type refuse, a sending type passes', () => {
+    expect(checkSendAccount(undefined, 'acct-1')).toEqual({ ok: true, accountConfig: null });
+    const none = checkSendAccount({ getAccountConfig: () => null }, 'acct-1');
+    expect(none.ok === false && none.status).toBe('account_not_configured');
+    const info = checkSendAccount({ getAccountConfig: () => ({ ...SENDING_ACCOUNT, type: 'info' }) }, 'acct-1');
+    expect(info.ok === false && info.status).toBe('receive_only');
+    expect(checkSendAccount({ getAccountConfig: () => SENDING_ACCOUNT }, 'acct-1')).toEqual({ ok: true, accountConfig: SENDING_ACCOUNT });
   });
 
   it('returns receive_only when the account type is a read-only mailbox', async () => {
@@ -465,7 +502,7 @@ describe('sendMail — recordSentMail integration', () => {
     const recordSentMail = vi.fn();
     const ctx = {
       stateDb: { recordSentMail },
-      getAccountConfig: () => null,
+      getAccountConfig: () => SENDING_ACCOUNT,
     } as unknown as import('./context.js').MailContext;
     const input: SendCoreInput = {
       to: [RECIPIENT],
@@ -498,7 +535,7 @@ describe('sendMail — recordSentMail integration', () => {
     const recordFollowup = vi.fn(() => 'fu-1');
     const ctx = {
       stateDb: { recordSentMail, recordFollowup },
-      getAccountConfig: () => null,
+      getAccountConfig: () => SENDING_ACCOUNT,
     } as unknown as import('./context.js').MailContext;
     const result = await sendMail(
       registry,
@@ -517,7 +554,7 @@ describe('sendMail — recordSentMail integration', () => {
     const recordSentMail = vi.fn(() => { throw new Error('disk full'); });
     const ctx = {
       stateDb: { recordSentMail },
-      getAccountConfig: () => null,
+      getAccountConfig: () => SENDING_ACCOUNT,
     } as unknown as import('./context.js').MailContext;
     const result = await sendMail(registry, { to: [RECIPIENT], subject: 's', body: 'b' }, {}, ctx);
     expect(result.ok).toBe(true);

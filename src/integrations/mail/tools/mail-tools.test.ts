@@ -651,12 +651,29 @@ describe('mail_reply tool', () => {
     // hook — exactly the greenmail Phase-0 stub's shape.
     const ctxWithoutHook = {
       findAccountByAddress: () => null,
-      getAccountConfig: () => null,
+      getAccountConfig: () => businessAccount('rafael-gmail', 'rafael@example.com'),
     } as unknown as MailContext;
     const tool = createMailReplyTool(registry, ctxWithoutHook);
     const out = await tool.handler({ uid: 7, body: 'answer' }, yesAgent);
     expect(out).toContain('Reply sent');
     expect(out).not.toContain('error');
+  });
+
+  it('blocks a reply from an account the context has no configuration for, before anything is sent', async () => {
+    const orig = envelope(9, { messageId: '<o9@x>', from: 'alice@example.com', subject: 'Hi' });
+    provider.fetch.mockResolvedValue({ envelope: orig, text: 'body', html: undefined, attachments: [], inReplyTo: undefined, references: undefined });
+    const unconfigured = {
+      findAccountByAddress: () => null,
+      getAccountConfig: () => null,
+      notifyOutboundSent: vi.fn(async () => {}),
+    } as unknown as MailContext;
+    const prompt = vi.fn(async () => 'Yes');
+    const tool = createMailReplyTool(registry, unconfigured);
+    const out = await tool.handler({ uid: 9, body: 'answer' }, { promptUser: prompt } as unknown as IAgent);
+    expect(out).toContain('mail_reply blocked');
+    expect(out).toContain('no stored configuration');
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it('reports a SENT reply as success even when the reconcile hook THROWS (best-effort, isolated)', async () => {
@@ -665,7 +682,7 @@ describe('mail_reply tool', () => {
     provider.send.mockResolvedValue({ messageId: '<r8@x>', accepted: ['alice@example.com'], rejected: [] });
     const throwingCtx = {
       findAccountByAddress: () => null,
-      getAccountConfig: () => null,
+      getAccountConfig: () => businessAccount('rafael-gmail', 'rafael@example.com'),
       notifyOutboundSent: vi.fn(async () => { throw new Error('reconcile boom'); }),
     } as unknown as MailContext;
     const tool = createMailReplyTool(registry, throwingCtx);
@@ -982,8 +999,20 @@ function receiveOnlyAccount(id: string, address: string, type: 'info' | 'abuse' 
 }
 
 describe('mail_send — mass-send guard', () => {
+  it('blocks a send from an account the context has no configuration for, and says how to fix it', async () => {
+    const tool = createMailSendTool(registry, makeStubContext([]));
+    const prompt = vi.fn(async () => 'Yes');
+    const out = await tool.handler({ to: 'a@x.com', subject: 'unconfigured send', body: 'b' }, { promptUser: prompt } as unknown as IAgent);
+    expect(out).toContain('mail_send blocked');
+    expect(out).toContain('not set up for sending');
+    expect(provider.send).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   it('does not trigger mass-send guard for <=5 recipients', async () => {
-    const cfg = businessAccount('biz', 'business@example.com');
+    // The configuration of the account that actually sends (the registry's
+    // default provider): a lookup with no entry for it now refuses the send.
+    const cfg = businessAccount('rafael-gmail', 'business@example.com');
     const ctx = makeStubContext([cfg]);
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
 

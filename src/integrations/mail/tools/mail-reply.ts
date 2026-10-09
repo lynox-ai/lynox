@@ -15,7 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, previewAddressList } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -142,11 +142,17 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           }
         }
 
-        // Receive-only hard block — no confirm, no override, no pre-approval
-        const sendAccountConfig = ctx?.getAccountConfig(sendProvider.accountId);
-        if (sendAccountConfig && isReceiveOnlyType(sendAccountConfig.type)) {
-          return `mail_reply blocked: account "${sendProvider.accountId}" has type "${sendAccountConfig.type}" which is receive-only. ` +
+        // Receive-only hard block — no confirm, no override, no pre-approval.
+        // Same decision as sendMail's, including its fail-closed half: an
+        // account with no stored configuration does not send.
+        const sendVerdict = checkSendAccount(ctx, sendProvider.accountId);
+        if (!sendVerdict.ok && sendVerdict.status === 'receive_only') {
+          return `mail_reply blocked: ${sendVerdict.message}. ` +
             `Compliance and bulk mailboxes never auto-respond. Escalate this message to the user manually.`;
+        }
+        if (!sendVerdict.ok) {
+          return `mail_reply blocked: ${sendVerdict.message}. ` +
+            `The account is not set up for sending. Reconnect it in the mail settings.`;
         }
 
         // Determine recipients
@@ -191,6 +197,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // system prompt; Phase 0.1 is just the advisory render.
         const smartNote = sendProvider.accountId !== readProvider.accountId
           ? ` _(smart reply-from, read via ${readProvider.accountId})_` : '';
+        const sendAccountConfig = sendVerdict.accountConfig;
         const personaNote = sendAccountConfig
           ? ` · _${truncate(personaFor(sendAccountConfig), 80)}_` : '';
         // Shared with mail_send's preview: an oversized body must state its

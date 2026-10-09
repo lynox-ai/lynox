@@ -46,6 +46,44 @@ export type MailAccountLookup = Pick<MailContext, 'getAccountConfig'>;
  * context would otherwise also switch on the follow-up and sent-mail log
  * writes below, which only the agent's own send makes.
  */
+/** The answer of {@link checkSendAccount}; on `ok`, the config it read (null only without a lookup). */
+export type SendAccountVerdict =
+  | { ok: true; accountConfig: MailAccountConfig | null }
+  | { ok: false; status: 'receive_only' | 'account_not_configured'; message: string };
+
+/**
+ * May this account send? Decided here once, for every sending path.
+ *
+ * FAIL-CLOSED on a missing configuration: when the caller hands over an
+ * account lookup and it has no entry for the account, the send is refused.
+ * Every provider in the registry is built from a stored account row, so a
+ * provider without one is a stale or half-removed account, not a legitimate
+ * sender; letting it through would skip the receive-only check exactly when
+ * the account's type cannot be read.
+ *
+ * Without a lookup at all (`undefined`) there is nothing to decide with and the
+ * send is not refused here; every production caller passes one.
+ */
+export function checkSendAccount(lookup: MailAccountLookup | undefined, accountId: string): SendAccountVerdict {
+  if (!lookup) return { ok: true, accountConfig: null };
+  const accountConfig = lookup.getAccountConfig(accountId);
+  if (accountConfig === null) {
+    return {
+      ok: false,
+      status: 'account_not_configured',
+      message: `account "${accountId}" has no stored configuration, so its type cannot be checked`,
+    };
+  }
+  if (isReceiveOnlyType(accountConfig.type)) {
+    return {
+      ok: false,
+      status: 'receive_only',
+      message: `account "${accountId}" has type "${accountConfig.type}" which is receive-only`,
+    };
+  }
+  return { ok: true, accountConfig };
+}
+
 export function accountLookupOnly(accounts: MailAccountLookup): MailAccountLookup {
   return { getAccountConfig: (id) => accounts.getAccountConfig(id) };
 }
@@ -123,6 +161,7 @@ export type SendCoreFailureStatus =
   | 'rate_limit'
   | 'invalid_recipients'
   | 'receive_only'
+  | 'account_not_configured'
   | 'dedup_window'
   | 'secret_in_body'
   | 'cancelled'
@@ -163,15 +202,9 @@ export async function sendMail(
   }
 
   const provider = resolveProvider(registry, input.account);
-  const accountConfig = ctx?.getAccountConfig(provider.accountId) ?? null;
-  if (accountConfig && isReceiveOnlyType(accountConfig.type)) {
-    return {
-      ok: false,
-      status: 'receive_only',
-      message:
-        `account "${provider.accountId}" has type "${accountConfig.type}" which is receive-only`,
-    };
-  }
+  const verdict = checkSendAccount(ctx, provider.accountId);
+  if (!verdict.ok) return { ok: false, status: verdict.status, message: verdict.message };
+  const accountConfig = verdict.accountConfig;
 
   if (input.to.length === 0) {
     return { ok: false, status: 'invalid_recipients', message: 'no valid recipients' };
