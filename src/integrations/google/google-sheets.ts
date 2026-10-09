@@ -121,9 +121,13 @@ function valuesToMarkdownTable(values: string[][]): string {
 // spreadsheet (no existing data at risk) → left out. Do not silently expand
 // this set: changing it changes user-visible permission prompts.
 const SHEETS_WRITE_ACTIONS = new Set<SheetsInput['action']>(['write', 'append', 'format']);
+// What a call writes at Google, which is wider than what the guard asks about: `create`
+// makes a new spreadsheet in the account. Read by the actor trail, not the guard.
+const SHEETS_OUTWARD_ACTIONS = new Set<string>([...SHEETS_WRITE_ACTIONS, 'create']);
 
 export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<SheetsInput> {
   return {
+    outwardWrite: (input) => (SHEETS_OUTWARD_ACTIONS.has(input.action) ? input.action : null),
     destructive: {
       mode: 'external',
       check: (input) => {

@@ -23,6 +23,7 @@ import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
+import { AuditLog } from './audit-log.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
@@ -1115,6 +1116,8 @@ export class Engine {
     // gate on `durable_memory_enabled` — onboarding runs regardless of DK). Null only
     // when engine.db is unavailable, in which case the HTTP/flow layer fails open.
     this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
+    // The actor trail rides engine.db as well (v22), for the same reason: it is always opened.
+    this._toolContext.auditLog = this.engineDb ? new AuditLog(this.engineDb.getDb()) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -2313,6 +2316,7 @@ export class Engine {
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
   getEngineDb(): EngineDb | null { return this.engineDb; }
+  getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
   /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }

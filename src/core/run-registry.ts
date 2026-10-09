@@ -37,6 +37,8 @@ export interface RunRecord {
   last_event_seq: number;
   last_persisted_seq: number;
   updated_at: string;
+  /** Who started the run (v57): a `principalTag`. NULL on rows from before the column. */
+  created_by: string | null;
 }
 
 // ── Registry ─────────────────────────────────────────────────────────────────
@@ -62,12 +64,12 @@ export class RunRegistry {
    * the user is retrying) must be replaced, not duplicated. The live
    * `awaiting_input` status is derived at read time from a pending prompt, so it
    * is not stored here. */
-  start(threadId: string, runId: string): void {
-    const tx = this.db.transaction((tid: string, rid: string) => {
+  start(threadId: string, runId: string, createdBy?: string): void {
+    const tx = this.db.transaction((tid: string, rid: string, by: string | null) => {
       this._getClearThreadStmt().run(tid);
-      this._getInsertStmt().run(rid, tid);
+      this._getInsertStmt().run(rid, tid, by);
     });
-    tx(threadId, runId);
+    tx(threadId, runId, createdBy ?? null);
   }
 
   /** Bump last_activity (and optionally the event/persisted seqs) so stale-run
@@ -105,6 +107,11 @@ export class RunRegistry {
     return this._getGetByRunStmt().get(runId) as RunRecord | undefined;
   }
 
+  /** The thread's row, if any — at most one, since `start` clears the thread first. */
+  getByThread(threadId: string): RunRecord | undefined {
+    return this.db.prepare(`SELECT * FROM active_runs WHERE thread_id = ?`).get(threadId) as RunRecord | undefined;
+  }
+
   // ── Prepared statements ─────────────────────────────────────────────────
 
   private _getClearThreadStmt(): Database.Statement {
@@ -113,8 +120,8 @@ export class RunRegistry {
 
   private _getInsertStmt(): Database.Statement {
     return (this._stmtInsert ??= this.db.prepare(`
-      INSERT INTO active_runs (run_id, thread_id, status, started_at, last_activity, updated_at)
-      VALUES (?, ?, 'running', datetime('now'), datetime('now'), datetime('now'))
+      INSERT INTO active_runs (run_id, thread_id, status, started_at, last_activity, updated_at, created_by)
+      VALUES (?, ?, 'running', datetime('now'), datetime('now'), datetime('now'), ?)
     `));
   }
 

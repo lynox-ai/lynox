@@ -57,6 +57,15 @@ export interface CallSlot {
    *  own slot). The result scan takes the closer of exactly these blocks as the engine's
    *  own (see `scanToolResult`); a closer anywhere else stays in the scan. */
   wrapped?: string[] | undefined;
+  /** The host whose answer this call returned, reported by `http_request` only when every
+   *  hop of the request stayed on that host. It lets the answer's untrusted marker keep that
+   *  host's write approvals (see `untrusted-epoch.ts`). `null` once two different hosts were
+   *  reported; unset or `null`, the answer counts as foreign content. */
+  answeredBy?: string | null | undefined;
+  /** Set once anything in this call tried to reach the network (`fetchPinned`). An
+   *  `http_request` result after that may carry server bytes even when it is an error,
+   *  so it counts as foreign content unless it is an answer reported for one host. */
+  contactedNetwork?: boolean | undefined;
 }
 
 const slotStorage = new AsyncLocalStorage<CallSlot>();
@@ -79,6 +88,20 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 export function noteOwnWrapped(block: string): void {
   const slot = slotStorage.getStore();
   if (slot) (slot.wrapped ??= []).push(block);
+}
+
+/** Mark the current call as one that tried to reach the network; outside a slot a no-op. */
+export function noteNetworkContact(): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.contactedNetwork = true;
+}
+
+/** Report the host that answered the current call. A second, different host makes the
+ *  answer foreign; outside a slot this is a no-op. */
+export function noteAnsweredBy(host: string): void {
+  const slot = slotStorage.getStore();
+  if (!slot) return;
+  slot.answeredBy = slot.answeredBy === undefined || slot.answeredBy === host ? host : null;
 }
 
 /**

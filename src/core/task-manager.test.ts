@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -674,6 +675,15 @@ describe('TaskManager', () => {
       expect(after!.last_run_status).toBe('failed');
     });
 
+    it('a run a non-owner started by hand gets no retry, whatever the trigger\'s retries say (§3.12 point 6)', () => {
+      const task = tm.create({ title: 'Flaky task', assignee: 'lynox', maxRetries: 3 });
+      tm.recordTaskRun(task.id, 'transient error', 'failed', { noRetry: true });
+      const after = tm.getTrigger(task.id);
+      expect(after!.retry_count).toBe(0);
+      expect(after!.status).toBe('failed');
+      expect(after!.next_run_at).toBeFalsy();
+    });
+
     it('a recurring cron task that fails surfaces status=failed but keeps a future next_run_at', () => {
       // New semantic (replaces the pre-2026-05-23 "stays open"):
       //   - status='failed' so the UI can show the cron task is unhealthy
@@ -1043,13 +1053,13 @@ describe('a bulk run\'s trigger', () => {
     expect(() => tm.update(previewId, { scheduleCron: '1h' })).toThrow(BulkTriggerLockedError);
     expect(() => tm.setEnabled(previewId, false)).toThrow(BulkTriggerLockedError);
     expect(() => tm.complete(previewId)).toThrow(BulkTriggerLockedError);
-    const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
+    const agent = { toolContext: { taskManager: tm }, principal: OWNER_PRINCIPAL } as unknown as IAgent;
     expect(await taskUpdateTool.handler({ task_id: previewId, status: 'completed' }, agent)).toBe(`Error: ${new BulkTriggerLockedError().message}`);
     expect(tm.getTrigger(previewId)).toEqual(before);
   });
 
   it('is refused to the model\'s task_update, which says why', async () => {
-    const agent = { toolContext: { taskManager: tm } } as unknown as IAgent;
+    const agent = { toolContext: { taskManager: tm }, principal: OWNER_PRINCIPAL } as unknown as IAgent;
     const before = row();
     for (const input of [{ task_id: id, schedule: '1h' }, { task_id: id, status: 'completed' }, { task_id: id, run_at: '2030-01-01T00:00:00Z' }]) {
       expect(await taskUpdateTool.handler(input, agent)).toBe(`Error: ${new BulkTriggerLockedError().message}`);

@@ -48,6 +48,7 @@ const {
   buildFfmpegArgs,
   validateMediaInput,
   checkOutputSize,
+  INPUT_DEMUXERS,
   MEDIA_FORMATS,
   MEDIA_OPERATIONS,
 } = await import('./media-process.js');
@@ -171,6 +172,7 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     expect(args).toEqual([
       '-hide_banner', '-nostdin', '-y',
       '-protocol_whitelist', 'file,pipe',
+      '-format_whitelist', INPUT_DEMUXERS.join(','),
       '-i', IN,
       '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-movflags', '+faststart', '-f', 'mp4',
@@ -179,13 +181,35 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     ]);
     // protocol_whitelist must be an INPUT option (before -i).
     expect(args.indexOf('-protocol_whitelist')).toBeLessThan(args.indexOf('-i'));
+    expect(args.indexOf('-format_whitelist')).toBeLessThan(args.indexOf('-i'));
   });
+
+  // The single-file formats the list was checked with against the image's ffmpeg (see
+  // INPUT_DEMUXERS); dropping one stops media_process reading that format.
+  it('keeps every demuxer the list was checked with', () => {
+    expect([...INPUT_DEMUXERS].sort()).toEqual([
+      '3g2', '3gp', 'aac', 'ac3', 'aiff', 'amr', 'ape', 'asf', 'au', 'avi', 'bmp_pipe', 'caf', 'dv', 'eac3',
+      'flac', 'flv', 'gif', 'h264', 'hevc', 'jpeg_pipe', 'm4a', 'm4v', 'matroska', 'mj2', 'mov', 'mp3',
+      'mp4', 'mpeg', 'mpegts', 'mpegvideo', 'ogg', 'png_pipe', 'tiff_pipe', 'w64', 'wav', 'webm', 'webp_pipe', 'wv',
+    ]);
+  });
+
+  // A demuxer that reads a list of further files would open them over `file`, outside the
+  // file area too. None of them may be on the list ffmpeg chooses from by content.
+  it.each(['hls', 'applehttp', 'dash', 'imf', 'concat', 'image2', 'image2pipe', 'm3u', 'tee', 'lavfi', 'subfile'])(
+    'the input demuxer list leaves out %s', (demuxer) => {
+      expect(INPUT_DEMUXERS).not.toContain(demuxer);
+      const args = buildFfmpegArgs('transcode', 'mp4', IN, OUT, {});
+      expect(args[args.indexOf('-format_whitelist') + 1]!.split(',')).not.toContain(demuxer);
+    },
+  );
 
   it('trim → wav: seek+range are OUTPUT options rendered as \\d+.\\d{3}', () => {
     const args = buildFfmpegArgs('trim', 'wav', IN, '/tmp/priv/output.wav', { start: 1.5, duration: 2 });
     expect(args).toEqual([
       '-hide_banner', '-nostdin', '-y',
       '-protocol_whitelist', 'file,pipe',
+      '-format_whitelist', INPUT_DEMUXERS.join(','),
       '-i', IN,
       '-ss', '1.500',
       '-vn', '-c:a', 'pcm_s16le', '-f', 'wav',
@@ -199,7 +223,7 @@ describe('buildFfmpegArgs — exact arg arrays (attack surface)', () => {
     const args = buildFfmpegArgs('extract_audio', 'mp3', IN, '/tmp/priv/output.mp3', {});
     expect(args).toContain('-vn');
     expect(args).toContain('libmp3lame');
-    expect(args.slice(0, 5)).toEqual(['-hide_banner', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe']);
+    expect(args.slice(0, 7)).toEqual(['-hide_banner', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe', '-format_whitelist', INPUT_DEMUXERS.join(',')]);
   });
 
   it('caps an oversized requested duration to the hard ceiling (600s)', () => {

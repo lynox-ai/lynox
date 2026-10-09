@@ -44,6 +44,11 @@ export interface SecretStoreLike {
    * ask_secret" is the wrong instruction for a key that is already stored.
    */
   explainUnresolved?(name: string): 'out-of-scope' | undefined;
+  /** Whether the value under `name` came from the process environment (`LYNOX_SECRET_*` or a
+   *  well-known variable) rather than the vault. A mandate's turn is refused these (PRD
+   *  customer-granted-operator-access D1): they are the engine's, not something the setup
+   *  stored. */
+  isEnvironmentSecret?(name: string): boolean;
   set?(name: string, value: string, scope?: SecretScope, ttlMs?: number): void;
   deleteSecret?(name: string): boolean;
 }

@@ -294,6 +294,13 @@ describe('run_workflow — inline steps', () => {
     expect(agent.noteUntrustedData).toHaveBeenCalledTimes(1);
   });
 
+  it('(270) a workflow run hands the parent new content for its write approvals', async () => {
+    const agent = { ...makePipelineAgent(), noteForeignContent: vi.fn() };
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ name: 'single', steps: [makeStep('s1', 'do thing')] }, agent as never);
+    expect(agent.noteForeignContent).toHaveBeenCalledTimes(1);
+  });
+
   it('successfully executes multi-step pipeline with input_from', async () => {
     const agent = makePipelineAgent();
 

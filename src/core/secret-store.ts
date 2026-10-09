@@ -386,7 +386,13 @@ function maskValue(value: string): string {
 export class SecretStore implements SecretStoreLike {
   private readonly secrets = new Map<string, InternalSecret>();
   private readonly consented = new Set<string>();
+  /** Names whose value `_loadFromEnv` took from the process environment. */
+  private readonly envNames = new Set<string>();
   private readonly vault: SecretVault | null;
+
+  isEnvironmentSecret(name: string): boolean {
+    return this.envNames.has(name);
+  }
 
   constructor(config?: LynoxUserConfig | undefined, vault?: SecretVault | undefined) {
     this.vault = vault ?? null;
@@ -406,6 +412,7 @@ export class SecretStore implements SecretStoreLike {
       if (key.startsWith(prefix) && value) {
         const name = key.slice(prefix.length);
         if (name.length === 0) continue;
+        this.envNames.add(name);
         this.secrets.set(name, {
           name,
           value,
@@ -430,6 +437,7 @@ export class SecretStore implements SecretStoreLike {
       const value = process.env[envVar];
       if (!value) continue;
       if (this.secrets.has(secretName)) continue; // LYNOX_SECRET_* already set
+      this.envNames.add(secretName);
       this.secrets.set(secretName, {
         name: secretName,
         value,

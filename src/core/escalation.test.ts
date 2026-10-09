@@ -9,6 +9,7 @@ function freshDb(): Database.Database {
   const db = new BetterSqlite3(':memory:');
   db.exec(`
     CREATE TABLE threads (
+      created_by TEXT,
       id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', model_tier TEXT NOT NULL DEFAULT 'balanced', model_tier_source TEXT NOT NULL DEFAULT 'unknown',
       context_id TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0, total_cost_usd REAL NOT NULL DEFAULT 0,
@@ -54,6 +55,23 @@ describe('escalateToUser (the Agent→User escalation primitive, Slice B3)', () 
     const pushed = notify.mock.calls[0]![0] as NotificationMessage;
     expect(pushed.data).toMatchObject({ taskId: 'task-1', threadId: 'escalation-task-1' });
     expect(pushed.priority).toBe('high');
+  });
+
+  it('never lands the owner\'s detail in a thread a mandate holds — a bare push instead', () => {
+    // An escalation thread is the owner's; a row with that id stamped by a mandate is refused
+    // up front by POST /api/sessions, and this is the second layer.
+    store.createThread('escalation-task-9', { created_by: 'mandate:setup@example.org' });
+    const r = escalateToUser(store, router, { key: 'task-9', title: '✗ Report', body: 'Step 3 failed', data: { taskId: 'task-9' } });
+    expect(r).toBeNull();
+    expect(store.getMessages('escalation-task-9')).toEqual([]);
+    expect(store.getThread('escalation-task-9')!.is_unread).toBe(0);
+    expect((notify.mock.calls[0]![0] as NotificationMessage).data).toEqual({ taskId: 'task-9' });
+  });
+
+  it('control: an owner-opened escalation thread is bumped as before', () => {
+    store.createThread('escalation-task-9', { created_by: 'owner' });
+    expect(escalateToUser(store, router, { key: 'task-9', title: 't', body: 'b' })).toEqual({ threadId: 'escalation-task-9' });
+    expect(store.getMessages('escalation-task-9')).toHaveLength(2);
   });
 
   it('BUMPS the same thread on a repeat event (one thread per source, history accumulates)', () => {

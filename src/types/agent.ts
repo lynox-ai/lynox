@@ -229,33 +229,22 @@ export interface SessionCounters {
    */
   costUSD: number;
   /**
-   * Hostnames the user has approved for outbound writes within this Session.
-   * Approval does not carry between Sessions — a new conversation re-prompts.
-   *
-   * Which methods count as a write is `isWriteMethod` in `tools/builtin/http.ts`
-   * and is not restated here.
-   */
-  approvedOutboundDomains: Set<string>;
-  /**
    * `secret:NAME` destinations the user approved within this Session, keyed
    * `NAME\u0000host`. A secret goes without a prompt only to a host a person accepted
    * for the api_profile that names it; any other host needs this approval. Created on
    * first use; not carried between Sessions.
    */
   approvedSecretDestinations?: Set<string> | undefined;
-  /** The secret-destination prompt last queued in this Session; the next one waits on it, so
-   *  the secret gate's prompts are asked one at a time (one pending prompt per Session). */
+  /** The gate prompt last queued in this Session (secret destination or write consent); the
+   *  next one waits on it, so they are asked one at a time (one pending prompt per Session).
+   *  See `core/prompt-chain.ts`. */
   secretPromptChain?: Promise<void> | undefined;
-  /**
-   * In-flight permission prompts keyed by hostname. Parallel
-   * `http_request` tool_use blocks against the same host must share one
-   * prompt — the PromptStore has a UNIQUE index per session_id WHERE
-   * status='pending', so a second concurrent insertAskUser throws
-   * PromptConflictError. Without a shared promise, calls 2..N of a
-   * five-way parallel batch all fail with "Session already has a
-   * pending prompt" before the user even sees the first prompt.
-   */
-  pendingOutboundPrompts: Map<string, Promise<boolean>>;
+  /** Moves whenever content the engine did not write enters this Session; see
+   *  `core/untrusted-epoch.ts`. Absent means 0. */
+  untrustedEpoch?: number | undefined;
+  /** Write approvals keyed `METHOD host`, each with the epoch it was given in; it holds
+   *  only while that epoch is current. Created on first use; not carried between Sessions. */
+  approvedWrites?: Map<string, number> | undefined;
 }
 
 /**
@@ -381,6 +370,14 @@ export interface IAgent {
    *  cause, so arming the marker for a taint that was merely inherited tells the operator this
    *  turn read something external when nothing did. */
   restoreConversationTaint?(): void;
+  /** New content the engine did not write entered the conversation; moves the write
+   *  approvals' epoch (see `core/untrusted-epoch.ts`). Optional like `noteUntrustedData`. */
+  noteForeignContent?(): void;
+  /** The epoch a write approval is checked against and stored with (`core/untrusted-epoch.ts`):
+   *  the one the current tool batch started in. Absent on a test double: the current epoch. */
+  approvalEpoch?(): number;
+  /** The current tool batch as an identity, undefined outside one. */
+  approvalBatch?(): object | undefined;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
   readonly userId?: string | undefined;

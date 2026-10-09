@@ -11,6 +11,7 @@
  * and never handed to the next would leave every unit green and the POST unsent.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -176,7 +177,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     ctx.runHistory = history;
     const out = await taskCreateTool.handler(
       { title: 'model copy', assignee: 'lynox', workflow_id: planned.id, schedule: CRON },
-      { name: 'creator', model: 'claude-haiku-4-5-20251001', memory: null, tools: [], onStream: null, toolContext: ctx } as unknown as IAgent,
+      { name: 'creator', model: 'claude-haiku-4-5-20251001', memory: null, tools: [], onStream: null, toolContext: ctx, principal: OWNER_PRINCIPAL } as unknown as IAgent,
     );
     expect(out).toContain('Workflow task created');
     const modelTrigger = tm.listTriggers().find((t) => t.title === 'model copy')!;

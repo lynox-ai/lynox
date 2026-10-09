@@ -12,10 +12,15 @@ import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../.
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
+import { bumpNow, recordApproval } from '../../core/untrusted-epoch.js';
+import { flattenPrompt } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/index.js';
 
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
 // fetchWithValidatedRedirects. The pinned transport is the seam: tests stub
@@ -78,7 +83,7 @@ const TEST_USER_CONFIG = {} as LynoxUserConfig;
 let testCtx: ToolContext;
 let testCounters: SessionCounters;
 
-function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted' } = {}): never {
+function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityContract?: CapabilityContract; withheld?: 'untrusted'; principal?: RequestPrincipal } = {}): never {
   const c = extras.capabilityContract;
   return {
     promptUser: extras.promptUser,
@@ -87,6 +92,7 @@ function makeAgent(extras: { promptUser?: ReturnType<typeof vi.fn>; capabilityCo
       : { contract: undefined, withheld: extras.withheld ?? 'none' }),
     toolContext: testCtx,
     sessionCounters: testCounters,
+    principal: extras.principal ?? OWNER_PRINCIPAL,
   } as never;
 }
 
@@ -153,8 +159,6 @@ beforeEach(() => {
   testCounters = {
     httpRequests: 0,
     writeBytes: 0,
-    approvedOutboundDomains: new Set<string>(),
-    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
   lastPinnedInputs.length = 0;
   // Install the test transport: capture the pinned input + delegate to
@@ -337,9 +341,8 @@ describe('httpRequestTool', () => {
      * previous one left behind.
      */
     it('the first write to a host is gated even when it carries no body', async () => {
-      // "first": consent is keyed on the hostname alone (`approvedOutboundDomains`),
-      // not on (host, method) — so an "Allow" for one write covers every later write
-      // to that host for the session. This drives a host that holds no approval yet.
+      // "first": a host that holds no approval yet. (A DELETE is asked every time anyway;
+      // this witness is about the gate being reached with no body at all.)
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 204, statusText: 'No Content', body: '' }));
       vi.stubGlobal('fetch', fetchMock);
@@ -899,6 +902,88 @@ describe('httpRequestTool', () => {
         expect(res).toContain('read external content before this call');
       });
 
+      // PRD customer-granted-operator-access §3.13: a mandate answers its own session's
+      // prompts, so the consent prompt is no bar to a write on an account the owner connected.
+      describe('a mandate and an account connected through a preset', () => {
+        const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+        async function withProfile(presetId: string | undefined): Promise<void> {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            auth: {
+              type: 'oauth2',
+              vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: {
+                grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+                ...(presetId === undefined ? { token_url: 'https://example.com/oauth/token' } : { preset_id: presetId, preset_params: { shop: 'acme' } }),
+              },
+            },
+          });
+          testCtx.apiStore = store;
+        }
+
+        it.each([
+          ['an interactive turn that would allow it', { promptUser: vi.fn().mockResolvedValue('Allow') }],
+          ['a contract that grants it', { capabilityContract: contract }],
+        ])('refuses the write in %s, and nothing is sent', async (_label, extras) => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await visible(
+            { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+            makeAgent({ ...extras, principal: mandate }),
+          );
+          expect(res).toContain('writes to an account the owner connected');
+          expect(res).toContain('task_create');
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(extras.promptUser ?? vi.fn()).not.toHaveBeenCalled();
+        });
+
+        // The check parses the address before the host policy does; an address that does not
+        // parse fails the same way for both, so the mandate learns nothing the owner would not.
+        it('an address that does not parse gets the owner\'s answer', async () => {
+          await withProfile('example-shop');
+          const asOwner = await visible({ url: 'https://exa mple.com/v1', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract })).catch((e: unknown) => String(e));
+          const asMandate = await visible({ url: 'https://exa mple.com/v1', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract, principal: mandate })).catch((e: unknown) => String(e));
+          expect(asMandate).toBe(asOwner);
+        });
+
+        it('control: the owner\'s same write goes out', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler(
+            { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+            makeAgent({ capabilityContract: contract }),
+          );
+          expect(fetchMock).toHaveBeenCalled();
+        });
+
+        it('control: the mandate\'s read of the same account goes out', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler({ url: 'https://example.com/v1/report' }, makeAgent({ principal: mandate }));
+          expect(fetchMock).toHaveBeenCalled();
+        });
+
+        it('control: the mandate\'s write to a profile without a preset goes out', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler(
+            { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
+            makeAgent({ capabilityContract: contract, principal: mandate }),
+          );
+          expect(fetchMock).toHaveBeenCalled();
+        });
+      });
+
       describe('a redirect after a reviewed write', () => {
         const reviewed: CapabilityContract = {
           version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
@@ -1283,8 +1368,6 @@ describe('httpRequestTool', () => {
       testCounters = {
         httpRequests: 0,
         writeBytes: 0,
-        approvedOutboundDomains: new Set<string>(),
-        pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
       };
       const result = await handler({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('HTTP 200');
@@ -2043,7 +2126,7 @@ describe('httpRequestTool', () => {
           resolvePrompt = res;
         }),
       );
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL } as never;
 
       const url = `https://api-parallel-consent-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -2077,7 +2160,9 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>(() =>
         new Promise<string>((res) => { resolvePrompt = res; }),
       );
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
+      // Parallel calls are the calls of one tool batch; a shared answer holds only there.
+      const batch = {};
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL, approvalBatch: () => batch } as never;
 
       const url = `https://api-parallel-deny-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
@@ -2104,7 +2189,7 @@ describe('httpRequestTool', () => {
       const promptUser = vi.fn<(q: string, opts?: string[]) => Promise<string>>()
         .mockResolvedValueOnce('Deny')
         .mockResolvedValueOnce('Allow');
-      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never;
+      const agent = { promptUser, sessionCounters: testCounters, governingContract: () => ({ contract: undefined, withheld: 'none' }), principal: OWNER_PRINCIPAL } as never;
 
       const url = `https://api-reprompt-${Date.now()}.example.com/v1/x`;
       const first = await visible({ url, method: 'POST', body: '{}' }, agent);
@@ -5432,7 +5517,7 @@ describe('outbound-write consent is granted per exact host', () => {
   it('a consent for one host does not cover a longer name ending in it', async () => {
     mockDnsPublic();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
-    testCounters.approvedOutboundDomains.add('api.example.com');
+    recordApproval(testCounters, 'POST api.example.com', 0);
 
     // The consented host itself goes through without a prompt…
     const ok = await visible({ url: 'https://api.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent());
@@ -5519,5 +5604,444 @@ describe('the connection a call went through is stamped by the resolver, not the
     const result = await runInCallSlot(slot, () => handler({ url: 'https://api.shop.example/v1/orders' }, makeAgent()));
     expect(result).toContain('HTTP 200');
     expect(slot.connection).toEqual({ id: 'shop', createdAt: null });
+  });
+});
+
+/**
+ * Row 270: a write approval is per (method, host), holds only in the untrusted-content epoch
+ * it was given in, and three kinds of write ask every time — a DELETE, a path of the
+ * outbound-effect table, and any write in a mandate's session. Each test counts the questions
+ * the person sees; `fetch` is stubbed, so what is asserted is the gate, not a request.
+ */
+describe('write approvals per method and host (270)', () => {
+  const BEXIO = 'https://api.bexio.com';
+  const ok = () => createMockResponse({ status: 200, statusText: 'OK', body: '{}' });
+
+  function agent270(extras: {
+    answer?: string | ((q: unknown) => Promise<string>);
+    principal?: RequestPrincipal;
+    batch?: object;
+    epoch?: number;
+    mask?: (t: string) => string;
+  } = {}): { agent: never; prompt: ReturnType<typeof vi.fn> } {
+    const a = extras.answer ?? 'Allow';
+    const prompt = vi.fn(typeof a === 'function' ? a : async () => a);
+    const agent = {
+      promptUser: prompt,
+      governingContract: () => ({ contract: undefined, withheld: 'none' }),
+      toolContext: testCtx,
+      sessionCounters: testCounters,
+      principal: extras.principal ?? OWNER_PRINCIPAL,
+      ...(extras.batch !== undefined ? { approvalBatch: () => extras.batch } : {}),
+      ...(extras.epoch !== undefined ? { approvalEpoch: () => extras.epoch } : {}),
+      ...(extras.mask ? { secretStore: { maskSecrets: extras.mask, containsSecret: () => false } } : {}),
+    } as never;
+    return { agent, prompt };
+  }
+
+  const question = (prompt: ReturnType<typeof vi.fn>, i: number): string =>
+    flattenPrompt(prompt.mock.calls[i]![0] as PromptText);
+
+  beforeEach(() => {
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ok()));
+  });
+
+  it('(3) an approval holds for the next write of the same method to the same host', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://h.example/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(2) an approval for POST does not cover PUT on the same host', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://h.example/a', method: 'PUT', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('(1) an approval does not hold once the epoch moved', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    bumpNow(testCounters);
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('(5) an approval is stored with the epoch the batch started in, not the current one', async () => {
+    testCounters.untrustedEpoch = 7;
+    const { agent } = agent270({ epoch: 6 });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(testCounters.approvedWrites?.get('POST h.example')).toBe(6);
+  });
+
+  it('(4) a DELETE asks every time', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'DELETE' }, agent);
+    await visible({ url: 'https://h.example/a', method: 'DELETE' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(testCounters.approvedWrites?.size ?? 0).toBe(0);
+  });
+
+  it('(8) two parallel DELETEs ask twice, one at a time, each naming its own path', async () => {
+    let open = 0; let most = 0;
+    const { agent, prompt } = agent270({ answer: async () => { open++; most = Math.max(most, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'Allow'; } });
+    await Promise.all([
+      visible({ url: 'https://h.example/items/a', method: 'DELETE' }, agent),
+      visible({ url: 'https://h.example/items/b', method: 'DELETE' }, agent),
+    ]);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(most).toBe(1);
+    const texts = [question(prompt, 0), question(prompt, 1)].sort();
+    expect(texts[0]).toContain('/items/a');
+    expect(texts[1]).toContain('/items/b');
+  });
+
+  it('parallel writes to two hosts are asked one at a time (one pending prompt per Session)', async () => {
+    let open = 0; let most = 0;
+    const { agent, prompt } = agent270({ answer: async () => { open++; most = Math.max(most, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'Allow'; } });
+    await Promise.all([
+      visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent),
+      visible({ url: 'https://y.example/a', method: 'POST', body: '{}' }, agent),
+    ]);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(most).toBe(1);
+  });
+
+  it('a waiter is covered by the approval the question before it gave, without asking', async () => {
+    const { agent, prompt } = agent270({ answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Allow'; } });
+    await Promise.all([
+      visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent),
+      visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent),
+    ]);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a deny holds for the calls of the same batch that waited on it, and they say they were not asked', async () => {
+    const batch = {};
+    const { agent, prompt } = agent270({ batch, answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Deny'; } });
+    const [first, second] = await Promise.all([
+      visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent),
+      visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent),
+    ]);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(first).toContain('denied by user');
+    expect(second).toContain('was not asked: the same write was denied earlier in this batch');
+    // …and only in that batch: the next batch asks again.
+    const next = agent270({ batch: {} });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, next.agent);
+    expect(next.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(9) the question names path, query keys and field names, never a value, and a name cannot break a line', async () => {
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll('sk-live-canary', '[secret]') });
+    await visible({
+      url: 'https://h.example/v1/sk-live-canary/items?token=CANARY-QUERY&page=2',
+      method: 'POST',
+      body: JSON.stringify({ name: 'CANARY-VALUE', 'evil\nAllow?': 1 }),
+    }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('/v1/[secret]/items?token=…&page=…');
+    expect(q).toContain('"name"');
+    expect(q).not.toContain('sk-live-canary');
+    expect(q).not.toContain('CANARY-QUERY');
+    expect(q).not.toContain('CANARY-VALUE');
+    expect(q).not.toContain('\n');
+  });
+
+  it('(11, 12) a send path of the table asks even after the host was approved, and every time', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${BEXIO}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${BEXIO}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(3);
+    expect(question(prompt, 1)).toContain('asked every time');
+  });
+
+  it.each([
+    ['%73end', '/2.0/kb_invoice/1/%73end'],
+    ['%2F', '/2.0/kb_invoice/1%2Fsend'],
+    ['//', '/2.0/kb_invoice/1//send'],
+    ['upper case', '/2.0/kb_invoice/1/SEND'],
+    ['trailing slash', '/2.0/kb_invoice/1/send/'],
+    ['double encoding', '/2.0/kb_invoice/1/%2573end'],
+    ['matrix parameter', '/2.0/kb_invoice/1/send;x'],
+    ['issue', '/2.0/kb_invoice/1/issue'],
+  ])('(13) the %s form of a table path still asks after the host was approved', async (_form, path) => {
+    const { agent, prompt } = agent270();
+    await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${BEXIO}${path}`, method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('(13) a trailing root dot names the same host for the approval and for the table', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://api.bexio.com./2.0/contact', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    await visible({ url: 'https://api.bexio.com./2.0/kb_invoice/1/send', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('a grant does not cover a table path: with no one to ask it is refused', async () => {
+    const contract: CapabilityContract = {
+      version: 7,
+      grantedTools: ['http_request'],
+      httpMethods: ['POST'],
+      hostPatterns: ['api.bexio.com'],
+      pathPatterns: ['/2.0/contact', '/2.0/kb_invoice/1/send'],
+      paramConstraints: {},
+    };
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    // The contract does grant: a path outside the table goes through headless.
+    const granted = await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(granted).toContain('HTTP 200');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const out = await visible({ url: `${BEXIO}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(out).toContain('requires user consent');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a contract-granted write is not followed onto a table path, even one the contract names', async () => {
+    const contract: CapabilityContract = {
+      version: 7,
+      grantedTools: ['http_request'],
+      httpMethods: ['POST'],
+      hostPatterns: ['api.bexio.com'],
+      pathPatterns: ['/2.0/contact', '/2.0/kb_invoice/1/send'],
+      paramConstraints: {},
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${BEXIO}/2.0/kb_invoice/1/send` } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain("this run's grant does not cover");
+  });
+
+  it('(13f) a redirect onto a table path is not followed, and the note names the target', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${BEXIO}/2.0/kb_invoice/1/send` } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: `${BEXIO}/2.0/kb_invoice/1`, method: 'POST', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('/send');
+    expect(out).toContain('needs its own approval');
+  });
+
+  it("(13f') a DELETE redirected to another host is not followed", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://other.example/items/1' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/items/1', method: 'DELETE' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('needs its own approval');
+  });
+
+  it("(13f'') a remembered write redirected to the same path with a trailing slash is followed", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/items', method: 'POST', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out).toContain('HTTP 200');
+  });
+
+  it('a remembered write redirected to another path on its own host is followed: the approval is per host, a refusal there would protect nothing', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/v2/items' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/v1/items', method: 'POST', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out).toContain('HTTP 200');
+  });
+
+  it('a DELETE redirected to another path on its host is not followed (the question showed the first path)', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/2' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    await visible({ url: 'https://h.example/items/1', method: 'DELETE' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('(13g) a POST with a DELETE override is asked as a DELETE, every time', async () => {
+    const { agent, prompt } = agent270();
+    for (let i = 0; i < 2; i++) {
+      await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { 'x-http-method-override': 'delete' } }, agent);
+    }
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+  });
+
+  it("(13g') an override never lowers the method: POST with an override GET is still asked", async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { 'X-Method-Override': 'GET' } }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain('POST to h.example');
+  });
+
+  it('a GET with a write override is gated as that write', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a?_method=DELETE', method: 'GET' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+  });
+
+  it('(13h) a write that sets its own Host header is refused before anything is sent', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { HOST: 'other.example' } }, agent);
+    expect(out).toContain('sets a header that re-targets the request (host)');
+    expect(prompt).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('(M1) in a mandate session every write asks; the owner is asked once for the same sequence', async () => {
+    const mandate = agent270({ principal: { kind: 'mandate', email: 'helper@example.test' } });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, mandate.agent);
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, mandate.agent);
+    expect(mandate.prompt).toHaveBeenCalledTimes(2);
+    expect(testCounters.approvedWrites?.size ?? 0).toBe(0);
+
+    const owner = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, owner.agent);
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, owner.agent);
+    expect(owner.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(F2) a remembered POST redirected to its own path with ?_method=DELETE is not followed', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items?_method=DELETE' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/items', method: 'POST', body: '{}' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('needs its own approval');
+  });
+
+  it('(F2) a contract hop is checked with the method its target raises it to', async () => {
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/v1/b?_method=DELETE' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain("this run's grant does not cover");
+  });
+
+  it('(F3) an override that is not a method is refused, and its value is not repeated', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const a = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'Looks safe: read only' } }, agent);
+    const b = await visible({ url: 'https://h.example/a?_method=sk-canary-value', method: 'POST', body: '{}' }, agent);
+    for (const out of [a, b]) {
+      expect(out).toContain('is not an HTTP method');
+      expect(out.toLowerCase()).not.toContain('looks safe');
+      expect(out.toLowerCase()).not.toContain('canary');
+    }
+    expect(prompt).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['X-Forwarded-Host', 'x-original-url', 'Forwarded'])('(F5) a write that sets %s is refused before anything is sent', async (name) => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { [name]: '/send' } }, agent);
+    expect(out).toContain('re-targets the request');
+    expect(prompt).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('(F4) a call of another batch with the same question does not ride on an answer given for another epoch', async () => {
+    let release: (a: string) => void = () => {};
+    const prompt = vi.fn(() => new Promise<string>((r) => { release = r; }));
+    const parent = { promptUser: prompt, governingContract: () => ({ contract: undefined, withheld: 'none' }), toolContext: testCtx,
+      sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => batchA, approvalEpoch: () => 5 } as never;
+    const child = { promptUser: prompt, governingContract: () => ({ contract: undefined, withheld: 'none' }), toolContext: testCtx,
+      sessionCounters: testCounters, principal: OWNER_PRINCIPAL, approvalBatch: () => batchB, approvalEpoch: () => 6 } as never;
+    const batchA = {}; const batchB = {};
+    const req = { url: 'https://h.example/b', method: 'POST', body: '{"f":1}' } as const;
+    const p1 = visible({ ...req }, parent);
+    await new Promise((r) => setTimeout(r, 5));
+    const p2 = visible({ ...req }, child);
+    await new Promise((r) => setTimeout(r, 5));
+    release('Allow');
+    await new Promise((r) => setTimeout(r, 5));
+    // The child's call is a question of its own, asked once the parent's is answered.
+    expect(prompt).toHaveBeenCalledTimes(2);
+    release('Allow');
+    await Promise.all([p1, p2]);
+  });
+
+  it('(F6) a field name holding a resolved secret is masked whole before it is clipped', async () => {
+    const secret = 'sk-live-' + 'x'.repeat(50);
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll(secret, '[secret]') });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: JSON.stringify({ [secret]: 1 }) }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('"[secret]"');
+    expect(q).not.toContain('sk-live-');
+  });
+
+  it('(F6) a secret with a character the URL encodes is masked in the path as shown', async () => {
+    const secret = 'pass word"+x';
+    const { agent, prompt } = agent270({ mask: (t) => t.replaceAll(secret, '[secret]') });
+    await visible({ url: `https://h.example/v1/${encodeURIComponent(secret)}/x?${encodeURIComponent(secret)}=1`, method: 'POST', body: '{}' }, agent);
+    const q = question(prompt, 0);
+    expect(q).toContain('/v1/[secret]/x?[secret]=…');
+    expect(q).not.toContain('pass word');
+  });
+
+  it('(F7) a GET with a write override whose redirect needs its own question says the write may have landed', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://z.example/a' } }))
+      .mockImplementation(async () => ok()));
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/a', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, agent);
+    expect(out).toContain('Write possibly landed');
+    expect(out).toContain('needs its own approval');
+  });
+
+  it('(F1) marks a call that reached the network, and not one refused before it', async () => {
+    const sent: CallSlot = {};
+    await runInCallSlot(sent, () => handler({ url: 'https://h.example/a' }, makeAgent()));
+    expect(sent.contactedNetwork).toBe(true);
+    const refused: CallSlot = {};
+    const { agent } = agent270({ answer: 'Deny' });
+    await runInCallSlot(refused, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
+    expect(refused.contactedNetwork).toBeUndefined();
+  });
+
+  it('reports the answering host for the answer\'s marker, and no host once a hop left it', async () => {
+    const same: CallSlot = {};
+    await runInCallSlot(same, () => handler({ url: 'https://H.example./a' }, makeAgent()));
+    expect(same.answeredBy).toBe('h.example');
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://z.example/b' } }))
+      .mockImplementation(async () => ok()));
+    const hopped: CallSlot = {};
+    await runInCallSlot(hopped, () => handler({ url: 'https://h.example/a' }, makeAgent()));
+    expect(hopped.answeredBy).toBeNull();
   });
 });

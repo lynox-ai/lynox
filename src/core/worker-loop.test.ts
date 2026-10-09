@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PromptStore } from './prompt-store.js';
@@ -2453,7 +2453,8 @@ describe('WorkerLoop', () => {
       const marker = loop.claimHandRunMinter()('hr-prop', EVA);
       await (loop as unknown as Exec).executeTask(task, null, marker);
       expect(session.run).not.toHaveBeenCalled();
-      expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', expect.stringContaining('needs your confirmation'), 'failed');
+      // The attempt was the mandate's request, so it is not retried as the owner's schedule.
+      expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-prop', expect.stringContaining('needs your confirmation'), 'failed', { noRetry: true });
     });
 
     it('drops a marker whose run was refused for another reason, so a later call cannot use it', async () => {
@@ -2822,7 +2823,8 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     expect(store.answerUser(row!.id, 'A')).toBe(true);
     await expect(answered).resolves.toBe('A');
     for (let i = 0; i < 200 && (tm.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
-    expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-ask', 'Tested with list A.', 'success');
+    // A run a mandate started by hand is never retried (§3.12 point 6, once per request).
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-ask', 'Tested with list A.', 'success', { noRetry: true });
     expect(session.run).toHaveBeenCalledTimes(1);
   });
 
@@ -3371,6 +3373,139 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     b.loop.stop();
   });
 
+  // Register: hand-run question origin. After a restart the run that asked is gone, and with
+  // it the in-memory hand-run mark; only the question row still says who asked and whether a
+  // run by hand did. Each case below is the state a restart leaves — a proposal the owner
+  // stamped while its test question was open — read by a loop that never ran it.
+  function parkedAfterRestart(stamp: { createdBy: string; handRun?: boolean }, stamped = true, maxRetries?: number): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
+    const store = new PromptStore(history.getDb());
+    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, ...(maxRetries !== undefined ? { maxRetries } : {}) }) as TriggerRecord;
+    const promptId = store.insertAskUser(`ask-${t.id}`, 'Which list?', ['A', 'B'], undefined, undefined, undefined, t.id, stamp);
+    history.updateTrigger(t.id, { status: 'waiting', waitingUntil: store.getById(promptId)!.expires_at });
+    if (stamped) tm.confirmTrigger(t.id, undefined, 'owner');
+    const session = makeSession('Resumed.');
+    const engine = Object.assign(
+      makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store }),
+      { getRunHistory: () => history },
+    ) as unknown as Engine;
+    return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), store, t, promptId, engine };
+  }
+  const expireQuestion = (store: PromptStore, promptId: string, triggerId: string): void => {
+    history.getDb().prepare(`UPDATE pending_prompts SET expires_at = datetime('now','-1 hour') WHERE id = ?`).run(promptId);
+    expect(store.expireOld()).toBe(1);
+    history.updateTrigger(triggerId, { waitingUntil: '2020-01-01T00:00:00.000Z' });
+  };
+
+  it('255-a: a test question of a run by hand is recorded with who asked and that a hand asked', async () => {
+    const h = await startParked(false);
+    const row = h.store.getPending(`ask-${h.t.id}`)!;
+    expect(row.created_by).toBe(M);
+    expect(row.hand_run).toBe(1);
+    h.loop.stop();
+    const o = await startParked(true);
+    const ordinary = o.store.getPending(`ask-${o.t.id}`)!;
+    expect(ordinary.created_by).toBe('owner');
+    expect(ordinary.hand_run).toBe(0);
+    o.loop.stop();
+  });
+
+  it('255-b: after a restart, the engine expired the test question first — the stamped one-shot ends open and keeps its time', async () => {
+    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    // Recorded as the failed test it was, and only that: the proposal is open again on its own time.
+    expect(after.status).toBe('open');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('255-b twin: an ordinary question expired the same way ends the wait failed, as before', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' });
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).toBe('failed');
+    expect(after.next_run_at ?? null).toBeNull();
+    h.loop.stop();
+  });
+
+  it('255-b2: after a restart, an expired question a mandate\'s own run asked is not retried as the owner\'s schedule', async () => {
+    // The mandate started the stamped schedule by hand (no test, so no hand_run), it parked,
+    // the process restarted. No run holds the starter any more; the question does.
+    const h = parkedAfterRestart({ createdBy: M }, true, 2);
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).toBe('failed');
+    expect(after.retry_count ?? 0).toBe(0);
+    expect(after.next_run_at ?? null).toBeNull();
+    h.loop.stop();
+  });
+
+  it('255-b2 twin: the owner\'s question expired the same way keeps its retry', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' }, true, 2);
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.retry_count).toBe(1);
+    expect(after.next_run_at).not.toBeNull();
+    h.loop.stop();
+  });
+
+  it('255-c: after a restart, the test question is answered — the stamped proposal keeps its own time', async () => {
+    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).toBe('open');
+    expect(after.next_run_at).toBe('2030-01-01T00:00:00.000Z');
+    h.loop.stop();
+  });
+
+  it('255-c twin: an ordinary answered question is due again at once', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const before = Date.now();
+    // Stop the dispatch the re-arm makes possible from reaching the row in this tick.
+    const engine = h.engine as unknown as { getTaskManager: () => TaskManager };
+    const real = engine.getTaskManager();
+    const due = vi.spyOn(real as unknown as { getDueTriggers: () => TriggerRecord[] }, 'getDueTriggers').mockReturnValue([]);
+    await h.loop.tick();
+    due.mockRestore();
+    const next = tm.getTrigger(h.t.id)!.next_run_at;
+    expect(next).not.toBeNull();
+    expect(Date.parse(next!)).toBeGreaterThanOrEqual(before - 1000);
+    expect(Date.parse(next!)).toBeLessThan(Date.parse('2030-01-01T00:00:00.000Z'));
+    h.loop.stop();
+  });
+
+  it('255-d: the run that picks up a mandate\'s answer after a restart runs under the mandate, never as a hand run', async () => {
+    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    let seen: string | undefined;
+    const session = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>)() as Session;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { seen = h.loop.runningStarterTag(h.t.id); return 'Resumed.'; });
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+    expect(opts?.['principal']).toEqual(EVA);
+    // The resumed run is the mandate's: it may stop it, and it is not retried. The principal
+    // read from a question mints no hand-run marker; it narrows the tools and nothing else.
+    expect(seen).toBe(M);
+    h.loop.stop();
+  });
+
+  it('255-d twin: an owner\'s answered question resumes as the owner\'s run', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+    expect(opts?.['principal']).toBeUndefined();
+    h.loop.stop();
+  });
+
   it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
     const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
     const { session, started, release } = heldSession(new Error('provider down'));
@@ -3427,6 +3562,86 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(session.run).toHaveBeenCalledTimes(1);
     expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
     expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  it('a run the mandate started is not retried when it fails, and is the mandate\'s while it runs', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
+    const { loop, engine, session } = setup(task);
+    let seen: string | undefined;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      seen = loop.runningStarterTag('hr-lock');
+      throw new Error('provider down');
+    });
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    expect(seen).toBe('mandate:eva@kanzlei.example');
+    expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.stringContaining('provider down'), 'failed', { noRetry: true });
+  });
+
+  it.each([
+    ['the mandate', true],
+    ['the owner', false],
+  ] as const)('the failure of a run %s started with retries left reaches the owner now: %s', async (who, now) => {
+    vi.useRealTimers();
+    const task = runAgentRow({
+      created_by: who === 'the mandate' ? 'mandate:eva@kanzlei.example' : 'owner',
+      confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0,
+    });
+    const session = makeSession(new Error('provider down'));
+    const router = makeNotificationRouter(true);
+    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session }), router, 60_000);
+    await (loop as unknown as Exec).executeTask(task, null, who === 'the mandate' ? loop.claimHandRunMinter()('hr-lock', EVA) : undefined);
+    const told = (router.notify as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .some((c) => String((c[0] as { body?: unknown }).body ?? '').includes('provider down'));
+    // Not retried, so now or never; the owner's own schedule is retried and tells later.
+    expect(told).toBe(now);
+  });
+
+  it('control: the owner\'s schedule that fails the same way keeps its retry, and runs as the owner\'s', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
+    const { loop, engine, session } = setup(task);
+    let seen: string | undefined;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      seen = loop.runningStarterTag('hr-lock');
+      throw new Error('provider down');
+    });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(seen).toBe('owner');
+    expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.stringContaining('provider down'), 'failed');
+  });
+
+  it.each(['throws', 'returns'] as const)('a mandate\'s run that %s after a shutdown cleared the running tasks is still not retried', async (end) => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
+    const { loop, engine, session } = setup(task);
+    let cleared: string | undefined = 'not reached';
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      loop.stop();
+      cleared = loop.runningStarterTag('hr-lock');
+      if (end === 'throws') throw new Error('provider down');
+      return 'Ran.';
+    });
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    // Read outside the run, so a failed precondition cannot turn into the case under test.
+    expect(cleared).toBeUndefined();
+    const calls = (engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![2]).toBe(end === 'throws' ? 'failed' : 'success');
+    expect(calls[0]![3]).toEqual({ noRetry: true });
+  });
+
+  it('every run result the loop records goes through the one writer that withholds the retry', () => {
+    // A guard on the SOURCE, because the rule is "no path records around it": a new failure
+    // path written as a direct `recordTaskRun` would retry a run a mandate started.
+    const src = readFileSync(new URL('./worker-loop.ts', import.meta.url), 'utf8');
+    // What the writer does is pinned by the behaviour tests around this one; this pins only
+    // that nothing records past it.
+    const code = src.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
+    expect(code.filter((line) => line.includes('recordTaskRun')).map((line) => line.trim().slice(0, 41)))
+      .toEqual(['tm?.recordTaskRun(id, result, status, ...']);
+    // Positive control: the writer is in use at more than one place.
+    expect([...src.matchAll(/this\.#recordRun\(/g)].length).toBeGreaterThan(10);
   });
 
   it('control: the same stamped schedule dispatched without a marker runs as the owner\'s', async () => {

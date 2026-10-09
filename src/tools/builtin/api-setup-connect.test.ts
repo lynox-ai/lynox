@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -132,8 +133,10 @@ const CLIENT_SECRET_VALUE = 'not-a-real-client-secret-only-a-fixture';
 
 function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE }): never {
   return {
-    sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+    principal: OWNER_PRINCIPAL,
+    sessionCounters: { httpRequests: 0 },
     secretStore: {
+      extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
       resolveSecretRefs: (input: unknown): unknown => {
         const text = JSON.stringify(input);
         return JSON.parse(text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (m, name: string) => secrets[name] ?? m)) as unknown;
@@ -197,6 +200,20 @@ describe('connect refuses a scope the preset does not allow', () => {
     const result = await connect(agentWith(store));
 
     expect(result).toContain('/api/oauth/connect/shop-api');
+  });
+
+  // The tool asks for the client pair as the route reads it, through the profile's view of the
+  // vault, so it does not hand out a link the route then refuses. A preset profile with a
+  // mandate as author cannot be saved any more; one stored before that is the case here.
+  it.each([
+    ['hands out no link for a profile a mandate wrote, whose client pair the route would not read', 'mandate:setup@example.org', false],
+    ['control: hands out the link for the owner\'s profile', undefined, true],
+  ])('%s', async (_label, author, linked) => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, scope: 'read_orders' } }, ...(author === undefined ? {} : { created_by: author }) });
+    const result = await connect(agentWith(store));
+    expect(result.includes('/api/oauth/connect/shop-api')).toBe(linked);
   });
 
   it('fetch_token refuses a preset profile whose token endpoint cannot be derived', async () => {
@@ -929,5 +946,156 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(link).not.toContain('?');
     expect(result).not.toContain(CLIENT_SECRET_VALUE);
     expect(result).not.toContain(CLIENT_ID_VALUE);
+  });
+});
+
+describe('a built-in preset profile is not held to checks that mean nothing for it', () => {
+  // Measured on 2026-10-08 with the full engine: models that chose the preset on
+  // their first call still lost rounds here, and two of nine gave up. The attach
+  // never reads `vault_keys` for oauth2, and a preset's catalogue entry says to
+  // create the profile directly, so neither demand bought anything.
+  const createBare = async (presetId: string, extra: Record<string, unknown> = {}): Promise<{ store: ApiStore; reply: string }> => {
+    const store = new ApiStore();
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action: 'create', profile: {
+      id: 'vetted-api',
+      name: 'Vetted',
+      base_url: 'http://shop.local/api',
+      description: 'Preset profile with nothing but the preset',
+      auth: { type: 'oauth2', oauth: {
+        client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+        preset_id: presetId, preset_params: {},
+      } },
+      ...extra,
+    } }, agent) as string;
+    return { store, reply };
+  };
+
+  it('saves a known preset profile with no vault_keys, endpoints, guidelines or avoid rules', async () => {
+    const { store, reply } = await createBare('vetted-shop');
+
+    expect(reply).toContain('Created API profile');
+    expect(store.get('vetted-api')?.auth?.oauth?.preset_id).toBe('vetted-shop');
+  });
+
+  it('still asks an oauth2 profile without a known preset for vault_keys', async () => {
+    // The control: without it the case above would pass if the check were gone for everyone.
+    const { reply } = await createBare('not-a-provider');
+
+    expect(reply).toContain('auth.vault_keys is required for auth.type="oauth2"');
+  });
+
+  it('still calls an oauth2 profile without a known preset incomplete', async () => {
+    const { reply } = await createBare('not-a-provider', { auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'not-a-provider',
+    } } });
+
+    expect(reply).toContain('Profile is incomplete');
+  });
+
+  it('still calls a non-oauth2 profile incomplete when it carries a known preset id', async () => {
+    // The exemption is for oauth2 profiles only. A bearer profile reads its token from
+    // vault_keys, so a preset id riding along on it must not buy it out of the check.
+    const { reply } = await createBare('vetted-shop', { auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'vetted-shop', preset_params: {},
+    } } });
+
+    expect(reply).toContain('Profile is incomplete');
+  });
+});
+
+describe('a save cannot take a profile off its built-in provider', () => {
+  // Measured: a model that wanted a write scope the preset refuses saved over a working
+  // read connection as its own OAuth app. connect refused that, and the user had neither.
+  const prior: ApiProfile = {
+    id: 'vetted-api',
+    name: 'Vetted',
+    base_url: 'http://shop.local/api',
+    description: 'Preset profile',
+    auth: { type: 'oauth2', oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+      preset_id: 'vetted-shop', preset_params: {},
+    } },
+  };
+  const saveOver = async (action: 'create' | 'update', auth: ApiProfile['auth']): Promise<{ store: ApiStore; reply: string }> => {
+    const store = new ApiStore();
+    store.register(prior);
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action, profile: { ...prior, description: 'changed', auth } }, agent) as string;
+    return { store, reply };
+  };
+
+  it.each([
+    ['update', 'drops preset_id for its own OAuth app', { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_url: 'http://shop.local/token', scope: 'write_all',
+    } }],
+    ['update', 'names another provider', { type: 'oauth2', oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
+    } }],
+    ['update', 'switches to a bearer token', { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] }],
+    ['create', 'overwrites the same id without the preset', { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+    } }],
+  ] as const)('refuses a %s that %s, and leaves the stored profile as it was', async (action, _label, auth) => {
+    const { store, reply } = await saveOver(action, auth as ApiProfile['auth']);
+
+    expect(reply).toContain('cannot remove or change auth.oauth.preset_id');
+    expect(store.get('vetted-api')?.auth?.oauth?.preset_id).toBe('vetted-shop');
+    expect(store.get('vetted-api')?.description).toBe('Preset profile');
+  });
+
+  it('names the way that exists instead of only saying no', async () => {
+    const { reply } = await saveOver('update', { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] });
+
+    expect(reply).toContain('Scopes this provider allows: .');
+    expect(reply).toContain('tell the user it is not available rather than offering it');
+    // Not "create a new profile": one host holds one profile, so that advice would loop
+    // back to the update this refused.
+    expect(reply).toContain('ask the user first, then delete this profile and create the new one.');
+  });
+
+  it('lists the scopes of the provider the profile is set up with', async () => {
+    const store = new ApiStore();
+    store.register({ ...prior, auth: { type: 'oauth2', oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
+    } }, base_url: 'https://acme.shops.example.com/admin', custom_endpoint_ack: { accepted: true, hosts: ['acme.shops.example.com'], redirect_hosts: ['acme.shops.example.com'], accepted_at: '2026-10-09T00:00:00.000Z' } });
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action: 'update', profile: { ...prior, base_url: 'https://acme.shops.example.com/admin', auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] } } }, agent) as string;
+
+    expect(reply).toContain('Scopes this provider allows: read_orders.');
+  });
+
+  it('still saves new preset_params on the same provider', async () => {
+    const { store, reply } = await saveOver('update', { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_params: { region: 'eu' } } });
+
+    expect(reply).not.toContain('cannot remove or change');
+    expect(store.get('vetted-api')?.description).toBe('changed');
+  });
+
+  it('lets a profile off a provider the engine no longer knows', async () => {
+    // A preset retired from the register cannot connect anyway; holding the profile to it
+    // would make even the save that repairs it impossible.
+    const store = new ApiStore();
+    store.register({ ...prior, auth: { ...prior.auth!, oauth: { ...prior.auth!.oauth!, preset_id: 'retired-shop' } } });
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action: 'update', profile: {
+      ...prior, description: 'changed', auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }], guidelines: ['x'], avoid: ['x'],
+    } }, agent) as string;
+
+    expect(reply).not.toContain('cannot remove or change');
+    expect(store.get('vetted-api')?.auth?.type).toBe('bearer');
+  });
+
+  it('still saves a change that keeps the provider', async () => {
+    // The control: without it the refusals above would pass if every save were refused.
+    const { store, reply } = await saveOver('update', prior.auth);
+
+    expect(reply).not.toContain('cannot remove or change');
+    expect(store.get('vetted-api')?.description).toBe('changed');
   });
 });

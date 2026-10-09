@@ -50,6 +50,26 @@ describe('SecretStore', () => {
       expect(store.listNames()).toContain('GITHUB_TOKEN');
     });
 
+    it('says which values came from the environment (a mandate\'s turn is refused those, PRD D1)', () => {
+      process.env['LYNOX_SECRET_GITHUB_TOKEN'] = 'ghp_abc123def456';
+      const store = new SecretStore(undefined, mockVault([
+        ['SHOP_KEY', { value: 'stored-by-setup-1234', scope: 'any', ttlMs: 0 }],
+      ]));
+      expect(store.listNames()).toContain('SHOP_KEY');
+      expect(store.isEnvironmentSecret('GITHUB_TOKEN')).toBe(true);
+      expect(store.isEnvironmentSecret('SHOP_KEY')).toBe(false);
+    });
+
+    it('counts a well-known variable the engine reads by its own name as the environment too', () => {
+      vi.stubEnv('GOOGLE_CLIENT_SECRET', 'client-secret-from-env-1234');
+      try {
+        const store = new SecretStore();
+        expect(store.isEnvironmentSecret('GOOGLE_CLIENT_SECRET')).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('ignores empty LYNOX_SECRET_ values', () => {
       process.env['LYNOX_SECRET_EMPTY'] = '';
       const store = new SecretStore();

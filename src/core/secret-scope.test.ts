@@ -61,6 +61,14 @@ describe('defaultVaultScope', () => {
 });
 
 describe('scopeSecretStore — reach', () => {
+  it('passes on where a value came from, and reads a store that cannot say as the environment', () => {
+    const inner = { ...makeStore(VAULT), isEnvironmentSecret: (n: string) => n === 'STRIPE_KEY' };
+    const scoped = scopeSecretStore(inner, ['STRIPE_KEY']);
+    expect(scoped.isEnvironmentSecret?.('STRIPE_KEY')).toBe(true);
+    expect(scoped.isEnvironmentSecret?.('OTHER')).toBe(false);
+    expect(scopeSecretStore(makeStore(VAULT), ['STRIPE_KEY']).isEnvironmentSecret?.('STRIPE_KEY')).toBe(true);
+  });
+
   it('resolves a key the scope names (the scope is not too tight)', () => {
     const scoped = scopeSecretStore(makeStore(VAULT), ['STRIPE_KEY']);
     expect(scoped.resolve('STRIPE_KEY')).toBe('sk_live_stripe');

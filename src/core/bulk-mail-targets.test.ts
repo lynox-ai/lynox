@@ -187,6 +187,25 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     expect(requests).toEqual([]);
   });
 
+  it('(270, 13k) sends nothing to a path of the outbound-effect table, even under a contract that grants it', async () => {
+    const send = 'https://api.bexio.com/2.0/kb_invoice/1/send';
+    const contact = 'https://api.bexio.com/2.0/contact/1';
+    const c = client('api.bexio.com', [send, contact], 'PUT');
+    expect(await c.write(send, 'PUT', { x: 1 })).toEqual({ kind: 'not_granted' });
+    expect(requests).toEqual([]);
+    // The control: the same contract reaches the transport for a path outside the table.
+    expect(await c.write(contact, 'PUT', { x: 1 })).toEqual({ kind: 'ok', value: undefined });
+    expect(requests).toEqual([{ method: 'PUT', url: contact }]);
+  });
+
+  it('(270) sends nothing whose address raises the verb with ?_method= (the minted contract names paths, never a query)', async () => {
+    const raised = 'https://shop.example.test/items/1?_method=DELETE';
+    const c = client('shop.example.test', [raised], 'PATCH');
+    expect(await c.write(raised, 'PATCH', { x: 1 })).toEqual({ kind: 'not_granted' });
+    expect(await c.get(raised)).toEqual({ kind: 'not_granted' });
+    expect(requests).toEqual([]);
+  });
+
   it('still writes a non-mail path on the same Google host that serves Gmail', async () => {
     const drive = 'https://www.googleapis.com/drive/v3/files/1';
     const gmail = 'https://www.googleapis.com/gmail/v1/users/me/settings/vacation';

@@ -8,11 +8,13 @@ import { TaskManager } from '../../core/task-manager.js';
 import { taskCreateTool, taskUpdateTool, taskListTool, triggerDetailLine } from './task.js';
 import type { IAgent, MemoryScopeRef } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 
 let sharedTaskManager: TaskManager | null = null;
 let sharedHistory: RunHistory | null = null;
 
-function makeAgent(scopes?: MemoryScopeRef[]): IAgent {
+function makeAgent(scopes?: MemoryScopeRef[], principal: RequestPrincipal = OWNER_PRINCIPAL): IAgent {
   const ctx = createToolContext({});
   ctx.taskManager = sharedTaskManager;
   // The workflow lookup `task_create` performs reads engine.db through the run
@@ -26,7 +28,8 @@ function makeAgent(scopes?: MemoryScopeRef[]): IAgent {
     onStream: null,
     activeScopes: scopes,
     toolContext: ctx,
-  };
+    principal,
+  } as IAgent;
 }
 
 describe('Task Tools', () => {
@@ -551,6 +554,88 @@ describe('Task Tools', () => {
       );
       expect(result).toContain('only applies together with `workflow_id`');
       expect(tm.listTriggers().find((t) => t.title === 'Orphan params')).toBeUndefined();
+    });
+  });
+
+  // PRD customer-granted-operator-access §3.12 (H2): a mandate's agent turn writes under the
+  // mandate's name, the way its HTTP requests do. Through the real store, with the owner as
+  // the control each time.
+  describe('a mandate\'s turn', () => {
+    const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+    const due = (id: string): boolean => tm.getDueTriggers().some((x) => x.id === id);
+
+    it('task_create records the mandate as author, and the schedule waits for the owner\'s stamp', async () => {
+      await taskCreateTool.handler({ title: 'Daily notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' }, makeAgent(undefined, mandate));
+      const t = tm.listTriggers({}).find((x) => x.title === 'Daily notice')!;
+      expect(tm.getTrigger(t.id)!.created_by).toBe('mandate:setup@example.org');
+      expect(due(t.id)).toBe(false);
+      tm.confirmTrigger(t.id, undefined, 'owner');
+      expect(due(t.id)).toBe(true);
+    });
+
+    it('control: the owner\'s task_create records no author', async () => {
+      await taskCreateTool.handler({ title: 'Owner notice', assignee: 'lynox', run_at: '2020-01-01T00:00:00.000Z' }, makeAgent());
+      const t = tm.listTriggers({}).find((x) => x.title === 'Owner notice')!;
+      expect(tm.getTrigger(t.id)!.created_by).toBeUndefined();
+    });
+
+    it.each([
+      ['a field the owner may change without losing the stamp', { priority: 'high' }],
+      ['completion', { status: 'completed' }],
+    ])('task_update of %s on an owner-stamped schedule takes the stamp off it, so it is no longer due', async (_label, change) => {
+      const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      expect(due(t.id)).toBe(true);
+      await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+      const after = tm.getTrigger(t.id)!;
+      expect(after.edited_by).toBe('mandate:setup@example.org');
+      expect(after.confirmed_at).toBeFalsy();
+      expect(due(t.id)).toBe(false);
+    });
+
+    it('control: the owner\'s task_update keeps the stamp, and the schedule stays due', async () => {
+      const t = tm.create({ title: 'Daily notice', taskType: 'scheduled', assignee: 'lynox', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      await taskUpdateTool.handler({ task_id: t.id, priority: 'high' }, makeAgent());
+      expect(tm.getTrigger(t.id)!.confirmed_at).toBeTruthy();
+      expect(due(t.id)).toBe(true);
+    });
+
+    it('task_update by a mandate on a schedule in another scope marks nothing', async () => {
+      const t = tm.create({ title: 'Other scope', taskType: 'scheduled', assignee: 'lynox', scopeType: 'context', scopeId: 'other', nextRunAt: '2020-01-01T00:00:00.000Z', confirmedAt: '2026-06-01T00:00:00.000Z', confirmedBy: 'owner', createdBy: 'owner' });
+      await taskUpdateTool.handler({ task_id: t.id, title: 'x' }, makeAgent([{ type: 'context', id: 'acme' }], mandate));
+      const after = tm.getTrigger(t.id)!;
+      expect(after.edited_by).toBeFalsy();
+      expect(after.confirmed_at).toBeTruthy();
+    });
+
+    // A to-do carries no mark, so a mandate's turn may neither create nor change one — the rule
+    // the task routes apply.
+    it('task_create by a mandate refuses a to-do, and creates nothing', async () => {
+      const result = await taskCreateTool.handler({ title: 'Mandate to-do' }, makeAgent(undefined, mandate));
+      expect(result).toBe('Error: only the owner of this instance can create a to-do.');
+      expect(tm.list({}).some((x) => x.title === 'Mandate to-do')).toBe(false);
+    });
+
+    it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
+      const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
+      expect(result).toMatch(/^Task created: /);
+      expect(tm.listTriggers({}).some((x) => x.title === 'Mandate run')).toBe(true);
+    });
+
+    it('control: the owner\'s task_create makes a to-do', async () => {
+      await taskCreateTool.handler({ title: 'Owner to-do' }, makeAgent());
+      expect(tm.list({}).some((x) => x.title === 'Owner to-do')).toBe(true);
+    });
+
+    it.each([
+      ['a field', { title: 'changed' }],
+      ['completion', { status: 'completed' }],
+    ])('task_update of %s on a to-do by a mandate is refused, and changes nothing', async (_label, change) => {
+      const t = tm.create({ title: 'Owner to-do' });
+      const result = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+      expect(result).toBe('Error: only the owner of this instance can change a to-do.');
+      const after = tm.getTask(t.id)!;
+      expect(after.title).toBe('Owner to-do');
+      expect(after.status).not.toBe('completed');
     });
   });
 

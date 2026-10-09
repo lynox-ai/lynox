@@ -19,6 +19,7 @@ import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import type { SecretStoreLike } from '../types/index.js';
+import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 // ── Errors ──
 
@@ -237,6 +238,13 @@ export interface ApiProfile {
   id: string;
   name: string;
   base_url: string;
+  /**
+   * Who wrote this profile, when it was not the owner: `mandate:<address>`
+   * (PRD customer-granted-operator-access §3.13, H2). Absent means the owner's, which
+   * every profile from before this field is. Set by the engine on a save, never taken
+   * from the input; the owner's save removes it, and says so.
+   */
+  created_by?: string | undefined;
   auth?: ApiAuth | undefined;
   rate_limit?: ApiRateLimit | undefined;
   description: string;
@@ -488,6 +496,26 @@ export function collectVaultKeys(profile: ApiProfile): string[] {
   }
   for (const w of recordedWrites(profile)) keys.add(w.name);
   return [...keys];
+}
+
+/** Whether a mandate wrote this profile (see {@link ApiProfile.created_by}). */
+export function isMandateAuthored(profile: ApiProfile): boolean {
+  return typeof profile.created_by === 'string' && profile.created_by.startsWith(MANDATE_TAG_PREFIX);
+}
+
+/**
+ * Every vault name a profile connected through a provider preset reads: its credentials,
+ * its token pair and what its exchanges wrote. A mandate's turn may not write to such an
+ * account (`http_request`), so it may not hold what authenticates there either. A mandate
+ * connects no preset account of its own (`api_setup`), so there is no exception here.
+ */
+export function presetCredentialNames(store: Pick<ApiStore, 'getAll'>): Set<string> {
+  const names = new Set<string>();
+  for (const p of store.getAll()) {
+    if (p.auth?.oauth?.preset_id === undefined) continue;
+    for (const k of collectVaultKeys(p)) names.add(k);
+  }
+  return names;
 }
 
 /** Map an `ApiProfile` onto a `kind='api'` connection row (outbound, no subject). */

@@ -1,4 +1,5 @@
 import type { ThreadStore } from './thread-store.js';
+import { isMandateTag } from './request-principal.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
@@ -39,6 +40,14 @@ export function escalateToUser(
   // INSERT OR IGNORE — first event creates the thread (+ its title); later events
   // keep the same row and just append + re-unread below.
   threadStore.createThread(threadId, { title: opts.title });
+  // An escalation thread is the owner's. If a mandate's session ever holds this id, the
+  // owner's detail must not land in a thread the mandate reaches: fall back to the bare push,
+  // as without a thread store. `POST /api/sessions` refuses a mandate this id up front; this is
+  // the second layer, for a row that got there any other way.
+  if (isMandateTag(threadStore.getThread(threadId)?.created_by)) {
+    void router.notify({ title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) });
+    return null;
+  }
   // Seed the agent's detail as an `assistant` turn, fronted by a user-role
   // "subject" ONLY when needed to keep the thread a VALID, RESUMABLE Anthropic
   // conversation (the Messages API requires the first message to be `user` and

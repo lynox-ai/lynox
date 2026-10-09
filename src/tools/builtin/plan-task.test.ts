@@ -700,8 +700,6 @@ describe('plan_task auto-planning fallback', () => {
     const onAfterRun = vi.fn();
     const counters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
     agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
@@ -725,8 +723,6 @@ describe('plan_task auto-planning fallback', () => {
     const onAfterRun = vi.fn();
     const counters = {
       httpRequests: 0, writeBytes: 0, costUSD: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
     agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };

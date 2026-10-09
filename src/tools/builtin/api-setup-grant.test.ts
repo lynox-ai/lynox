@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
+import type { RequestPrincipal } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -12,7 +14,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-import { apiSetupTool } from './api-setup.js';
+import { apiSetupTool, providerBodyForModel, sentCredentials } from './api-setup.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { EngineDb } from '../../core/engine-db.js';
@@ -131,9 +133,11 @@ function makeAgent(
   vault: MockVault,
   promptUser?: () => Promise<string>,
   granted: readonly string[] = ['http_request', 'api_setup'],
+  principal: RequestPrincipal = OWNER_PRINCIPAL,
 ): never {
   return {
-    sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+    principal,
+    sessionCounters: { httpRequests: 0 },
     secretStore: vault,
     getAvailableTools: () => granted.map((name) => ({ definition: { name } })),
     promptUser,
@@ -376,6 +380,169 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
     await fetchToken(agent);
 
     expect(store.get('crm-api')?.oauth_grant?.state).toBe('revoked');
+  });
+});
+
+describe('fetch_token — what of the provider\'s answer the model reads', () => {
+  it('a refused exchange whose answer repeats the client secret and the refresh token shows neither', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    tokenEndpoint(401, JSON.stringify({ error: 'invalid_client', error_description: 'client secret-1 rejected for rt-1', client_secret: 'secret-1' }));
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(result).toContain('invalid_client');
+    expect(result).toContain('"client_secret":"<redacted>"');
+    expect(result).not.toContain('secret-1');
+    expect(result).not.toContain('rt-1');
+  });
+
+  it('an answer without access_token shows the fields it has, not the tokens in them', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    tokenEndpoint(200, JSON.stringify({ refresh_token: 'rt-unrequested-9', id_token: 'idt-unrequested-9', token_type: 'bearer' }));
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(result).toContain('no `access_token`');
+    expect(result).toContain('"refresh_token":"<redacted>"');
+    expect(result).toContain('"token_type":"bearer"');
+    expect(result).not.toContain('rt-unrequested-9');
+    expect(result).not.toContain('idt-unrequested-9');
+  });
+
+  it('an answer that repeats the client secret JSON-escaped does not show it', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'Sec/ret+Value', [REFRESH]: 'rt-1' });
+    tokenEndpoint(401, '{"error":"invalid_client","echo":"Sec\\/ret\\u002BValue"}');
+
+    const result = await fetchToken(makeAgent(store, vault));
+
+    expect(result).toContain('invalid_client');
+    expect(result).toContain('"echo":"<redacted>"');
+    expect(result).not.toContain('Sec/ret+Value');
+  });
+
+  it('a form-encoded answer shows its error and not the token in it', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    tokenEndpoint(200, 'error=odd&refresh_token=rt-form-9&state=x');
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(result).toContain("wasn't valid JSON");
+    expect(result).toContain('error=odd');
+    expect(result).toContain('refresh_token=<redacted>');
+    expect(result).not.toContain('rt-form-9');
+  });
+});
+
+describe('providerBodyForModel', () => {
+  it('keeps the grant type, whose value is a field name', () => {
+    const sent = sentCredentials({ grant_type: 'refresh_token', client_id: 'client-1', client_secret: 'secret-1', refresh_token: 'rt-1' });
+    expect(sent).toEqual(['secret-1', 'rt-1']);
+    const out = providerBodyForModel('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1"}', sent, 500);
+    expect(out).toBe('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1"}');
+  });
+
+  it('counts an authorization code it sends as a credential, though an answer\'s code field is not one', () => {
+    expect(sentCredentials({ grant_type: 'authorization_code', code: 'auth-code-9', code_verifier: 'ver-9' })).toEqual(['auth-code-9', 'ver-9']);
+  });
+
+  it('replaces a sent credential wherever the answer repeats it', () => {
+    expect(providerBodyForModel('<html>bad secret secret-1 here</html>', ['secret-1'], 500)).toBe('<html>bad secret <redacted> here</html>');
+  });
+
+  it('in text, replaces only the named credential fields, and keeps error codes', () => {
+    expect(providerBodyForModel('status_code=400 error_code=x code=AADSTS50011 password: hunter2 api_key="k-9" refreshToken=rt-9</p>', [], 500))
+      .toBe('status_code=400 error_code=x code=AADSTS50011 password: <redacted> api_key="<redacted>" refreshToken=<redacted></p>');
+  });
+
+  it('hides credential names with the word in the middle, as providers use them', () => {
+    expect(providerBodyForModel('{"SecretAccessKey":"wJal9","secret_key":"ab12","tokenValue":"tv9","AccessKeyId":"AKIA9"}', [], 500))
+      .toBe('{"SecretAccessKey":"<redacted>","secret_key":"<redacted>","tokenValue":"<redacted>","AccessKeyId":"<redacted>"}');
+  });
+
+  it('keeps a boolean under a credential name, and descriptive fields with their endings', () => {
+    const body = '{"has_refresh_token":true,"refresh_token_expires_in":3600,"id_token_hint":"x","token_uri":"https://p/t","token_endpoint":"https://p/e","token_format":"jwt"}';
+    expect(providerBodyForModel(body, [], 500)).toBe(body);
+  });
+
+  it('in text, hides a middle-word credential name and keeps a descriptive one', () => {
+    expect(providerBodyForModel('SecretAccessKey=wJal9 token_type=bearer', [], 500)).toBe('SecretAccessKey=<redacted> token_type=bearer');
+  });
+
+  it.each([
+    ['a redirect URL', 'redirect: https://app/cb?access_token=ya29abc123', 'redirect: https://app/cb?access_token=<redacted>'],
+    ['a fragment', 'Location: https://app/cb#access_token=ya29abc123&state=x', 'Location: https://app/cb#access_token=<redacted>&state=x'],
+    ['an error label', 'error: refresh_token=r1abc23 is invalid', 'error: refresh_token=<redacted> is invalid'],
+    ['a detail label', 'detail: refresh_token: r1abc23 expired', 'detail: refresh_token: <redacted> expired'],
+    ['a message label', 'msg=client_secret:s3cr3tv', 'msg=client_secret:<redacted>'],
+  ])('in text, reads the value of another name again: %s', (_label, input, expected) => {
+    expect(providerBodyForModel(input, [], 500)).toBe(expected);
+  });
+
+  it('hides a credential value that holds a colon', () => {
+    expect(providerBodyForModel('client_secret=abc:def password: user:pw9', [], 500)).toBe('client_secret=<redacted> password: <redacted>');
+  });
+
+  it('reads the value of a describing name again', () => {
+    expect(providerBodyForModel('token_uri=https://p/t?access_token=at9', [], 500)).toBe('token_uri=https://p/t?access_token=<redacted>');
+  });
+
+  it('hides any bearer value after an authorization label, short ones too', () => {
+    expect(providerBodyForModel('Authorization: Bearer abc', [], 500)).toBe('Authorization: Bearer <redacted>');
+  });
+
+  it('keeps the word bearer in prose and the label after it', () => {
+    expect(providerBodyForModel('token_type=bearer error=invalid_client', [], 500)).toBe('token_type=bearer error=invalid_client');
+    expect(providerBodyForModel('scheme bearer v2.0 is unsupported', [], 500)).toBe('scheme bearer v2.0 is unsupported');
+  });
+
+  it('replaces a lower-case or quoted bearer value in text', () => {
+    expect(providerBodyForModel('authorization: bearer abc123def', [], 500)).toBe('authorization: bearer <redacted>');
+    expect(providerBodyForModel('Authorization: Bearer "abc123def" end', [], 500)).toBe('Authorization: Bearer <redacted> end');
+  });
+
+  it('replaces a Bearer value in text', () => {
+    expect(providerBodyForModel('got Authorization: Bearer abc.k9m-ghi for this', [], 500)).toBe('got Authorization: Bearer <redacted> for this');
+  });
+
+  it('in JSON, keeps fields that describe a credential and error codes', () => {
+    const body = '{"code":"invalid_grant","token_type":"bearer","token_endpoint_auth_method":"client_secret_post","client_secret_expires_at":0}';
+    expect(providerBodyForModel(body, [], 500)).toBe(body);
+  });
+
+  it('in JSON, hides a credential field whatever it holds, under any credential name', () => {
+    expect(providerBodyForModel('{"id_token":["a1","b2"],"token":{"value":"v9"},"accessToken":"at9","api_key":"k9","jwt":"j9"}', [], 500))
+      .toBe('{"id_token":"<redacted>","token":"<redacted>","accessToken":"<redacted>","api_key":"<redacted>","jwt":"<redacted>"}');
+  });
+
+  it('replaces a sent credential the answer repeats URL-encoded', () => {
+    expect(providerBodyForModel('echo=Sec%2Fret%2BValue', ['Sec/ret+Value'], 500)).toBe('echo=<redacted>');
+  });
+
+  it('replaces a sent credential the answer repeats JSON-escaped', () => {
+    expect(providerBodyForModel('{"echo":"Sec\\/ret\\u002BValue"}', ['Sec/ret+Value'], 500)).toBe('{"echo":"<redacted>"}');
+  });
+
+  it('masks a long opaque run in text', () => {
+    const opaque = 'Q'.repeat(10) + 'w8'.repeat(20);
+    expect(providerBodyForModel(`unexpected ${opaque} end`, [], 500)).not.toContain(opaque);
+  });
+
+  it('redacts a credential field nested in an array', () => {
+    expect(providerBodyForModel('{"errors":[{"access_token":"at-9","msg":"m"}]}', [], 500)).toBe('{"errors":[{"access_token":"<redacted>","msg":"m"}]}');
+  });
+
+  it('marks a cut', () => {
+    const out = providerBodyForModel('x'.repeat(20), [], 10);
+    expect(out).toBe(`${'x'.repeat(10)}…[truncated]`);
+  });
+
+  it('leaves a short sent value alone, which would otherwise erase ordinary words', () => {
+    expect(providerBodyForModel('{"error":"abc"}', ['abc'], 500)).toBe('{"error":"abc"}');
   });
 });
 
@@ -1960,7 +2127,7 @@ describe('who may have a token renewed on their behalf', () => {
    */
   function agentWith(over: Record<string, unknown>): never {
     return {
-      sessionCounters: { httpRequests: 0, approvedOutboundDomains: new Set<string>(), pendingOutboundPrompts: new Map<string, unknown>() },
+      sessionCounters: { httpRequests: 0 },
       toolContext: { apiStore: null },
       getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
       ...over,
@@ -3191,5 +3358,253 @@ describe('the two properties the comments claim, which nothing was checking', ()
     // the recorder were simply not wired up, which is the failure that produced
     // the wrong verdict in the first place.
     expect(reads, 'the read recorder captured nothing at all, so the two assertions above prove nothing').toContain('CRM_API_REFRESH_TOKEN');
+  });
+});
+
+// PRD customer-granted-operator-access §3.13 (H2), through the real attach and renewal: a
+// mandate does not write to an account connected through a preset, and a profile a mandate
+// wrote does not get the environment's values or a preset account's credentials. The owner is
+// the control each time.
+describe('mandates and stored credentials', () => {
+  const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+  const M = 'mandate:setup@example.org';
+  const PRESET_ACK = { accepted: true as const, hosts: ['api.crm.example', 'auth.bexio.com'], accepted_at: '2026-09-22T00:00:00.000Z' };
+  const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
+
+  /** The mock vault, able to say where a value came from and to name the refs in an input. */
+  function vault(seed: Record<string, string>, env: readonly string[] = []): MockVault {
+    return {
+      ...makeVault(seed),
+      isEnvironmentSecret: (n: string) => env.includes(n),
+      extractSecretNames: (input: unknown) => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
+    } as MockVault;
+  }
+
+  /** The crm profile, connected through the bexio preset, with a token that is due. */
+  const presetProfile = (): ApiProfile => crmProfile({
+    custom_endpoint_ack: PRESET_ACK,
+    auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, preset_id: 'bexio', token_expires_at: Date.now() - 1000 } },
+  });
+
+  async function send(
+    profiles: ApiProfile[],
+    v: MockVault,
+    req: { url: string; method?: string; body?: string },
+    principal: RequestPrincipal,
+  ): Promise<{ calls: Array<{ url: string; auth: string | undefined }>; out: string }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    for (const p of profiles) apiStore.register(p);
+    const calls: Array<{ url: string; auth: string | undefined }> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      const h = (init?.headers ?? {}) as Record<string, string>;
+      calls.push({ url, auth: h['Authorization'] ?? h['authorization'] });
+      if (url.includes('/token')) {
+        return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal) as unknown as { toolContext: Record<string, unknown> };
+    // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
+    // so the log only has to accept the rows. Without one the renewal is skipped by design.
+    agent.toolContext['auditLog'] = { record: (): void => {} };
+    const out = await httpRequestTool.handler(
+      { method: 'GET', ...req } as never,
+      agent as never,
+    ).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
+    return { calls, out: String(out) };
+  }
+
+  it('control: the owner\'s read of a preset account renews the due token and goes out with it', async () => {
+    const { calls } = await send([presetProfile()], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls.some((c) => c.url.includes('auth.bexio.com') && c.url.includes('/token'))).toBe(true);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
+  });
+
+  it('control: the mandate\'s read of the same account does the same', async () => {
+    const { calls } = await send([presetProfile()], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
+  });
+
+  it.each([
+    ['the host as the profile names it', 'https://api.crm.example/v1/contacts'],
+    ['the host with a trailing root dot', 'https://api.crm.example./v1/contacts'],
+    ['the host with two trailing dots', 'https://api.crm.example../v1/contacts'],
+  ])('a mandate\'s write to a preset account (%s) is refused before the credential is attached: no renewal, nothing sent', async (_label, url) => {
+    const { calls, out } = await send([presetProfile()], vault(SEED), { url, method: 'POST', body: '{}' }, mandate);
+    expect(out).toContain('writes to an account the owner connected');
+    expect(calls).toEqual([]);
+  });
+
+  it('a mandate\'s write is refused on a host a preset profile shares with another profile', async () => {
+    const second: ApiProfile = { ...crmProfile({ id: 'crm-two', auth: { type: 'none' } }) };
+    const { calls, out } = await send([presetProfile(), second], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(out).toContain('writes to an account the owner connected');
+    expect(calls).toEqual([]);
+  });
+
+  const bearer = (vaultKey: string, created_by?: string): ApiProfile => ({
+    ...crmProfile({ auth: { type: 'bearer', vault_keys: [vaultKey] } }),
+    ...(created_by === undefined ? {} : { created_by }),
+  });
+
+  it('a profile a mandate wrote does not get a value the engine took from its environment', async () => {
+    const { calls } = await send([bearer('ENV_TOKEN', M)], vault({ ENV_TOKEN: 'from-env' }, ['ENV_TOKEN']), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls[0]?.auth).toBeUndefined();
+  });
+
+  it('control: the owner\'s profile gets the same value', async () => {
+    const { calls } = await send([bearer('ENV_TOKEN')], vault({ ENV_TOKEN: 'from-env' }, ['ENV_TOKEN']), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls[0]?.auth).toBe('Bearer from-env');
+  });
+
+  it('control: a profile a mandate wrote gets what the setup stored', async () => {
+    const { calls } = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example/v1/contacts' }, mandate);
+    expect(calls[0]?.auth).toBe('Bearer stored');
+  });
+
+  it.each([
+    ['a profile a mandate wrote does not send', M, false],
+    ['control: the owner\'s profile sends', undefined, true],
+  ])('%s a client secret from the environment to its token endpoint (fetch_token)', async (_label, author, exchanged) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), ...(author === undefined ? {} : { created_by: author }) });
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'from-env' }, ['CRM_CLIENT_SECRET']) as never));
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(exchanged);
+  });
+
+  // No preset profile carries a mandate as author any more (api_setup refuses to save one);
+  // one stored before that gets no preset credentials either, its own included.
+  it('a preset profile with a mandate as author gets no preset credentials, its own included', async () => {
+    const own: ApiProfile = { ...presetProfile(), created_by: M, auth: { ...presetProfile().auth!, oauth: { ...presetProfile().auth!.oauth!, token_expires_at: Date.now() + 3_600_000 } } };
+    const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
+  });
+
+  it('when the derived token name of a profile a mandate wrote comes from the environment, fetch_token says to change the id, not to leave the name out', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(apiStore, vault(SEED, ['CRM_API_ACCESS_TOKEN']) as never, undefined, undefined, mandate));
+    expect(out).toContain('Save the profile under a different id');
+    expect(out).not.toContain('Leave output_secret_name out');
+  });
+
+  it('control: the owner\'s profile may fetch_token into a name a mandate\'s profile could not', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({}, 'client_credentials'));
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'MINTED', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const v = vault(SEED, ['FROM_ENV_TOKEN']);
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'FROM_ENV_TOKEN' }, makeAgent(apiStore, v as never));
+    expect(out).not.toContain('is a credential this profile may not write');
+    expect(calls.some((u) => u.includes('/oauth/token'))).toBe(true);
+  });
+
+  it('a profile a mandate wrote may not fetch_token into the token slot of the owner\'s preset account, and nothing is sent', async () => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    // The owner's account keeps its own client keys, so only the token slot is shared.
+    const shop: ApiProfile = {
+      ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1',
+      custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] },
+      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], oauth: { preset_id: 'bexio', grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET' } },
+    };
+    apiStore.register(shop);
+    apiStore.register({ ...crmProfile({}, 'client_credentials'), created_by: M });
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url);
+      return new Response(JSON.stringify({ access_token: 'MINTED', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const v = vault({ ...SEED, SHOP_API_ACCESS_TOKEN: 'owner-token' });
+    const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'SHOP_API_ACCESS_TOKEN' }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
+    expect(out).toContain('is a credential this profile may not write');
+    expect(calls).toEqual([]);
+    expect(v.peek('SHOP_API_ACCESS_TOKEN')).toBe('owner-token');
+  });
+
+  it('a profile a mandate wrote does not get the token of a preset account', async () => {
+    const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
+    const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
+  });
+});
+
+/**
+ * The renewal posts to the provider and may rotate the refresh token there: an outward write
+ * that runs inside an `http_request` past the dispatch that records a mandate's writes. So it
+ * leaves its own pair of rows in the actor trail (`audit-log.ts`), and without a row it does
+ * not run — the request goes out on the stored token instead.
+ */
+describe('a mandate\'s renewal in the actor trail', () => {
+  const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; correlationId: string };
+  beforeEach(() => { resetOAuthRenewalBackoffForTests(); });
+
+  async function renewAs(principal: RequestPrincipal, auditLog: { record: (e: Rec) => void } | null): Promise<{ calls: string[]; stderr: string }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: Date.now() - 1000 } },
+    }));
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      const body = url.includes('/oauth/token') ? JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }) : '{"ok":true}';
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true; });
+    const agent = makeAgent(apiStore, makeVault(SEED), undefined, undefined, principal) as unknown as { toolContext: Record<string, unknown> };
+    agent.toolContext['auditLog'] = auditLog;
+    await httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, agent as never);
+    return { calls, stderr: written.join('') };
+  }
+
+  it('records attempt and returned around a mandate\'s renewal', async () => {
+    const recs: Rec[] = [];
+    const { calls } = await renewAs(MANDATE, { record: (e) => { recs.push(e); } });
+    expect(calls.filter((u) => u.includes('/oauth/token'))).toHaveLength(1);
+    expect(recs.map((r) => r.phase)).toEqual(['attempt', 'returned']);
+    for (const r of recs) expect(r).toMatchObject({ principal: MANDATE, action: 'api_setup:fetch_token', target: 'api_setup renewal crm-api' });
+    expect(recs[0]!.correlationId).toBe(recs[1]!.correlationId);
+  });
+
+  it('does not renew for a mandate when the attempt cannot be written, and says why on stderr', async () => {
+    for (const auditLog of [{ record: (): void => { throw new Error('disk full'); } }, null]) {
+      resetOAuthRenewalBackoffForTests();
+      const { calls, stderr } = await renewAs(MANDATE, auditLog);
+      expect(calls.some((u) => u.includes('/oauth/token')), String(auditLog)).toBe(false);
+      expect(calls.some((u) => u.includes('/v1/contacts')), 'the request still went out on the stored token').toBe(true);
+      expect(stderr).toMatch(/oauth token renewal refused for profile "crm-api": the renewal could not be recorded/);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('control: the owner\'s renewal runs and leaves no row', async () => {
+    const recs: Rec[] = [];
+    const { calls } = await renewAs(OWNER_PRINCIPAL, { record: (e) => { recs.push(e); } });
+    expect(calls.filter((u) => u.includes('/oauth/token'))).toHaveLength(1);
+    expect(recs).toEqual([]);
   });
 });

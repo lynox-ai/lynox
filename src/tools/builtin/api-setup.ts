@@ -18,10 +18,10 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
-import { accessTokenKey, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, isMandateAuthored, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { authTypeForModel, slotNameForModel, shapedForLog, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
+import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -31,7 +31,9 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isProtectedSecretWrite, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { hiddenFromProfile, secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -150,6 +152,12 @@ const VALID_OUTPUT_VOLUMES = new Set(['small', 'medium', 'large', 'streaming']);
 const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
+/** The built-in preset an oauth2 profile names, when the engine knows it. */
+function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
+  const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
+  return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+}
+
 function validateProfile(profile: ApiProfile): string | null {
   for (const field of REQUIRED_FIELDS) {
     if (!profile[field] || (typeof profile[field] === 'string' && (profile[field] as string).trim() === '')) {
@@ -234,7 +242,11 @@ function validateProfile(profile: ApiProfile): string | null {
         return `Invalid ${field} "${key}": that credential belongs to this instance — an infrastructure secret or the slot holding the tenant's own provider key. It is never attached to an outbound request — use a credential the user supplied for this API.`;
       }
     }
-    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
+    // A built-in preset is the exception: its sign-in reads `client_id_key` and
+    // `client_secret_key`, the token is attached from a slot derived from the
+    // profile id, and `collectVaultKeys` counts the OAuth keys on its own. A list
+    // here changes nothing for such a profile, so demanding one only costs a round.
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
     // OAuth2 metadata: required when type='oauth2' AND the agent intends to
@@ -369,8 +381,15 @@ function validateProfile(profile: ApiProfile): string | null {
     if (!VALID_PROVENANCE_SOURCES.has(profile.provenance.source)) {
       return `Invalid provenance.source "${profile.provenance.source}": must be openapi, docs_url, or manual`;
     }
-    if (profile.provenance.schema_version !== 2) {
-      return `Invalid provenance.schema_version "${String(profile.provenance.schema_version)}": only schema_version=2 is supported in v2 profiles`;
+    const schemaVersion: unknown = profile.provenance.schema_version;
+    // The string "2" is the common slip, and quoting it back next to "only 2 is
+    // supported" read as a contradiction: models resent the same call until the
+    // repeat brake stopped them. Naming the type is what tells them the fix.
+    if (typeof schemaVersion === 'string') {
+      return 'Invalid provenance.schema_version: must be the number 2, not a string. Write schema_version: 2 without quotes.';
+    }
+    if (schemaVersion !== 2) {
+      return `Invalid provenance.schema_version "${String(schemaVersion)}": only schema_version=2 is supported in v2 profiles`;
     }
   }
   return null;
@@ -1333,9 +1352,139 @@ function deletedMeanwhile(
   return `Token exchange completed, but api_profile "${profile.id}" was deleted while it ran.${purgeMessage(purge)}`;
 }
 
+/**
+ * Field names whose values a token endpoint's answer must not carry into a sentence: any name
+ * that CONTAINS a credential word (`access_token`, `accessToken`, `SecretAccessKey`,
+ * `secret_key`, `tokenValue`, `api_key`, `jwt`), plus `authorization`, `key` and
+ * `code_verifier`. Matching the middle too keeps provider shapes like AWS's `SecretAccessKey`
+ * hidden; what that would also hide, a field that only DESCRIBES a credential (`token_type`,
+ * `token_endpoint_auth_method`, `client_secret_expires_at`, `refresh_token_expires_in`), is
+ * named by its ending in `DESCRIPTIVE_FIELD` and stays readable. `code` is not among them,
+ * because error bodies use it for the error code; the authorization code this engine sends is
+ * replaced as a sent value instead.
+ */
+const CREDENTIAL_WORD = /token|secret|password|assertion|api_?key|access_?key|jwt|^key$|^authorization$|^code_verifier$/i;
+const DESCRIPTIVE_FIELD = /(?:_?type|_?expires_?(?:at|in)|_?auth_?method|_?endpoint|_?ur[il]|_?hint|_?format)$/i;
+const isCredentialField = (name: string): boolean => CREDENTIAL_WORD.test(name) && !DESCRIPTIVE_FIELD.test(name);
+/** What this engine SENDS that counts as a credential: the fields above, and the authorization code. */
+const isSentCredential = (name: string): boolean => isCredentialField(name) || name === 'code';
+
+function redactCredentialFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactCredentialFields);
+  if (value === null || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    // Whatever shape a credential field holds — a string, a list of them, an object — none of
+    // it is shown. A boolean (`has_refresh_token: true`) carries no credential and stays.
+    out[k] = isCredentialField(k) && v !== null && typeof v !== 'boolean' ? '<redacted>' : redactCredentialFields(v);
+  }
+  return out;
+}
+
+/**
+ * A token endpoint's answer as the model may read it: enough to diagnose (error codes,
+ * descriptions, field names), never a credential. Providers answer a failed exchange with
+ * bodies that repeat what was sent, a client secret included, and a body without
+ * `access_token` can still hold a `refresh_token` or `id_token`. So:
+ * - every credential this exchange sent (`sentCredentials`) is replaced wherever it appears, as
+ *   sent and URL-encoded, and once more after a JSON body is parsed and written back, because
+ *   parsing undoes an escaped echo (`\/`, `\u002B`) that the first pass could not see;
+ * - a JSON body has the values of credential-named fields replaced, at any depth;
+ * - any other body has `name=value` / `name: value` pairs of those names replaced, and a
+ *   `Bearer` value;
+ * - long opaque runs are masked as the error reporter masks them.
+ * Then it is cut to `max`, with a marker.
+ */
+export function sentCredentials(params: Readonly<Record<string, string>>): string[] {
+  return Object.entries(params).filter(([k]) => isSentCredential(k)).map(([, v]) => v);
+}
+
+function withoutSent(text: string, sent: readonly string[]): string {
+  let body = text;
+  for (const value of sent) {
+    if (value.length < 4) continue;
+    for (const form of new Set([value, encodeURIComponent(value)])) body = body.split(form).join('<redacted>');
+  }
+  return body;
+}
+
+/**
+ * `name=value` / `name: value` pairs in a text body whose name carries a credential word. Only
+ * such names are matched, so a label in front (`detail:`, `redirect:`, `msg=`) consumes nothing
+ * and the pair behind it is matched on its own. A credential name loses its whole value, colons
+ * included. A name that only describes a credential (`token_uri`) keeps its value, but the
+ * value is read again, because a URL can hold a pair of its own; the value is strictly shorter
+ * than the match, so the recursion ends.
+ */
+function redactTextPairs(text: string): string {
+  return text.replace(/\b([A-Za-z_]*(?:token|secret|password|assertion|api_?key|access_?key|jwt)[A-Za-z_]*|key|authorization|code_verifier)\b(["']?\s*[=:]\s*["']?)(?!Bearer\b)([^\s&"',}<]+)/gi,
+    (_whole, name: string, sep: string, value: string) => `${name}${sep}${isCredentialField(name) ? '<redacted>' : redactTextPairs(value)}`);
+}
+
+export function providerBodyForModel(text: string, sent: readonly string[], max: number): string {
+  let body = withoutSent(text, sent);
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { parsed = undefined; }
+  if (parsed !== null && typeof parsed === 'object') {
+    body = withoutSent(JSON.stringify(redactCredentialFields(parsed)), sent);
+  } else {
+    // The scheme word first, so `Authorization: Bearer x` loses `x` and keeps `Bearer`; the
+    // field pass then skips the scheme word instead of taking it for the value. A bearer value
+    // is token-shaped (eight characters or more, with a digit or punctuation), so the word in
+    // prose — `token_type=bearer error=…` — does not take the next label with it.
+    // After an `Authorization` label any bearer value goes, whatever its shape.
+    body = body.replace(/\b(authorization["']?\s*[=:]\s*["']?bearer)\s+"?[^\s"',}&<]+"?/gi, '$1 <redacted>');
+    body = redactTextPairs(body.replace(/\b(Bearer)\s+"?(?=[A-Za-z0-9._~+/-]*[0-9._~+/-])[A-Za-z0-9._~+/-]{8,}=*"?/gi, '$1 <redacted>'));
+  }
+  body = maskSecretPatterns(body, { includeGeneric: true });
+  return body.length > max ? `${body.slice(0, max)}…[truncated]` : body;
+}
+
+function hostOf(profile: ApiProfile): string | undefined {
+  try { return new URL(profile.base_url).hostname; } catch { return undefined; }
+}
+
+/**
+ * What the owner takes over when their save replaces a profile a mandate wrote. `update`
+ * replaces a profile whole, so that is what the SAVED profile still shares with the replaced
+ * one — the vault names and the host — not what the replaced one named. Shaped like every
+ * other profile value this tool echoes.
+ */
+export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
+  const priorKeys = new Set(collectVaultKeys(prior));
+  const kept = collectVaultKeys(saved).filter((k) => priorKeys.has(k)).map((k) => shapedForLog(k, DERIVED_NAME_SHAPE, 80));
+  const host = hostOf(saved);
+  const keptHost = host !== undefined && host === hostOf(prior) ? shapedForLog(host, HOSTNAME_SHAPE, 255) : undefined;
+  const lead = 'This profile had been set up in a mandate\'s session; it is now yours.';
+  if (kept.length === 0 && keptHost === undefined) {
+    return `${lead} Your save keeps none of the vault keys or the host that setup named.`;
+  }
+  const what = [
+    ...(kept.length > 0 ? [`the vault keys ${kept.join(', ')}`] : []),
+    ...(keptHost !== undefined ? [`the host ${keptHost}`] : []),
+  ].join(' and ');
+  const carry = kept.length > 0 ? ' Check what those keys hold: the profile is yours now, so the engine resolves them for it as for any of your profiles, values from the environment included.' : '';
+  return `${lead} Your save keeps ${what} from that setup.${carry}`;
+}
+
+/**
+ * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
+ * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
+ * host, the names the engine resolves — holds only while the profile is the one its author
+ * saved, and `update` replaces a profile whole. A profile without an author is the owner's,
+ * so the answer for one from before authors were recorded is no. `null` = go ahead.
+ */
+export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | undefined, id: string): string | null {
+  if (existing === undefined || isOwnerPrincipal(agent.principal)) return null;
+  if (existing.created_by === principalTag(agent.principal)) return null;
+  return `Error: API profile "${id}" was not set up in this session's name, so this session may not change or delete it. Nothing was changed. Ask the owner to make the change.`;
+}
+
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+  // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
+  outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
   // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
   // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
   // the token at the provider — a vault before-image would restore a dead token. The
@@ -1538,6 +1687,8 @@ ${draftJson}
       if (!apiStore) return 'No API profiles registered.';
       const existing = apiStore.get(input.id);
       if (!existing) return `API profile "${input.id}" not found.`;
+      const foreignRefine = foreignProfileRefusal(agent, existing, input.id);
+      if (foreignRefine) return foreignRefine;
 
       if (input.refine.response_shape) {
         const shapeErr = validateShape(input.refine.response_shape);
@@ -1585,10 +1736,39 @@ ${draftJson}
       // onto a reused profile reference). A shallow copy suffices — we only ever
       // replace the whole top-level field, never mutate a nested value.
       const profile = { ...input.profile };
+      // The string "2" is read as the number it names. Models send it that way often
+      // enough that the refusal below cost a round in a third of the measured runs, and
+      // it is stored as the number: the loader treats anything but `=== 2` as v1.
+      const sentVersion: unknown = profile.provenance?.schema_version;
+      if (profile.provenance && sentVersion === '2') profile.provenance = { ...profile.provenance, schema_version: 2 };
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;
       }
+      // `create` overwrites an existing id as well, so both ask. The author is the engine's
+      // to record, never the input's: a mandate's save records the mandate.
+      const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
+      if (foreignSave) return foreignSave;
+      // A provider preset connects an account, and connecting is the owner's: a mandate's turn
+      // prepares a profile but does not name a preset (PRD §3.13, interim scope — see the
+      // register row on who owns a connection).
+      if (!isOwnerPrincipal(agent.principal) && profile.auth?.oauth?.preset_id !== undefined) {
+        return `Error: profile "${profile.id}" names a provider preset, and connecting an account through one is for the owner to do. Nothing was saved. Save it without auth.oauth.preset_id, or ask the owner to set it up and connect.`;
+      }
+      delete profile.created_by;
+      const prior = agent.toolContext?.apiStore?.get(profile.id);
+      // A save may not take a profile off the built-in provider it was set up with. A model
+      // that wanted a write scope the preset refuses saved over a working read connection as
+      // its own OAuth app; connect then refused that, and the user had neither. The answer
+      // names what is possible, so the next attempt is not another way around it.
+      const priorPreset = prior ? builtInPresetOf(prior) : undefined;
+      if (priorPreset && builtInPresetOf(profile)?.id !== priorPreset.id) {
+        return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
+      }
+      if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
+      // The owner's save of a mandate's profile makes it the owner's, and the answer says what
+      // the mandate had chosen, so the owner adopts it knowingly rather than by a re-save.
+      const adopted = isOwnerPrincipal(agent.principal) && prior !== undefined && isMandateAuthored(prior) ? prior : undefined;
 
       // Wave 5d BYOK liability gate: a profile pointed at a host outside
       // lynox's vetted sub-processor list cannot be saved without explicit
@@ -1784,15 +1964,20 @@ ${draftJson}
       if (storedGrant) profile.oauth_grant = storedGrant;
       else delete profile.oauth_grant;
 
-      // Enforce research: warn if profile is too thin
+      // Enforce research: warn if profile is too thin. Not for a built-in preset:
+      // the preset supplies the host and the sign-in, and its catalogue entry says
+      // to create the profile directly. Asking for endpoints there sent models off
+      // to research docs and fill the fields from web knowledge before they could
+      // connect; endpoints, guidelines and avoid rules can follow with update.
       const warnings: string[] = [];
-      if (!profile.endpoints || profile.endpoints.length === 0) {
+      const thinCheckApplies = !builtInPresetOf(profile);
+      if (thinCheckApplies && (!profile.endpoints || profile.endpoints.length === 0)) {
         warnings.push('No endpoints listed — bootstrap from an OpenAPI URL or research the docs (web_research) and add key endpoints.');
       }
-      if (!profile.guidelines || profile.guidelines.length === 0) {
+      if (thinCheckApplies && (!profile.guidelines || profile.guidelines.length === 0)) {
         warnings.push('No guidelines — add best practices (correct HTTP methods, required headers, pagination, etc.).');
       }
-      if (!profile.avoid || profile.avoid.length === 0) {
+      if (thinCheckApplies && (!profile.avoid || profile.avoid.length === 0)) {
         warnings.push('No "avoid" rules — add common mistakes to prevent (wrong methods, missing params, rate limit pitfalls).');
       }
       if (!profile.auth) {
@@ -1836,6 +2021,7 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
+      if (adopted !== undefined) parts.push(adoptionNote(adopted, profile));
       if (grantDiscarded) {
         parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
       }
@@ -1866,6 +2052,9 @@ ${draftJson}
       if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
+      if (!isOwnerPrincipal(agent.principal)) {
+        return `Error: connecting an account is for the owner to do, so this session does not hand out a link for profile "${id}". Ask the owner to connect it.`;
+      }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
       }
@@ -1965,7 +2154,10 @@ ${draftJson}
       // model to collect a value the user already gave — and the user then has to
       // decide which half of the sentence is about them.
       const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
-      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds(agent, k));
+      // Asked through the profile's view, as the route reads them, so a link is not handed out
+      // that the route then refuses.
+      const connectStore = agent.secretStore ? secretsForProfile(agent.secretStore, profile, apiStore) : undefined;
+      const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds({ secretStore: connectStore } as IAgent, k));
       if (unnamed.length > 0 || unfilled.length > 0) {
         if (unnamed.length > 0) {
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
@@ -2000,6 +2192,8 @@ ${draftJson}
       // Read before the delete: what the vault holds for this profile is decided
       // by the profile, and afterwards there is no profile to ask.
       const existing = apiStore.get(id);
+      const foreignDelete = foreignProfileRefusal(agent, existing, id);
+      if (foreignDelete) return foreignDelete;
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
@@ -2028,6 +2222,13 @@ ${draftJson}
       const apiStore = agent.toolContext?.apiStore;
       const profile = apiStore?.get(input.id);
       if (!profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
+      // A renewal on someone else's profile is what a read through it does anyway, and it
+      // writes where that profile's tokens live. A name of the caller's choosing would copy
+      // that account's token to where the profile's rules no longer reach it.
+      if (input.output_secret_name !== undefined) {
+        const foreignFetch = foreignProfileRefusal(agent, profile, input.id);
+        if (foreignFetch) return foreignFetch;
+      }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${input.id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". fetch_token only applies to oauth2 profiles. If you need OAuth here, update the profile's auth to type="oauth2" with the oauth metadata block.`;
       }
@@ -2079,7 +2280,9 @@ ${draftJson}
       if (!clientIdKey || !clientSecretKey) {
         return `Error: profile "${input.id}" auth.oauth is missing client_id_key or client_secret_key. Update the profile with the vault key names that hold the OAuth credentials.`;
       }
-      const secretStore = agent.secretStore;
+      // The profile's view of the vault: a profile a mandate wrote does not get the
+      // environment's values or a preset account's credentials (`profile-secret-view.ts`).
+      const secretStore = agent.secretStore && apiStore ? secretsForProfile(agent.secretStore, profile, apiStore) : undefined;
       if (!secretStore) {
         return 'Error: no secret store wired in this context — cannot resolve OAuth credentials.';
       }
@@ -2165,6 +2368,14 @@ ${draftJson}
       // their own provider key.
       if (isProtectedSecretWrite(outputName)) {
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
+      // A profile a mandate wrote does not write over what it may not read either: a value
+      // from the environment, or any account connected through a preset, whose requests would then
+      // carry a token this profile minted (`profile-secret-view.ts`).
+      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName)) {
+        return input.output_secret_name === undefined
+          ? `Error: "${outputName}", where this profile's token would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its token gets a name of its own.`
+          : `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       // Never a slot the refresh token lives in: the access token would be written
       // over it, and the grant would go with it. Both slots, because a profile can
@@ -2259,8 +2470,7 @@ ${draftJson}
       if (!exchanged.responseOk) {
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
-        const snippet = respText.length > 500 ? respText.slice(0, 500) + '…[truncated]' : respText;
-        const responseBody = `Response body:\n${snippet}`;
+        const responseBody = `Response body:\n${providerBodyForModel(respText, sentCredentials(params), 500)}`;
         const notOurs = 'This is the external provider\'s answer — NOT a lynox tool limitation. Do NOT recommend self-host or tier changes for this kind of failure.';
         // Which of three things failed decides what happens to the grant: a
         // revocation ends it, a client problem leaves it intact, and anything
@@ -2346,11 +2556,11 @@ ${draftJson}
       try {
         parsed = JSON.parse(respText) as typeof parsed;
       } catch {
-        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. First 500 chars:\n${respText.slice(0, 500)}`;
+        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. Its start:\n${providerBodyForModel(respText, sentCredentials(params), 500)}`;
       }
       const accessToken = parsed.access_token;
       if (!accessToken || typeof accessToken !== 'string') {
-        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
+        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${providerBodyForModel(respText, sentCredentials(params), 300)}.`;
       }
       // A refresh token counts as new only if it differs from the one this exchange
       // sent. A provider that does not rotate can answer with the very token it was

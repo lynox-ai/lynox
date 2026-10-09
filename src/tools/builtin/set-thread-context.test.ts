@@ -33,6 +33,7 @@ function freshThreadsDb(): Database.Database {
       skip_extraction INTEGER NOT NULL DEFAULT 0,
       is_unread INTEGER NOT NULL DEFAULT 0,
       primary_subject_id TEXT,
+      created_by TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );

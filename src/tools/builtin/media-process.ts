@@ -18,7 +18,9 @@
  *      COPIED into a private mkdtemp dir. ffmpeg's `-i` only ever sees THAT
  *      controlled tmp path — the agent's input string never reaches argv.
  *   5. `-protocol_whitelist file,pipe` (input-side, before `-i`) blocks a
- *      crafted input file from making ffmpeg open http/concat/subfile/… targets.
+ *      crafted input file from making ffmpeg open http/concat/subfile/… targets, and
+ *      `-format_whitelist` (INPUT_DEMUXERS) keeps out the demuxers that read a list of
+ *      further files over `file` (HLS, DASH, IMF, ffconcat, image sequences).
  *   6. Bounded: hard execFile timeout + maxBuffer, an always-present `-t`
  *      output-duration ceiling, and a post-run output-size cap (reject + delete).
  *   7. Output lands in the tenant's file area so the existing download endpoint
@@ -35,6 +37,24 @@ import { randomBytes } from 'node:crypto';
 import type { ToolEntry } from '../../types/index.js';
 import { resolveFileAreaPath, getFileAreaDir } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
+
+/**
+ * The demuxers ffmpeg may pick for an input (`-format_whitelist`). ffmpeg chooses the
+ * demuxer by content, whatever the file is called, and some demuxers read a LIST of further
+ * files: HLS, DASH, IMF, ffconcat, image sequences. Those open their entries over the `file`
+ * protocol the input itself needs, so a crafted input in the file area could make ffmpeg read
+ * paths outside it. Only single-file containers and codecs are named here. Checked against the
+ * image's ffmpeg (5.1): each of mp4, mov, m4a, mkv, webm, avi, ts, mpg, flv, gif, mp3, wav,
+ * ogg, opus, flac, aac, wma, aiff, au, wv, ac3, eac3, dv, raw h264, hevc, m2v and m4v, png,
+ * jpg, bmp and tiff decodes with this list, detected by content; an HLS, DASH or ffconcat
+ * input is refused.
+ */
+export const INPUT_DEMUXERS: readonly string[] = Object.freeze([
+  'mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2', 'matroska', 'webm', 'avi', 'mpegts', 'mpeg', 'flv',
+  'asf', 'gif', 'mp3', 'wav', 'w64', 'ogg', 'flac', 'aac', 'amr', 'aiff', 'caf',
+  'png_pipe', 'jpeg_pipe', 'webp_pipe', 'bmp_pipe', 'tiff_pipe',
+  'ac3', 'eac3', 'wv', 'ape', 'au', 'dv', 'h264', 'hevc', 'mpegvideo', 'm4v',
+]);
 
 // ── Resource bounds (safe-by-construction ceilings) ──────────────────────────
 const FFMPEG_TIMEOUT_MS = 60_000;               // hard wall-clock kill
@@ -163,6 +183,7 @@ export function buildFfmpegArgs(
     '-nostdin',                            // never read commands from stdin
     '-y',                                  // overwrite our own tmp output only
     '-protocol_whitelist', 'file,pipe',    // INPUT-side: block http/concat/subfile/...
+    '-format_whitelist', INPUT_DEMUXERS.join(','), // INPUT-side: no demuxer that reads a list of files
     '-i', inputPath,
   ];
 

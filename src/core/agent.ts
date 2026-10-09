@@ -97,13 +97,17 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
-import { collectVaultKeys } from './api-store.js';
+import { collectVaultKeys, presetCredentialNames } from './api-store.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
 import { runInCallSlot } from './call-connection.js';
+import { inSessionPromptChain } from './prompt-chain.js';
+import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
+import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
+import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 
@@ -238,6 +242,16 @@ function stableStringify(value: unknown): string {
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
+
+/** An open actor-trail entry: the attempt row is written, the outcome not yet. */
+interface OutwardTrail {
+  readonly log: AuditLog | null;
+  readonly principal: RequestPrincipal;
+  readonly runId: string | undefined;
+  readonly correlationId: string;
+  readonly action: string;
+  readonly target: string;
+}
 
 export interface SendStop {
   cause: SendStopCause;
@@ -806,6 +820,44 @@ export class Agent implements IAgent {
   private _conversationSawUntrusted = false;
   /** The taint state when the current tool batch started; read by the secret gate. */
   private _taintBeforeBatch: boolean | undefined;
+  /** The untrusted-content epoch when the current tool batch started, and the sources of
+   *  content that arrived during it; decided at the batch's end (`untrusted-epoch.ts`). */
+  private _epochBeforeBatch: number | undefined;
+  private _batchSources: BatchSources | undefined;
+  /** The epoch a write approval is checked against and stored with: the one the current
+   *  batch started in, or the current one outside a batch. */
+  approvalEpoch(): number {
+    return this._epochBeforeBatch ?? currentEpoch(this.sessionCounters);
+  }
+  /** The current tool batch as an identity (undefined outside one): a write refused in a
+   *  batch stays refused for the calls of the same batch that waited on the question. */
+  approvalBatch(): object | undefined {
+    return this._batchSources;
+  }
+  /**
+   * Content the engine did not write entered the conversation: in a batch it is counted
+   * when the batch ends, outside one it moves the epoch now. Called for new content only —
+   * not for a taint handed down to a sub-agent or restored after a rebuild, which brings
+   * nothing the conversation had not already seen.
+   */
+  noteForeignContent(): void {
+    if (this._batchSources) this._batchSources.add(FOREIGN);
+    else bumpNow(this.sessionCounters);
+  }
+  /**
+   * The source an `http_request` result adds to the epoch (`untrusted-epoch.ts`). Its dispatch
+   * adds none, so this is the only place it is counted, and the polarity is foreign by default:
+   * an answer counts for the host that gave it only when it carries the untrusted marker AND
+   * the tool reported that one host for THIS call. Any other result of a call that reached
+   * the network — an error, a refusal after a redirect, a timeout message with the server's
+   * status text — is foreign. A call that never reached it (refused before sending) adds nothing.
+   */
+  private _noteHttpRequestSource(callSlot: CallSlot, marked: boolean): void {
+    if (!marked && !callSlot.contactedNetwork) return;
+    const host = marked ? callSlot.answeredBy : undefined;
+    if (typeof host === 'string' && this._batchSources) this._batchSources.add({ kind: 'host', host });
+    else this.noteForeignContent();
+  }
   /** Whether this CONVERSATION has ingested untrusted content (sticky; see field doc). */
   get conversationSawUntrusted(): boolean { return this._conversationSawUntrusted; }
   /**
@@ -1239,8 +1291,6 @@ export class Agent implements IAgent {
       httpRequests: 0,
       writeBytes: 0,
       costUSD: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
     this.toolCallTracker = config.toolCallTracker;
@@ -2179,6 +2229,7 @@ export class Agent implements IAgent {
     if (Agent._contentHoldsUntrustedMarker(content)) {
       this._sawUntrustedData = true;
       this._conversationSawUntrusted = true;
+      this.noteForeignContent();
     }
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
@@ -3536,13 +3587,7 @@ export class Agent implements IAgent {
     const input = (tc.input ?? {}) as Record<string, unknown>;
     const counters = this.sessionCounters;
     // One prompt at a time per Session; each waiter re-reads the approvals once it is its turn.
-    const oneAtATime = async <T>(fn: () => Promise<T>): Promise<T> => {
-      const prev = counters.secretPromptChain ?? Promise.resolve();
-      let release!: () => void;
-      counters.secretPromptChain = new Promise<void>((r) => { release = r; });
-      await prev.catch(() => {});
-      try { return await fn(); } finally { release(); }
-    };
+    const oneAtATime = <T>(fn: () => Promise<T>): Promise<T> => inSessionPromptChain(counters, fn);
     // A call that waited in the queue must not raise a prompt once the run is aborted: the
     // prompt would outlive the run as a pending row and block the Session's next prompt.
     const runSignal = this.abortController?.signal;
@@ -3678,6 +3723,10 @@ export class Agent implements IAgent {
     // each arms the latch for its own tool as it starts, so a per-call read would count a
     // sibling's dispatch as content already taken in (the secret gate asks about the past).
     this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
+    const batchSources = new BatchSources();
+    const epochBeforeBatch = currentEpoch(this.sessionCounters);
+    this._batchSources = batchSources;
+    this._epochBeforeBatch = epochBeforeBatch;
 
     // Enforce fan-out limit: execute first N in parallel, truncate excess
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;
@@ -3698,6 +3747,9 @@ export class Agent implements IAgent {
       toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
     );
     this._taintBeforeBatch = undefined;
+    this._batchSources = undefined;
+    this._epochBeforeBatch = undefined;
+    batchSources.resolve(this.sessionCounters, epochBeforeBatch);
 
     // A call that needs a person and cannot reach one ends the run — after the batch has
     // settled, so the calls beside it finish rather than being cut off mid-flight.
@@ -3888,6 +3940,63 @@ export class Agent implements IAgent {
     return this._recordedToolCalls;
   }
 
+  /**
+   * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
+   * or `null` when there is nothing to record: the owner's call, or a call that writes
+   * nothing outside. Only the owner is exempt, so a principal kind added later is recorded
+   * until someone decides otherwise. `'refused'` when the row cannot be written — no trail store, or the
+   * insert threw — and the call must not run. The target is built from the call as the model
+   * sent it (`tc.input`), before any secret was resolved into it.
+   */
+  private _beginOutwardTrail(tc: BetaToolUseBlock, tool: ToolEntry): OutwardTrail | null | 'refused' {
+    if (isOwnerPrincipal(this.principal)) return null;
+    const label = tool.outwardWrite ? tool.outwardWrite(tc.input as never) : null;
+    if (label === null) return null;
+    const input = tc.input as { url?: unknown; action?: unknown };
+    const target = tc.name === 'http_request' && typeof input.url === 'string'
+      ? httpTarget(label, input.url)
+      : `${tc.name} ${label}`;
+    // Who acted and in which run are fixed here, at the attempt: a session reuses its agent
+    // across runs and resets `principal` per run, and an abandoned call can settle after the
+    // next run, the owner's, has begun.
+    const entry: OutwardTrail = {
+      log: this.toolContext?.auditLog ?? null, principal: this.principal, runId: this.currentRunId,
+      correlationId: newCorrelationId(), action: `${tc.name}:${label}`, target,
+    };
+    if (entry.log === null) return 'refused';
+    try {
+      entry.log.record({ principal: entry.principal, correlationId: entry.correlationId, action: entry.action, target, phase: 'attempt', runId: entry.runId });
+    } catch {
+      return 'refused';
+    }
+    return entry;
+  }
+
+  /** The outcome row for a trail `_beginOutwardTrail` opened. A failure to write it changes
+   *  nothing about the call, which has already run: the attempt row stands without an
+   *  outcome, which is what it then is. Written exactly once per attempt: by the handler's
+   *  settling (`_trailOnSettle`), or by the dispatch's catch when no handler started. */
+  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase): void {
+    try {
+      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: trail.runId });
+    } catch { /* the attempt row stands alone */ }
+  }
+
+  /**
+   * The outcome is read from the HANDLER's own settling, not from the dispatch around it.
+   * The dispatch can give up on a call that goes on running — the per-tool timeout and a
+   * stopped run both stop waiting without cancelling it — and a step after the handler
+   * (scan, ledger, stream) can throw for a call whose write already happened. Read from the
+   * dispatch, both would say `failed` for a mail that went out. Read here, an abandoned call
+   * gets its outcome when it really ends, and its attempt stands alone until then.
+   */
+  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail): void {
+    work.then(
+      () => { Agent._endOutwardTrail(trail, 'returned'); },
+      () => { Agent._endOutwardTrail(trail, 'failed'); },
+    );
+  }
+
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
@@ -3923,6 +4032,10 @@ export class Agent implements IAgent {
     // deferred `remember` on a later clean turn is still routed to pending_review.
     if (Agent.EXTERNAL_CONTENT_TOOLS.has(tc.name)) {
       this._conversationSawUntrusted = true;
+      // Several of these tools return what they read without wrapping it, so the marker
+      // below never sees it. `http_request` always wraps and reports which host answered,
+      // so its content is counted from its result instead.
+      if (tc.name !== 'http_request') this.noteForeignContent();
     }
 
     const tool = this.tools.find(t => t.definition.name === tc.name);
@@ -4042,10 +4155,18 @@ export class Agent implements IAgent {
         // and the consent and destination prompts below are no bar for a mandate, which
         // answers its own session's prompts. Every provider slot is refused, the tenant's own
         // keys included: a mandate sets the instance up and has no use for them in a request.
-        // Refused on the name, before the vault is asked: the value is never bound, and the
-        // answer is the same whether the vault holds the name or not.
+        // Refused on the name, before the vault is asked: the value is never bound, and for a
+        // protected name the answer is the same whether the vault holds it or not.
         if (this._toolLock !== null) {
-          const held = secretNames.filter(n => isProtectedSecretWrite(n));
+          // And every value the engine took from its environment, under whatever name: those
+          // are the engine's, not something the setup stored. A store that cannot say where a
+          // value came from is read as the environment. And what authenticates an account
+          // connected through a provider preset: a mandate does not write there
+          // (`http_request`), so it does not get the token to write with.
+          const store = this.secretStore;
+          const apiStore = this.toolContext?.apiStore;
+          const preset = apiStore ? presetCredentialNames(apiStore) : new Set<string>();
+          const held = secretNames.filter(n => isProtectedSecretWrite(n) || (store.isEnvironmentSecret?.(n) ?? true) || preset.has(n));
           if (held.length > 0) {
             return {
               type: 'tool_result',
@@ -4150,10 +4271,20 @@ export class Agent implements IAgent {
       };
     }
 
+    // A mandate's call that writes outside the instance is recorded before it runs, and does
+    // not run unrecorded (PRD customer-granted-operator-access §3.13 "Verbundene Konten").
+    // After every gate the dispatch itself holds; the gates inside the handler come later,
+    // which is why the outcome is a second row and not part of this one.
+    const trail = this._beginOutwardTrail(tc, tool);
+    if (trail === 'refused') {
+      return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE, is_error: true };
+    }
+
     const timer = measureTool(tc.name);
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
+    let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
     const callSlot: CallSlot = {};
     try {
@@ -4164,9 +4295,12 @@ export class Agent implements IAgent {
       // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
       // never reads the field, so this is a no-op for it.
       this._pendingDowngradeTier = downgradeDecision;
-      const rawResult = runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
+      // Resolved ONCE: the trail and the timeout race below read the same promise, so a
+      // thenable's `then` runs once, not once per reader.
+      const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : tool.handler(processedInput, this));
+        : tool.handler(processedInput, this)));
+      if (trail !== null) { Agent._trailOnSettle(rawResult, trail); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching
@@ -4219,9 +4353,10 @@ export class Agent implements IAgent {
       // DK.1 F5: arm the sticky conversation latch too (this marker stays in context
       // across turns, so a later clean-latch `remember` could still be executing an
       // injected instruction that rode in with it).
-      if (containsUntrustedMarker(scanned)) {
-        this._conversationSawUntrusted = true;
-      }
+      const marked = containsUntrustedMarker(scanned);
+      if (marked) this._conversationSawUntrusted = true;
+      if (tc.name === 'http_request') this._noteHttpRequestSource(callSlot, marked);
+      else if (marked) this.noteForeignContent();
 
       // Shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard
@@ -4302,6 +4437,9 @@ export class Agent implements IAgent {
         content: sanitizedResult,
       };
     } catch (err: unknown) {
+      // Reached with the trail still open only when the handler never started (it threw while
+      // being called); a started handler records its own outcome when it settles.
+      if (trail !== null && !trailWatched) Agent._endOutwardTrail(trail, 'failed');
       const duration = timer.end();
       // A question nobody can answer is re-built with the question MASKED before anything
       // below reads it: its message leaves the agent, into the ledger here and into the
@@ -4326,6 +4464,9 @@ export class Agent implements IAgent {
       // covered only the soft path and claimed the threat closed — found in the
       // delta round, 2026-08-24.
       const ledgerMessage = this._ledgerReason(message);
+      // An `http_request` error after the network was reached may carry server text (a status
+      // line, a redirect target): foreign content, whatever the host.
+      if (tc.name === 'http_request') this._noteHttpRequestSource(callSlot, false);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;

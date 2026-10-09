@@ -180,6 +180,22 @@ export interface WeekSummary {
 const VALID_STATUSES = new Set<string>(['open', 'in_progress', 'completed', 'failed']);
 const VALID_PRIORITIES = new Set<string>(['low', 'medium', 'high', 'urgent']);
 
+/**
+ * Whether {@link TaskManager.create} makes these params an AGENT-TRIGGER (→ `triggers`
+ * table, fired by the WorkerLoop) rather than a USER-TODO (→ `tasks` table, never fired):
+ * a row is a trigger if it carries ANY firing/agent attribute. Mirrors the migration-v42
+ * predicate. `assignee: 'lynox'` alone counts, because create gives such a row a run time
+ * of now. Exported so a caller can tell before the write which of the two it asks for.
+ */
+export function createsTrigger(params: Pick<TaskCreateParams, 'assignee' | 'nextRunAt' | 'scheduleCron' | 'watchConfig' | 'pipelineId' | 'taskType'>): boolean {
+  return params.assignee === 'lynox'
+    || Boolean(params.nextRunAt)
+    || Boolean(params.scheduleCron)
+    || Boolean(params.watchConfig)
+    || Boolean(params.pipelineId)
+    || Boolean(params.taskType && params.taskType !== 'manual');
+}
+
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
@@ -226,16 +242,7 @@ export class TaskManager {
       resolvedTaskType = resolvedTaskType ?? 'manual';
     }
 
-    // A row is an AGENT-TRIGGER (→ `triggers` table, fired by the WorkerLoop) if
-    // it carries ANY firing/agent attribute; otherwise it's a USER-TODO (→
-    // `tasks` table, never fired). Mirrors the migration-v42 predicate. The
-    // auto-trigger above already stamped resolvedNextRunAt for assignee=lynox.
-    const willBeTrigger = params.assignee === 'lynox'
-      || Boolean(resolvedNextRunAt)
-      || Boolean(params.scheduleCron)
-      || Boolean(params.watchConfig)
-      || Boolean(params.pipelineId)
-      || Boolean(resolvedTaskType && resolvedTaskType !== 'manual');
+    const willBeTrigger = createsTrigger(params);
 
     if (willBeTrigger) {
       // Reject any pipeline destined for background execution (cron, explicit
@@ -821,7 +828,13 @@ export class TaskManager {
    * status filter the agent tool offers, and the UI's status map — which is a wider unit
    * than this one and is filed as its own. No migration.
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped'): void {
+  /**
+   * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
+   *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
+   *   per request"). A retry carries no request, so it would run as the owner's schedule with
+   *   the full tool set.
+   */
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped', opts?: { noRetry?: boolean | undefined }): void {
     const task = this.history.getTrigger(id);
     if (!task) {
       throw new Error(`Trigger not found: ${id}`);
@@ -899,6 +912,7 @@ export class TaskManager {
       (status === 'failed' || status === 'timeout')
       && task.max_retries
       && (task.retry_count ?? 0) < task.max_retries
+      && opts?.noRetry !== true
     ) {
       // Retry with exponential backoff if retries remaining
       retryCount = (task.retry_count ?? 0) + 1;
