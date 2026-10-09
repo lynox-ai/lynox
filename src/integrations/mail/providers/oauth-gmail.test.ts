@@ -412,6 +412,33 @@ describe('OAuthGmailProvider — send', () => {
     expect(raw).toContain('<relinked@example.org>');
   });
 
+  it('reads the profile again after Google is reconnected as another account, and once per token otherwise', async () => {
+    let profile = 'first@example.org';
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: profile }));
+      if (init?.method === 'POST' && url.includes('messages/send')) return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const getAccessToken = vi.fn().mockResolvedValue('token-a');
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth({ getAccessToken } as Partial<GoogleAuth>));
+    const profileReads = () => fetchMock.mock.calls.filter(c => String(c[0]).endsWith('/profile')).length;
+    expect(await provider.fromAddress()).toBe('first@example.org');
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 'b' });
+    expect(profileReads(), 'the confirmation and the send share one read').toBe(1);
+    profile = 'second@example.org';
+    getAccessToken.mockResolvedValue('token-b');
+    expect(await provider.fromAddress(), 'a new grant reads the new profile').toBe('second@example.org');
+    expect(profileReads()).toBe(2);
+  });
+
+  it('refuses a profile without an address, and a closed provider', async () => {
+    fetchMock.mockImplementation((url: string) => url.endsWith('/profile') ? Promise.resolve(respondJson({})) : Promise.resolve(respondText('not stubbed', 404)));
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    await expect(provider.fromAddress()).rejects.toBeInstanceOf(MailError);
+    await provider.close();
+    await expect(provider.fromAddress()).rejects.toThrow('Provider closed');
+  });
+
   it('posts a base64url-encoded RFC2822 message and returns the Gmail id', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
       if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
