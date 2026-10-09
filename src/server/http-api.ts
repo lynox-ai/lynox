@@ -3119,7 +3119,7 @@ export class LynoxHTTPApi {
         threadId: sessionId,
         resumed: !!threadId && !!thread,
       });
-    }, free('a mandate starts its own turn here; the tool lock of its principal bounds what the turn can do'));
+    }, ownerOnly('start a conversation'));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/sessions/:id', async (_req, res, params) => {
       const session = this.sessionStore.get(params['id']!);
@@ -4033,7 +4033,7 @@ export class LynoxHTTPApi {
         // persists regardless).
         this.engine?.getRunBufferManager()?.remove(runId);
       }
-    }, free('a mandate starts its own turn here; the tool lock of its principal bounds what the turn can do')));
+    }, ownerOnly('run a conversation')));
 
     // GET /runs/active — client-queryable live-run state for the nav indicator.
     // Returns every registry row (running + interrupted; done/error are already
@@ -4249,7 +4249,7 @@ export class LynoxHTTPApi {
       }
 
       errorResponse(res, 404, 'No pending prompt');
-    }, free('answers a question a run asked; the answer reaches only that run')));
+    }, ownerOnly('answer a question of a run')));
 
     // POST /sessions/:id/reply-tabs — one-shot reply for multi-question tabs prompts.
     // Body: { promptId: string, answers: string[] }. Each answer corresponds
@@ -4285,7 +4285,7 @@ export class LynoxHTTPApi {
 
       if (ps.answerUserTabs(promptId, answers)) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
-    }, free('answers a question a run asked; the answer reaches only that run')));
+    }, ownerOnly('answer a question of a run')));
 
     // POST /sessions/:id/tab-progress — persist partial answers (optional).
     // Called by the client as the user answers individual tabs so a mid-batch
@@ -4309,7 +4309,7 @@ export class LynoxHTTPApi {
 
       ps.setPartialAnswers(promptId, partial as (string | null)[]);
       jsonResponse(res, 200, { ok: true });
-    }, free('answers a question a run asked; the answer reaches only that run')));
+    }, ownerOnly('answer a question of a run')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
@@ -4362,7 +4362,7 @@ export class LynoxHTTPApi {
       }
       if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
       jsonResponse(res, 200, { ok: true });
-    }, free('answers a question a run asked; the answer reaches only that run')));
+    }, ownerOnly('answer a question of a run')));
 
     // POST /sessions/:id/mail-connected — settle a connect_mail prompt after the
     // in-chat consent step has POSTed the account to /api/mail/accounts. Body:
@@ -4403,7 +4403,7 @@ export class LynoxHTTPApi {
       }
       if (!answered) { errorResponse(res, 404, 'No pending mail prompt'); return; }
       jsonResponse(res, 200, { ok: true });
-    }, free('answers a question a run asked; the answer reaches only that run')));
+    }, ownerOnly('answer a question of a run')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
       const sessionId = params['id']!;
@@ -5319,7 +5319,7 @@ export class LynoxHTTPApi {
         // PromptConflictError — this session already has a pending prompt.
         errorResponse(res, 409, err instanceof Error ? err.message : 'Could not start onboarding');
       }
-    }, free('creates a question for the session, not a turn'));
+    }, ownerOnly('start the onboarding questions'));
 
     // Promote the answered Step-0 prompt. Reads the VERBATIM answers from the settled
     // PromptStore row (NOT the request body → AC-1.3a) and runs the §6.1 promotion
@@ -5552,16 +5552,6 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const value = b && typeof b['value'] === 'string' ? b['value'] : '';
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
-      // Anyone but the owner may store a name that is new, never replace one that exists: a
-      // replaced credential sends the owner's later writes to another account, and nothing
-      // shows it. "Exists" reads every place a value can live — the map, the vault file
-      // (which other code writes past the map: mail logins, Google tokens) and the
-      // environment.
-      if (!isOwnerPrincipal(this._principalOf(_req))
-        && (store.getMasked(name) !== null || store.listVaultNames().includes(name) || store.isEnvironmentSecret(name))) {
-        errorResponse(res, 403, 'Only the owner of this instance can replace a stored secret.');
-        return;
-      }
       try {
         store.set(name, value);
         store.recordConsent(name);
@@ -5601,7 +5591,7 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { ok: true, hot_reload: hotReload });
-    }, free('stores a value a setup step asked for; the handler refuses to replace a value that exists')));
+    }, ownerOnly('store a secret')));
 
     // user scope (matches PUT): the instance owner manages their own integration
     // keys. The real protection is the tier-keyed gate below, not the route scope.
@@ -8534,7 +8524,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : String(err);
         errorResponse(res, 500, msg);
       }
-    }, free('a mandate connects an account during setup'));
+    }, ownerOnly('connect Google'));
 
     // Google OAuth callback — handles redirect from Google after user consent
     this.addStatic('user', 'GET /api/google/callback', async (req, res) => {
@@ -9367,7 +9357,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : String(err);
         errorResponse(res, 500, msg);
       }
-    }, free('a mandate connects an account during setup'));
+    }, ownerOnly('add a mail account'));
 
     // In-memory rate limiter for /api/mail/accounts/test. Closes the
     // credential-probe oracle: an attacker cannot brute-force test many

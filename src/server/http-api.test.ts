@@ -954,26 +954,43 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
-    it('starts a run under the principal of the request — the mandate\'s and, after it, the owner\'s (D1, §3.13 E1)', async () => {
-      // The session keeps the last run's principal when a run names none, so the route must
-      // name the owner too: otherwise an owner's run after a mandate's would stay locked.
+    it('starts no run for a mandate session, and the owner\'s run under the owner (§3.13 E1)', async () => {
+      // Starting a conversation is the owner's until a mandate can be bound to what it set up.
       // The run route's key pre-flight, as the `runs` block sets it.
       mockSecretResolve.mockImplementation((name: string) => name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null);
-      const runAs = async (token: string): Promise<unknown> => {
+      const runAs = async (token: string): Promise<{ status: number; principal: unknown }> => {
         mockSessionRun.mockClear();
         const res = await fetch(`${baseUrl}/api/sessions/test/run`, {
           method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ task: 'set up the instance' }),
         });
         await res.text();
-        expect(mockSessionRun).toHaveBeenCalledTimes(1);
-        return (mockSessionRun.mock.calls[0] as unknown[])[1];
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return { status: res.status, principal: call?.[1] };
       };
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
-      // The actor trail names who acted: the display name and the mandate id ride along (H2h).
-      expect(await runAs(mandate)).toMatchObject({ principal: { kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id } });
+      const refused = await runAs(mandate);
+      expect(refused.status).toBe(403);
+      expect(mockSessionRun).not.toHaveBeenCalled();
       const owner = webUiLoginSession(TEST_SECRET, null)!.token;
-      expect(await runAs(owner)).toMatchObject({ principal: { kind: 'owner' } });
+      expect((await runAs(owner)).principal).toMatchObject({ principal: { kind: 'owner' } });
+    });
+
+    it('carries the mandate\'s display name and mandate id from the cookie into the request principal (H2h)', async () => {
+      // Read where a mandate may act and the principal is recorded: a schedule delete writes
+      // its actor-trail row with the principal of the request.
+      const rows: Array<{ principal: unknown }> = [];
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origLog = engineRef['getAuditLog'];
+      const origHistory = engineRef['getRunHistory'];
+      engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
+      engineRef['getRunHistory'] = () => ({ deleteTask: () => true, deleteTrigger: () => false });
+      try {
+        const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+        const res = await fetch(`${baseUrl}/api/tasks/task-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
+        expect(res.status).toBe(200);
+      } finally { engineRef['getAuditLog'] = origLog; engineRef['getRunHistory'] = origHistory; }
+      expect(rows[0]?.principal).toEqual({ kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id });
     });
 
     it('gives a mandate session the user scope even without an admin secret (D6)', async () => {
@@ -13831,29 +13848,18 @@ describe('mandate stance of every route that writes', () => {
     expect(open).toEqual([
       'DELETE /api/tasks/stance-probe mark',
       'PATCH /api/tasks/stance-probe mark',
-      'POST /api/google/auth free',
       'POST /api/llm/test free',
-      'POST /api/mail/accounts free',
       'POST /api/mail/accounts/test free',
       'POST /api/mail/autodiscover free',
       'POST /api/onboarding/derive-domain free',
-      'POST /api/onboarding/knowledge/start free',
       'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
-      'POST /api/sessions free',
-      'POST /api/sessions/stance-probe/mail-connected free',
-      'POST /api/sessions/stance-probe/reply free',
-      'POST /api/sessions/stance-probe/reply-tabs free',
-      'POST /api/sessions/stance-probe/run free',
-      'POST /api/sessions/stance-probe/secret-saved free',
-      'POST /api/sessions/stance-probe/tab-progress free',
       'POST /api/speak free',
       'POST /api/tasks mark',
       'POST /api/tasks/stance-probe/complete mark',
       'POST /api/transcribe free',
       'POST /api/triggers/stance-probe/run own',
       'POST /api/workflows/stance-probe/grant-preview free',
-      'PUT /api/secrets/stance-probe free',
     ]);
   });
 
@@ -13894,18 +13900,16 @@ describe('mandate stance of every route that writes', () => {
   });
 });
 
-describe('PUT /api/secrets/:name and a stored value', () => {
+describe('PUT /api/secrets/:name and a mandate', () => {
   const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
   afterEach(() => { api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL); });
 
-  async function put(principal: RequestPrincipal, store: { map?: string[]; file?: string[]; env?: string[] }, slot: string): Promise<{ status: number; set: ReturnType<typeof vi.fn> }> {
+  async function put(principal: RequestPrincipal, slot: string): Promise<{ status: number; set: ReturnType<typeof vi.fn> }> {
     const set = vi.fn();
     const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
     const orig = engineRef['getSecretStore'];
     engineRef['getSecretStore'] = () => ({
-      getMasked: (n: string) => (store.map ?? []).includes(n) ? '****' : null,
-      listVaultNames: () => store.file ?? [],
-      isEnvironmentSecret: (n: string) => (store.env ?? []).includes(n),
+      getMasked: () => null, listVaultNames: () => [], isEnvironmentSecret: () => false,
       set, recordConsent: vi.fn(),
       // `errorResponse` masks every answer through the store.
       maskAll: (t: string) => t, maskSecrets: (t: string) => t,
@@ -13913,30 +13917,23 @@ describe('PUT /api/secrets/:name and a stored value', () => {
     api.setPrincipalResolverForTesting(() => principal);
     try {
       const res = await jsonFetch(`/api/secrets/${slot}`, { method: 'PUT', body: JSON.stringify({ value: 'NEW-VALUE' }) });
-      if (res.status === 403) expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can replace a stored secret.');
+      if (res.status === 403) expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can store a secret.');
       return { status: res.status, set };
     } finally { engineRef['getSecretStore'] = orig; }
   }
 
-  it('lets a mandate store a name that is new', async () => {
-    const r = await put(MANDATE, {}, 'CRM_CLIENT_ID');
-    expect(r.status).toBe(200);
-    expect(r.set).toHaveBeenCalledWith('CRM_CLIENT_ID', 'NEW-VALUE');
-  });
-
-  it.each([
-    ['in the store\'s map', { map: ['CRM_CLIENT_ID'] }],
-    ['only in the vault file (written past the map)', { file: ['CRM_CLIENT_ID'] }],
-    ['in the environment', { env: ['CRM_CLIENT_ID'] }],
-  ])('refuses a mandate that would replace a value %s, and leaves it as it was', async (_label, store) => {
-    const r = await put(MANDATE, store, 'CRM_CLIENT_ID');
+  it('refuses a mandate even for a name nothing holds yet: a new name can still take precedence over the value in use', async () => {
+    // A vault value outranks one in config.json, and a primary key slot outranks its
+    // fallback, so "the name is new" does not mean "nothing the owner uses changes".
+    const r = await put(MANDATE, 'MISTRAL_API_KEY');
     expect(r.status).toBe(403);
     expect(r.set).not.toHaveBeenCalled();
   });
 
-  it('control: the owner replaces a stored value', async () => {
-    const r = await put(OWNER_PRINCIPAL, { map: ['CRM_CLIENT_ID'], file: ['CRM_CLIENT_ID'] }, 'CRM_CLIENT_ID');
+  it('control: the owner stores a secret', async () => {
+    const r = await put(OWNER_PRINCIPAL, 'CRM_CLIENT_ID');
     expect(r.status).toBe(200);
     expect(r.set).toHaveBeenCalledWith('CRM_CLIENT_ID', 'NEW-VALUE');
   });
 });
+
