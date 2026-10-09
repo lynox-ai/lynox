@@ -266,7 +266,7 @@ function validateProfile(profile: ApiProfile): string | null {
       if (o.body_format !== undefined && o.body_format !== 'form' && o.body_format !== 'json') {
         return `Invalid auth.oauth.body_format "${o.body_format}": must be "form" or "json"`;
       }
-      // Every reader splits it as text (connect, the start route, the refresh), so a list
+      // Connect, the start route and a preset refresh split it as text, so a list
       // saved here only failed later, at the link, with a TypeError. Not quoted back: the
       // value is the model's own input.
       const scope: unknown = o.scope;
