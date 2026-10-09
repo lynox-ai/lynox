@@ -1177,6 +1177,39 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
 });
 
 describe('mail_reply — smart reply-from', () => {
+  // Reply-all after the sender switched to another of the user's own accounts: the account the
+  // reply goes out from is left out of Cc; the mailbox the original was read from stays in Cc,
+  // which the preview shows before sending (removing a recipient silently would surprise more).
+  it('reply_all after a sender switch leaves out the sending account, keeps the read mailbox', async () => {
+    const personal = new FakeProvider('personal');
+    const business = new FakeProvider('business');
+    const ctx = makeStubContext([
+      { ...businessAccount('personal', 'user@gmail.com'), type: 'personal' },
+      // Stored as typed, in mixed case; the original names it in lower case.
+      businessAccount('business', 'User@Example.com'),
+    ]);
+    const reg = new InMemoryMailRegistry();
+    reg.add(personal);
+    reg.add(business);
+    personal.fetch.mockResolvedValue({
+      envelope: {
+        ...envelope(43, { messageId: '<inbound43@x>', from: 'alice@example.org', subject: 'Plan' }),
+        to: [{ address: 'user@example.com' }],
+        cc: [{ address: 'user@gmail.com' }, { address: 'colleague@example.org' }],
+      },
+      text: 'hi', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    business.send.mockResolvedValue({ messageId: '<r43@x>', accepted: [], rejected: [] });
+
+    await createMailReplyTool(reg, ctx).handler({ account: 'personal', uid: 43, body: 'Reply', reply_all: true }, yesAgent);
+
+    expect(personal.send, 'the reply goes out from the matched account').not.toHaveBeenCalled();
+    const cc = (business.send.mock.calls[0]![0].cc ?? []).map(a => a.address.toLowerCase());
+    expect(cc, 'the sending account is not copied on its own reply').not.toContain('user@example.com');
+    expect(cc, 'the mailbox it was read from stays').toContain('user@gmail.com');
+    expect(cc, 'other recipients stay').toContain('colleague@example.org');
+  });
+
   it('uses the account matching the original recipient address', async () => {
     const personal = new FakeProvider('personal', 'user@gmail.com');
     const business = new FakeProvider('business', 'user@example.com');
