@@ -53,6 +53,9 @@ export interface TaskRow {
    *  legacy row so {@link TaskStore.upsert} can resolve it to `assignee_subject_id`
    *  when the caller opts in (`manageAssignee`, S4a). Ignored otherwise. */
   assignee?: string | null | undefined;
+  /** Who created it (`principalTag`); null is the owner. A re-projection fills a missing value
+   *  and never changes a stored one: who created a to-do does not change. */
+  createdBy?: string | null | undefined;
 }
 
 export interface StoredTask {
@@ -95,6 +98,7 @@ export function taskRecordToRow(rec: TaskRecord): TaskRow {
     parentTaskId: rec.parent_task_id ?? null,
     completedAt: rec.completed_at ?? null,
     assignee: rec.assignee,
+    createdBy: rec.created_by ?? null,
   };
 }
 
@@ -136,6 +140,7 @@ interface TaskRecordDbRow {
   assignee_subject_id: string | null;
   assignee_name: string | null;
   assignee_is_self: number | null;
+  created_by: string | null;
 }
 
 /**
@@ -171,6 +176,7 @@ export function taskDbRowToRecord(row: TaskRecordDbRow): TaskRecord {
     created_at: row.created_at,
     updated_at: row.updated_at,
     completed_at: row.completed_at,
+    created_by: row.created_by,
   };
 }
 
@@ -183,7 +189,7 @@ const TASK_RECORD_SELECT = `
   SELECT t.id, t.title, t.description, t.status, t.priority,
          t.scope_type, t.scope_id, t.tags, t.due_date, t.parent_task_id,
          t.completed_at, t.created_at, t.updated_at, t.assignee_subject_id,
-         s.name AS assignee_name, s.is_self AS assignee_is_self
+         s.name AS assignee_name, s.is_self AS assignee_is_self, t.created_by
   FROM tasks t LEFT JOIN subjects s ON t.assignee_subject_id = s.id`;
 
 /**
@@ -244,9 +250,9 @@ export class TaskStore {
     this.db.prepare(`
       INSERT INTO tasks (
         id, title, description, status, priority, scope_type, scope_id,
-        tags, due_date, parent_task_id, assignee_subject_id, completed_at, created_at, updated_at
+        tags, due_date, parent_task_id, assignee_subject_id, completed_at, created_by, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -258,6 +264,7 @@ export class TaskStore {
         due_date = excluded.due_date,
         parent_task_id = excluded.parent_task_id,
         ${assigneeConflictSet}completed_at = excluded.completed_at,
+        created_by = COALESCE(tasks.created_by, excluded.created_by),
         updated_at = excluded.updated_at
     `).run(
       row.id,
@@ -272,6 +279,7 @@ export class TaskStore {
       parentTaskId,
       assigneeSubjectId,
       row.completedAt ?? null,
+      row.createdBy ?? null,
       ts?.createdAt ?? null,
       ts?.updatedAt ?? null,
     );

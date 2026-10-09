@@ -22,7 +22,7 @@ import { EngineDb } from '../core/engine-db.js';
 import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
-import { BulkTriggerLockedError, TriggerTierUnsupportedError } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
@@ -13806,47 +13806,41 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   });
 
   describe('DELETE /api/tasks/:id', () => {
+    // The route asks TaskManager for the to-do (its own rule, witnessed over real stores in
+    // 'a mandate's own to-dos over the task routes'), then the trigger table.
     const history = (deleted: boolean): Record<string, unknown> => ({
-      getTask: vi.fn().mockReturnValue(undefined),
+      getTask: vi.fn().mockReturnValue(undefined), deleteTodo: vi.fn().mockReturnValue(false),
       deleteTask: vi.fn().mockReturnValue(false), deleteTrigger: vi.fn().mockReturnValue(deleted),
     });
 
-    it('refuses a mandate\'s delete of a to-do before anything runs: nothing deleted, no row', async () => {
-      const h = { ...history(true), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
-      await withEngine({ getRunHistory: () => h }, async () => {
+    it.each([
+      [403, new ForeignTodoError('delete')],
+      [409, new TodoHasForeignSubtasksError()],
+    ] as const)('answers TaskManager\'s refusal with %i, deletes no trigger and records the attempt as refused', async (status, err) => {
+      const h = { ...history(true), deleteTodo: vi.fn(() => { throw err; }) };
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h }, async () => {
         asMandate();
         const res = await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' });
-        expect(res.status).toBe(403);
-        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a to-do.');
+        expect(res.status).toBe(status);
+        expect(((await res.json()) as { error: string }).error).toBe(err.message);
       });
-      expect(h.deleteTask).not.toHaveBeenCalled();
+      expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', MANDATE);
       expect(h['deleteTrigger']).not.toHaveBeenCalled();
-      expect(rows()).toEqual([]);
-    });
-
-    it('never deletes a to-do for a mandate, even one its check did not find', async () => {
-      // The check reads the task store, the delete the legacy table: a to-do whose mirror
-      // write failed is missing from the one and present in the other.
-      const h = { ...history(false), deleteTask: vi.fn().mockReturnValue(true) };
-      await withEngine({ getRunHistory: () => h }, async () => {
-        asMandate();
-        expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(404);
-      });
-      expect(h.deleteTask).not.toHaveBeenCalled();
       expectPair('DELETE /api/tasks/:id', 'todo-1', 'refused');
     });
 
     it('control: the owner deletes a to-do', async () => {
-      const h = { ...history(false), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
-      await withEngine({ getRunHistory: () => h }, async () => {
+      const h = { ...history(false), deleteTodo: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h }, async () => {
         expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(200);
       });
-      expect(h.deleteTask).toHaveBeenCalledWith('todo-1');
+      expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', OWNER_PRINCIPAL);
+      expect(h['deleteTrigger']).not.toHaveBeenCalled();
     });
 
     it('records attempt and done around a mandate\'s delete', async () => {
       const h = history(true);
-      await withEngine({ getRunHistory: () => h }, async () => {
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h }, async () => {
         asMandate();
         expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
       });
@@ -13855,7 +13849,8 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     });
 
     it('records refused when nothing was deleted', async () => {
-      await withEngine({ getRunHistory: () => history(false) }, async () => {
+      const none = history(false);
+      await withEngine({ getRunHistory: () => none, getTaskManager: () => none }, async () => {
         asMandate();
         expect((await jsonFetch('/api/tasks/nope', { method: 'DELETE' })).status).toBe(404);
       });
@@ -13865,19 +13860,19 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     it('answers 503 and deletes nothing when the attempt cannot be written', async () => {
       for (const auditLog of [failingLog, null]) {
         const h = history(true);
-        await withEngine({ getRunHistory: () => h, getAuditLog: () => auditLog }, async () => {
+        await withEngine({ getRunHistory: () => h, getTaskManager: () => h, getAuditLog: () => auditLog }, async () => {
           asMandate();
           const res = await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' });
           expect(res.status, String(auditLog)).toBe(503);
         });
-        expect(h['deleteTask']).not.toHaveBeenCalled();
+        expect(h['deleteTodo']).not.toHaveBeenCalled();
         expect(h['deleteTrigger']).not.toHaveBeenCalled();
       }
     });
 
     it('leaves no row for the owner, and the owner\'s delete does not depend on the log', async () => {
       const h = history(true);
-      await withEngine({ getRunHistory: () => h, getAuditLog: () => failingLog }, async () => {
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h, getAuditLog: () => failingLog }, async () => {
         expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
       });
       expect(rows()).toEqual([]);
@@ -14102,8 +14097,10 @@ describe('PUT /api/secrets/:name and a mandate', () => {
 
 
 describe('a mandate and a to-do', () => {
-  // A to-do has no stamp to drop and records no one who set it up, so nothing on it would
-  // carry a mandate's act: creating, changing, completing it is refused. A trigger is marked.
+  // A to-do records who created it; a mandate changes only its own, a rule TaskManager checks
+  // on the row it resolves (the witnesses over real stores are in 'a mandate's own to-dos over
+  // the task routes'). Here: the routes hand TaskManager the principal and answer its refusal.
+  // A trigger is marked.
   const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
   afterEach(() => {
     api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
@@ -14113,18 +14110,17 @@ describe('a mandate and a to-do', () => {
   });
 
   it.each([
-    ['PATCH', '/api/tasks/todo-1', { title: 'changed' }],
-    ['POST', '/api/tasks/todo-1/complete', {}],
-  ] as const)('refuses %s %s for a to-do, and changes nothing', async (method, path, body) => {
+    ['PATCH', '/api/tasks/todo-1', { title: 'changed' }, mockTaskUpdate, 3, 'change'],
+    ['POST', '/api/tasks/todo-1/complete', {}, mockTaskComplete, 2, 'complete'],
+  ] as const)('%s %s hands TaskManager the mandate, and answers its refusal with 403', async (method, path, body, called, at, what) => {
     mockTaskMarkEditedBy.mockReturnValue(false);
-    mockTaskGetTask.mockReturnValue({ id: 'todo-1', title: 'a to-do' });
-    mockTaskUpdate.mockClear(); mockTaskComplete.mockClear();
+    called.mockClear();
+    called.mockImplementationOnce(() => { throw new ForeignTodoError(what); });
     api.setPrincipalResolverForTesting(() => MANDATE);
     const res = await jsonFetch(path, { method, body: JSON.stringify(body) });
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can change a to-do.');
-    expect(mockTaskUpdate).not.toHaveBeenCalled();
-    expect(mockTaskComplete).not.toHaveBeenCalled();
+    expect(((await res.json()) as { error: string }).error).toBe(`Only the owner of this instance, or the person who created it, can ${what} this to-do.`);
+    expect(called.mock.calls[0]![at]).toEqual(MANDATE);
   });
 
   it('control: a mandate\'s change to a trigger is marked and goes through', async () => {
@@ -14144,13 +14140,12 @@ describe('a mandate and a to-do', () => {
     expect(res.status).toBe(404);
   });
 
-  it('refuses a mandate\'s new to-do, and creates nothing', async () => {
+  it('creates a mandate\'s new to-do under its name', async () => {
     mockTaskCreate.mockClear();
     api.setPrincipalResolverForTesting(() => MANDATE);
     const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a to-do' }) });
-    expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can create a to-do.');
-    expect(mockTaskCreate).not.toHaveBeenCalled();
+    expect(res.status).toBe(201);
+    expect(mockTaskCreate).toHaveBeenCalledWith(expect.objectContaining({ title: 'a to-do', createdBy: 'mandate:recipient@example.invalid' }));
   });
 
   it.each([
@@ -14179,6 +14174,145 @@ describe('a mandate and a to-do', () => {
     const res = await jsonFetch('/api/tasks/todo-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
     expect(res.status).toBe(200);
     expect(mockTaskUpdate).toHaveBeenCalled();
+  });
+});
+
+// PRD customer-granted-operator-access §3.12 points 1 and 3, §3.13 N10b (H2c-2): over real
+// stores (history.db with every migration, the engine.db mirror, the audit log), once with the
+// to-do reads on history.db and once on engine.db.
+describe.each([false, true])('a mandate\'s own to-dos over the task routes (subject graph %s)', (graph) => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const M = 'mandate:recipient@example.invalid';
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  let dir = '';
+  let history: RunHistory;
+  let edb: EngineDb;
+  let tm: TaskManager;
+  let restore: Array<() => void> = [];
+  const swap = (key: string, value: unknown): void => {
+    const ref = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const orig = ref[key]; ref[key] = value; restore.push(() => { ref[key] = orig; });
+  };
+  const asMandate = (): void => api.setPrincipalResolverForTesting(() => MANDATE);
+  const snapshot = (): unknown => ({
+    legacy: history.getDb().prepare('SELECT * FROM tasks ORDER BY id').all(),
+    mirror: edb.getDb().prepare('SELECT * FROM tasks ORDER BY id').all(),
+  });
+  const exists = (id: string): boolean => history.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id) !== undefined;
+  const error = async (res: Response): Promise<string> => ((await res.json()) as { error: string }).error;
+
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-own-todo-route-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    edb = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(edb, graph);
+    tm = new TaskManager(history);
+    const log = new AuditLog(edb.getDb());
+    swap('getRunHistory', () => history);
+    swap('getTaskManager', () => tm);
+    swap('getAuditLog', () => log);
+  });
+  afterEach(() => {
+    for (const r of restore.reverse()) r();
+    restore = [];
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    edb.close();
+    history.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('POST creates a mandate\'s to-do under its name', async () => {
+    asMandate();
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a to-do' }) });
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: string };
+    expect(tm.getTask(id)!.created_by).toBe(M);
+  });
+
+  describe('PATCH and complete', () => {
+    it.each([
+      ['PATCH', '', { title: 'changed' }, 'change'],
+      ['POST', '/complete', {}, 'complete'],
+    ] as const)('refuse %s%s on the owner\'s to-do with 403, and no row changes', async (method, suffix, body, what) => {
+      const t = tm.create({ title: 'owner\'s' });
+      const before = snapshot();
+      asMandate();
+      const res = await jsonFetch(`/api/tasks/${t.id}${suffix}`, { method, body: JSON.stringify(body) });
+      expect(res.status).toBe(403);
+      expect(await error(res)).toBe(`Only the owner of this instance, or the person who created it, can ${what} this to-do.`);
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('go through on a mandate\'s own to-do', async () => {
+      const t = tm.create({ title: 'mine', createdBy: M });
+      asMandate();
+      expect((await jsonFetch(`/api/tasks/${t.id}`, { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) })).status).toBe(200);
+      expect((await jsonFetch(`/api/tasks/${t.id}/complete`, { method: 'POST', body: '{}' })).status).toBe(200);
+      expect(tm.getTask(t.id)).toMatchObject({ title: 'changed', status: 'completed' });
+    });
+
+    it('control: the owner changes and completes a mandate\'s to-do', async () => {
+      const t = tm.create({ title: 'mine', createdBy: M });
+      expect((await jsonFetch(`/api/tasks/${t.id}`, { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) })).status).toBe(200);
+      expect((await jsonFetch(`/api/tasks/${t.id}/complete`, { method: 'POST', body: '{}' })).status).toBe(200);
+      expect(tm.getTask(t.id)).toMatchObject({ title: 'changed', status: 'completed' });
+    });
+
+    it('leave an unknown id at 404', async () => {
+      asMandate();
+      expect((await jsonFetch('/api/tasks/nope0000', { method: 'PATCH', body: JSON.stringify({ title: 'x' }) })).status).toBe(404);
+      expect((await jsonFetch('/api/tasks/nope0000/complete', { method: 'POST', body: '{}' })).status).toBe(404);
+    });
+  });
+
+  describe('DELETE', () => {
+    it('deletes a mandate\'s own to-do and its own subtasks, both gone', async () => {
+      const parent = tm.create({ title: 'mine', createdBy: M });
+      const sub = tm.create({ title: 'own sub', createdBy: M, parentTaskId: parent.id });
+      asMandate();
+      expect((await jsonFetch(`/api/tasks/${parent.id}`, { method: 'DELETE' })).status).toBe(200);
+      expect(exists(parent.id)).toBe(false);
+      expect(exists(sub.id)).toBe(false);
+    });
+
+    it('answers 409 while a subtask of the owner\'s hangs under it, and no row changes, the to-do included', async () => {
+      const parent = tm.create({ title: 'mine', createdBy: M });
+      tm.create({ title: 'own sub', createdBy: M, parentTaskId: parent.id });
+      tm.create({ title: 'owner sub', parentTaskId: parent.id });
+      const before = snapshot();
+      asMandate();
+      const res = await jsonFetch(`/api/tasks/${parent.id}`, { method: 'DELETE' });
+      expect(res.status).toBe(409);
+      expect(await error(res)).toBe('This to-do was not deleted: it has subtasks the owner of this instance added, and deleting it would delete them too. The owner can delete those subtasks, or this to-do; ask the owner.');
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('refuses the owner\'s to-do with 403, and no row changes', async () => {
+      const t = tm.create({ title: 'owner\'s' });
+      const before = snapshot();
+      asMandate();
+      const res = await jsonFetch(`/api/tasks/${t.id}`, { method: 'DELETE' });
+      expect(res.status).toBe(403);
+      expect(await error(res)).toBe('Only the owner of this instance, or the person who created it, can delete this to-do.');
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('control: the owner deletes a mandate\'s to-do with the owner\'s subtask under it', async () => {
+      const parent = tm.create({ title: 'mine', createdBy: M });
+      const sub = tm.create({ title: 'owner sub', parentTaskId: parent.id });
+      expect((await jsonFetch(`/api/tasks/${parent.id}`, { method: 'DELETE' })).status).toBe(200);
+      expect(exists(parent.id)).toBe(false);
+      expect(exists(sub.id)).toBe(false);
+    });
+
+    it('leaves an unknown id at 404', async () => {
+      asMandate();
+      expect((await jsonFetch('/api/tasks/nope0000', { method: 'DELETE' })).status).toBe(404);
+    });
   });
 });
 

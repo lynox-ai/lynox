@@ -89,7 +89,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { BulkTriggerLockedError, TriggerTierUnsupportedError, createsTrigger, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -1850,27 +1850,28 @@ export class LynoxHTTPApi {
    * customer-granted-operator-access §3.12 point 3): every kind of change — fields,
    * schedule, the enabled switch, completion — not only the instruction. The owner's
    * changes are left exactly as they were: they neither mark nor clear. A to-do has no
-   * stamp to drop and records no one who set it up: an actor-trail row would record the
-   * act, but nothing on the to-do would carry it, and no stance opens a route without a
-   * mark on what it changes. So a mandate may not create, change, complete or delete a
-   * to-do; the task routes and the `task_create` and `task_update` tools refuse it alike. Returns true when it
-   * answered the request itself (a refused to-do, or a bulk trigger, which no request may
-   * change).
+   * stamp to drop; it records who created it, and a mandate changes, completes or deletes
+   * only a to-do of its own (§3.12 points 1 and 3). That rule is `TaskManager`'s, checked
+   * on the row the write resolves; the routes pass the principal and answer its refusal
+   * (`_answerTodoRefusal`). Returns true when it answered the request itself (a bulk
+   * trigger, which no request may change).
    */
   private _markMandateEdit(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string): boolean {
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return false;
-    let marked: boolean;
     try {
-      marked = taskManager.markEditedBy(id, principalTag(principal), true);
+      taskManager.markEditedBy(id, principalTag(principal), true);
     } catch (err: unknown) {
       if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return true; }
       throw err;
     }
-    if (!marked && taskManager.getTask(id) !== undefined) {
-      errorResponse(res, 403, 'Only the owner of this instance can change a to-do.');
-      return true;
-    }
+    return false;
+  }
+
+  /** Answers a `TaskManager` refusal of a mandate's to-do write; false for any other error. */
+  private _answerTodoRefusal(res: ServerResponse, err: unknown): boolean {
+    if (err instanceof ForeignTodoError) { errorResponse(res, 403, err.message); return true; }
+    if (err instanceof TodoHasForeignSubtasksError) { errorResponse(res, 409, err.message); return true; }
     return false;
   }
 
@@ -7204,10 +7205,8 @@ export class LynoxHTTPApi {
       if (runAt && Number.isNaN(Date.parse(runAt))) {
         errorResponse(res, 400, 'Invalid runAt: must be ISO 8601 datetime'); return;
       }
-      // A mandate's act is marked on the schedule it creates; a to-do carries no such mark.
-      if (!byOwner && !createsTrigger({ assignee, nextRunAt: runAt, scheduleCron })) {
-        errorResponse(res, 403, 'Only the owner of this instance can create a to-do.'); return;
-      }
+      // A mandate's act is marked on the schedule it creates; a to-do it creates records it
+      // as its creator (`createdBy`), and only that mandate and the owner may change it.
       try {
         // A human creating a schedule via this authenticated route IS the consent
         // action for a `run_agent` trigger (mirrors the pipelineId branch above,
@@ -7282,8 +7281,9 @@ export class LynoxHTTPApi {
       }
       let task;
       try {
-        task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1]);
+        task = taskManager.update(params['id']!, body as Parameters<typeof taskManager.update>[1], undefined, this._principalOf(_req));
       } catch (err: unknown) {
+        if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         if (err instanceof TriggerTierUnsupportedError) { errorResponse(res, 400, err.message); return; }
         throw err;
@@ -7295,18 +7295,24 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const runHistory = engine.getRunHistory();
       if (!requireService(res, runHistory, 'History')) return;
+      const taskManager = engine.getTaskManager();
+      if (!requireService(res, taskManager, 'Task manager')) return;
       // A mandate may delete the owner's schedules; each delete is recorded (PRD §3.13, N10b).
-      // A to-do is the owner's alone (see `_markMandateEdit`). The bound is the delete below,
-      // which removes a to-do only for the owner; this check only names the refusal.
-      const byOwner = isOwnerPrincipal(this._principalOf(_req));
-      if (!byOwner && runHistory.getTask(params['id']!) !== undefined) {
-        errorResponse(res, 403, 'Only the owner of this instance can delete a to-do.'); return;
-      }
+      // A to-do it deletes only when it is its own, with no subtask of the owner's under it
+      // (`TaskManager.deleteTodo`, checked on the row it deletes).
+      const by = this._principalOf(_req);
       const trail = this._beginRequestTrail(_req, res, 'DELETE /api/tasks/:id', params['id']!);
       if (trail === false) return;
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
-      const deleted = (byOwner && runHistory.deleteTask(params['id']!)) || runHistory.deleteTrigger(params['id']!);
+      let deleted: boolean;
+      try {
+        deleted = taskManager.deleteTodo(params['id']!, by) || runHistory.deleteTrigger(params['id']!);
+      } catch (err: unknown) {
+        this._endRequestTrail(trail, 'refused');
+        if (this._answerTodoRefusal(res, err)) return;
+        throw err;
+      }
       this._endRequestTrail(trail, deleted ? 'done' : 'refused');
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
@@ -7318,8 +7324,9 @@ export class LynoxHTTPApi {
       if (this._markMandateEdit(_req, res, taskManager, params['id']!)) return;
       let task;
       try {
-        task = taskManager.complete(params['id']!);
+        task = taskManager.complete(params['id']!, undefined, this._principalOf(_req));
       } catch (err: unknown) {
+        if (this._answerTodoRefusal(res, err)) return;
         if (err instanceof BulkTriggerLockedError) { errorResponse(res, 409, err.message); return; }
         throw err;
       }

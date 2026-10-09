@@ -1412,6 +1412,11 @@ const MIGRATIONS: string[] = [
    ALTER TABLE pending_prompts ADD COLUMN created_by TEXT;
    ALTER TABLE pending_prompts ADD COLUMN hand_run INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE active_runs ADD COLUMN created_by TEXT;`,
+  // v58: who created a to-do (PRD customer-granted-operator-access §3.12 points 1 and 3,
+  // §3.13 N10b) — a `principalTag`. NULL on every older row and on every row the owner
+  // writes, which `ownedBy` reads as the owner's.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
+   ALTER TABLE tasks ADD COLUMN created_by TEXT;`,
 ];
 
 export class RunHistory {
@@ -3093,6 +3098,7 @@ export class RunHistory {
     dueDate?: string | undefined;
     tags?: string | undefined;
     parentTaskId?: string | undefined;
+    createdBy?: string | undefined;
   }): void {
     persistence.insertTask(this.db, params);
     this._verbMirror(() => { this._reprojectTask(params.id); });
@@ -3216,6 +3222,12 @@ export class RunHistory {
   /** See `TriggerStore.isAmbiguousId`. False without a trigger store. */
   isAmbiguousTriggerId(id: string): boolean {
     return this._triggerStore?.isAmbiguousId(id) ?? false;
+  }
+
+  /** The rows {@link deleteTask} would remove for this exact id, read from the legacy table it
+   *  deletes from (never the mirror, whose parent links can be NULL for older rows), unbounded. */
+  getTaskDeleteSet(id: string): ReturnType<typeof persistence.getTaskDeleteSet> {
+    return persistence.getTaskDeleteSet(this.db, id);
   }
 
   deleteTask(id: string): boolean {
