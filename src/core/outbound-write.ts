@@ -139,13 +139,24 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   return path.split('/').some((segment) => entry.segments.some((s) => segment === s || segment.startsWith(`${s}.`)));
 }
 
-/** Percent-decode every well-formed run and keep a malformed `%` as it is. `decodeURIComponent`
- *  throws on the first malformed one, and the WHATWG parser keeps those in a path, so one
- *  `%zz` would otherwise leave the whole path encoded and a secret in it unmasked. */
+/** Percent-decode every `%XX` run the way a WHATWG server reads it: the bytes as UTF-8, a byte
+ *  that is not valid UTF-8 as U+FFFD, and a malformed `%` (`%zz`) kept as it is. Not
+ *  `decodeURIComponent`, which throws on the first invalid byte: a run it gave up on stayed
+ *  encoded, so one `%FF` before an encoded secret hid the whole secret from the mask while the
+ *  server still read it. `ignoreBOM`, so a leading `%EF%BB%BF` is decoded, not dropped. */
+const UTF8_REPLACING = new TextDecoder('utf-8', { ignoreBOM: true });
 function lenientDecode(text: string): string {
-  return text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
-    try { return decodeURIComponent(run); } catch { return run; }
-  });
+  return text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) =>
+    UTF8_REPLACING.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
+}
+
+/** Whether `text`, percent-decoded (also with `+` read as a space), holds a secret `mask` knows.
+ *  Asked of text the mask already ran over: a secret left after decoding was written in a form
+ *  the mask did not see. */
+function hidesEncodedSecret(text: string, mask: (text: string) => string): boolean {
+  const decoded = lenientDecode(text);
+  const spaced = lenientDecode(text.replace(/\+/g, ' '));
+  return mask(decoded) !== decoded || mask(spaced) !== spaced;
 }
 
 const MAX_FIELDS = 12;
@@ -271,7 +282,9 @@ function minifyJson(text: string): string {
  * string, so a secret is matched as the value it is. Any other JSON body (a duplicate key,
  * which a parser keeps one of and a server may read the other; an escape such as `A`)
  * is shown as it is sent, masked as text — and is not showable when a decoded string literal
- * holds a secret, because the escaped form is not one the mask recognises.
+ * holds a secret, because the escaped form is not one the mask recognises. In either kind, a
+ * string whose percent-decoded form holds a secret makes the body not showable: no server may
+ * decode it, but the reader of the question can.
  * A body sent as `application/x-www-form-urlencoded` is shown one `name = value` per line,
  * masked whole, then each part decoded and masked again. Any other body is masked as text, and
  * is not showable when its percent-decoded form still holds a secret. Invisible characters are
@@ -284,15 +297,24 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
   try { parsed = JSON.parse(body); } catch { isJson = false; }
   if (isJson) {
     if (JSON.stringify(parsed) === minifyJson(body)) {
+      // A secret percent-encoded INSIDE a string is not shown either: a JSON server does not
+      // decode it, but whoever reads the question can. The rule is "never in the display".
+      let encodedSecret = false;
+      const masked = (s: string): string => {
+        const m = mask(s);
+        if (hidesEncodedSecret(m, mask)) encodedSecret = true;
+        return m;
+      };
       const walk = (v: unknown): unknown => {
-        if (typeof v === 'string') return mask(v);
+        if (typeof v === 'string') return masked(v);
         if (Array.isArray(v)) return v.map(walk);
         if (v !== null && typeof v === 'object') {
-          return Object.fromEntries(Object.entries(v).map(([k, x]) => [mask(k), walk(x)]));
+          return Object.fromEntries(Object.entries(v).map(([k, x]) => [masked(k), walk(x)]));
         }
         return v;
       };
-      return { text: visible(mask(JSON.stringify(walk(parsed), null, 2))) };
+      const text = visible(mask(JSON.stringify(walk(parsed), null, 2)));
+      return encodedSecret ? { unshowable: 'escaped-secret' } : { text };
     }
     // Shown as sent, masked as text. Decided on what is LEFT after that mask: every string
     // literal of the masked TEXT, decoded one by one. One still holding a secret was written in
@@ -303,7 +325,7 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
     try { JSON.parse(shownRaw); } catch { return { unshowable: 'escaped-secret' }; }
     for (const [literal] of shownRaw.matchAll(/"(?:[^"\\]|\\.)*"/g)) {
       const decoded = JSON.parse(literal) as string;
-      if (mask(decoded) !== decoded) return { unshowable: 'escaped-secret' };
+      if (mask(decoded) !== decoded || hidesEncodedSecret(decoded, mask)) return { unshowable: 'escaped-secret' };
     }
     return { text: visible(shownRaw) };
   }
@@ -325,10 +347,7 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
   // Any other body is shown as text, and the server may still read it percent-decoded (a form
   // sent without its Content-Type, or one whose masked secret removed its `=`/`&` structure).
   // A secret left in the decoded form was written in a form the text mask did not see.
-  const decodedHides = (t: string) => mask(t) !== t;
-  if (decodedHides(lenientDecode(shown)) || decodedHides(lenientDecode(shown.replace(/\+/g, ' ')))) {
-    return { unshowable: 'escaped-secret' };
-  }
+  if (hidesEncodedSecret(shown, mask)) return { unshowable: 'escaped-secret' };
   return { text: visible(shown) };
 }
 

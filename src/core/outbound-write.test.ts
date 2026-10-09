@@ -206,6 +206,35 @@ describe('bodyForQuestion (N12-4)', () => {
   });
 });
 
+describe('percent-decoding as a server reads it (F-A, F-B)', () => {
+  const enc = (t: string) => [...t].map((c) => `%${c.charCodeAt(0).toString(16)}`).join('');
+  const vault = (t: string) => t.replaceAll('hunter2secret', '[s]');
+  const FORM = 'application/x-www-form-urlencoded';
+  it('an invalid byte before an encoded secret does not hide it from the mask', () => {
+    expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`x=%C3${enc('hunter2secret')}`, vault)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = \uFFFD[s]' });
+    expect(pathForQuestion(`https://h.example/a/%FF${enc('hunter2secret')}`, vault)).toBe('/a/\uFFFD[s]');
+    expect(bodyFieldNames(`%FF${enc('hunter2secret')}=1`, vault)).toBe('fields "\uFFFD[s]"');
+  });
+  it('positive control: an invalid byte before harmless text is shown as U+FFFD, nothing refused', () => {
+    expect(bodyForQuestion(`x=%FF${enc('harmless')}`, vault, FORM)).toEqual({ text: 'x = \uFFFDharmless' });
+    expect(pathForQuestion(`https://h.example/a/%FF${enc('harmless')}`, vault)).toBe('/a/\uFFFDharmless');
+  });
+  it('keeps a leading byte-order mark instead of dropping it', () => {
+    expect(bodyForQuestion('x=%EF%BB%BFa', (t) => t, FORM)).toEqual({ text: 'x = ⟨U+FEFF⟩a' });
+  });
+  it('a secret percent-encoded inside a JSON string is never shown, canonical or not, value or key', () => {
+    expect(bodyForQuestion(JSON.stringify({ a: enc('hunter2secret') }), vault)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(JSON.stringify({ [enc('hunter2secret')]: 1 }), vault)).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(`{"a":"${enc('hunter2secret')}","n":1.0}`, vault)).toEqual({ unshowable: 'escaped-secret' });
+  });
+  it('positive control: encoded text that is no secret, and a plain secret, are shown in JSON', () => {
+    expect(bodyForQuestion(JSON.stringify({ a: '100%25 sure', b: 'hunter2secret' }), vault)).toEqual({ text: '{\n  "a": "100%25 sure",\n  "b": "[s]"\n}' });
+    expect(bodyForQuestion('{"a":"100%25 sure","n":1.0}', vault)).toEqual({ text: '{"a":"100%25 sure","n":1.0}' });
+  });
+});
+
 describe('carriesInlineBinary (N12-4)', () => {
   const b64 = 'QUJD'.repeat(300);
   it.each([
