@@ -1560,11 +1560,15 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
       if (preset) {
         const scopeField: unknown = p.auth.oauth?.scope;
         const requested = presetScopeRequest(preset, typeof scopeField === 'string' ? scopeField : undefined);
-        if ('scopes' in requested) lines.push(`OAuth scopes this connection asks for: ${requested.scopes.join(' ')}`);
+        if ('scopes' in requested && requested.scopes.length > 0) lines.push(`OAuth scopes this connection asks for: ${requested.scopes.join(' ')}`);
         lines.push(`OAuth scopes the "${preset.id}" preset allows: ${[...preset.requiredScopes, ...preset.allowedScopes].join(' ')}. No other scope can be added, not even by editing this profile; tell the user so instead of offering one.`);
+        // The stored value, which a save can also write; a Date past its range would throw
+        // on toISOString and take the whole view down. After a revocation the old expiry
+        // stays on the profile and says nothing about a token that works.
         const expiresAt: unknown = p.auth.oauth?.token_expires_at;
-        if (typeof expiresAt === 'number' && Number.isFinite(expiresAt)) {
-          lines.push(`Access token expires: ${new Date(expiresAt).toISOString()}`);
+        const expiry = typeof expiresAt === 'number' ? new Date(expiresAt) : undefined;
+        if (expiry && !Number.isNaN(expiry.getTime()) && !hasRevokedGrant(p)) {
+          lines.push(`Access token expiry on record: ${expiry.toISOString()}`);
         }
       }
     }

@@ -1120,7 +1120,36 @@ describe('view tells the model what a preset connection may ask for', () => {
   it('gives the token expiry from the stored timestamp', async () => {
     const reply = await view({ token_expires_at: Date.UTC(2026, 9, 9, 15, 52, 38) });
 
-    expect(reply).toContain('Access token expires: 2026-10-09T15:52:38.000Z');
+    expect(reply).toContain('Access token expiry on record: 2026-10-09T15:52:38.000Z');
+  });
+
+  it('leaves the expiry out, and does not fail, when the stored number is no date', async () => {
+    // A save can store any number here, and past ±8.64e15 ms toISOString throws.
+    const reply = await view({ token_expires_at: 1e16 });
+
+    expect(reply).toContain('preset allows: read_orders.');
+    expect(reply).not.toContain('Access token expiry');
+  });
+
+  it('leaves the expiry out once the provider revoked the grant', async () => {
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({
+      ...p,
+      auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, token_expires_at: Date.UTC(2026, 9, 9, 15, 52, 38) } },
+      oauth_grant: { state: 'revoked', revoked_fp: 'fp', revoked_at: '2026-10-09T10:00:00.000Z' },
+    });
+    const reply = await apiSetupTool.handler({ action: 'view', id: 'shop-api' }, agentWith(store)) as string;
+
+    expect(reply).toContain('preset allows: read_orders.');
+    expect(reply).not.toContain('Access token expiry');
+  });
+
+  it('asks for nothing when the stored scope is not text', async () => {
+    const reply = await view({ scope: ['read_orders', 'write_orders'] });
+
+    expect(reply).toContain('preset allows: read_orders.');
+    expect(reply).not.toContain('asks for');
   });
 
   it('prints no requested scope that the preset refuses, so profile text never reaches the list', async () => {
@@ -1133,6 +1162,15 @@ describe('view tells the model what a preset connection may ask for', () => {
 
   it('says nothing about scopes for a profile without a known preset', async () => {
     const reply = await view({ preset_id: 'not-a-provider' });
+
+    expect(reply).not.toContain('OAuth scopes');
+  });
+
+  it('says nothing about scopes for a profile that is not oauth2, whatever preset it names', async () => {
+    const store = new ApiStore();
+    const p = shopProfile();
+    store.register({ ...p, auth: { ...p.auth!, type: 'bearer' } });
+    const reply = await apiSetupTool.handler({ action: 'view', id: 'shop-api' }, agentWith(store)) as string;
 
     expect(reply).not.toContain('OAuth scopes');
   });
