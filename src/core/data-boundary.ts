@@ -338,6 +338,18 @@ export function closeTagPattern(token: string, flags = 'gi'): RegExp {
 // actually present. This is the primary ReDoS defence for the exfiltration
 // patterns — the classic attack shape is a leading token repeated N times with NO
 // terminal (so the match keeps FAILING expensively); the gate makes that O(n).
+/**
+ * The line-break classes a reader may honour, as a regex character-class body: CR, LF, VT,
+ * FF, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR. One list for every place that has to agree
+ * on where a line starts: the one-line rendering of mail header fields and the role-line scan
+ * below. A model reads VT as a line break (measured), while a JavaScript `^` in multiline mode
+ * starts a line only after CR, LF, LS and PS, so the scan does not use `^`/`m`.
+ */
+export const LINE_BREAK_CLASS = '\\r\\n\\u000b\\u000c\\u0085\\u2028\\u2029';
+
+/** Start of the text, or right after any of {@link LINE_BREAK_CLASS}. */
+const LINE_START = `(?:^|[${LINE_BREAK_CLASS}])`;
+
 const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: RegExp }> = [
   // Tool invocation language
   { pattern: /\b(use|call|execute|invoke|run)\s+(the\s+)?(bash|write_file|http_request|spawn_agent|read_file|memory_store|remember|recall|memory_block_edit|memory_retire|memory_focus|archive_search)\s+tool\b/i, label: 'tool invocation' },
@@ -362,8 +374,8 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
   { pattern: new RegExp(BOUNDARY_CLOSE_ANY_SOURCE, 'i'), label: 'boundary escape' },
 
   // Role impersonation — assistant:/human: always flagged (rare in data), system:/user: only with instruction-like follow-up
-  { pattern: /^(assistant|human):\s/im, label: 'role impersonation' },
-  { pattern: /^(system|user):\s*(?:you\b|I\b|we\b|ignore\b|forget\b|disregard\b|override\b|please\b|must\b|should\b|always\b|never\b|don'?t\b|do not\b|now\b|from now\b|let'?s\b|pretend\b|act as\b)/im, label: 'role impersonation' },
+  { pattern: new RegExp(`${LINE_START}(assistant|human):\\s`, 'i'), label: 'role impersonation' },
+  { pattern: new RegExp(`${LINE_START}(system|user):\\s*(?:you\\b|I\\b|we\\b|ignore\\b|forget\\b|disregard\\b|override\\b|please\\b|must\\b|should\\b|always\\b|never\\b|don'?t\\b|do not\\b|now\\b|from now\\b|let'?s\\b|pretend\\b|act as\\b)`, 'i'), label: 'role impersonation' },
   { pattern: /\bas\s+the\s+(assistant|system|AI|model)\b/i, label: 'role impersonation' },
 
   // Data exfiltration instructions. Two ReDoS defences on these multi-anchor

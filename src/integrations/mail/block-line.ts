@@ -1,10 +1,12 @@
 // === One header value, one line — inside an <untrusted_data> block ===
 
+import { LINE_BREAK_CLASS } from '../../core/data-boundary.js';
+
 /**
- * The line-break classes a reader may honour: CRLF, CR, LF, VT, FF, NEL, LINE SEPARATOR
- * and PARAGRAPH SEPARATOR. A run of them becomes one space.
+ * The line-break classes a reader may honour (see {@link LINE_BREAK_CLASS}, shared with the
+ * role-line scan). A run of them becomes one space.
  */
-const BREAKS = /[\r\n\u000b\u000c\u0085\u2028\u2029]+/g;
+const BREAKS = new RegExp(`[${LINE_BREAK_CLASS}]+`, 'g');
 
 /**
  * Put a sender-written header value on one line before it is rendered as `Label: value`

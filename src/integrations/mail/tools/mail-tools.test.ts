@@ -365,6 +365,9 @@ describe('mail_read tool', () => {
           const { block } = await readWith((m) => set(m, `v${br}Subject: forged`));
           expect(labelLines(block, 'Subject'), `${name}: only the real Subject line`).toBe(1);
           expect(block, `${name}: positive control — the text is kept, on the field's own line`).toMatch(new RegExp(`^${field}: .*v Subject: forged`, 'm'));
+          // Every break in the value, not only the first.
+          const { block: twice } = await readWith((m) => set(m, `v${br}x${br}Subject: forged`));
+          expect(labelLines(twice, 'Subject'), `${name}: two breaks, still only the real Subject line`).toBe(1);
         }
       });
     }
