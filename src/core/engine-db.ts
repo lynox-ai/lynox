@@ -957,6 +957,16 @@ const MIGRATIONS: string[] = [
      revoked_at INTEGER,
      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
    );`,
+
+  // v25: when the owner was told that an unconfirmed `run_agent` trigger came due. `getDue`
+  // holds such a trigger back without touching it, so nothing else would ever say it is
+  // waiting. Set once per unconfirmed phase; a write that stamps the trigger or takes a stamp
+  // away clears it, so consent given and then taken back earns exactly one new reminder,
+  // while edits to a trigger that was never stamped do not (each would otherwise re-announce
+  // it). Existing rows stay NULL: a
+  // trigger already waiting is reminded once, the first time the engine sees it due.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (25);
+   ALTER TABLE triggers ADD COLUMN consent_reminded_at TEXT;`,
 ];
 
 /**

@@ -3203,6 +3203,18 @@ export class RunHistory {
     this._requireTriggerStore().releaseLease(id, holder);
   }
 
+  /** Unconfirmed `run_agent` triggers that came due and whose owner was not told yet —
+   *  see {@link TriggerStore.getAwaitingConsentUnreminded}. Empty without a trigger store. */
+  getAwaitingConsentUnreminded(now?: string): TriggerRecord[] {
+    return this._triggerStore?.getAwaitingConsentUnreminded(now) ?? [];
+  }
+
+  /** Claim the one consent reminder of a trigger's unconfirmed phase — see
+   *  {@link TriggerStore.markConsentReminded}. */
+  markConsentReminded(id: string): boolean {
+    return this._triggerStore?.markConsentReminded(id) ?? false;
+  }
+
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
    *  WorkerLoop tick's second query, beside {@link getDueTriggers} — which no longer
    *  returns a parked trigger at all. Empty when no trigger store is wired. */

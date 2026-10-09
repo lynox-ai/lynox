@@ -203,6 +203,14 @@ interface TriggerFullDbRow {
   model_tier: string | null;
 }
 
+/**
+ * The new value of `consent_reminded_at` for a write that sets `confirmed_at` to `?NEW`
+ * (a bound parameter or `NULL`): kept only when the row had no stamp and gets none, cleared
+ * otherwise. See {@link TriggerStore.setConfirmedAt}.
+ */
+const KEEP_MARKER_IF_UNSTAMPED_SQL =
+  "CASE WHEN COALESCE(?NEW, '') = '' AND COALESCE(confirmed_at, '') = '' THEN consent_reminded_at ELSE NULL END";
+
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
 const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
@@ -360,6 +368,9 @@ export class TriggerStore {
         -- Who stamped goes with the stamp: no stamp, no stamper.
         confirmed_by = CASE WHEN COALESCE(excluded.confirmed_at, '') = '' THEN NULL
                             ELSE COALESCE(excluded.confirmed_by, triggers.confirmed_by) END,
+        -- The reminder marker survives only an unstamped row staying unstamped (setConfirmedAt says why).
+        consent_reminded_at = CASE WHEN COALESCE(excluded.confirmed_at, '') = '' AND COALESCE(triggers.confirmed_at, '') = ''
+                                   THEN triggers.consent_reminded_at ELSE NULL END,
         updated_at = excluded.updated_at
     `).run(
       row.id,
@@ -546,8 +557,14 @@ export class TriggerStore {
     // mandate set up would be held again by the owner's own later rename, forever.
     const by = confirmedAt === null ? null : (confirmedBy ?? null);
     return this.db.prepare(
-      "UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), updated_at = datetime('now') WHERE id = ?",
-    ).run(confirmedAt, by, by, id).changes > 0;
+      // The reminder marker survives only while a trigger stays unstamped throughout: a write
+      // that stamps it, or that touches a stamp it had, clears the marker, so the next
+      // unconfirmed phase is reminded once again. An edit to a trigger that was never stamped
+      // keeps it, so rewriting a waiting trigger cannot make it announce itself again.
+      // Asking for the OLD stamp too (SQLite reads the pre-update row on the right-hand side)
+      // also covers a stamp written by a binary that predates the marker and left it set.
+      `UPDATE triggers SET confirmed_at = ?, confirmed_by = ?, edited_by = COALESCE(?, edited_by), consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', '?')}, updated_at = datetime('now') WHERE id = ?`,
+    ).run(confirmedAt, by, by, confirmedAt, id).changes > 0;
   }
 
   /**
@@ -560,7 +577,7 @@ export class TriggerStore {
   markEditedBy(id: string, editedBy: string, clearStamp: boolean): boolean {
     return this.db.prepare(
       clearStamp
-        ? "UPDATE triggers SET edited_by = ?, confirmed_at = NULL, confirmed_by = NULL, updated_at = datetime('now') WHERE id = ?"
+        ? `UPDATE triggers SET edited_by = ?, confirmed_at = NULL, confirmed_by = NULL, consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}, updated_at = datetime('now') WHERE id = ?`
         : "UPDATE triggers SET edited_by = ?, updated_at = datetime('now') WHERE id = ?",
     ).run(editedBy, id).changes > 0;
   }
@@ -605,7 +622,7 @@ export class TriggerStore {
     // that repoints a watch has to clear consent right here; `trigger-consent.test.ts`
     // pins the set of files that may name the setter, so a new one shows up red.
     if (params.title !== undefined || params.description !== undefined) {
-      sets.push('confirmed_at = NULL', 'confirmed_by = NULL');
+      sets.push('confirmed_at = NULL', 'confirmed_by = NULL', `consent_reminded_at = ${KEEP_MARKER_IF_UNSTAMPED_SQL.replace('?NEW', 'NULL')}`);
     }
     if (params.status !== undefined) {
       sets.push('status = ?');
@@ -732,7 +749,9 @@ export class TriggerStore {
    * `run_agent` trigger (which lands `confirmed_at = NULL`, fail-closed) is simply
    * never selected until a human confirms it — so `next_run_at` is preserved (no
    * disable / no run-result mangling) and confirming makes it due in place. The
-   * WorkerLoop dispatch adds a defense-in-depth backstop. `run_workflow` keeps its
+   * WorkerLoop dispatch adds a defense-in-depth backstop. Held back this quietly, the
+   * trigger would never be mentioned again; {@link getAwaitingConsentUnreminded} is the
+   * other half, which the tick uses to tell the owner once that it came due. `run_workflow` keeps its
    * own {@link PlannedPipeline.confirmedAt} gate (in executePipeline);
    * `backup`/`notify` are deterministic → never gated here.
    *
@@ -783,6 +802,48 @@ export class TriggerStore {
        ORDER BY next_run_at ASC`,
     ).all(now, WAITING, MANDATE_TAG_LIKE, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * The `run_agent` triggers {@link getDue} holds back for consent and whose owner has not
+   * been told yet — the input of the worker loop's reminder.
+   *
+   * The same predicate as `getDue` with its consent clause turned round: a trigger listed
+   * here is one that would be running now if a human had confirmed it. The denylist terms
+   * around it stay, so a paused, completed, parked or leased trigger is not "due" here
+   * either. A trigger a mandate wrote is listed too when it is an unconfirmed `run_agent`;
+   * the owner is the one who can stamp it, so telling the owner is right for both reasons
+   * it waits.
+   */
+  getAwaitingConsentUnreminded(now: string = new Date().toISOString()): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS}
+       FROM triggers
+       WHERE next_run_at IS NOT NULL
+         AND next_run_at <= ?
+         AND enabled != 0
+         AND status != 'completed'
+         AND status != ?
+         AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
+         AND effect = 'run_agent' AND COALESCE(confirmed_at, '') = ''
+         AND consent_reminded_at IS NULL
+         AND (lease_until IS NULL OR lease_until <= ?)
+       ORDER BY next_run_at ASC`,
+    ).all(now, WAITING, now) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * Claim the reminder for one trigger. True for exactly one caller per unconfirmed phase —
+   * the stretch in which a trigger stays unstamped; edits inside it do not start a new one,
+   * so rewriting a waiting trigger cannot make it announce itself again. The write is conditional on the marker still being empty and the trigger still being
+   * unconfirmed, so two processes on the same file cannot both send it, and a trigger that
+   * was confirmed in the meantime is not reminded about.
+   */
+  markConsentReminded(id: string, at: string = new Date().toISOString()): boolean {
+    return this.db.prepare(
+      "UPDATE triggers SET consent_reminded_at = ? WHERE id = ? AND consent_reminded_at IS NULL AND COALESCE(confirmed_at, '') = ''",
+    ).run(at, id).changes > 0;
   }
 
   /**
