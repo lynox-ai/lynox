@@ -148,6 +148,8 @@ export const BULK_HALT_REASONS = {
   maxTargets: 'the approved maximum number of targets is reached',
   atomicRolledBack: 'a target of an atomic run could not be written; the targets written before it were rolled back',
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
+  atomicStoppedRolledBack: 'the owner stopped an atomic run; the targets written before the stop were rolled back',
+  atomicStoppedRollbackIncomplete: 'the owner stopped an atomic run, and rolling back the targets written before the stop did not complete',
   unavailable: 'the target system is not available',
   credential: 'the access credential for this host cannot be attached',
   unauthorized: 'the host did not accept the stored credential',

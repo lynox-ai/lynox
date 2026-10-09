@@ -1,4 +1,5 @@
 import type { RunHooks } from '../types/orchestration.js';
+import type { AbortScope } from '../types/config.js';
 import { randomUUID } from 'node:crypto';
 import type { UntrustedCause } from './untrusted-signals.js';
 
@@ -89,6 +90,10 @@ export async function runGuardedSavedWorkflow(
     /** Who started the run, when a request did. A mandate's steps get only the tools its
      *  lock allows (PRD customer-granted-operator-access D1, §3.13 E4). Absent = the owner. */
     principal?: RequestPrincipal | undefined;
+    /** The owner's stop, and the scope whose agents it ends (the worker's scheduled run).
+     *  See `RunManifestOptions.stopSignal`. */
+    stopSignal?: AbortSignal | undefined;
+    abortScope?: AbortScope | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
@@ -175,6 +180,8 @@ export async function runGuardedSavedWorkflow(
     // And the step agents are built for that principal, so its lock also refuses them the
     // protected secrets and its writes carry its name.
     principal: opts?.principal,
+    stopSignal: opts?.stopSignal,
+    abortScope: opts?.abortScope,
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

@@ -7085,9 +7085,10 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('a stop through the SIGNAL is told the run halts, not that it may finish on its own', async () => {
-      // A bulk preview has no model call and no tool handler; the session sentence would
-      // tell its owner the wrong thing.
+    it('a stop through the SIGNAL is told the run halts, not the session sentence', async () => {
+      // A bulk run or a workflow is stopped between its units, not at a model call; the
+      // session sentence would tell its owner the wrong thing. (That a run whose last unit
+      // was under way may still finish is true of both, so it is not the difference.)
       const stopTask = vi.fn().mockReturnValue({ kind: 'requested', via: 'signal' });
       await withEngine({ getWorkerLoop: () => ({ stopTask }) }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
@@ -7095,7 +7096,8 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as { via: string; note: string };
         expect(body.via).toBe('signal');
         expect(body.note).toContain('halted');
-        expect(body.note).not.toContain('finish on its own');
+        expect(body.note).toContain('before its next target');
+        expect(body.note).not.toContain('model call');
       });
     });
 

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { WORKFLOW_STOPPED_ERROR } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
@@ -162,20 +163,28 @@ export interface RunManifestOptions {
    */
   runTaint?: RunTaint | undefined;
   /**
-   * The session whose abort may reach this run's step agents.
+   * The scope whose abort may reach this run's step agents — a session's, or a run's own.
    *
-   * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
-   * the library Run button, the HTTP re-target, and the worker loop's own scheduled
-   * pipelines, which go through the same `runGuardedSavedWorkflow`. A process-wide set is
-   * not the fallback: it is what let a stop in one thread abort another thread's agents.
+   * ⚠ Absent for the library Run button and the HTTP re-target, which have no calling
+   * agent to source it from. The worker loop's SCHEDULED pipeline has no session either;
+   * it builds a scope of its own per run, which the owner's stop aborts (see
+   * `stopSignal`). A process-wide set is not the fallback: it is what let a stop in one
+   * thread abort another thread's agents.
    *
-   * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
-   * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
-   * false is the generalisation, because a worker path that runs an agent turn does have
-   * a session with a scope, and so does the interactive `run_workflow`. For a while
-   * neither supplied it, which made the whole step half dead code. See `AbortScope`.
+   * ⚠ An earlier version said "headless or worker-driven". Half wrong: a worker path that
+   * runs an agent turn has a session with a scope, and so does the interactive
+   * `run_workflow`. For a while neither supplied it, which made the whole step half dead
+   * code. See `AbortScope`.
    */
   abortScope?: import('../types/config.js').AbortScope | undefined;
+  /**
+   * Aborted when the run's OWNER stopped it — and for nothing else: the caller aborts it
+   * only for an explicit stop, never for a shutdown or a deadline. Read before each step, and
+   * by a step that fails while it is aborted, which ends the run rather than carrying on
+   * under `on_failure: 'continue'` — also when that step was the last one. It does not interrupt a step by itself:
+   * ending the step agents in flight is `abortScope`'s job, so a caller passes both.
+   */
+  stopSignal?: AbortSignal | undefined;
 }
 
 /**
@@ -208,20 +217,28 @@ export interface RunCtxInput {
   workflowId?: string | undefined;
   runTaint?: RunTaint | undefined;
   /**
-   * The session whose abort may reach this run's step agents.
+   * The scope whose abort may reach this run's step agents — a session's, or a run's own.
    *
-   * ⚠ Absent for the SAVED-WORKFLOW path, which has no calling agent to source it from:
-   * the library Run button, the HTTP re-target, and the worker loop's own scheduled
-   * pipelines, which go through the same `runGuardedSavedWorkflow`. A process-wide set is
-   * not the fallback: it is what let a stop in one thread abort another thread's agents.
+   * ⚠ Absent for the library Run button and the HTTP re-target, which have no calling
+   * agent to source it from. The worker loop's SCHEDULED pipeline has no session either;
+   * it builds a scope of its own per run, which the owner's stop aborts (see
+   * `stopSignal`). A process-wide set is not the fallback: it is what let a stop in one
+   * thread abort another thread's agents.
    *
-   * ⚠ An earlier version said "headless or worker-driven". Half wrong: the worker's
-   * SCHEDULED pipeline really is scope-less, exactly as that wording implied — what is
-   * false is the generalisation, because a worker path that runs an agent turn does have
-   * a session with a scope, and so does the interactive `run_workflow`. For a while
-   * neither supplied it, which made the whole step half dead code. See `AbortScope`.
+   * ⚠ An earlier version said "headless or worker-driven". Half wrong: a worker path that
+   * runs an agent turn has a session with a scope, and so does the interactive
+   * `run_workflow`. For a while neither supplied it, which made the whole step half dead
+   * code. See `AbortScope`.
    */
   abortScope?: import('../types/config.js').AbortScope | undefined;
+  /**
+   * Aborted when the run's OWNER stopped it — and for nothing else: the caller aborts it
+   * only for an explicit stop, never for a shutdown or a deadline. Read before each step, and
+   * by a step that fails while it is aborted, which ends the run rather than carrying on
+   * under `on_failure: 'continue'` — also when that step was the last one. It does not interrupt a step by itself:
+   * ending the step agents in flight is `abortScope`'s job, so a caller passes both.
+   */
+  stopSignal?: AbortSignal | undefined;
 }
 
 /**
@@ -260,7 +277,21 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     workflowId: input.workflowId,
     runTaint: input.runTaint,
     abortScope: input.abortScope,
+    stopSignal: input.stopSignal,
   };
+}
+
+/** Whether the owner stopped the run; if so, end it as stopped. */
+function stoppedByOwner(options: RunManifestOptions, state: RunState): boolean {
+  if (options.stopSignal?.aborted !== true) return false;
+  // A run that already ended on a cause of its own keeps it: a sibling step that failed or
+  // was rejected in the same phase is the run's outcome, and reading it as the stop would
+  // drop the escalation and the retry it is owed. The stop still ends the run.
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = WORKFLOW_STOPPED_ERROR;
+  state.completedAt = new Date().toISOString();
+  return true;
 }
 
 /**
@@ -863,6 +894,11 @@ async function executeStep(
     return 'ok';
   }
 
+  // The owner's stop is read HERE, before each step — the one place every path reaches: the
+  // next sequential step, the first step of the next phase, and a step of a wide phase the
+  // pool hands out after the stop (the scope can only abort agents that already exist).
+  if (stoppedByOwner(options, state)) return 'halt';
+
   const stepStart = new Date().toISOString();
   // A2: the step's `pipeline_step` run id (declared before the try so the catch
   // can finalize it as failed). Undefined when RunHistory isn't wired.
@@ -1094,6 +1130,10 @@ async function executeStep(
         skipped: false, error: error.message,
       }, stepRows, stepModelTier);
     }
+
+    // A step that failed while the owner's stop is out ended because of it (its agent was
+    // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
+    if (stoppedByOwner(options, state)) return 'halt';
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';

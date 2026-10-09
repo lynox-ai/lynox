@@ -59,6 +59,24 @@ describe('runGuardedSavedWorkflow — the headless pool is the engine set, on pu
   });
 });
 
+describe('runGuardedSavedWorkflow — the stop seam', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCheckPersistentBudget.mockReturnValue({ allowed: true });
+    mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-s', status: 'completed', costUsd: 0 });
+    _resetTenantInvariantForTests();
+  });
+
+  it('hands the owner\'s stop signal and the abort scope to the run, by identity', async () => {
+    const stop = new AbortController();
+    const abortScope = { members: new Set<{ abort: () => void }>() };
+    await runGuardedSavedWorkflow(makeEngine([]), 'wf-stop', undefined, { stopSignal: stop.signal, abortScope });
+    const opts = mockRunSavedWorkflow.mock.calls[0]![4] as { stopSignal?: unknown; abortScope?: unknown };
+    expect(opts.stopSignal).toBe(stop.signal);
+    expect(opts.abortScope).toBe(abortScope);
+  });
+});
+
 describe('runGuardedSavedWorkflow — budget + managed-credit lifecycle', () => {
   beforeEach(() => {
     vi.clearAllMocks();

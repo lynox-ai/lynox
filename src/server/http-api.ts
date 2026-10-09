@@ -7383,12 +7383,11 @@ export class LynoxHTTPApi {
     //
     // ⛔ AND IT NEVER ANSWERS `stopped: true`. A stop is requested, not completed: what
     // ends the run is an abort unwinding somewhere else, so 202 is the true code and
-    // `via` says what the abort reached. FIVE of the seven effects have nothing that
-    // reads an abort — `run_workflow`, `bulk_apply`, `bulk_undo`, `backup`, `notify` —
-    // and for them this route answers 409 and changes nothing. (The number used to read
-    // "four" beside the same five-item list: a count of the test cases, one of which
-    // covers two effects, written where a count of effects belongs.) That is the whole
-    // point: a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets
+    // `via` says what the abort reached. TWO of the seven effects have nothing that
+    // reads an abort — `backup` and `notify` — and for them this route answers 409 and
+    // changes nothing. (Until the bulk writes and `run_workflow` read the owner's stop, it
+    // was five; before that the count read "four" beside a five-item list — a count of
+    // test cases written where a count of effects belongs.) That is the whole point: a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets
     // is fail-open with ceremony, and the owner's reaction to it is to stop watching.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/stop', async (_req, res, params) => {
       const loop = engine.getWorkerLoop();
@@ -7449,7 +7448,7 @@ export class LynoxHTTPApi {
         note: outcome.via === 'wait'
           ? 'The run was parked on a question; the wait has been ended.'
           : outcome.via === 'signal'
-            ? 'The read stops before its next target and the bulk run is halted, unless its last target was already being read and it finishes. To continue, resume the bulk run.'
+            ? 'The stop was requested. A bulk write stops before its next target, after the one being written is recorded; a bulk preview stops its read. Either is halted for a resume, and an atomic write is rolled back instead. A scheduled workflow stops before its next step, and its step agents in flight are aborted. A run whose last target or step was already under way may still finish on its own.'
             : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
       });
     }, OWN));

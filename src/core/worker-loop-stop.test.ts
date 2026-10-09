@@ -33,6 +33,7 @@ import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/ind
 import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
 import type { ActiveTask } from './worker-loop.js';
 import { getPipelineStore } from '../tools/builtin/pipeline.js';
+import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 
 /**
  * The saved-workflow runner, gated — the one collaborator a `run_workflow` test has to
@@ -50,6 +51,8 @@ const wf = vi.hoisted(() => ({
   calls: [] as unknown[][],
   signal: undefined as (() => void) | undefined,
   wait: undefined as Promise<void> | undefined,
+  /** What the runner answers once released; a completed run by default. */
+  result: undefined as Record<string, unknown> | undefined,
 }));
 /**
  * The pinned fetch, gated — so a WATCH run can be caught in the window before its
@@ -80,7 +83,7 @@ vi.mock('./saved-workflow-runner.js', () => ({
     wf.calls.push(args);
     wf.signal?.();
     await wf.wait;
-    return { ok: true, status: 'completed', runId: 'wf-run-1' };
+    return wf.result ?? { ok: true, status: 'completed', runId: 'wf-run-1' };
   },
 }));
 
@@ -594,6 +597,8 @@ interface ClassHarness {
   halts: () => string[];
   /** Every `updateTrigger` the handler made — a re-arm is what must NOT happen. */
   reArms: () => unknown[];
+  /** How many escalations the run raised. */
+  escalations: () => number;
 }
 
 /**
@@ -674,6 +679,7 @@ function makeClassHarness(opts: {
     wf.calls.length = 0;
     wf.signal = () => signalRunning();
     wf.wait = g.wait;
+    releases.push(() => { wf.result = undefined; });
   }
   if (opts.pauseAt === 'bulkClient') {
     // The external-client factory: three dynamic imports and a few store reads, and
@@ -695,6 +701,7 @@ function makeClassHarness(opts: {
     haltReason: null, contractJson: null,
   };
   const sessions: number[] = [];
+  let escalations = 0;
   const engine = {
     getTaskManager: () => manager,
     getRunHistory: () => ({
@@ -703,7 +710,7 @@ function makeClassHarness(opts: {
     }),
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
-    escalateToUser: () => null,
+    escalateToUser: () => { escalations++; return null; },
     getPromptStore: () => null,
     getSecretStore: () => null,
     getDataStore: () => null,
@@ -745,6 +752,7 @@ function makeClassHarness(opts: {
     records: () => records,
     halts: () => halts,
     reArms: () => reArms,
+    escalations: () => escalations,
   };
 }
 
@@ -763,20 +771,20 @@ describe('what a stop can reach — one case per effect class', () => {
     expect(h.sessionCreations()).toBe(0);
   });
 
-  it('a BULK WRITE cannot be interrupted — the case where a false 200 lets it keep writing', async () => {
+  it('a BULK WRITE is stoppable through its SIGNAL — handed over in the same case clause', async () => {
     // ⛔ The worst of the seven to answer wrongly: `bulk_apply` writes its targets, so
     // `{stopped:true}` over a run that carries on is not a cosmetic lie — the owner stops
-    // watching a write they asked to end.
+    // watching a write they asked to end. The answer is `requested` because the clause
+    // now hands `controller.signal` to `runBulkEffect`, which reads it between targets;
+    // that the run then really ENDS, with the target in flight finished and recorded, is
+    // asserted against a real ledger in `bulk-apply.test.ts`, not here.
     //
-    // ⚠ TWO LIMITS, stated rather than implied. This pauses at the client factory, which
-    // `executeBulk` awaits BEFORE its write loop — so `sessionCreations()` witnesses "no
-    // session before the pause", not "none in the whole run"; threading a signal into
-    // `executeBulk` later would leave this green while the comment above it went stale.
-    // And `bulk_undo` has no case of its own because it rides this same case clause: a
-    // twin would pin one line twice.
+    // ⚠ `bulk_undo` has no case of its own because it rides this same case clause: a
+    // twin would pin one line twice. And `sessionCreations()` witnesses "no session before
+    // the pause" (the client factory, awaited before the write loop), not "none in the run".
     const h = makeClassHarness({ effect: 'bulk_apply', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
     await h.running;
-    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'bulk_apply' });
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
     expect(h.sessionCreations()).toBe(0);
   });
 
@@ -852,24 +860,96 @@ describe('what a stop can reach — one case per effect class', () => {
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
   });
 
-  it('a SAVED WORKFLOW run has no handle at all — and is handed nothing that could become one', async () => {
+  it('a SAVED WORKFLOW run is stoppable: it is handed the owner\'s stop and a scope its stop ends', async () => {
     const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
     await h.running;
-    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'run_workflow' });
-
-    // ⛔ THE POSITIVE HALF, and the reason this test mocks the runner rather than the
-    // handler: it is not merely that nothing was ATTACHED — nothing was PASSED. Four
-    // arguments (engine, id, params, run options), none of them a signal, and the options
-    // carry no signal either; a fix that threads one in changes this assertion, which is
-    // where the next reader will find the gap named.
+    // ⛔ What the runner is HANDED, read off the call — the mock is the runner, not the
+    // handler, so the handler's own hand-over is what this sees.
     expect(wf.calls).toHaveLength(1);
-    expect(wf.calls[0]).toHaveLength(4);
-    expect(wf.calls[0]!.some(a => a instanceof AbortSignal)).toBe(false);
-    const runOptions = wf.calls[0]![3] as Record<string, unknown>;
-    expect(Object.keys(runOptions), 'the run options it IS handed').toEqual(expect.arrayContaining(['origin']));
-    expect(Object.values(runOptions).some(v => v instanceof AbortSignal)).toBe(false);
-    expect(Object.keys(runOptions).some(k => /signal|abort/i.test(k))).toBe(false);
+    const runOptions = wf.calls[0]![3] as { stopSignal?: unknown; abortScope?: { members: Set<{ abort: () => void }> } };
+    expect(runOptions.stopSignal).toBeInstanceOf(AbortSignal);
+    expect(runOptions.abortScope?.members).toBeInstanceOf(Set);
+    const stopSignal = runOptions.stopSignal as AbortSignal;
+    // A step agent in flight, as `spawnInline` registers it.
+    let aborted = 0;
+    runOptions.abortScope!.members.add({ abort: () => { aborted++; } });
+    expect(stopSignal.aborted).toBe(false);
+
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    expect(stopSignal.aborted, 'the stop reaches the run').toBe(true);
+    expect(aborted, 'and the step agent in flight').toBe(1);
+
+    // The run then ends as the runner ends a stopped run.
+    wf.result = { ok: true, status: 'failed', runId: 'wf-run-1', error: WORKFLOW_STOPPED_ERROR };
+    h.release();
+    await waitUntil('the run to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2], 'a stop is not a failure').toBe('stopped');
+    expect(h.escalations(), 'the owner asked; nothing is escalated').toBe(0);
     expect(h.sessionCreations()).toBe(0);
+  });
+
+  it('a SHUTDOWN during a saved workflow does not stop it — only the owner\'s stop does', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    const runOptions = wf.calls[0]![3] as { stopSignal: AbortSignal; abortScope: { members: Set<{ abort: () => void }> } };
+    let aborted = 0;
+    runOptions.abortScope.members.add({ abort: () => { aborted++; } });
+    h.loop.stop();
+    expect(runOptions.stopSignal.aborted).toBe(false);
+    expect(aborted).toBe(0);
+    h.release();
+    await waitUntil('the run to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('success');
+  });
+
+  it('a saved workflow PAST ITS DEADLINE is still stopped by the owner', async () => {
+    // ⛔ The deadline aborts the task controller first, and an abort event fires once per
+    // signal: a stop wired as a listener on that controller never heard the owner. The run
+    // carried on behind a 202 — on exactly the long runs an owner wants to stop.
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' }, taskTimeoutMs: 20 });
+    await h.running;
+    const runOptions = wf.calls[0]![3] as { stopSignal: AbortSignal; abortScope: { members: Set<{ abort: () => void }> } };
+    let aborted = 0;
+    runOptions.abortScope.members.add({ abort: () => { aborted++; } });
+    // Past the deadline (`WallClockBudget` floors an arm at one second), with margin.
+    await new Promise(r => setTimeout(r, 1500));
+    expect(runOptions.stopSignal.aborted, 'the deadline is not the owner\'s stop').toBe(false);
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    expect(runOptions.stopSignal.aborted, 'the stop still reaches the run').toBe(true);
+    expect(aborted, 'and its step agent').toBe(1);
+    wf.result = { ok: true, status: 'failed', runId: 'wf-run-1', error: WORKFLOW_STOPPED_ERROR };
+    h.release();
+    await waitUntil('the run to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('stopped');
+  });
+
+  it('a stop that arrives after the last step leaves a COMPLETED run recorded as completed', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    // The default answer: the runner had finished every step when the stop came.
+    h.release();
+    await waitUntil('the run to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('success');
+  });
+
+  it('a run that reads as stopped without the owner\'s stop is recorded as a failure', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    wf.result = { ok: true, status: 'failed', runId: 'wf-run-1', error: WORKFLOW_STOPPED_ERROR };
+    h.release();
+    await waitUntil('the run to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('failed');
+  });
+
+  it('a run that FAILS on its own while a stop is out is recorded as its failure', async () => {
+    const h = makeClassHarness({ effect: 'run_workflow', pauseAt: 'workflow', record: { pipeline_id: 'wf-1' } });
+    await h.running;
+    expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    wf.result = { ok: true, status: 'rejected', runId: 'wf-run-1', error: 'a gate refused the step' };
+    h.release();
+    await waitUntil('the run to settle', () => h.records().length > 0);
+    expect(h.records()[0]?.[2]).toBe('failed');
   });
 
   it('a WATCH run is unstoppable while it FETCHES and stoppable once it analyses', async () => {

@@ -24,6 +24,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
 });
 
 import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx } from './runner.js';
+import { WORKFLOW_STOPPED_ERROR } from './workflow-stop.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
@@ -1925,6 +1926,128 @@ describe('runManifest — DoS bound wiring', () => {
     expect(state.error).toContain('step limit');
     expect(state.outputs.has('p1')).toBe(true);
     expect(state.outputs.has('p2')).toBe(false);
+  });
+});
+
+describe('runManifest — the owner\'s stop', () => {
+  it('a stop after step 1 ends the run before step 2, as stopped', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const stop = new AbortController();
+    const state = await runManifest(MANIFEST, CONFIG, {
+      mockResponses, stopSignal: stop.signal,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') stop.abort(); } },
+    });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
+    expect(state.outputs.has('step-1')).toBe(true);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('the stop is read on the PARALLEL path too, between phases', async () => {
+    const parallelManifest: Manifest = {
+      manifest_version: '1.1', name: 'parallel-flow', triggered_by: 'test', context: {},
+      agents: [
+        { id: 'p1', agent: 'agent-a', runtime: 'mock' },
+        { id: 'p2', agent: 'agent-b', runtime: 'mock', input_from: ['p1'] },
+      ],
+      gate_points: [], on_failure: 'stop',
+    };
+    const stop = new AbortController();
+    const state = await runManifest(parallelManifest, CONFIG, {
+      mockResponses: new Map(), stopSignal: stop.signal,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'p1') stop.abort(); } },
+    });
+    expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
+    expect(state.outputs.has('p2')).toBe(false);
+  });
+
+  it('a step of a wide phase handed out after the stop is not started', async () => {
+    // One phase, three independent steps, at most one at a time: the stop lands while the
+    // first runs, after the phase check — so only the per-step check can keep the rest out.
+    const wide: Manifest = {
+      manifest_version: '1.1', name: 'wide', triggered_by: 'test', context: {},
+      agents: [
+        { id: 'w1', agent: 'agent-a', runtime: 'mock' },
+        { id: 'w2', agent: 'agent-b', runtime: 'mock' },
+        { id: 'w3', agent: 'agent-c', runtime: 'mock' },
+      ],
+      gate_points: [], on_failure: 'continue',
+    };
+    const stop = new AbortController();
+    const started: string[] = [];
+    const state = await runManifest(wide, CONFIG, {
+      mockResponses: new Map(), stopSignal: stop.signal, limits: { maxParallelSteps: 1 },
+      hooks: { onStepStart: (id) => { started.push(id); stop.abort(); } },
+    });
+    expect(started).toEqual(['w1']);
+    expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
+  });
+
+  it('a step that fails while the stop is out ends the run, even under on_failure: continue', async () => {
+    // The step agent the stop aborted throws — the runner must not read that as an ordinary
+    // failure and carry on with the next step.
+    const manifest: Manifest = {
+      ...MANIFEST, on_failure: 'continue',
+      agents: [
+        { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 't' },
+        { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+      ],
+    };
+    const stop = new AbortController();
+    mockSpawnInline.mockImplementationOnce(async () => { stop.abort(); throw new Error('aborted'); });
+    const state = await runManifest(manifest, CONFIG, { parentTools: [], stopSignal: stop.signal });
+    expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('a LAST step that fails while the stop is out ends the run stopped, not completed', async () => {
+    // With no step after it, only the failing step itself can read the stop: under
+    // `continue` the run would otherwise finish as completed with one errored step.
+    const manifest: Manifest = {
+      ...MANIFEST, on_failure: 'continue',
+      agents: [{ id: 'only', agent: 'only', runtime: 'inline', task: 't' }],
+    };
+    const stop = new AbortController();
+    mockSpawnInline.mockImplementationOnce(async () => { stop.abort(); throw new Error('aborted'); });
+    const state = await runManifest(manifest, CONFIG, { parentTools: [], stopSignal: stop.signal });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_STOPPED_ERROR);
+  });
+
+  it('a sibling\'s own failure in the same phase is the run\'s outcome, not the stop', async () => {
+    const phase: Manifest = {
+      manifest_version: '1.1', name: 'phase', triggered_by: 'test', context: {},
+      agents: [
+        { id: 'a', agent: 'a', runtime: 'inline', task: 't' },
+        { id: 'b', agent: 'b', runtime: 'inline', task: 't' },
+      ],
+      gate_points: [], on_failure: 'stop',
+    };
+    const stop = new AbortController();
+    mockSpawnInline
+      .mockImplementationOnce(async () => { throw new Error('a failed on its own'); })
+      .mockImplementationOnce(async () => { await new Promise(r => setTimeout(r, 5)); stop.abort(); throw new Error('aborted'); });
+    const state = await runManifest(phase, CONFIG, { parentTools: [], stopSignal: stop.signal });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe('a failed on its own');
+  });
+
+  it('a stop after the last step leaves the run completed', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const stop = new AbortController();
+    const state = await runManifest(MANIFEST, CONFIG, {
+      mockResponses, stopSignal: stop.signal,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-2') stop.abort(); } },
+    });
+    expect(state.status).toBe('completed');
+  });
+
+  it('buildRunCtx carries the stop and the scope', () => {
+    const stop = new AbortController();
+    const scope = { members: new Set<{ abort: () => void }>() };
+    const opts = buildRunCtx({ autonomy: 'autonomous', stopSignal: stop.signal, abortScope: scope });
+    expect(opts.stopSignal).toBe(stop.signal);
+    expect(opts.abortScope).toBe(scope);
   });
 });
 

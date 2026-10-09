@@ -705,6 +705,10 @@ export async function runSavedWorkflow(
      *  having spent something, synchronously and before the first spend — so a process
      *  that dies before answering still leaves the mark behind. */
     hooks?: RunHooks | undefined;
+    /** The owner's stop and the scope it aborts — see `RunManifestOptions.stopSignal`.
+     *  Absent for every caller with no stop to deliver. */
+    stopSignal?: AbortSignal | undefined;
+    abortScope?: import('../../types/config.js').AbortScope | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
@@ -819,6 +823,9 @@ export async function runSavedWorkflow(
       // The claim seam: both are undefined for every caller that holds no claim.
       runId: runtime?.runId,
       hooks: runtime?.hooks,
+      // The stop seam: undefined for every caller that has no stop to deliver.
+      stopSignal: runtime?.stopSignal,
+      abortScope: runtime?.abortScope,
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI

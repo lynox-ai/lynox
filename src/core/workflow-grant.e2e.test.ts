@@ -130,7 +130,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
 
   async function fire(trigger: TriggerRecord): Promise<void> {
     const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify } as never, 60_000);
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(tm.getTrigger(trigger.id)!, undefined, new AbortController().signal);
   }
 
   const posts = (): PinnedTransportInput[] => sent.filter((s) => s.method === 'POST');
