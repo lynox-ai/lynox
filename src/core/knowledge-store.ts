@@ -1072,18 +1072,27 @@ export class KnowledgeStore {
    */
   private _dropSeededProfileLine(entryText: string): void {
     try {
-      const block = this.getBlock('profile');
-      if (!block || !block.content) return;
-      const seeded = collapseToSingleLine(entryText);
-      if (!seeded) return;
-      const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
-      if (kept.length === block.content.split('\n').length) return;
-      this.setBlockContent('profile', kept.join('\n').trim());
+      this._removeSeededProfileLine(entryText);
     } catch (err: unknown) {
       process.stderr.write(
         `[lynox:knowledge] could not drop the retired line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
+  }
+
+  /**
+   * The removal itself, without the best-effort wrapper: a failure throws. For the caller
+   * whose answer to the user is "nothing of this stays" — there a swallowed failure would
+   * leave the copy loading into every turn behind a success.
+   */
+  private _removeSeededProfileLine(entryText: string): void {
+    const block = this.getBlock('profile');
+    if (!block || !block.content) return;
+    const seeded = collapseToSingleLine(entryText);
+    if (!seeded) return;
+    const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
+    if (kept.length === block.content.split('\n').length) return;
+    this.setBlockContent('profile', kept.join('\n').trim());
   }
 
   // ── Erasure ──
@@ -1168,16 +1177,20 @@ export class KnowledgeStore {
    * Every status, `superseded` and `rejected` included: an entry kept "for audit" still holds
    * the text, and the promise is about the text. The seeded `profile` line goes with it, as in
    * {@link deleteBySubject} — the always-loaded block is where a surviving copy keeps being read.
+   *
+   * Unlike there, a failure on the block THROWS, and the block goes FIRST. The caller tells the
+   * user that nothing of the chat stays, so a swallowed failure would answer success over a
+   * surviving copy. And the order is what makes a retry work: rows deleted first, then a
+   * failing block, would leave a retry with no text to match — it would delete nothing,
+   * report success, and the line would stay for good. Block first, a failure leaves the rows,
+   * and the retry re-derives the lines from them.
    */
   deleteByThread(threadId: string): number {
     const doomed = this.db.prepare(
       'SELECT text FROM knowledge_entries WHERE source_thread_id = ?',
     ).all(threadId) as Array<{ text: string }>;
-    const removed = this.db.prepare('DELETE FROM knowledge_entries WHERE source_thread_id = ?').run(threadId).changes;
-    if (removed > 0) {
-      for (const row of doomed) this._dropSeededProfileLine(this.engine.dec(row.text));
-    }
-    return removed;
+    for (const row of doomed) this._removeSeededProfileLine(this.engine.dec(row.text));
+    return this.db.prepare('DELETE FROM knowledge_entries WHERE source_thread_id = ?').run(threadId).changes;
   }
 
   // ── Focus derivation (H2-gated) ──

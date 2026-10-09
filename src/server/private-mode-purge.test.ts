@@ -145,6 +145,22 @@ describe('PATCH /api/threads/:id { skip_extraction: true } purges the thread fro
     for (const id of seeded.durable) expect(ks.getEntry(id)).not.toBeNull();
   });
 
+  it('a profile line that cannot be removed answers 500 — never "ok" over a copy that keeps loading', async () => {
+    const { ks } = stores();
+    const line = 'Jana Reber prefers calls after 18:00';
+    ks.setBlockContent('profile', line);
+    const seeded = ks.write({ text: line, sourceChannel: 'user', sourceUntrusted: false, sourceThreadId: 't-block-fails' });
+    stores().ts.createThread('t-block-fails', { title: 'chat t-block-fails' });
+    vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
+
+    const { status, body } = await setPrivate('t-block-fails');
+
+    expect(status).toBe(500);
+    expect(body['failed']).toEqual(['durable knowledge: disk full']);
+    expect(ks.getBlock('profile')?.content).toContain(line);
+    expect(ks.getEntry(seeded.id)).not.toBeNull(); // kept, so switching again can finish the job
+  });
+
   it('a failed legacy purge answers 500 too, and the durable half still runs', async () => {
     const { ks, kl } = stores();
     const seeded = seedThread('t-legacy-fails');

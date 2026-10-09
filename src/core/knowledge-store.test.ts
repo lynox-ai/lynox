@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -1124,6 +1124,31 @@ describe('the always-loaded profile block and who may reach into it', () => {
     ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'private-chat' });
     expect(ks.deleteByThread('private-chat')).toBe(1);
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('a private-mode purge THROWS when the block cannot be changed, keeps the rows, and a retry finishes', () => {
+    // A swallowed failure here would answer "nothing of this chat stays" over a line that
+    // keeps loading into every turn. The rows stay so the retry can find the line again —
+    // deleted first, the retry would match nothing and report success.
+    const { ks } = make();
+    ks.setBlockContent('profile', LINE);
+    const id = ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'private-chat' }).id;
+    const spy = vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
+
+    expect(() => ks.deleteByThread('private-chat')).toThrow('disk full');
+    expect(ks.getEntry(id)).not.toBeNull();
+    expect(ks.getBlock('profile')?.content).toContain(LINE);
+
+    spy.mockRestore();
+    expect(ks.deleteByThread('private-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('the other erasures keep their best-effort block step — only the private purge changed', () => {
+    const { ks } = make();
+    const id = seed(ks, 'agent');
+    vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
+    expect(ks.deleteEntry(id)).toBe(true);
   });
 });
 
