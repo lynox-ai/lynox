@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeAll, beforeEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, readdirSync, utimesSync, lutimesSync, lstatSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
@@ -17,6 +17,9 @@ import {
   rawWireSinkDir,
   writeRawWireBody,
   captureRawWireBody,
+  pruneWireSinkDir,
+  pruneWireSinks,
+  WIRE_CAPTURE_RETENTION_MS,
   type WireSnapshotInput,
   type RawWireBody,
 } from './wire-capture.js';
@@ -540,5 +543,107 @@ describe('the provisioned-instance refusal announces itself', () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED/);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('sink retention', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  /** Write a file and backdate its mtime by `ageMs`. */
+  const aged = (dir: string, name: string, ageMs: number): string => {
+    const p = join(dir, name);
+    writeFileSync(p, '{}');
+    const t = (Date.now() - ageMs) / 1000;
+    utimesSync(p, t, t);
+    return p;
+  };
+
+  it('keeps captures for seven days — the settings copy (privacy.wire_capture_subtitle) says so', () => {
+    expect(WIRE_CAPTURE_RETENTION_MS).toBe(7 * DAY);
+  });
+
+  it('pruneWireSinks clears both sinks of expired captures and keeps fresh ones', () => {
+    const wire = mkTmp();
+    const raw = mkTmp();
+    const oldW = aged(wire, 'wire-run-old-t1-1000.json', 8 * DAY);
+    const newW = aged(wire, 'wire-run-new-t1-2000.json', 1 * DAY);
+    const oldR = aged(raw, 'raw-run-old-t1-1000.json', 8 * DAY);
+    pruneWireSinks({ LYNOX_DEBUG_WIRE_SINK: wire, LYNOX_DEBUG_WIRE_RAW_SINK: raw });
+    expect(existsSync(oldW)).toBe(false);
+    expect(existsSync(newW)).toBe(true);
+    expect(existsSync(oldR)).toBe(false);
+  });
+
+  it('prunes both kinds when both sinks share one directory', () => {
+    const shared = mkTmp();
+    const oldW = aged(shared, 'wire-run-old-t1-1000.json', 8 * DAY);
+    const oldR = aged(shared, 'raw-run-old-t1-1000.json', 8 * DAY);
+    pruneWireSinks({ LYNOX_DEBUG_WIRE_SINK: shared, LYNOX_DEBUG_WIRE_RAW_SINK: shared });
+    expect(existsSync(oldW)).toBe(false);
+    expect(existsSync(oldR)).toBe(false);
+  });
+
+  it('leaves a sink directory alone that the write path would refuse, and creates none', () => {
+    const base = mkTmp();
+    const loose = join(base, 'loose');
+    mkdirSync(loose, { mode: 0o755 });
+    chmodSync(loose, 0o755);
+    const inLoose = aged(loose, 'wire-run-a-t1-1000.json', 8 * DAY);
+    const real = mkTmp();
+    const target = aged(real, 'raw-run-b-t1-1000.json', 8 * DAY);
+    const link = join(base, 'linked');
+    symlinkSync(real, link);
+    const missing = join(base, 'never-armed');
+    pruneWireSinks({ LYNOX_DEBUG_WIRE_SINK: loose, LYNOX_DEBUG_WIRE_RAW_SINK: link });
+    expect(existsSync(inLoose)).toBe(true);
+    expect(existsSync(target)).toBe(true);
+    pruneWireSinks({ LYNOX_DEBUG_WIRE_SINK: missing, LYNOX_DEBUG_WIRE_RAW_SINK: missing });
+    expect(existsSync(missing)).toBe(false);
+  });
+
+  it('touches nothing but the sink\'s own file names, however old', () => {
+    const dir = mkTmp();
+    const foreign = [
+      aged(dir, 'notes.json', 30 * DAY),
+      aged(dir, 'wire-run-x.json', 30 * DAY),          // prefix only, not the full shape
+      aged(dir, 'raw-run-x-t1-1000.json', 30 * DAY),   // the OTHER sink's name
+      aged(dir, 'wire-run-x-t1-1000.json.bak', 30 * DAY),
+    ];
+    expect(pruneWireSinkDir(dir, 'wire')).toBe(0);
+    for (const p of foreign) expect(existsSync(p)).toBe(true);
+  });
+
+  it('skips a symlink and a directory that carry a capture name', () => {
+    const dir = mkTmp();
+    const outside = mkTmp();
+    const target = aged(outside, 'precious.json', 30 * DAY);
+    const link = join(dir, 'wire-run-l-t1-1000.json');
+    symlinkSync(target, link);
+    const t = (Date.now() - 30 * DAY) / 1000;
+    lutimesSync(link, t, t);
+    const sub = join(dir, 'wire-run-d-t1-1000.json');
+    mkdirSync(sub);
+    utimesSync(sub, t, t);
+    expect(pruneWireSinkDir(dir, 'wire')).toBe(0);
+    expect(existsSync(target)).toBe(true);
+    expect(existsSync(link)).toBe(true);
+    expect(existsSync(sub)).toBe(true);
+  });
+
+  it('keeps a file exactly at the retention age and removes it one millisecond later', () => {
+    const dir = mkTmp();
+    const p = aged(dir, 'wire-run-a-t1-1.json', 1 * DAY);
+    const mtime = lstatSync(p).mtimeMs;
+    expect(pruneWireSinkDir(dir, 'wire', mtime + WIRE_CAPTURE_RETENTION_MS)).toBe(0);
+    expect(existsSync(p)).toBe(true);
+    expect(pruneWireSinkDir(dir, 'wire', mtime + WIRE_CAPTURE_RETENTION_MS + 1)).toBe(1);
+    expect(existsSync(p)).toBe(false);
+  });
+
+  it('names a capture of a run with an empty id so the prune can find it', () => {
+    const dir = mkTmp();
+    writeWireSnapshot(buildWireSnapshot(baseInput({ runId: '' })), { LYNOX_DEBUG_WIRE_SINK: dir });
+    const [name] = readdirSync(dir);
+    expect(name).toMatch(/^wire-norun-t\d+-\d+\.json$/);
+    expect(pruneWireSinkDir(dir, 'wire', Date.now() + WIRE_CAPTURE_RETENTION_MS + 60_000)).toBe(1);
   });
 });

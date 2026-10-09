@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
@@ -7,6 +7,8 @@ import { reloadConfig } from './config.js';
 import type { GDriveBackupUploader, UploadResult } from './backup-upload-gdrive.js';
 import type { LynoxConfig } from '../types/index.js';
 import { SubjectStore } from './subject-store.js';
+import { RunHistory } from './run-history.js';
+import { WIRE_CAPTURE_RETENTION_MS, type WireSnapshot } from './wire-capture.js';
 import type { ExtractionResult } from './entity-extractor.js';
 
 // Gate 3 (below) stores one memory through the real KnowledgeLayer; extraction is mocked so no
@@ -18,8 +20,10 @@ vi.mock('./entity-extractor.js', async (importOriginal) => {
 });
 
 /**
- * The BOOT-WIRING proof for the two gates in {@link Engine.init} that carry data-protection
- * behaviour: the merge-ledger retention sweep and the Drive-upload tier gate.
+ * The BOOT-WIRING proof for the gates in {@link Engine.init} that carry data-protection
+ * behaviour: the merge-ledger retention sweep, the Drive-upload tier gate, and the debug-capture
+ * retention sweep (at boot and hourly — capture is switched off after use, so a prune that waited
+ * for the next capture would never run). The orphan-subject reap has its own block below.
  *
  * Their DECISIONS are covered elsewhere — `pruneExpiredLedgers` and `driveBackupAllowed` each
  * have their own suite. What was not covered is that `init()` CALLS them: delete either line
@@ -34,7 +38,7 @@ vi.mock('./entity-extractor.js', async (importOriginal) => {
  * a real Engine against a tmp data dir and call `init()` directly. This test is that same
  * shape.
  */
-describe('Engine boot — the two init() gates are actually wired', () => {
+describe('Engine boot — the init() data-protection gates are actually wired', () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
   const ENV_KEYS = [
@@ -47,6 +51,8 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     // `afterEach`. No assertion depended on it, but it is exactly the uncontrolled cross-case
     // state the comment below argues against for the other seven.
     'LYNOX_VAULT_KEY', 'GOOGLE_SERVICE_ACCOUNT_KEY',
+    // An ambient sink override would point the boot sweep at a directory outside the test's.
+    'LYNOX_DEBUG_WIRE_SINK', 'LYNOX_DEBUG_WIRE_RAW_SINK',
   ] as const;
   const saved = new Map<string, string | undefined>();
 
@@ -130,6 +136,77 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     expect(existsSync(expired)).toBe(false);  // boot did the work no merge was coming to do
     expect(existsSync(fresh)).toBe(true);     // and only that work — never the newest
     expect(existsSync(foreign)).toBe(true);   // a file runMerge never wrote is not ours to delete
+  });
+
+  // ─── Debug-capture retention: pruned at boot and hourly, not on the next capture ─────────
+
+  const wireSnap = (runId: string, capturedAt: number): WireSnapshot => ({
+    runId, turnIndex: 1, model: 'm', provider: 'p', systemPromptHash: 'h', userMessage: 'u',
+    userMessageChars: 1, toolNames: [], toolCount: 0, toolChoice: undefined, temperature: undefined,
+    maxTokens: 1, ephemeralTailPresent: false, ephemeralTailChars: 0, capturedAt,
+  });
+  const wireRunIds = (engine: Engine): string[] =>
+    (engine.getRunHistory()!.getDb().prepare('SELECT run_id FROM wire_snapshots ORDER BY run_id').all() as Array<{ run_id: string }>)
+      .map(r => r.run_id);
+  /** A sink file, backdated by `ageMs`, in a 0700 sink dir as `prepareSinkDir` would leave it. */
+  function seedSinkFile(sinkDir: string, name: string, ageMs: number): string {
+    mkdirSync(sinkDir, { recursive: true, mode: 0o700 });
+    const full = join(sinkDir, name);
+    writeFileSync(full, '{}');
+    const t = (Date.now() - ageMs) / 1000;
+    utimesSync(full, t, t);
+    return full;
+  }
+
+  it('prunes expired debug captures at boot, with capture switched off', async () => {
+    const dir = freshDataDir('wire-boot');
+    const now = Date.now();
+    // Captured earlier, capture since switched off: nothing will insert again, so only boot
+    // can remove the expired row. `debug_wire_capture` is absent from the config here.
+    const seed = new RunHistory(join(dir, 'history.db'));
+    seed.insertWireSnapshot(wireSnap('run-expired', now - WIRE_CAPTURE_RETENTION_MS - 60_000));
+    seed.insertWireSnapshot(wireSnap('run-fresh', now - 60_000));
+    seed.close();
+    const oldWire = seedSinkFile(join(dir, 'wire-sink'), 'wire-run-x-t1-1000.json', WIRE_CAPTURE_RETENTION_MS + 86_400_000);
+    const oldRaw = seedSinkFile(join(dir, 'wire-sink-raw'), 'raw-run-x-t1-1000.json', WIRE_CAPTURE_RETENTION_MS + 86_400_000);
+    const freshRaw = seedSinkFile(join(dir, 'wire-sink-raw'), 'raw-run-y-t1-2000.json', 60_000);
+
+    const engine = await boot();
+
+    expect(wireRunIds(engine)).toEqual(['run-fresh']);
+    expect(existsSync(oldWire)).toBe(false);
+    expect(existsSync(oldRaw)).toBe(false);
+    expect(existsSync(freshRaw)).toBe(true);
+  });
+
+  it('keeps pruning hourly while the engine runs', async () => {
+    freshDataDir('wire-hourly');
+    const spy = vi.spyOn(globalThis, 'setInterval');
+    let engine: Engine;
+    let hourly: Array<Parameters<typeof setInterval>>;
+    let handle: unknown;
+    try {
+      engine = await boot();
+      hourly = spy.mock.calls.filter(c => c[1] === 60 * 60_000);
+      handle = spy.mock.results[spy.mock.calls.findIndex(c => c[1] === 60 * 60_000)]?.value;
+    } finally {
+      spy.mockRestore();
+    }
+    expect(hourly).toHaveLength(1);
+    // A row that expires after boot — the boot sweep cannot have seen it.
+    engine.getRunHistory()!.insertWireSnapshot(wireSnap('run-late', Date.now() - WIRE_CAPTURE_RETENTION_MS - 60_000));
+    expect(wireRunIds(engine)).toEqual(['run-late']);
+    (hourly[0]![0] as () => void)();
+    expect(wireRunIds(engine)).toEqual([]);
+
+    // And shutdown stops it, rather than leaving a sweep to fire on a closed store.
+    const clear = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      await engine.shutdown();
+      expect(clear.mock.calls.some(c => c[0] === handle)).toBe(true);
+    } finally {
+      clear.mockRestore();
+    }
   });
 
   // ─── Gate 2: the Drive-upload gates — tier at boot, consent at upload ───────────────────

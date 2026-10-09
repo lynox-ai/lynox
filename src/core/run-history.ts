@@ -9,6 +9,7 @@ import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
 import type { WireSnapshot } from './wire-capture.js';
+import { WIRE_CAPTURE_RETENTION_MS } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
@@ -1215,9 +1216,11 @@ const MIGRATIONS: string[] = [
   // it is redacted-but-personal owner data. `system_prompt_hash` points into
   // prompt_snapshots (the big system text is not duplicated per turn). Written ONLY
   // when the owner-consent `debug_wire_capture` setting is on. Pruned when the thread
-  // is deleted (DELETE /api/threads/:id → deleteWireSnapshotsForThread) or when a run
-  // is explicitly removed (deleteRun cascade); there is no time-based prune, so a live
-  // thread's snapshots persist for as long as the thread does.
+  // is deleted (DELETE /api/threads/:id → deleteWireSnapshotsForThread), when a run
+  // is explicitly removed (deleteRun cascade), and by age: rows older than
+  // WIRE_CAPTURE_RETENTION_MS go at engine boot and on the hourly sweep
+  // (pruneExpiredWireSnapshots). (This comment said "there is no time-based prune" until
+  // that existed.)
   `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
    CREATE TABLE IF NOT EXISTS wire_snapshots (
      run_id TEXT NOT NULL,
@@ -2693,6 +2696,20 @@ export class RunHistory {
       snapshot.capturedAt,
     );
   }
+
+  /**
+   * Delete wire snapshots captured more than `retentionMs` before `now`. Returns the count.
+   *
+   * Age is `captured_at`, the capture time the Agent seam stamped — not the run's start, so a
+   * long run's late turns are not dropped early. The connection runs with `secure_delete` on
+   * (`zeroDeletedContent`), so a pruned row's content is overwritten, not just unlinked. Called
+   * by the engine at boot and hourly, not from `insertWireSnapshot`: capture is switched off
+   * after use, and then no insert would ever come to trigger it.
+   */
+  pruneExpiredWireSnapshots(now: number = Date.now(), retentionMs: number = WIRE_CAPTURE_RETENTION_MS): number {
+    return this.db.prepare('DELETE FROM wire_snapshots WHERE captured_at < ?').run(now - retentionMs).changes;
+  }
+
 
   /**
    * Read the persisted wire snapshots for a run, decrypted + turn-ordered, for the
