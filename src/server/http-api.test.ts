@@ -130,6 +130,9 @@ const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'comple
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
 const mockTaskMarkEditedBy = vi.fn().mockReturnValue(true);
+const mockTaskCreateScheduled = vi.fn().mockReturnValue({ id: 'cron-1', title: 'Cron' });
+// A to-do lookup: none by default, so an unmarked id reads as "no such row" (the route's 404).
+const mockTaskGetTask = vi.fn().mockReturnValue(undefined);
 const mockTaskGetTrigger = vi.fn().mockReturnValue({ id: 'task-1', effect: 'run_agent' });
 const mockConfirmTrigger = vi.fn().mockReturnValue({ id: 'task-1', confirmed_at: '2026-06-01T00:00:00.000Z' });
 const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
@@ -277,9 +280,11 @@ vi.mock('../core/engine.js', () => ({
       update: mockTaskUpdate,
       complete: mockTaskComplete,
       createPipelineTask: mockTaskCreatePipeline,
+      createScheduled: mockTaskCreateScheduled,
       setEnabled: mockTaskSetEnabled,
       confirmTrigger: mockConfirmTrigger,
       markEditedBy: mockTaskMarkEditedBy,
+      getTask: mockTaskGetTask,
       getTrigger: mockTaskGetTrigger,
     });
     this.getThreadStore = vi.fn().mockReturnValue(null);
@@ -954,26 +959,43 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
-    it('starts a run under the principal of the request — the mandate\'s and, after it, the owner\'s (D1, §3.13 E1)', async () => {
-      // The session keeps the last run's principal when a run names none, so the route must
-      // name the owner too: otherwise an owner's run after a mandate's would stay locked.
+    it('starts no run for a mandate session, and the owner\'s run under the owner (§3.13 E1)', async () => {
+      // Starting a conversation is the owner's until a mandate can be bound to what it set up.
       // The run route's key pre-flight, as the `runs` block sets it.
       mockSecretResolve.mockImplementation((name: string) => name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null);
-      const runAs = async (token: string): Promise<unknown> => {
+      const runAs = async (token: string): Promise<{ status: number; principal: unknown }> => {
         mockSessionRun.mockClear();
         const res = await fetch(`${baseUrl}/api/sessions/test/run`, {
           method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ task: 'set up the instance' }),
         });
         await res.text();
-        expect(mockSessionRun).toHaveBeenCalledTimes(1);
-        return (mockSessionRun.mock.calls[0] as unknown[])[1];
+        const call = mockSessionRun.mock.calls[0] as unknown[] | undefined;
+        return { status: res.status, principal: call?.[1] };
       };
       const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
-      // The actor trail names who acted: the display name and the mandate id ride along (H2h).
-      expect(await runAs(mandate)).toMatchObject({ principal: { kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id } });
+      const refused = await runAs(mandate);
+      expect(refused.status).toBe(403);
+      expect(mockSessionRun).not.toHaveBeenCalled();
       const owner = webUiLoginSession(TEST_SECRET, null)!.token;
-      expect(await runAs(owner)).toMatchObject({ principal: { kind: 'owner' } });
+      expect((await runAs(owner)).principal).toMatchObject({ principal: { kind: 'owner' } });
+    });
+
+    it('carries the mandate\'s display name and mandate id from the cookie into the request principal (H2h)', async () => {
+      // Read where a mandate may act and the principal is recorded: a schedule delete writes
+      // its actor-trail row with the principal of the request.
+      const rows: Array<{ principal: unknown }> = [];
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origLog = engineRef['getAuditLog'];
+      const origHistory = engineRef['getRunHistory'];
+      engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
+      engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
+      try {
+        const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+        const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
+        expect(res.status).toBe(200);
+      } finally { engineRef['getAuditLog'] = origLog; engineRef['getRunHistory'] = origHistory; }
+      expect(rows[0]?.principal).toEqual({ kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id });
     });
 
     it('gives a mandate session the user scope even without an admin secret (D6)', async () => {
@@ -13682,7 +13704,41 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
   describe('DELETE /api/tasks/:id', () => {
     const history = (deleted: boolean): Record<string, unknown> => ({
+      getTask: vi.fn().mockReturnValue(undefined),
       deleteTask: vi.fn().mockReturnValue(false), deleteTrigger: vi.fn().mockReturnValue(deleted),
+    });
+
+    it('refuses a mandate\'s delete of a to-do before anything runs: nothing deleted, no row', async () => {
+      const h = { ...history(true), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h }, async () => {
+        asMandate();
+        const res = await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a to-do.');
+      });
+      expect(h.deleteTask).not.toHaveBeenCalled();
+      expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      expect(rows()).toEqual([]);
+    });
+
+    it('never deletes a to-do for a mandate, even one its check did not find', async () => {
+      // The check reads the task store, the delete the legacy table: a to-do whose mirror
+      // write failed is missing from the one and present in the other.
+      const h = { ...history(false), deleteTask: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(404);
+      });
+      expect(h.deleteTask).not.toHaveBeenCalled();
+      expectPair('DELETE /api/tasks/:id', 'todo-1', 'refused');
+    });
+
+    it('control: the owner deletes a to-do', async () => {
+      const h = { ...history(false), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h }, async () => {
+        expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(200);
+      });
+      expect(h.deleteTask).toHaveBeenCalledWith('todo-1');
     });
 
     it('records attempt and done around a mandate\'s delete', async () => {
@@ -13726,29 +13782,19 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   });
 
   describe('DELETE /api/workflows/:id', () => {
-    it('records attempt and done around a mandate\'s delete, and refused on a 404', async () => {
+    // Owner-only: deleting a workflow silences every schedule that runs it. The route keeps
+    // its trail writer for the day it opens; while it is closed a mandate leaves no row,
+    // because nothing was attempted.
+    it('refuses a mandate before anything runs: nothing deleted, no row', async () => {
       const deletePlannedPipeline = vi.fn().mockReturnValue(true);
       await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
         asMandate();
-        expect((await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' })).status).toBe(200);
-      });
-      expectPair('DELETE /api/workflows/:id', 'wf-1', 'done');
-      db.getDb().exec('DROP TRIGGER audit_log_no_update; DELETE FROM audit_log;');
-      deletePlannedPipeline.mockReturnValue(false);
-      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
-        asMandate();
-        expect((await jsonFetch('/api/workflows/wf-2', { method: 'DELETE' })).status).toBe(404);
-      });
-      expectPair('DELETE /api/workflows/:id', 'wf-2', 'refused');
-    });
-
-    it('answers 503 and deletes nothing when the attempt cannot be written', async () => {
-      const deletePlannedPipeline = vi.fn().mockReturnValue(true);
-      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }), getAuditLog: () => failingLog }, async () => {
-        asMandate();
-        expect((await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' })).status).toBe(503);
+        const res = await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a workflow.');
       });
       expect(deletePlannedPipeline).not.toHaveBeenCalled();
+      expect(rows()).toEqual([]);
     });
   });
 
@@ -13806,5 +13852,212 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       expect(l.runTriggerNow).toHaveBeenCalledTimes(1);
       expect(rows()).toEqual([]);
     });
+  });
+});
+
+// PRD customer-granted-operator-access §3.13: every `user` route that writes declares, at its
+// registration, what a mandate may do there. Read off the route table the server really
+// builds, so a route added tomorrow is in the set without anyone listing it.
+//
+// ⚠ What this checks and what it does not: that each such route DECLARES a stance, and for
+// `owner-only` that the stance is APPLIED (the dispatcher refuses before the handler). For
+// `mark`, `own` and `free` it checks neither that the handler does what the stance says nor
+// that the stance is the right one; those are the handlers' own tests and a reviewer's call.
+describe('mandate stance of every route that writes', () => {
+  const WRITE = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+  const table = (): ReturnType<typeof api.routeStancesForTesting> => api.routeStancesForTesting();
+  const writes = (): ReturnType<typeof api.routeStancesForTesting> => table().filter(r => r.scope === 'user' && WRITE.has(r.method));
+  /** A request path for a route: a dynamic pattern's groups filled with a placeholder. */
+  const concrete = (path: string): string => path.replace(/:[^/]+/g, 'stance-probe');
+  const name = (r: { method: string; path: string }): string => `${r.method} ${concrete(r.path)}`;
+
+  it('finds a stance on every user route that writes, and a reason on every free one', () => {
+    const all = writes();
+    // The set is the real one, not an empty filter.
+    expect(all.length).toBeGreaterThan(70);
+    expect(all.filter(r => r.stance === undefined).map(name), 'declare a MandateStance at the registration').toEqual([]);
+    for (const r of all) {
+      if (r.stance?.kind === 'free') expect(r.stance.why.trim().length, name(r)).toBeGreaterThan(10);
+      if (r.stance?.kind === 'owner-only') expect(r.stance.what.trim().length, name(r)).toBeGreaterThan(3);
+    }
+  });
+
+  it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {
+    const open = writes().filter(r => r.stance !== undefined && r.stance.kind !== 'owner-only').map(r => `${name(r)} ${r.stance!.kind}`).sort();
+    expect(open).toEqual([
+      'DELETE /api/tasks/stance-probe mark',
+      'PATCH /api/tasks/stance-probe mark',
+      'POST /api/llm/test free',
+      'POST /api/mail/accounts/test free',
+      'POST /api/mail/autodiscover free',
+      'POST /api/onboarding/derive-domain free',
+      'POST /api/searxng/check free',
+      'POST /api/secrets/validate-key free',
+      'POST /api/tasks mark',
+      'POST /api/tasks/stance-probe/complete mark',
+      'POST /api/triggers/stance-probe/run own',
+      'POST /api/workflows/stance-probe/grant-preview free',
+    ]);
+  });
+
+  describe('owner-only is applied, not only declared', () => {
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterEach(() => {
+      api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+      for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    });
+
+    it('refuses a mandate at every owner-only route with that route\'s sentence, before its handler', async () => {
+      const closed = writes().filter(r => r.stance?.kind === 'owner-only');
+      expect(closed.length).toBeGreaterThan(40);
+      api.setPrincipalResolverForTesting(() => MANDATE);
+      const wrong: string[] = [];
+      for (const r of closed) {
+        const res = await jsonFetch(concrete(r.path), { method: r.method, body: '{}' });
+        const error = res.status === 403 ? ((await res.json()) as { error?: string }).error : `status ${String(res.status)}`;
+        const want = `Only the owner of this instance can ${(r.stance as { what: string }).what}.`;
+        if (error !== want) wrong.push(`${name(r)}: ${String(error)}`);
+        for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+      }
+      expect(wrong).toEqual([]);
+    });
+
+    it('lets the owner past the same check (the handler answers, whatever it says)', async () => {
+      // Three routes whose handlers answer the mock engine harmlessly.
+      for (const [method, path] of [['POST', '/api/bulk/runs/stance-probe/undo'], ['PATCH', '/api/workflows/stance-probe'], ['POST', '/api/sessions/stance-probe/abort']] as const) {
+        const res = await jsonFetch(path, { method, body: '{}' });
+        const text = await res.text();
+        expect(text, `${method} ${path}`).not.toContain('Only the owner of this instance');
+      }
+    });
+  });
+});
+
+describe('PUT /api/secrets/:name and a mandate', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  afterEach(() => { api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL); });
+
+  async function put(principal: RequestPrincipal, slot: string): Promise<{ status: number; set: ReturnType<typeof vi.fn> }> {
+    const set = vi.fn();
+    const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const orig = engineRef['getSecretStore'];
+    engineRef['getSecretStore'] = () => ({
+      getMasked: () => null, listVaultNames: () => [], isEnvironmentSecret: () => false,
+      set, recordConsent: vi.fn(),
+      // `errorResponse` masks every answer through the store.
+      maskAll: (t: string) => t, maskSecrets: (t: string) => t,
+    });
+    api.setPrincipalResolverForTesting(() => principal);
+    try {
+      const res = await jsonFetch(`/api/secrets/${slot}`, { method: 'PUT', body: JSON.stringify({ value: 'NEW-VALUE' }) });
+      if (res.status === 403) expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can store a secret.');
+      return { status: res.status, set };
+    } finally { engineRef['getSecretStore'] = orig; }
+  }
+
+  it('refuses a mandate even for a name nothing holds yet: a new name can still take precedence over the value in use', async () => {
+    // A vault value outranks one in config.json, and a primary key slot outranks its
+    // fallback, so "the name is new" does not mean "nothing the owner uses changes".
+    const r = await put(MANDATE, 'MISTRAL_API_KEY');
+    expect(r.status).toBe(403);
+    expect(r.set).not.toHaveBeenCalled();
+  });
+
+  it('control: the owner stores a secret, and replaces one that exists', async () => {
+    const replaced = await put(OWNER_PRINCIPAL, 'ANTHROPIC_API_KEY');
+    expect(replaced.status).toBe(200);
+    expect(replaced.set).toHaveBeenCalledWith('ANTHROPIC_API_KEY', 'NEW-VALUE');
+  });
+
+  it('control: the owner stores a new name', async () => {
+    const r = await put(OWNER_PRINCIPAL, 'CRM_CLIENT_ID');
+    expect(r.status).toBe(200);
+    expect(r.set).toHaveBeenCalledWith('CRM_CLIENT_ID', 'NEW-VALUE');
+  });
+});
+
+
+describe('a mandate and a to-do', () => {
+  // A to-do has no stamp to drop and records no one who set it up, so nothing on it would
+  // carry a mandate's act: creating, changing, completing it is refused. A trigger is marked.
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  afterEach(() => {
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    mockTaskMarkEditedBy.mockReturnValue(true);
+    mockTaskGetTask.mockReturnValue(undefined);
+    mockTaskUpdate.mockReset().mockReturnValue({ id: 'task-1', title: 'Updated' });
+  });
+
+  it.each([
+    ['PATCH', '/api/tasks/todo-1', { title: 'changed' }],
+    ['POST', '/api/tasks/todo-1/complete', {}],
+  ] as const)('refuses %s %s for a to-do, and changes nothing', async (method, path, body) => {
+    mockTaskMarkEditedBy.mockReturnValue(false);
+    mockTaskGetTask.mockReturnValue({ id: 'todo-1', title: 'a to-do' });
+    mockTaskUpdate.mockClear(); mockTaskComplete.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch(path, { method, body: JSON.stringify(body) });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can change a to-do.');
+    expect(mockTaskUpdate).not.toHaveBeenCalled();
+    expect(mockTaskComplete).not.toHaveBeenCalled();
+  });
+
+  it('control: a mandate\'s change to a trigger is marked and goes through', async () => {
+    mockTaskUpdate.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
+    expect(res.status).toBe(200);
+    expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', 'mandate:recipient@example.invalid', true);
+    expect(mockTaskUpdate).toHaveBeenCalled();
+  });
+
+  it('leaves a mandate\'s change to an unknown id at 404', async () => {
+    mockTaskMarkEditedBy.mockReturnValue(false);
+    mockTaskUpdate.mockReturnValueOnce(undefined);
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks/nope', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
+    expect(res.status).toBe(404);
+  });
+
+  it('refuses a mandate\'s new to-do, and creates nothing', async () => {
+    mockTaskCreate.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a to-do' }) });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can create a to-do.');
+    expect(mockTaskCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['one-off schedule', { runAt: '2026-11-01T09:00:00Z' }, mockTaskCreate],
+    ['schedule assigned to lynox', { assignee: 'lynox' }, mockTaskCreate],
+    ['recurring schedule', { scheduleCron: '0 9 * * 1' }, mockTaskCreateScheduled],
+  ] as const)('control: a mandate\'s new %s is created', async (_label, fields, created) => {
+    created.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a run', ...fields }) });
+    expect(res.status).toBe(201);
+    expect(created).toHaveBeenCalled();
+  });
+
+  it('control: the owner creates a to-do', async () => {
+    mockTaskCreate.mockClear();
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a to-do' }) });
+    expect(res.status).toBe(201);
+    expect(mockTaskCreate).toHaveBeenCalled();
+  });
+
+  it('control: the owner changes a to-do', async () => {
+    mockTaskMarkEditedBy.mockReturnValue(false);
+    mockTaskGetTask.mockReturnValue({ id: 'todo-1', title: 'a to-do' });
+    mockTaskUpdate.mockClear();
+    const res = await jsonFetch('/api/tasks/todo-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
+    expect(res.status).toBe(200);
+    expect(mockTaskUpdate).toHaveBeenCalled();
   });
 });
