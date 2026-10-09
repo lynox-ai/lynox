@@ -1267,7 +1267,7 @@ describe('mail_reply — smart reply-from', () => {
       envelope: {
         ...envelope(44, { messageId: '<inbound44@x>', from: 'alice@example.org', subject: 'Plan' }),
         to: [{ address: 'New@Gmail.com' }],
-        cc: [{ address: 'colleague@example.org' }],
+        cc: [{ address: 'colleague@example.org' }, { address: 'old@gmail.com' }],
       },
       text: 'hi', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
     });
@@ -1279,7 +1279,7 @@ describe('mail_reply — smart reply-from', () => {
 
     const cc = (gmail.send.mock.calls[0]![0].cc ?? []).map(a => a.address.toLowerCase());
     expect(cc, 'the live sending address is not copied on its own reply').not.toContain('new@gmail.com');
-    expect(cc, 'other recipients stay').toEqual(['colleague@example.org']);
+    expect(cc, 'other recipients stay, the stored old address too — it no longer sends').toEqual(['colleague@example.org', 'old@gmail.com']);
     expect(prompt, 'the confirmation shows the same address as the sender').toContain('**From:** new@gmail.com (account gmail-old)');
   });
 
