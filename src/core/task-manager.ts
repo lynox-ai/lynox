@@ -7,7 +7,7 @@ import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
-import { isMandateTag, ownedBy, type RequestPrincipal } from './request-principal.js';
+import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -395,13 +395,16 @@ export class TaskManager {
    * tries the triggers next). A mandate deletes only a to-do of its own, and only while every
    * task under it, at any depth, is its own too: those the owner added are not the mandate's
    * to delete, and one further down holds the delete back as much. Checked on rows read from
-   * the table the delete removes from. The owner, and the engine (no principal), pass both.
+   * the table the delete removes from. The owner's and the engine's delete (no principal) is
+   * the legacy one, unchanged and without that read: it also clears the mirror and the subtasks
+   * of an id whose own row is gone.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
+    if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
     const { task, descendants } = this.history.getTaskDeleteSet(id);
     if (task === undefined) return false;
     refuseForeignTodo(task, by, 'delete');
-    if (by !== undefined && descendants.some((sub) => !ownedBy(sub, by))) throw new TodoHasForeignSubtasksError();
+    if (descendants.some((sub) => !ownedBy(sub, by))) throw new TodoHasForeignSubtasksError();
     return this.history.deleteTask(id);
   }
 

@@ -1294,6 +1294,17 @@ describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (grap
       expect(gone(ownerSub)).toBe(true);
     });
 
+    it.each([
+      ['the owner', OWNER_PRINCIPAL],
+      ['the engine (no principal)', undefined],
+    ] as const)('control: %s still clears a to-do the legacy table no longer holds from the mirror', (_l, by) => {
+      const id = mine();
+      history.getDb().prepare('DELETE FROM tasks WHERE id = ?').run(id);
+      expect(engine.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id)).toBeDefined();
+      tm.deleteTodo(id, by);
+      expect(engine.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id)).toBeUndefined();
+    });
+
     it('answers false for an unknown id', () => {
       expect(tm.deleteTodo('nope', M)).toBe(false);
       expect(tm.deleteTodo('nope', OTHER)).toBe(false);
