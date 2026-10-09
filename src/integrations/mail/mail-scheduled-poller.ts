@@ -20,7 +20,7 @@
 import type { MailRegistry } from './tools/registry.js';
 import type { MailStateDb, ScheduledSend } from './state.js';
 import type { MailErrorCode } from './provider.js';
-import { sendMail, type SendCoreFailureStatus, type SendCoreInput } from './send-core.js';
+import { accountLookupOnly, sendMail, type MailAccountLookup, type SendCoreFailureStatus, type SendCoreInput } from './send-core.js';
 
 /** Max retries before a row is marked permanently failed. */
 const MAX_ATTEMPTS = 3;
@@ -70,6 +70,12 @@ export function classifyScheduledFailure(r: { status: SendCoreFailureStatus; err
 export interface ScheduledSendPollerOptions {
   state: MailStateDb;
   registry: MailRegistry;
+  /**
+   * Account configurations, so a receive-only account is refused here exactly
+   * as it is for an immediate send. Required, not optional: without it
+   * `sendMail` cannot see the account type and sends from any account.
+   */
+  accounts: MailAccountLookup;
   /** Poll cadence in milliseconds. Default 60_000 (1 minute). */
   intervalMs?: number;
   /** Cap on items processed per tick. Default 25 — bounded SMTP burst. */
@@ -152,7 +158,7 @@ async function fireOne(
   // gates at queue-insert time, the poller is just the deferred actuator.
   let result: Awaited<ReturnType<typeof sendMail>>;
   try {
-    result = await sendMail(opts.registry, sendInput, { skipRateLimit: true });
+    result = await sendMail(opts.registry, sendInput, { skipRateLimit: true }, accountLookupOnly(opts.accounts));
   } catch (err) {
     // sendMail returns its own refusals and catches the provider's errors, so a throw is
     // unexpected and its place in the pipeline unknown — most likely before the send (resolving

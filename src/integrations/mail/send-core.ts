@@ -31,6 +31,24 @@ import {
   type MailSendResult,
 } from './provider.js';
 import type { MailContext } from './context.js';
+
+/**
+ * The one thing `sendMail` reads from the mail context: the account's
+ * configuration, which decides whether the account may send at all
+ * (receive-only types are refused). Narrowed so a caller that is not the
+ * agent's tool, such as the scheduled-send poller or the escalation channel,
+ * can hand it over without the whole context.
+ */
+export type MailAccountLookup = Pick<MailContext, 'getAccountConfig'>;
+
+/**
+ * Hand `sendMail` the account lookup ALONE. A caller holding the whole
+ * context would otherwise also switch on the follow-up and sent-mail log
+ * writes below, which only the agent's own send makes.
+ */
+export function accountLookupOnly(accounts: MailAccountLookup): MailAccountLookup {
+  return { getAccountConfig: (id) => accounts.getAccountConfig(id) };
+}
 import { reflowMailBody } from './body-reflow.js';
 import type { MailProvider } from './provider.js';
 import type { SentMailLogInput } from './state.js';
@@ -121,7 +139,7 @@ export async function sendMail(
   registry: MailRegistry,
   input: SendCoreInput,
   opts: SendCoreOptions = {},
-  ctx?: MailContext,
+  ctx?: MailContext | MailAccountLookup,
 ): Promise<SendCoreResult> {
   if (!opts.skipRateLimit) {
     const rateBlock = checkMailRateLimit('mail_send');
@@ -215,14 +233,15 @@ export async function sendMail(
   recordMailSend(allRecipients, input.subject);
 
   let followupId: string | null = null;
-  if (opts.trackFollowup && ctx) {
+  const stateDb = ctx && 'stateDb' in ctx ? ctx.stateDb : undefined;
+  if (opts.trackFollowup && stateDb) {
     const days = Number(opts.trackFollowup.reminder_in_days);
     if (Number.isFinite(days) && days > 0 && opts.trackFollowup.reason) {
       const reminderAt = new Date(Date.now() + days * 86_400_000);
       const primary = input.to[0]?.address ?? '';
       const messageId = result.messageId || `local-${String(Date.now())}`;
       try {
-        followupId = ctx.stateDb.recordFollowup({
+        followupId = stateDb.recordFollowup({
           accountId: provider.accountId,
           sentMessageId: messageId,
           threadKey: messageId,
@@ -243,7 +262,7 @@ export async function sendMail(
   // a write failure must never roll back the user-visible send. Logged
   // at debug so persistent schema/permission breakage stays diagnosable
   // (silent swallow once cost us a week of missing sidebar history).
-  if (ctx) {
+  if (stateDb) {
     try {
       const sentLogInput: SentMailLogInput = {
         accountId: provider.accountId,
@@ -256,7 +275,7 @@ export async function sendMail(
       };
       if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
       if (followupId !== null) sentLogInput.followupId = followupId;
-      ctx.stateDb.recordSentMail(sentLogInput);
+      stateDb.recordSentMail(sentLogInput);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[mail/send-core] recordSentMail failed: ${msg}\n`);

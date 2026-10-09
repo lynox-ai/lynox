@@ -14,10 +14,11 @@ vi.mock('./send-core.js', async (orig) => ({
 const { EscalationMailChannel, formatEscalationBody } = await import('./escalation-mail-channel.js');
 
 const registry = { get: () => null, list: () => [], default: () => 'acct-1' } satisfies MailRegistry;
+const accounts = { getAccountConfig: () => null };
 const CHEF = 'chef@betrieb.example';
 
 function channel(over: Partial<{ allowedRecipients: readonly string[]; account: string }> = {}) {
-  return new EscalationMailChannel({ registry, allowedRecipients: [CHEF], ...over });
+  return new EscalationMailChannel({ registry, accounts, allowedRecipients: [CHEF], ...over });
 }
 
 function msg(over: Partial<NotificationMessage> = {}): NotificationMessage {
@@ -34,6 +35,37 @@ describe('EscalationMailChannel — what reaches the wire', () => {
   beforeEach(() => {
     sendMail.mockReset();
     sendMail.mockResolvedValue({ ok: true, result: {}, followupId: null });
+  });
+
+  it('hands sendMail the account lookup, so a receive-only account is refused', async () => {
+    const lookup = vi.fn(() => null);
+    // Handed the WHOLE context shape, as the engine would: the channel must still
+    // pass on the lookup alone.
+    const whole = { getAccountConfig: lookup, stateDb: { recordSentMail: vi.fn() } };
+    await new EscalationMailChannel({ registry, accounts: whole, allowedRecipients: [CHEF] }).send(msg({ recipient: CHEF }));
+    const passed = sendMail.mock.calls[0]?.[3] as { getAccountConfig: (id: string) => unknown } | undefined;
+    passed?.getAccountConfig('acct-1');
+    expect(lookup).toHaveBeenCalledWith('acct-1');
+    // The lookup alone: no state DB rides along, so no sidebar or follow-up write is switched on.
+    expect(passed && 'stateDb' in passed).toBe(false);
+  });
+
+  it('refuses through the REAL pipeline when the sending account is receive-only', async () => {
+    const actual = await vi.importActual<typeof import('./send-core.js')>('./send-core.js');
+    sendMail.mockImplementation(actual.sendMail);
+    const providerSend = vi.fn();
+    const provider = { accountId: 'acct-1', send: providerSend };
+    const reg = { get: () => provider, getDefault: () => provider, list: () => [], default: () => 'acct-1' } as unknown as MailRegistry;
+    const typed = (type: string) => ({ getAccountConfig: () => ({ id: 'acct-1', type }) }) as never;
+
+    const refused = new EscalationMailChannel({ registry: reg, accounts: typed('info'), allowedRecipients: [CHEF] });
+    expect(await refused.send(msg({ recipient: CHEF }))).toBe(false);
+    expect(providerSend).not.toHaveBeenCalled();
+
+    providerSend.mockResolvedValue({ messageId: '<m@x>', accepted: [CHEF], rejected: [] });
+    const allowed = new EscalationMailChannel({ registry: reg, accounts: typed('personal'), allowedRecipients: [CHEF] });
+    expect(await allowed.send(msg({ recipient: CHEF, title: 'Zweite Eskalation' }))).toBe(true);
+    expect(providerSend).toHaveBeenCalledTimes(1);
   });
 
   it('hands sendMail exactly the recipient, subject and rendered case — and nothing else', async () => {
@@ -83,13 +115,13 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   });
 
   it('refuses everything when the allowlist is empty', async () => {
-    const ch = new EscalationMailChannel({ registry });
+    const ch = new EscalationMailChannel({ registry, accounts });
     expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
     expect(sendMail).not.toHaveBeenCalled();
   });
 
   it('matches the allowlist case-insensitively and ignores surrounding space', async () => {
-    const ch = new EscalationMailChannel({ registry, allowedRecipients: ['  CHEF@Betrieb.example '] });
+    const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: ['  CHEF@Betrieb.example '] });
     expect(await ch.send(msg({ recipient: CHEF }))).toBe(true);
     expect(sendMail).toHaveBeenCalledTimes(1);
   });
@@ -118,7 +150,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   });
 
   it('accepts a display-name form in the ALLOWLIST too', async () => {
-    const ch = new EscalationMailChannel({ registry, allowedRecipients: [`Chef <${CHEF}>`] });
+    const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: [`Chef <${CHEF}>`] });
     expect(await ch.send(msg({ recipient: CHEF }))).toBe(true);
     expect(wireInput()['to']).toEqual([{ address: CHEF }]);
   });
@@ -126,7 +158,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   it('refuses an allowlist entry holding two addresses instead of expanding it', async () => {
     // The same string is refused on the way in, so accepting it in the config
     // would make one direction of the same value stricter than the other.
-    const ch = new EscalationMailChannel({ registry, allowedRecipients: [`${CHEF}, zweit@betrieb.example`] });
+    const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: [`${CHEF}, zweit@betrieb.example`] });
     expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
     expect(await ch.send(msg({ recipient: 'zweit@betrieb.example' }))).toBe(false);
     expect(sendMail).not.toHaveBeenCalled();
@@ -142,7 +174,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
       return true;
     });
     try {
-      new EscalationMailChannel({ registry, allowedRecipients: [CHEF, 'x@b.example, y@c.example', 'kaputt'] });
+      new EscalationMailChannel({ registry, accounts, allowedRecipients: [CHEF, 'x@b.example, y@c.example', 'kaputt'] });
     } finally {
       spy.mockRestore();
     }
@@ -161,7 +193,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     });
     let ch: InstanceType<typeof EscalationMailChannel>;
     try {
-      ch = new EscalationMailChannel({ registry, allowedRecipients: [`${CHEF}; zweit@betrieb.example`] });
+      ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: [`${CHEF}; zweit@betrieb.example`] });
     } finally {
       spy.mockRestore();
     }
@@ -179,7 +211,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
       return true;
     });
     try {
-      new EscalationMailChannel({ registry, allowedRecipients: ['chef', 'auch-keine-adresse'] });
+      new EscalationMailChannel({ registry, accounts, allowedRecipients: ['chef', 'auch-keine-adresse'] });
     } finally {
       spy.mockRestore();
     }
@@ -194,8 +226,8 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
       return true;
     });
     try {
-      new EscalationMailChannel({ registry, allowedRecipients: [] });
-      new EscalationMailChannel({ registry });
+      new EscalationMailChannel({ registry, accounts, allowedRecipients: [] });
+      new EscalationMailChannel({ registry, accounts });
     } finally {
       spy.mockRestore();
     }
@@ -206,7 +238,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     // Checking one value and sending another is the gap. `banKer` case-folds
     // onto the entry, so it passes the check — and must not be what ships,
     // because for a domain a case-fold can be a different IDNA label.
-    const ch = new EscalationMailChannel({ registry, allowedRecipients: ['chef@banker.example'] });
+    const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: ['chef@banker.example'] });
     expect(await ch.send(msg({ recipient: 'chef@banKer.example' }))).toBe(true);
     expect(wireInput()['to']).toEqual([{ address: 'chef@banker.example' }]);
   });

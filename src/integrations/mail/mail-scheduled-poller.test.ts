@@ -8,6 +8,13 @@ let db: MailStateDb;
 let sendCalls: MailSendInput[];
 let provider: MailProvider;
 let registry: MailRegistry;
+/**
+ * Answers from the same DB the rows live in, and carries a state DB like the
+ * engine's MailContext does — so a poller that passed the whole object on would
+ * switch on the sent-mail log, and `sentLog` would see it.
+ */
+const sentLog = vi.fn();
+const accounts = { getAccountConfig: (id: string) => db.getAccount(id), stateDb: { recordSentMail: sentLog, recordFollowup: vi.fn() } };
 let sendImpl: (input: MailSendInput) => Promise<MailSendResult>;
 
 const ACCOUNT: MailAccountConfig = {
@@ -24,6 +31,7 @@ const ACCOUNT: MailAccountConfig = {
 
 beforeEach(() => {
   db = new MailStateDb({ path: ':memory:' });
+  sentLog.mockClear();
   db.upsertAccount(ACCOUNT);
   sendCalls = [];
   sendImpl = async (input: MailSendInput): Promise<MailSendResult> => {
@@ -60,10 +68,35 @@ function queue(opts: { scheduledAt: Date; subject?: string }): string {
 }
 
 describe('mail-scheduled-poller', () => {
+  it('sends nothing from a receive-only account — the same refusal as an immediate send', async () => {
+    db.upsertAccount({ ...ACCOUNT, type: 'info' });
+    queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'receive-only probe' });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
+    const result = await poller.tickNow();
+    poller.stop();
+    expect(sendCalls).toHaveLength(0);
+    expect(result).toEqual({ fired: 0, failed: 1 });
+    expect(db.listScheduledForAccount('acct-1')[0]!.failReason).toMatch(/receive_only/);
+  });
+
+  it('sends from the same account once its type allows sending', async () => {
+    // The positive half: without it the test above also passes against a
+    // poller that sends nothing at all. Its own subject: the recipient dedup
+    // window is process-wide and would otherwise refuse a later test's send.
+    queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'send-capable probe' });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
+    const result = await poller.tickNow();
+    poller.stop();
+    expect(sendCalls).toHaveLength(1);
+    expect(result.fired).toBe(1);
+    // The account lookup alone reaches sendMail: no sidebar write for a scheduled send.
+    expect(sentLog).not.toHaveBeenCalled();
+  });
+
   it('fires a due send + marks sent_at', async () => {
     const past = new Date(Date.now() - 5000);
     const id = queue({ scheduledAt: past });
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     const result = await poller.tickNow();
     poller.stop();
     expect(result.fired).toBe(1);
@@ -75,7 +108,7 @@ describe('mail-scheduled-poller', () => {
 
   it('does not fire rows whose scheduled_at is still in the future', async () => {
     queue({ scheduledAt: new Date(Date.now() + 60_000) });
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     const result = await poller.tickNow();
     poller.stop();
     expect(result.fired).toBe(0);
@@ -88,7 +121,7 @@ describe('mail-scheduled-poller', () => {
     queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'retry-test' });
     let tries = 0;
     sendImpl = async () => { tries++; throw new MailError('rate_limited', 'throttled'); };
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     expect((await poller.tickNow()).failed).toBe(0);
     expect((await poller.tickNow()).failed).toBe(0);
     const r = await poller.tickNow();
@@ -112,7 +145,7 @@ describe('mail-scheduled-poller', () => {
       queue({ scheduledAt: new Date(Date.now() - 5000), subject: `unknown-${what}` });
       let tries = 0;
       sendImpl = async () => { tries++; throw err; };
-      const poller = startScheduledSendPoller({ state: db, registry });
+      const poller = startScheduledSendPoller({ state: db, registry, accounts });
       expect((await poller.tickNow()).failed).toBe(1);
       await poller.tickNow();
       poller.stop();
@@ -127,7 +160,7 @@ describe('mail-scheduled-poller', () => {
     queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'scope' });
     let tries = 0;
     sendImpl = async () => { tries++; throw new MailError('unsupported', 'needs the send scope'); };
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     expect((await poller.tickNow()).failed).toBe(1);
     poller.stop();
     expect(tries).toBe(1);
@@ -136,7 +169,7 @@ describe('mail-scheduled-poller', () => {
 
   it('a refusal decided before the provider is marked failed at once, and nothing reaches the provider', async () => {
     db.insertScheduledSend({ accountId: 'acct-1', to: [], subject: 'nobody', bodyMd: 'x', scheduledAt: new Date(Date.now() - 5000) });
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     expect((await poller.tickNow()).failed).toBe(1);
     poller.stop();
     expect(sendCalls).toHaveLength(0);
@@ -146,7 +179,7 @@ describe('mail-scheduled-poller', () => {
   it('a throw out of the send pipeline is not retried: it may come after the mail went out', async () => {
     queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'throws' });
     registry = { ...registry, get: () => { throw new Error('registry broke'); }, getDefault: () => { throw new Error('registry broke'); } } as unknown as MailRegistry;
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     expect((await poller.tickNow()).failed).toBe(1);
     await poller.tickNow();
     poller.stop();
@@ -163,8 +196,8 @@ describe('mail-scheduled-poller', () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     sendImpl = async (input) => { sendCalls.push(input); await gate; return { messageId: '<m@x>', accepted: ['recipient@x'], rejected: [] }; };
-    const a = startScheduledSendPoller({ state: db, registry });
-    const b = startScheduledSendPoller({ state: stateB, registry });
+    const a = startScheduledSendPoller({ state: db, registry, accounts });
+    const b = startScheduledSendPoller({ state: stateB, registry, accounts });
     const first = a.tickNow();
     const secondResult = await b.tickNow();
     release();
@@ -181,11 +214,11 @@ describe('mail-scheduled-poller', () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     sendImpl = async (input) => { sendCalls.push(input); await gate; return { messageId: '<m@x>', accepted: ['recipient@x'], rejected: [] }; };
-    const a = startScheduledSendPoller({ state: db, registry, now: () => t0 });
+    const a = startScheduledSendPoller({ state: db, registry, accounts, now: () => t0 });
     const first = a.tickNow();
     await vi.waitFor(() => expect(sendCalls).toHaveLength(1));
     // Another tick, past the stale limit, reports the row as possibly sent…
-    const later = startScheduledSendPoller({ state: db, registry, now: () => t0 + SCHEDULED_CLAIM_STALE_MS + 60_000 });
+    const later = startScheduledSendPoller({ state: db, registry, accounts, now: () => t0 + SCHEDULED_CLAIM_STALE_MS + 60_000 });
     await later.tickNow();
     expect(db.listScheduledForAccount('acct-1')[0]!.failReason?.startsWith(OUTCOME_UNKNOWN_PREFIX)).toBe(true);
     // …and then the send comes back: it went out.
@@ -203,7 +236,7 @@ describe('mail-scheduled-poller', () => {
     const pending = queue({ scheduledAt: new Date(Date.now() + 60_000), subject: 'pending' });
     const failed = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'possibly-sent' });
     sendImpl = async () => { throw new MailError('timeout', 'SMTP timeout'); };
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     await poller.tickNow();
     poller.stop();
     expect(db.cancelScheduledSend(failed)).toBe(false);
@@ -229,7 +262,7 @@ describe('mail-scheduled-poller', () => {
   it('keeps at most 200 characters of a provider message in the reason', async () => {
     queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'long' });
     sendImpl = async () => { throw new MailError('send_rejected', 'x'.repeat(5000)); };
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     await poller.tickNow();
     poller.stop();
     const reason = db.listScheduledForAccount('acct-1')[0]!.failReason!;
@@ -242,7 +275,7 @@ describe('mail-scheduled-poller', () => {
     const t0 = Date.now();
     const id = queue({ scheduledAt: new Date(t0 - 60_000), subject: 'orphan' });
     expect(db.claimScheduledSend(id, new Date(t0 - SCHEDULED_CLAIM_STALE_MS - 1000))).toBe(true);
-    const poller = startScheduledSendPoller({ state: db, registry, now: () => t0 });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts, now: () => t0 });
     await poller.tickNow();
     poller.stop();
     expect(sendCalls).toHaveLength(0);
@@ -254,7 +287,7 @@ describe('mail-scheduled-poller', () => {
     const t0 = Date.now();
     const id = queue({ scheduledAt: new Date(t0 - 60_000), subject: 'busy' });
     expect(db.claimScheduledSend(id, new Date(t0 - 1000))).toBe(true);
-    const poller = startScheduledSendPoller({ state: db, registry, now: () => t0 });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts, now: () => t0 });
     await poller.tickNow();
     poller.stop();
     expect(sendCalls).toHaveLength(0);
@@ -268,7 +301,7 @@ describe('mail-scheduled-poller', () => {
     const busy = queue({ scheduledAt: new Date(t0 - 120_000), subject: 'busy-first' });
     queue({ scheduledAt: new Date(t0 - 60_000), subject: 'due-second' });
     expect(db.claimScheduledSend(busy, new Date(t0 - 1000))).toBe(true);
-    const poller = startScheduledSendPoller({ state: db, registry, now: () => t0, perTickLimit: 1 });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts, now: () => t0, perTickLimit: 1 });
     expect((await poller.tickNow()).fired).toBe(1);
     poller.stop();
     expect(sendCalls.map((c) => c.subject)).toEqual(['due-second']);
@@ -310,7 +343,7 @@ describe('mail-scheduled-poller', () => {
     const id2 = queue({ scheduledAt: new Date(Date.now() - 5000), subject: 'failed' });
     db.markScheduledSent(id1);
     db.markScheduledFailed(id2, 'manual');
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     const result = await poller.tickNow();
     poller.stop();
     expect(result.fired).toBe(0);
@@ -319,7 +352,7 @@ describe('mail-scheduled-poller', () => {
 
   it('respects perTickLimit + leaves overflow for next tick', async () => {
     for (let i = 0; i < 5; i++) queue({ scheduledAt: new Date(Date.now() - 5000), subject: `s${i}` });
-    const poller = startScheduledSendPoller({ state: db, registry, perTickLimit: 2 });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts, perTickLimit: 2 });
     expect((await poller.tickNow()).fired).toBe(2);
     expect((await poller.tickNow()).fired).toBe(2);
     expect((await poller.tickNow()).fired).toBe(1);
@@ -343,7 +376,7 @@ describe('mail-scheduled-poller', () => {
     // the still-unsent row and re-delivers it).
     const dueSpy = vi.spyOn(db, 'listDueScheduledSends');
 
-    const poller = startScheduledSendPoller({ state: db, registry });
+    const poller = startScheduledSendPoller({ state: db, registry, accounts });
     const first = poller.tickNow(); // starts, blocks inside the gated send
     const second = poller.tickNow(); // must coalesce onto the in-flight tick
     expect(first).toBe(second); // same promise → no second concurrent tick
