@@ -152,6 +152,12 @@ const VALID_OUTPUT_VOLUMES = new Set(['small', 'medium', 'large', 'streaming']);
 const VALID_COST_MODELS = new Set(['per_call', 'per_token', 'per_unit']);
 const VALID_PROVENANCE_SOURCES = new Set(['openapi', 'docs_url', 'manual']);
 
+/** The built-in preset an oauth2 profile names, when the engine knows it. */
+function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.get> {
+  const presetId: unknown = profile.auth?.type === 'oauth2' ? profile.auth.oauth?.preset_id : undefined;
+  return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
+}
+
 function validateProfile(profile: ApiProfile): string | null {
   for (const field of REQUIRED_FIELDS) {
     if (!profile[field] || (typeof profile[field] === 'string' && (profile[field] as string).trim() === '')) {
@@ -236,7 +242,11 @@ function validateProfile(profile: ApiProfile): string | null {
         return `Invalid ${field} "${key}": that credential belongs to this instance — an infrastructure secret or the slot holding the tenant's own provider key. It is never attached to an outbound request — use a credential the user supplied for this API.`;
       }
     }
-    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
+    // A built-in preset is the exception: its sign-in reads `client_id_key` and
+    // `client_secret_key`, the token is attached from a slot derived from the
+    // profile id, and `collectVaultKeys` counts the OAuth keys on its own. A list
+    // here changes nothing for such a profile, so demanding one only costs a round.
+    if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0) && !builtInPresetOf(profile)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
     }
     // OAuth2 metadata: required when type='oauth2' AND the agent intends to
@@ -371,8 +381,15 @@ function validateProfile(profile: ApiProfile): string | null {
     if (!VALID_PROVENANCE_SOURCES.has(profile.provenance.source)) {
       return `Invalid provenance.source "${profile.provenance.source}": must be openapi, docs_url, or manual`;
     }
-    if (profile.provenance.schema_version !== 2) {
-      return `Invalid provenance.schema_version "${String(profile.provenance.schema_version)}": only schema_version=2 is supported in v2 profiles`;
+    const schemaVersion: unknown = profile.provenance.schema_version;
+    // The string "2" is the common slip, and quoting it back next to "only 2 is
+    // supported" read as a contradiction: models resent the same call until the
+    // repeat brake stopped them. Naming the type is what tells them the fix.
+    if (typeof schemaVersion === 'string') {
+      return 'Invalid provenance.schema_version: must be the number 2, not a string. Write schema_version: 2 without quotes.';
+    }
+    if (schemaVersion !== 2) {
+      return `Invalid provenance.schema_version "${String(schemaVersion)}": only schema_version=2 is supported in v2 profiles`;
     }
   }
   return null;
@@ -1719,6 +1736,11 @@ ${draftJson}
       // onto a reused profile reference). A shallow copy suffices — we only ever
       // replace the whole top-level field, never mutate a nested value.
       const profile = { ...input.profile };
+      // The string "2" is read as the number it names. Models send it that way often
+      // enough that the refusal below cost a round in a third of the measured runs, and
+      // it is stored as the number: the loader treats anything but `=== 2` as v1.
+      const sentVersion: unknown = profile.provenance?.schema_version;
+      if (profile.provenance && sentVersion === '2') profile.provenance = { ...profile.provenance, schema_version: 2 };
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;
@@ -1934,15 +1956,20 @@ ${draftJson}
       if (storedGrant) profile.oauth_grant = storedGrant;
       else delete profile.oauth_grant;
 
-      // Enforce research: warn if profile is too thin
+      // Enforce research: warn if profile is too thin. Not for a built-in preset:
+      // the preset supplies the host and the sign-in, and its catalogue entry says
+      // to create the profile directly. Asking for endpoints there sent models off
+      // to research docs and fill the fields from web knowledge before they could
+      // connect; endpoints, guidelines and avoid rules can follow with update.
       const warnings: string[] = [];
-      if (!profile.endpoints || profile.endpoints.length === 0) {
+      const thinCheckApplies = !builtInPresetOf(profile);
+      if (thinCheckApplies && (!profile.endpoints || profile.endpoints.length === 0)) {
         warnings.push('No endpoints listed — bootstrap from an OpenAPI URL or research the docs (web_research) and add key endpoints.');
       }
-      if (!profile.guidelines || profile.guidelines.length === 0) {
+      if (thinCheckApplies && (!profile.guidelines || profile.guidelines.length === 0)) {
         warnings.push('No guidelines — add best practices (correct HTTP methods, required headers, pagination, etc.).');
       }
-      if (!profile.avoid || profile.avoid.length === 0) {
+      if (thinCheckApplies && (!profile.avoid || profile.avoid.length === 0)) {
         warnings.push('No "avoid" rules — add common mistakes to prevent (wrong methods, missing params, rate limit pitfalls).');
       }
       if (!profile.auth) {
