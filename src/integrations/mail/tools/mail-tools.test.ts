@@ -840,6 +840,29 @@ describe('mail_reply tool', () => {
     expect(cc, 'a copied recipient keeps its display name and spelling').toContainEqual({ name: 'The Manager', address: 'Manager@Example.com' });
   });
 
+  // The explicit cc names someone who was already on the original: they are copied once, as the
+  // explicit cc gave them, both in what is sent and in what the confirmation shows.
+  it('reply_all with an explicit cc that names an original recipient copies them once', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: {
+        ...envelope(10, { messageId: '<o10@x>', from: 'alice@example.com', subject: 'Plan' }),
+        to: [{ address: 'colleague@example.com' }],
+        cc: [{ name: 'The Manager', address: 'Manager@Example.com' }],
+      },
+      text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: 'x', accepted: [], rejected: [] });
+    let preview = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { preview = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+
+    await createMailReplyTool(registry).handler({ uid: 10, body: 'reply', reply_all: true, cc: 'manager@example.com' }, agent);
+
+    const keys = (provider.send.mock.calls[0]![0].cc ?? []).map(a => a.address);
+    expect(keys.filter(k => k.toLowerCase() === 'manager@example.com'), 'copied once').toEqual(['manager@example.com']);
+    expect(keys, 'the other original recipient is still copied').toContain('colleague@example.com');
+    expect(preview.match(/manager@example\.com/gi), 'the confirmation lists them once').toHaveLength(1);
+  });
+
   it('rejects when the original has no sender and no override is given', async () => {
     const orig: MailEnvelope = { ...envelope(1, { messageId: '<o@x>' }), from: [], replyTo: [] };
     provider.fetch.mockResolvedValue({
