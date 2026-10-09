@@ -109,6 +109,36 @@ type RouteHandler = (
   body: unknown,
 ) => Promise<void>;
 
+/**
+ * What a mandate may do at a route that writes (PRD customer-granted-operator-access §3.13).
+ * Every `user` route that writes declares exactly one, at its registration; the route table
+ * is checked for it (`routeStancesForTesting`), so a new route cannot arrive without one.
+ *
+ * - `owner-only`: a mandate is refused with 403 before the handler runs. The dispatcher
+ *   enforces it, so for this stance "declared" also means "applied".
+ * - `mark`: a mandate may; the handler marks the act (the owner's stamp drops, or the actor
+ *   trail gets a row).
+ * - `own`: a mandate may act only on what it set up itself; the handler checks that.
+ * - `free`: a mandate may, for the reason given.
+ *
+ * Only `owner-only` is applied here. For the other three the declaration states what the
+ * handler does; that the handler does it is for the handler's own tests.
+ */
+export type MandateStance =
+  | { readonly kind: 'owner-only'; readonly what: string }
+  | { readonly kind: 'mark' }
+  | { readonly kind: 'own' }
+  | { readonly kind: 'free'; readonly why: string };
+
+/** A mandate may not; `what` completes "Only the owner of this instance can …". */
+const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
+/** A mandate may; the handler marks the act. */
+const MARK: MandateStance = { kind: 'mark' };
+/** A mandate may act on what it set up itself; the handler checks it. */
+const OWN: MandateStance = { kind: 'own' };
+/** A mandate may, for this reason. */
+const free = (why: string): MandateStance => ({ kind: 'free', why });
+
 interface DynamicRoute {
   method: string;
   /**
@@ -118,9 +148,13 @@ interface DynamicRoute {
    * at registration. See `addDynamic` / `parseDynamicRoute`.
    */
   scope: AuthScope;
+  /** The path as registered (`/api/x/:id`), for the route table. */
+  path: string;
   pattern: RegExp;
   paramNames: string[];
   handler: RouteHandler;
+  /** Required on a `user` route that writes; see `MandateStance`. */
+  stance?: MandateStance | undefined;
 }
 
 interface ProviderStatus {
@@ -1237,13 +1271,13 @@ function profileOAuthRedirectUri(): string {
   }
 }
 
-function parseDynamicRoute(scope: AuthScope, method: string, path: string, handler: RouteHandler): DynamicRoute {
+function parseDynamicRoute(scope: AuthScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): DynamicRoute {
   const paramNames: string[] = [];
   const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
     paramNames.push(name);
     return '([^/]+)';
   });
-  return { method, scope, pattern: new RegExp(`^${pattern}$`), paramNames, handler };
+  return { method, scope, path, pattern: new RegExp(`^${pattern}$`), paramNames, handler, stance };
 }
 
 /** The 409 a chat run gets while `DELETE /api/data` is running. */
@@ -1399,6 +1433,8 @@ export class LynoxHTTPApi {
    * both. Lookup happens once per request in the dispatch path.
    */
   private readonly staticRouteScopes = new Map<string, AuthScope>();
+  /** What a mandate may do at each static route that declares it; see `MandateStance`. */
+  private readonly staticRouteStances = new Map<string, MandateStance>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   // `identityKey` rides along with the cached status: `getProvidersStatus` seeds
@@ -1443,14 +1479,34 @@ export class LynoxHTTPApi {
   // pathname)` enumeration to drift out of sync.
 
   /** Register a fixed-path route. Scope MUST be set per route. */
-  private addStatic(scope: AuthScope, key: string, handler: RouteHandler): void {
+  private addStatic(scope: AuthScope, key: string, handler: RouteHandler, stance?: MandateStance): void {
     this.staticRoutes.set(key, handler);
     this.staticRouteScopes.set(key, scope);
+    if (stance !== undefined) this.staticRouteStances.set(key, stance);
   }
 
   /** Register a parameterised route (`/api/x/:id`). Scope MUST be set per route. */
-  private addDynamic(scope: AuthScope, method: string, path: string, handler: RouteHandler): void {
-    this.dynamicRoutes.push(parseDynamicRoute(scope, method, path, handler));
+  private addDynamic(scope: AuthScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): void {
+    this.dynamicRoutes.push(parseDynamicRoute(scope, method, path, handler, stance));
+  }
+
+  /**
+   * The route table as the detector reads it: every registered route with its scope and its
+   * mandate stance. Test seam, not reachable over HTTP.
+   */
+  routeStancesForTesting(): Array<{ method: string; path: string; scope: AuthScope; stance: MandateStance | undefined }> {
+    const out: Array<{ method: string; path: string; scope: AuthScope; stance: MandateStance | undefined }> = [];
+    for (const [key, scope] of this.staticRouteScopes) {
+      const space = key.indexOf(' ');
+      out.push({ method: key.slice(0, space), path: key.slice(space + 1), scope, stance: this.staticRouteStances.get(key) });
+    }
+    for (const r of this.dynamicRoutes) out.push({ method: r.method, path: r.path, scope: r.scope, stance: r.stance });
+    return out;
+  }
+
+  /** Refuses a non-owner at an `owner-only` route; true when it answered. */
+  private _refusedByStance(req: IncomingMessage, res: ServerResponse, stance: MandateStance | undefined): boolean {
+    return stance?.kind === 'owner-only' && this._refuseUnlessOwner(req, res, stance.what);
   }
 
   /**
@@ -2659,6 +2715,8 @@ export class LynoxHTTPApi {
     const staticHandler = this.staticRoutes.get(routeKey)
       ?? (method === 'HEAD' ? this.staticRoutes.get(`GET ${pathname}`) : undefined);
     if (staticHandler) {
+      const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
+      if (this._refusedByStance(req, res, this.staticRouteStances.get(stanceKey))) return;
       await staticHandler(req, res, {}, body);
       return;
     }
@@ -2676,6 +2734,7 @@ export class LynoxHTTPApi {
             params[name] = value;
           }
         }
+        if (this._refusedByStance(req, res, route.stance)) return;
         await route.handler(req, res, params, body);
         return;
       }
@@ -3060,7 +3119,7 @@ export class LynoxHTTPApi {
         threadId: sessionId,
         resumed: !!threadId && !!thread,
       });
-    });
+    }, free('a mandate starts its own turn here; the tool lock of its principal bounds what the turn can do'));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/sessions/:id', async (_req, res, params) => {
       const session = this.sessionStore.get(params['id']!);
@@ -3072,7 +3131,7 @@ export class LynoxHTTPApi {
       this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('end a session')));
 
     // ── Runs (SSE) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/run', async (req, res, params, body) => {
@@ -3974,7 +4033,7 @@ export class LynoxHTTPApi {
         // persists regardless).
         this.engine?.getRunBufferManager()?.remove(runId);
       }
-    }));
+    }, free('a mandate starts its own turn here; the tool lock of its principal bounds what the turn can do')));
 
     // GET /runs/active — client-queryable live-run state for the nav indicator.
     // Returns every registry row (running + interrupted; done/error are already
@@ -4031,7 +4090,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 404, { error: 'run not found' });
-    }));
+    }, ownerOnly('stop or dismiss a run')));
 
     // GET /runs/:runId/stream?since=<seq> — resumable SSE re-attach (Tier 2).
     // Replays buffered events newer than `since`, then live-tails new appends,
@@ -4190,7 +4249,7 @@ export class LynoxHTTPApi {
       }
 
       errorResponse(res, 404, 'No pending prompt');
-    }));
+    }, free('answers a question a run asked; the answer reaches only that run')));
 
     // POST /sessions/:id/reply-tabs — one-shot reply for multi-question tabs prompts.
     // Body: { promptId: string, answers: string[] }. Each answer corresponds
@@ -4226,7 +4285,7 @@ export class LynoxHTTPApi {
 
       if (ps.answerUserTabs(promptId, answers)) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
-    }));
+    }, free('answers a question a run asked; the answer reaches only that run')));
 
     // POST /sessions/:id/tab-progress — persist partial answers (optional).
     // Called by the client as the user answers individual tabs so a mid-batch
@@ -4250,7 +4309,7 @@ export class LynoxHTTPApi {
 
       ps.setPartialAnswers(promptId, partial as (string | null)[]);
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, free('answers a question a run asked; the answer reaches only that run')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
@@ -4303,7 +4362,7 @@ export class LynoxHTTPApi {
       }
       if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, free('answers a question a run asked; the answer reaches only that run')));
 
     // POST /sessions/:id/mail-connected — settle a connect_mail prompt after the
     // in-chat consent step has POSTed the account to /api/mail/accounts. Body:
@@ -4344,7 +4403,7 @@ export class LynoxHTTPApi {
       }
       if (!answered) { errorResponse(res, 404, 'No pending mail prompt'); return; }
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, free('answers a question a run asked; the answer reaches only that run')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
       const sessionId = params['id']!;
@@ -4361,7 +4420,7 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('stop a run')));
 
     // ── Changeset review ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
@@ -4434,7 +4493,7 @@ export class LynoxHTTPApi {
 
       csm.cleanup();
       jsonResponse(res, 200, { ok: true, accepted, rolledBack });
-    }));
+    }, ownerOnly('review the changes of a run')));
 
     // ── Compact (context management) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
@@ -4457,7 +4516,7 @@ export class LynoxHTTPApi {
         ...(result.occupancyBefore !== undefined ? { occupancyBefore: result.occupancyBefore } : {}),
         ...(result.occupancyAfter !== undefined ? { occupancyAfter: result.occupancyAfter } : {}),
       });
-    }));
+    }, ownerOnly('compact a conversation')));
 
     // Mid-thread model re-pick (§5.1b) — the "continue a
     // historical chat on another model" half of the ask. Resolves an EXISTING
@@ -4496,7 +4555,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 200, { ok: true, model: result.tier, modelId: result.modelId });
-    }));
+    }, ownerOnly('change a conversation\'s model')));
 
     // ── Threads ──
     this.addStatic('user', 'GET /api/threads', async (req, res) => {
@@ -4565,7 +4624,7 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('change a conversation')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
@@ -4588,7 +4647,7 @@ export class LynoxHTTPApi {
       // snapshots outlive their deleted thread with no other prune path.
       engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('delete a conversation')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/messages', async (req, res, params) => {
       const threadStore = engine.getThreadStore();
@@ -4935,7 +4994,7 @@ export class LynoxHTTPApi {
       if (engine.getSecretStore()?.containsSecret(content)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       await new MemoryFacade(memory, engine.getKnowledgeLayer()).replaceDocument(ns, content);
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('change memory')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/memory/:ns/append', async (_req, res, params, body) => {
       const memory = engine.getMemory();
@@ -4947,7 +5006,7 @@ export class LynoxHTTPApi {
       if (engine.getSecretStore()?.containsSecret(text)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       await new MemoryFacade(memory, engine.getKnowledgeLayer()).append(ns, text);
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('change memory')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/memory/:ns', async (req, res, params) => {
       const memory = engine.getMemory();
@@ -4958,7 +5017,7 @@ export class LynoxHTTPApi {
       const pattern = url.searchParams.get('pattern') ?? '';
       const deleted = await new MemoryFacade(memory, engine.getKnowledgeLayer()).delete(ns, pattern);
       jsonResponse(res, 200, { deleted });
-    }));
+    }, ownerOnly('change memory')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
@@ -4978,7 +5037,7 @@ export class LynoxHTTPApi {
       if (engine.getSecretStore()?.containsSecret(newText)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       const updated = await new MemoryFacade(memory, engine.getKnowledgeLayer()).update(ns, oldText, newText);
       jsonResponse(res, 200, { updated });
-    }));
+    }, ownerOnly('change memory')));
 
     // ── Knowledge review queue (DK.2) — the pending_review surface ──
     // Present ONLY when `durable_memory_enabled` (getKnowledgeStore() returns null
@@ -5130,7 +5189,7 @@ export class LynoxHTTPApi {
       } catch (err) {
         errorResponse(res, 400, err instanceof Error ? err.message : 'Review failed');
       }
-    }));
+    }, ownerOnly('review knowledge')));
 
     // ── Knowledge read-surface (DK-UX) — the "Wissen" browse tab ──
     // Present ONLY when `durable_memory_enabled` (getKnowledgeStore() null otherwise
@@ -5165,7 +5224,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : 'Retire failed';
         errorResponse(res, /no active entry/i.test(msg) ? 404 : 400, msg);
       }
-    }));
+    }, ownerOnly('retire knowledge')));
 
     // ── Onboarding flags (Onboarding Wave 1) — server-side, cross-device state ──
     // 'user' scope = owner-authenticated (S6): the model has NO tool path here, only
@@ -5218,7 +5277,7 @@ export class LynoxHTTPApi {
         });
       }
       jsonResponse(res, 200, { ...store.getStatus(), degraded: false });
-    }));
+    }, ownerOnly('change onboarding progress')));
 
     // Reset one flag (the Settings per-layer reactivation path, AC-1.5). Idempotent —
     // `removed:false` when the flag was already absent.
@@ -5229,7 +5288,7 @@ export class LynoxHTTPApi {
       if (!isOnboardingFlag(flag)) { errorResponse(res, 400, 'Unknown onboarding flag'); return; }
       const removed = store.reset(flag);
       jsonResponse(res, 200, { removed, ...store.getStatus(), degraded: false });
-    }));
+    }, ownerOnly('change onboarding progress')));
 
     // ── Onboarding knowledge Step-0 (Onboarding Wave 1, D9v2 / §6.1) ──
     // The engine-posed "clean phase" basics. 'user' scope = owner-auth (S6); the model
@@ -5260,7 +5319,7 @@ export class LynoxHTTPApi {
         // PromptConflictError — this session already has a pending prompt.
         errorResponse(res, 409, err instanceof Error ? err.message : 'Could not start onboarding');
       }
-    });
+    }, free('creates a question for the session, not a turn'));
 
     // Promote the answered Step-0 prompt. Reads the VERBATIM answers from the settled
     // PromptStore row (NOT the request body → AC-1.3a) and runs the §6.1 promotion
@@ -5268,7 +5327,6 @@ export class LynoxHTTPApi {
     // a model-composed ask_user/tabs prompt can never reach user_asserted this way.
     this.addStatic('user', 'POST /api/onboarding/knowledge/promote', async (_req, res, _params, body) => {
       // Promoting writes active knowledge and the always-loaded profile: an owner's stamp (§3.13 E9).
-      if (this._refuseUnlessOwner(_req, res, 'promote onboarding knowledge')) return;
       const promptStore = engine.getPromptStore();
       if (!requireService(res, promptStore, 'Prompt store')) return;
       const b = body as Record<string, unknown> | null;
@@ -5321,7 +5379,7 @@ export class LynoxHTTPApi {
         model: undefined, untrusted: sawUntrusted, step: 0,
       });
       jsonResponse(res, 200, { degraded: false, threadId: row.session_id, ...result });
-    });
+    }, ownerOnly('promote onboarding knowledge'));
 
     // ── Onboarding domain derive (Onboarding W1, Activation Principle) ──
     // Pre-fill a candidate website from the Step-0 company name so the scan step is a
@@ -5350,7 +5408,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { domain: null });
       }
-    });
+    }, free('looks up a company\'s web domain and stores nothing'));
 
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
     // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint
@@ -5494,6 +5552,16 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const value = b && typeof b['value'] === 'string' ? b['value'] : '';
       if (!value) { errorResponse(res, 400, 'Missing value'); return; }
+      // Anyone but the owner may store a name that is new, never replace one that exists: a
+      // replaced credential sends the owner's later writes to another account, and nothing
+      // shows it. "Exists" reads every place a value can live — the map, the vault file
+      // (which other code writes past the map: mail logins, Google tokens) and the
+      // environment.
+      if (!isOwnerPrincipal(this._principalOf(_req))
+        && (store.getMasked(name) !== null || store.listVaultNames().includes(name) || store.isEnvironmentSecret(name))) {
+        errorResponse(res, 403, 'Only the owner of this instance can replace a stored secret.');
+        return;
+      }
       try {
         store.set(name, value);
         store.recordConsent(name);
@@ -5533,7 +5601,7 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { ok: true, hot_reload: hotReload });
-    }));
+    }, free('stores a value a setup step asked for; the handler refuses to replace a value that exists')));
 
     // user scope (matches PUT): the instance owner manages their own integration
     // keys. The real protection is the tier-keyed gate below, not the route scope.
@@ -5551,7 +5619,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, store, 'Secret store')) return;
       const deleted = store.deleteSecret(name);
       jsonResponse(res, 200, { deleted });
-    }));
+    }, ownerOnly('delete a secret')));
 
     // BYOK validation probe — used by the Web UI SetupBanner BEFORE
     // PUT /api/secrets/:name so a typo'd key never silently lands in the
@@ -5605,7 +5673,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : 'Validation failed';
         jsonResponse(res, 200, { state: 'network-error', error: msg });
       }
-    });
+    }, free('checks a provider key and stores nothing'));
 
     // SearXNG health check — validates a SearXNG URL is reachable
     this.addStatic('user', 'POST /api/searxng/check', async (_req, res, _params, body) => {
@@ -5634,7 +5702,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { healthy: false });
       }
-    });
+    }, free('checks a search endpoint and stores nothing'));
 
     // Search reranker capability probe — read-time provider snapshot so the
     // Settings → Search page can surface "Reranker is Anthropic-only" instead
@@ -6276,7 +6344,7 @@ export class LynoxHTTPApi {
       }
 
       jsonResponse(res, 200, { ok: true });
-    });
+    }, ownerOnly('change the configuration'));
 
     // ── History ──
     this.addStatic('user', 'GET /api/history/runs', async (req, res) => {
@@ -6473,7 +6541,6 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
       // A mandate's run of a workflow must carry its tool lock (PRD customer-granted-
       // operator-access, piece H2), which this route cannot apply yet; until then it may not.
-      if (this._refuseUnlessOwner(_req, res, 'run a workflow')) return;
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       // Optional re-target values: { "params": { "<name>": <value>, ... } }.
@@ -6818,7 +6885,7 @@ export class LynoxHTTPApi {
         ...(result.grantNote !== undefined ? { grantNote: capForClient(maskForClient(result.grantNote)) } : {}),
         ...(result.writeNotes !== undefined ? { writeNotes: result.writeNotes.map((n) => capForClient(maskForClient(n))) } : {}),
       });
-    }));
+    }, ownerOnly('run a workflow')));
 
     // The preview of a write grant for a saved workflow: what the entry would enforce, one
     // line per (method, URL), the bound values, and the checksum the acceptance must echo.
@@ -6850,7 +6917,7 @@ export class LynoxHTTPApi {
         binding: prepared.binding,
         checksum: prepared.checksum,
       });
-    }));
+    }, free('computes the preview of a grant and stores nothing')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/workflows/:id', async (_req, res, params, body) => {
       const history = engine.getRunHistory();
@@ -6869,7 +6936,7 @@ export class LynoxHTTPApi {
       const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
       forgetPipeline(params['id']!);
       jsonResponse(res, 200, { renamed: true });
-    }));
+    }, ownerOnly('rename a workflow')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -6885,7 +6952,7 @@ export class LynoxHTTPApi {
       const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
       forgetPipeline(params['id']!);
       jsonResponse(res, 200, { deleted: true });
-    }));
+    }, ownerOnly('delete a workflow')));
 
     // ── Tasks ──
     this.addStatic('user', 'GET /api/tasks', async (req, res) => {
@@ -7039,7 +7106,7 @@ export class LynoxHTTPApi {
       } catch (e) {
         errorResponse(res, 400, e instanceof Error ? e.message : 'Failed to create task');
       }
-    });
+    }, MARK);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/tasks/:id', async (_req, res, params, body) => {
       const taskManager = engine.getTaskManager();
@@ -7100,7 +7167,7 @@ export class LynoxHTTPApi {
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
-    }));
+    }, MARK));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const runHistory = engine.getRunHistory();
@@ -7114,7 +7181,7 @@ export class LynoxHTTPApi {
       this._endRequestTrail(trail, deleted ? 'done' : 'refused');
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
-    }));
+    }, MARK));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/complete', async (_req, res, params) => {
       const taskManager = engine.getTaskManager();
@@ -7129,7 +7196,7 @@ export class LynoxHTTPApi {
       }
       if (!task) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, task);
-    }));
+    }, MARK));
 
     // Stop a RUNNING task on its owner's explicit instruction. Pausing a SCHEDULE is
     // `PATCH /api/tasks/:id {enabled:false}` and deleting it is `DELETE`; neither
@@ -7215,7 +7282,7 @@ export class LynoxHTTPApi {
             ? 'The read stops before its next target and the bulk run is halted, unless its last target was already being read and it finishes. To continue, resume the bulk run.'
             : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
       });
-    }));
+    }, ownerOnly('stop a running task')));
 
     // Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
     // unattended execution — stamps `confirmed_at` so it becomes due + dispatches
@@ -7225,7 +7292,6 @@ export class LynoxHTTPApi {
     // explicit human step. Idempotent (re-confirming just re-stamps).
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/confirm', async (_req, res, params) => {
       // Only the owner stamps (§3.12 point 2).
-      if (this._refuseUnlessOwner(_req, res, 'confirm a schedule')) return;
       const taskManager = engine.getTaskManager();
       if (!requireService(res, taskManager, 'Task manager')) return;
       let trigger;
@@ -7240,7 +7306,7 @@ export class LynoxHTTPApi {
       // stamps it. A workflow is shared by every schedule that names it, so stamping it here
       // would also restart the owner's other schedules on steps the owner was not shown.
       jsonResponse(res, 200, trigger);
-    }));
+    }, ownerOnly('confirm a schedule')));
 
     // Run a trigger immediately, off-schedule (the Triggers-home "Run now"
     // control). Delegates to the WorkerLoop so the manual run goes through the
@@ -7314,7 +7380,7 @@ export class LynoxHTTPApi {
         errorResponse(res, 404, 'Trigger not found'); return;
       }
       jsonResponse(res, 202, { started: true });
-    }));
+    }, OWN));
 
     // ── Bulk runs (PRD bulk-changes-reversible §3.4/§3.5) ──
     // The human side of a bulk run: see what a dry run would do, approve it, resume a
@@ -7412,7 +7478,6 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
-      if (this._refuseUnlessOwner(req, res, 'approve a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const checksum = checksumOf(body);
@@ -7431,11 +7496,10 @@ export class LynoxHTTPApi {
       });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
-    }));
+    }, ownerOnly('approve a bulk run')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/resume', async (_req, res, params, body) => {
       // Resuming re-arms the unattended write: an owner's act (§3.13 E6).
-      if (this._refuseUnlessOwner(_req, res, 'resume a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const checksum = checksumOf(body);
@@ -7456,30 +7520,28 @@ export class LynoxHTTPApi {
       const out = ledger.resume(params['id']!, { checksum, maxTargets: resumeMax });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));
-    }));
+    }, ownerOnly('resume a bulk run')));
 
     // The owner's statement that the one target an external run wrote kept every field the
     // write did not send. It is what lets runs to that host with that verb go wider.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/confirm-probe', async (req, res, params) => {
       // Confirming the probe releases the remaining writes: an owner's act (§3.13 E6).
-      if (this._refuseUnlessOwner(req, res, 'confirm the probe of a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const out = ledger.confirmProbe(params['id']!, { confirmedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown' }) });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(ledger.getStatus(params['id']!)!));
-    }));
+    }, ownerOnly('confirm the probe of a bulk run')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/undo', async (_req, res, params) => {
       // An undo is itself an unattended external write: an owner's act (§3.13 E6).
-      if (this._refuseUnlessOwner(_req, res, 'undo a bulk run')) return;
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const out = ledger.planUndo(params['id']!);
       if (!out.ok) { refuse(res, out.reason); return; }
       // A previewed undo run: approving it is the second approval (§3.5).
       jsonResponse(res, 201, { ...withBinding(out.status), checksum: ledger.computeChecksum(out.status.id) });
-    }));
+    }, ownerOnly('undo a bulk run')));
 
     // ── Subject merges, as runs an owner can take back (PRD bulk-changes-reversible §3.7, form B) ──
     // What these return is a merge's names, counts and state — never the ledger entry, which
@@ -7585,7 +7647,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 200, { merge: out.view });
-    }));
+    }, ownerOnly('take back a merge')));
 
     // ── Artifacts ──
     this.addStatic('user', 'GET /api/artifacts', async (_req, res) => {
@@ -7619,7 +7681,7 @@ export class LynoxHTTPApi {
         ...(typeof b['id'] === 'string' ? { id: b['id'] } : {}),
       });
       jsonResponse(res, 201, artifact);
-    });
+    }, ownerOnly('save an artifact'));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/artifacts/:id', async (_req, res, params) => {
       const store = engine.getArtifactStore();
@@ -7635,7 +7697,7 @@ export class LynoxHTTPApi {
       const deleted = store.delete(params['id']!);
       if (!deleted) { errorResponse(res, 404, 'Artifact not found'); return; }
       jsonResponse(res, 200, { deleted: true });
-    }));
+    }, ownerOnly('delete an artifact')));
 
     // ── Transcription (provider info for UI hint) ──
     this.addStatic('user', 'GET /api/transcribe/info', async (_req, res) => {
@@ -7655,7 +7717,7 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/privacy/delete-request', async (_req, res) => {
       process.stderr.write('[privacy] account deletion requested via UI stop-gap mailto\n');
       jsonResponse(res, 200, { ok: true, channel: 'mailto', recipient: 'privacy@lynox.ai' });
-    });
+    }, ownerOnly('request the deletion of data'));
 
     // ── Available tools (T5 — Tool Toggles UI) ──
     // Drives the categorised Tool Toggles surface (P3-FOLLOWUP-HOTFIX).
@@ -7896,7 +7958,7 @@ export class LynoxHTTPApi {
         // server-side context.
         errorResponse(res, 200, msg.startsWith('Blocked:') ? msg : 'Probe failed: timeout or network error');
       }
-    });
+    }, free('sends one test request to the model provider and stores nothing'));
 
     // ── Voice info (combined STT + TTS capabilities for the Web UI) ──
     // Drives the privacy hint + auto-speak toggle visibility + the
@@ -8125,7 +8187,7 @@ export class LynoxHTTPApi {
         res.write(`data: ${JSON.stringify({ error: 'TTS synthesis failed' })}\n\n`);
       }
       res.end();
-    });
+    }, free('turns text into audio and stores nothing'));
 
     // ── Transcription (streaming via SSE) ──
     this.addStatic('user', 'POST /api/transcribe', async (_req, res, _params, body) => {
@@ -8255,7 +8317,7 @@ export class LynoxHTTPApi {
         res.write(`data: ${JSON.stringify({ error: 'Transcription failed' })}\n\n`);
       }
       res.end();
-    });
+    }, free('turns audio into text and stores nothing'));
 
     // ── Push Notifications ──
 
@@ -8313,7 +8375,7 @@ export class LynoxHTTPApi {
 
       this.pushChannel.subscribe(endpoint, p256dh, auth);
       jsonResponse(res, 201, { ok: true });
-    });
+    }, ownerOnly('subscribe to notifications'));
 
     this.addStatic('user', 'POST /api/push/unsubscribe', async (_req, res, _params, body) => {
       if (!this.pushChannel) {
@@ -8328,7 +8390,7 @@ export class LynoxHTTPApi {
       }
       this.pushChannel.unsubscribe(endpoint);
       jsonResponse(res, 200, { ok: true });
-    });
+    }, ownerOnly('change notification subscriptions'));
 
     this.addStatic('user', 'POST /api/push/test', async (_req, res) => {
       if (!this.pushChannel) {
@@ -8350,7 +8412,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 200, { ok: true, sent: result.sent, failed: result.failed, cleaned: result.cleaned });
-    });
+    }, ownerOnly('send a test notification'));
 
     // ── Google Auth ──
     //
@@ -8472,7 +8534,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : String(err);
         errorResponse(res, 500, msg);
       }
-    });
+    }, free('a mandate connects an account during setup'));
 
     // Google OAuth callback — handles redirect from Google after user consent
     this.addStatic('user', 'GET /api/google/callback', async (req, res) => {
@@ -8568,7 +8630,7 @@ export class LynoxHTTPApi {
       // report one that did not take place.
       const { revokedAtGoogle } = await google.revoke();
       jsonResponse(res, 200, { ok: true, revoked_at_google: revokedAtGoogle });
-    });
+    }, ownerOnly('revoke the Google connection'));
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back
     // path (D12). Separate from `/revoke` on purpose: the two differ only in
@@ -8579,13 +8641,13 @@ export class LynoxHTTPApi {
       if (!requireService(res, google, 'Google auth')) return;
       google.disconnect();
       jsonResponse(res, 200, { ok: true });
-    });
+    }, ownerOnly('disconnect Google'));
 
     // Reload Google integration after credentials change
     this.addStatic('user', 'POST /api/google/reload', async (_req, res) => {
       const ok = await engine.reloadGoogle();
       jsonResponse(res, 200, { ok });
-    });
+    }, ownerOnly('reload the Google connection'));
 
     // Get Google OAuth start URL (managed instances — redirects via control plane)
     //
@@ -8694,7 +8756,7 @@ export class LynoxHTTPApi {
           errorResponse(res, 500, msg);
         }
       });
-    });
+    }, ownerOnly('claim the managed Google connection'));
 
     // ── API-profile OAuth: the authorization-code round-trip (W1b) ────────
     //
@@ -9202,7 +9264,7 @@ export class LynoxHTTPApi {
           errorResponse(res, 500, err instanceof Error ? err.message : String(err));
         }
       }
-    });
+    }, free('looks up mail server settings and stores nothing'));
 
     this.addStatic('user', 'GET /api/mail/accounts', async (_req, res) => {
       const ctx = engine.getMailContext();
@@ -9305,7 +9367,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : String(err);
         errorResponse(res, 500, msg);
       }
-    });
+    }, free('a mandate connects an account during setup'));
 
     // In-memory rate limiter for /api/mail/accounts/test. Closes the
     // credential-probe oracle: an attacker cannot brute-force test many
@@ -9399,7 +9461,7 @@ export class LynoxHTTPApi {
         const msg = err instanceof Error ? err.message : String(err);
         errorResponse(res, 500, msg);
       }
-    });
+    }, free('tests a mail login and stores nothing'));
 
     // user scope: same mailbox-management surface as POST /api/mail/accounts.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/mail/accounts/:id', async (_req, res, params) => {
@@ -9408,7 +9470,7 @@ export class LynoxHTTPApi {
       const removed = await ctx!.removeAccount(params['id']!);
       if (!removed) { errorResponse(res, 404, `Account "${params['id']}" not found`); return; }
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('remove a mail account')));
 
     // Set the default mailbox. Persists `is_default=1` on the target row and
     // updates the in-memory registry so subsequent tool calls fall back to
@@ -9425,7 +9487,7 @@ export class LynoxHTTPApi {
         const status = msg.includes('not registered') ? 404 : 400;
         errorResponse(res, status, msg);
       }
-    }));
+    }, ownerOnly('change the default mail account')));
 
     // ── /api/inbox/* (PRD-UNIFIED-INBOX Phase 1a) ───────────────────────────
     //
@@ -9531,7 +9593,7 @@ export class LynoxHTTPApi {
         ? (body as import('../integrations/inbox/api.js').NotificationPrefsBody)
         : {};
       sendInbox(res, handleUpdateNotificationPrefs(deps!, safeBody));
-    });
+    }, ownerOnly('change inbox notifications'));
 
     this.addStatic('user', 'GET /api/inbox/cold-start', async (_req, res) => {
       const deps = inboxDeps();
@@ -9550,7 +9612,7 @@ export class LynoxHTTPApi {
       };
       if (typeof b['force'] === 'boolean') runBody.force = b['force'];
       sendInbox(res, await handleRunColdStart(deps!, runBody));
-    });
+    }, ownerOnly('start the inbox import'));
 
     this.addStatic('user', 'POST /api/inbox/items/bulk-action', async (_req, res, _params, body) => {
       const deps = inboxDeps();
@@ -9562,14 +9624,14 @@ export class LynoxHTTPApi {
         action: b['action'] as import('../integrations/inbox/api.js').BulkAction,
       };
       sendInbox(res, handleBulkAction(deps!, bulkBody));
-    });
+    }, ownerOnly('act on inbox items'));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/undo/:bulkId', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleUndoBulk } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleUndoBulk(deps!, params['bulkId']!));
-    }));
+    }, ownerOnly('undo an inbox action')));
 
     this.addStatic('user', 'GET /api/inbox/undo/recent', async (_req, res) => {
       const deps = inboxDeps();
@@ -9587,7 +9649,7 @@ export class LynoxHTTPApi {
         accountId: typeof b['accountId'] === 'string' ? b['accountId'] : '',
       };
       sendInbox(res, await handleRunBackfillMetadata(deps!, runBody));
-    });
+    }, ownerOnly('backfill inbox metadata'));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id', async (_req, res, params) => {
       const deps = inboxDeps();
@@ -9640,7 +9702,7 @@ export class LynoxHTTPApi {
       };
       if (at !== undefined) setActionBody.at = at;
       sendInbox(res, handleSetAction(deps!, params['id']!, setActionBody));
-    }));
+    }, ownerOnly('act on an inbox item')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/inbox/items/:id/snooze', async (_req, res, params, body) => {
       const deps = inboxDeps();
@@ -9663,7 +9725,7 @@ export class LynoxHTTPApi {
         snoozeBody.timezone = b['timezone'];
       }
       sendInbox(res, handleSetSnooze(deps!, params['id']!, snoozeBody));
-    }));
+    }, ownerOnly('snooze an inbox item')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/contacts/:email', async (_req, res, params) => {
       const deps = inboxDeps();
@@ -9688,7 +9750,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleRefreshItemBody } = await import('../integrations/inbox/api.js');
       sendInbox(res, await handleRefreshItemBody(deps!, params['id']!));
-    }));
+    }, ownerOnly('refresh an inbox item')));
 
     this.addStatic('user', 'GET /api/inbox/rules', async (req, res) => {
       const deps = inboxDeps();
@@ -9720,14 +9782,14 @@ export class LynoxHTTPApi {
           ? { ...ruleBody, tenantId: b['tenantId'] }
           : ruleBody;
       sendInbox(res, handleCreateRule(deps!, finalRuleBody));
-    });
+    }, ownerOnly('change inbox rules'));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/inbox/rules/:id', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleDeleteRule } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleDeleteRule(deps!, params['id']!));
-    }));
+    }, ownerOnly('change inbox rules')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
@@ -9836,7 +9898,7 @@ export class LynoxHTTPApi {
       const removed = crm.deleteContact(id);
       if (!removed) { errorResponse(res, 404, 'No contact with this id'); return; }
       jsonResponse(res, 200, { removed: true });
-    }));
+    }, ownerOnly('delete a contact')));
 
     this.addStatic('user', 'GET /api/crm/deals', async (req, res) => {
       const crm = engine.getCRM();
@@ -9896,7 +9958,7 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         errorResponse(res, 500, err instanceof Error ? err.message : 'Backup failed');
       }
-    });
+    }, ownerOnly('create a backup'));
 
     this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/backups/:id/restore', async (_req, res, params) => {
       if (denyOnManagedInstance(res, 'backup restore')) return;
@@ -9964,7 +10026,7 @@ export class LynoxHTTPApi {
       // take the same tokens with a profile — only those its exchanges wrote.
       if (existing) purgeRecordedTokens(store, existing, engine.getSecretStore());
       jsonResponse(res, 200, { ok: true });
-    }));
+    }, ownerOnly('delete an API profile')));
 
     // ── DataStore ────────────────────────────────────────────────
 
@@ -10988,7 +11050,7 @@ export class LynoxHTTPApi {
       } catch {
         errorResponse(res, 404, 'File not found');
       }
-    });
+    }, ownerOnly('delete files'));
 
     // ── Migration (zero-knowledge self-hosted → managed) ─────────────
 

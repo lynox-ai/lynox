@@ -13726,29 +13726,19 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   });
 
   describe('DELETE /api/workflows/:id', () => {
-    it('records attempt and done around a mandate\'s delete, and refused on a 404', async () => {
+    // Owner-only: deleting a workflow silences every schedule that runs it. The route keeps
+    // its trail writer for the day it opens; while it is closed a mandate leaves no row,
+    // because nothing was attempted.
+    it('refuses a mandate before anything runs: nothing deleted, no row', async () => {
       const deletePlannedPipeline = vi.fn().mockReturnValue(true);
       await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
         asMandate();
-        expect((await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' })).status).toBe(200);
-      });
-      expectPair('DELETE /api/workflows/:id', 'wf-1', 'done');
-      db.getDb().exec('DROP TRIGGER audit_log_no_update; DELETE FROM audit_log;');
-      deletePlannedPipeline.mockReturnValue(false);
-      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
-        asMandate();
-        expect((await jsonFetch('/api/workflows/wf-2', { method: 'DELETE' })).status).toBe(404);
-      });
-      expectPair('DELETE /api/workflows/:id', 'wf-2', 'refused');
-    });
-
-    it('answers 503 and deletes nothing when the attempt cannot be written', async () => {
-      const deletePlannedPipeline = vi.fn().mockReturnValue(true);
-      await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }), getAuditLog: () => failingLog }, async () => {
-        asMandate();
-        expect((await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' })).status).toBe(503);
+        const res = await jsonFetch('/api/workflows/wf-1', { method: 'DELETE' });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a workflow.');
       });
       expect(deletePlannedPipeline).not.toHaveBeenCalled();
+      expect(rows()).toEqual([]);
     });
   });
 
@@ -13806,5 +13796,147 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       expect(l.runTriggerNow).toHaveBeenCalledTimes(1);
       expect(rows()).toEqual([]);
     });
+  });
+});
+
+// PRD customer-granted-operator-access §3.13: every `user` route that writes declares, at its
+// registration, what a mandate may do there. Read off the route table the server really
+// builds, so a route added tomorrow is in the set without anyone listing it.
+//
+// ⚠ What this checks and what it does not: that each such route DECLARES a stance, and for
+// `owner-only` that the stance is APPLIED (the dispatcher refuses before the handler). For
+// `mark`, `own` and `free` it checks neither that the handler does what the stance says nor
+// that the stance is the right one; those are the handlers' own tests and a reviewer's call.
+describe('mandate stance of every route that writes', () => {
+  const WRITE = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+  const table = (): ReturnType<typeof api.routeStancesForTesting> => api.routeStancesForTesting();
+  const writes = (): ReturnType<typeof api.routeStancesForTesting> => table().filter(r => r.scope === 'user' && WRITE.has(r.method));
+  /** A request path for a route: a dynamic pattern's groups filled with a placeholder. */
+  const concrete = (path: string): string => path.replace(/:[^/]+/g, 'stance-probe');
+  const name = (r: { method: string; path: string }): string => `${r.method} ${concrete(r.path)}`;
+
+  it('finds a stance on every user route that writes, and a reason on every free one', () => {
+    const all = writes();
+    // The set is the real one, not an empty filter.
+    expect(all.length).toBeGreaterThan(70);
+    expect(all.filter(r => r.stance === undefined).map(name), 'declare a MandateStance at the registration').toEqual([]);
+    for (const r of all) {
+      if (r.stance?.kind === 'free') expect(r.stance.why.trim().length, name(r)).toBeGreaterThan(10);
+      if (r.stance?.kind === 'owner-only') expect(r.stance.what.trim().length, name(r)).toBeGreaterThan(3);
+    }
+  });
+
+  it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {
+    const open = writes().filter(r => r.stance !== undefined && r.stance.kind !== 'owner-only').map(r => `${name(r)} ${r.stance!.kind}`).sort();
+    expect(open).toEqual([
+      'DELETE /api/tasks/stance-probe mark',
+      'PATCH /api/tasks/stance-probe mark',
+      'POST /api/google/auth free',
+      'POST /api/llm/test free',
+      'POST /api/mail/accounts free',
+      'POST /api/mail/accounts/test free',
+      'POST /api/mail/autodiscover free',
+      'POST /api/onboarding/derive-domain free',
+      'POST /api/onboarding/knowledge/start free',
+      'POST /api/searxng/check free',
+      'POST /api/secrets/validate-key free',
+      'POST /api/sessions free',
+      'POST /api/sessions/stance-probe/mail-connected free',
+      'POST /api/sessions/stance-probe/reply free',
+      'POST /api/sessions/stance-probe/reply-tabs free',
+      'POST /api/sessions/stance-probe/run free',
+      'POST /api/sessions/stance-probe/secret-saved free',
+      'POST /api/sessions/stance-probe/tab-progress free',
+      'POST /api/speak free',
+      'POST /api/tasks mark',
+      'POST /api/tasks/stance-probe/complete mark',
+      'POST /api/transcribe free',
+      'POST /api/triggers/stance-probe/run own',
+      'POST /api/workflows/stance-probe/grant-preview free',
+      'PUT /api/secrets/stance-probe free',
+    ]);
+  });
+
+  describe('owner-only is applied, not only declared', () => {
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterEach(() => {
+      api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+      for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    });
+
+    it('refuses a mandate at every owner-only route with that route\'s sentence, before its handler', async () => {
+      const closed = writes().filter(r => r.stance?.kind === 'owner-only');
+      expect(closed.length).toBeGreaterThan(40);
+      api.setPrincipalResolverForTesting(() => MANDATE);
+      const wrong: string[] = [];
+      for (const r of closed) {
+        const res = await jsonFetch(concrete(r.path), { method: r.method, body: '{}' });
+        const error = res.status === 403 ? ((await res.json()) as { error?: string }).error : `status ${String(res.status)}`;
+        const want = `Only the owner of this instance can ${(r.stance as { what: string }).what}.`;
+        if (error !== want) wrong.push(`${name(r)}: ${String(error)}`);
+        for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+      }
+      expect(wrong).toEqual([]);
+    });
+
+    it('lets the owner past the same check (the handler answers, whatever it says)', async () => {
+      // Three routes whose handlers answer the mock engine harmlessly.
+      for (const [method, path] of [['POST', '/api/bulk/runs/stance-probe/undo'], ['PATCH', '/api/workflows/stance-probe'], ['POST', '/api/sessions/stance-probe/abort']] as const) {
+        const res = await jsonFetch(path, { method, body: '{}' });
+        const text = await res.text();
+        expect(text, `${method} ${path}`).not.toContain('Only the owner of this instance');
+      }
+    });
+  });
+});
+
+describe('PUT /api/secrets/:name and a stored value', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  afterEach(() => { api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL); });
+
+  async function put(principal: RequestPrincipal, store: { map?: string[]; file?: string[]; env?: string[] }, slot: string): Promise<{ status: number; set: ReturnType<typeof vi.fn> }> {
+    const set = vi.fn();
+    const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const orig = engineRef['getSecretStore'];
+    engineRef['getSecretStore'] = () => ({
+      getMasked: (n: string) => (store.map ?? []).includes(n) ? '****' : null,
+      listVaultNames: () => store.file ?? [],
+      isEnvironmentSecret: (n: string) => (store.env ?? []).includes(n),
+      set, recordConsent: vi.fn(),
+      // `errorResponse` masks every answer through the store.
+      maskAll: (t: string) => t, maskSecrets: (t: string) => t,
+    });
+    api.setPrincipalResolverForTesting(() => principal);
+    try {
+      const res = await jsonFetch(`/api/secrets/${slot}`, { method: 'PUT', body: JSON.stringify({ value: 'NEW-VALUE' }) });
+      if (res.status === 403) expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can replace a stored secret.');
+      return { status: res.status, set };
+    } finally { engineRef['getSecretStore'] = orig; }
+  }
+
+  it('lets a mandate store a name that is new', async () => {
+    const r = await put(MANDATE, {}, 'CRM_CLIENT_ID');
+    expect(r.status).toBe(200);
+    expect(r.set).toHaveBeenCalledWith('CRM_CLIENT_ID', 'NEW-VALUE');
+  });
+
+  it.each([
+    ['in the store\'s map', { map: ['CRM_CLIENT_ID'] }],
+    ['only in the vault file (written past the map)', { file: ['CRM_CLIENT_ID'] }],
+    ['in the environment', { env: ['CRM_CLIENT_ID'] }],
+  ])('refuses a mandate that would replace a value %s, and leaves it as it was', async (_label, store) => {
+    const r = await put(MANDATE, store, 'CRM_CLIENT_ID');
+    expect(r.status).toBe(403);
+    expect(r.set).not.toHaveBeenCalled();
+  });
+
+  it('control: the owner replaces a stored value', async () => {
+    const r = await put(OWNER_PRINCIPAL, { map: ['CRM_CLIENT_ID'], file: ['CRM_CLIENT_ID'] }, 'CRM_CLIENT_ID');
+    expect(r.status).toBe(200);
+    expect(r.set).toHaveBeenCalledWith('CRM_CLIENT_ID', 'NEW-VALUE');
   });
 });
