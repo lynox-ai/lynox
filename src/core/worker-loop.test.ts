@@ -3578,6 +3578,25 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.stringContaining('provider down'), 'failed', { noRetry: true });
   });
 
+  it.each([
+    ['the mandate', true],
+    ['the owner', false],
+  ] as const)('the failure of a run %s started with retries left reaches the owner now: %s', async (who, now) => {
+    vi.useRealTimers();
+    const task = runAgentRow({
+      created_by: who === 'the mandate' ? 'mandate:eva@kanzlei.example' : 'owner',
+      confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0,
+    });
+    const session = makeSession(new Error('provider down'));
+    const router = makeNotificationRouter(true);
+    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session }), router, 60_000);
+    await (loop as unknown as Exec).executeTask(task, null, who === 'the mandate' ? loop.claimHandRunMinter()('hr-lock', EVA) : undefined);
+    const told = (router.notify as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .some((c) => String((c[0] as { body?: unknown }).body ?? '').includes('provider down'));
+    // Not retried, so now or never; the owner's own schedule is retried and tells later.
+    expect(told).toBe(now);
+  });
+
   it('control: the owner\'s schedule that fails the same way keeps its retry, and runs as the owner\'s', async () => {
     vi.useRealTimers();
     const task = runAgentRow({ created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
@@ -3596,15 +3615,19 @@ describe('hand runs carry the starter\'s principal', () => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
     const { loop, engine, session } = setup(task);
+    let cleared: string | undefined = 'not reached';
     (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
       loop.stop();
-      expect(loop.runningStarterTag('hr-lock')).toBeUndefined();
+      cleared = loop.runningStarterTag('hr-lock');
       if (end === 'throws') throw new Error('provider down');
       return 'Ran.';
     });
     await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    // Read outside the run, so a failed precondition cannot turn into the case under test.
+    expect(cleared).toBeUndefined();
     const calls = (engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls).toHaveLength(1);
+    expect(calls[0]![2]).toBe(end === 'throws' ? 'failed' : 'success');
     expect(calls[0]![3]).toEqual({ noRetry: true });
   });
 
