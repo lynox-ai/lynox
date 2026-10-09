@@ -15,7 +15,15 @@
  */
 export type RequestPrincipal =
   | { readonly kind: 'owner' }
-  | { readonly kind: 'mandate'; readonly email: string };
+  | {
+      readonly kind: 'mandate';
+      readonly email: string;
+      /** How the mandate is shown (one line, as the control plane folded it). For the actor
+       *  trail only; identity, tags and comparisons stay on `email`. */
+      readonly display?: string | undefined;
+      /** Which grant this login came from. For the actor trail only. */
+      readonly mandateId?: string | undefined;
+    };
 
 /** The prefix every mandate tag carries; the due query matches on it in SQL. */
 export const MANDATE_TAG_PREFIX = 'mandate:';

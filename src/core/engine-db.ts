@@ -915,6 +915,31 @@ const MIGRATIONS: string[] = [
   // model the way it did before this column existed. Existing rows stay NULL.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (21);
    ALTER TABLE triggers ADD COLUMN model_tier TEXT;`,
+
+  // v22 (actor trail): who did what through a mandate (PRD customer-granted-operator-access
+  // §3.6) — the actor, the act and its target, never its content. A write leaves two rows
+  // joined by `correlation_id`: an `attempt` before it runs and its `outcome` (done, refused,
+  // error) after, so a write that was refused shows as refused and one whose outcome never
+  // arrived shows as only attempted. Rows are never changed: the trigger refuses an UPDATE.
+  // They are not exempt from the owner's erasure (`deleteAllData` empties this table too):
+  // the trail is a record for the owner, and erasing the instance erases it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (22);
+   CREATE TABLE IF NOT EXISTS audit_log (
+     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+     ts             TEXT NOT NULL,
+     actor_kind     TEXT NOT NULL,
+     actor_email    TEXT,
+     actor_display  TEXT,
+     mandate_id     TEXT,
+     action         TEXT NOT NULL,
+     target         TEXT,
+     phase          TEXT NOT NULL,
+     correlation_id TEXT NOT NULL,
+     run_id         TEXT,
+     request_id     TEXT
+   );
+   CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
+   BEGIN SELECT RAISE(ABORT, 'audit_log rows are never changed'); END;`,
 ];
 
 /**

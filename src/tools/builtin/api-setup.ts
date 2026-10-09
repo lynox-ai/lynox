@@ -1466,6 +1466,8 @@ export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | unde
 // ── Tool definition ───────────────────────────────────────────────────────────
 
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+  // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
+  outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
   // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
   // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
   // the token at the provider — a vault before-image would restore a dead token. The

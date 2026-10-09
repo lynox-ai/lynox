@@ -73,6 +73,7 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
@@ -1693,6 +1694,33 @@ export class LynoxHTTPApi {
     this._principalResolver = resolver;
   }
 
+  /**
+   * The actor trail of a mandate's request (`audit-log.ts`, PRD §3.6): the `attempt` row,
+   * written before the act. `null` for the owner, who leaves no trail in this piece. `false`
+   * when the row cannot be written — the route has answered 503 and must not act. The action
+   * is the route; the target an id from the path, never a body.
+   */
+  private _beginRequestTrail(req: IncomingMessage, res: ServerResponse, action: string, target: string): AuditEntry | null | false {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return null;
+    const log = this.engine?.getAuditLog() ?? null;
+    const entry: AuditEntry = { principal, action, target, phase: 'attempt', correlationId: newCorrelationId() };
+    try {
+      if (log === null) throw new Error('no audit log');
+      log.record(entry);
+    } catch {
+      errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
+      return false;
+    }
+    return entry;
+  }
+
+  /** The outcome row of a request trail: `done` when the act happened, `refused` otherwise. */
+  private _endRequestTrail(trail: AuditEntry | null, phase: 'done' | 'refused'): void {
+    if (trail === null) return;
+    try { this.engine?.getAuditLog()?.record({ ...trail, phase }); } catch { /* the attempt row stands alone */ }
+  }
+
   /** The 403 a mandate gets for an act only the owner may perform. */
   private _refuseUnlessOwner(req: IncomingMessage, res: ServerResponse, what: string): boolean {
     if (isOwnerPrincipal(this._principalOf(req))) return false;
@@ -1773,11 +1801,11 @@ export class LynoxHTTPApi {
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
     if (nowS >= session.exp) return null;
-    return { iat: timestamp, principal: { kind: 'mandate', email: session.email } };
+    return { iat: timestamp, principal: { kind: 'mandate', email: session.email, display: session.display, mandateId: session.mandateId } };
   }
 
   /** The signed principal part of a session cookie; null for anything this engine does not know. */
-  private static _parseSessionPrincipal(part: string): { email: string; exp: number } | null {
+  private static _parseSessionPrincipal(part: string): { email: string; display: string; mandateId: string; exp: number } | null {
     let raw: unknown;
     try {
       raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -1792,7 +1820,7 @@ export class LynoxHTTPApi {
     if (typeof display !== 'string' || display.length === 0) return null;
     if (typeof mandateId !== 'string' || mandateId.length === 0) return null;
     if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null;
-    return { email, exp };
+    return { email, display, mandateId, exp };
   }
 
   /**
@@ -6846,7 +6874,12 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
+      // Deleting a workflow stops every schedule that runs it, so a mandate's delete is
+      // recorded like a schedule's (PRD §3.13, N10b).
+      const trail = this._beginRequestTrail(_req, res, 'DELETE /api/workflows/:id', params['id']!);
+      if (trail === false) return;
       const deleted = history.deletePlannedPipeline(params['id']!);
+      this._endRequestTrail(trail, deleted ? 'done' : 'refused');
       if (!deleted) { errorResponse(res, 404, 'Workflow not found'); return; }
       // Evict the in-memory cache so the deleted workflow can't be resurrected.
       const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
@@ -7072,9 +7105,13 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/tasks/:id', async (_req, res, params) => {
       const runHistory = engine.getRunHistory();
       if (!requireService(res, runHistory, 'History')) return;
+      // A mandate may delete the owner's schedules; each delete is recorded (PRD §3.13, N10b).
+      const trail = this._beginRequestTrail(_req, res, 'DELETE /api/tasks/:id', params['id']!);
+      if (trail === false) return;
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
       const deleted = runHistory.deleteTask(params['id']!) || runHistory.deleteTrigger(params['id']!);
+      this._endRequestTrail(trail, deleted ? 'done' : 'refused');
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
     }));
@@ -7221,6 +7258,7 @@ export class LynoxHTTPApi {
       // passes the stamp checks as it always has, or not at all.
       const principal = this._principalOf(_req);
       let marker: HandRunMarker | undefined;
+      let trail: AuditEntry | null = null;
       if (!isOwnerPrincipal(principal)) {
         // Bound to the CANONICAL id: the route accepts an id prefix, and the dispatch
         // checks the marker against the row it resolved.
@@ -7234,9 +7272,21 @@ export class LynoxHTTPApi {
         }
         const mint = this.#handRunMinterFor(workerLoop);
         if (!mint) { errorResponse(res, 503, 'Test runs by hand are not available on this instance right now.'); return; }
+        // Every hand start of a mandate is recorded (PRD §3.13 E4, G1), and before the
+        // marker is minted: a start that cannot be recorded leaves no marker behind.
+        const begun = this._beginRequestTrail(_req, res, 'POST /api/triggers/:id/run', trigger.id);
+        if (begun === false) return;
+        trail = begun;
         marker = mint(trigger.id, principal);
       }
-      const outcome = await workerLoop.runTriggerNow(params['id']!, marker);
+      let outcome: Awaited<ReturnType<typeof workerLoop.runTriggerNow>>;
+      try {
+        outcome = await workerLoop.runTriggerNow(params['id']!, marker);
+      } catch (err: unknown) {
+        this._endRequestTrail(trail, 'refused');
+        throw err;
+      }
+      this._endRequestTrail(trail, outcome.ok ? 'done' : 'refused');
       if (!outcome.ok) {
         if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
         // Its own answer, not "already running": the run exists and is waiting for the
@@ -10205,6 +10255,10 @@ export class LynoxHTTPApi {
 
     // DELETE /api/data — GDPR Art. 17 (Right to Erasure)
     this.addStatic('admin', 'DELETE /api/data', async (_req, res, _params, body) => {
+      // The erasure empties the actor trail with everything else, so it is the owner's alone:
+      // a mandate cannot erase the record of what it did. Checked before the tier, so it does
+      // not depend on which instances a mandate exists on.
+      if (this._refuseUnlessOwner(_req, res, 'delete all data')) return;
       if (denyOnManagedInstance(res, 'bulk data deletion')) return;
       const b = body as Record<string, unknown> | null;
       const confirm = b && typeof b['confirm'] === 'string' ? b['confirm'] : '';

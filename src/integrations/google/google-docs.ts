@@ -77,6 +77,7 @@ const DOCS_WRITE_ACTIONS = new Set<DocsInput['action']>(['create', 'append', 're
 
 export function createDocsTool(getAuth: () => GoogleAuth | null): ToolEntry<DocsInput> {
   return {
+    outwardWrite: (input) => (DOCS_WRITE_ACTIONS.has(input.action) ? input.action : null),
     destructive: {
       mode: 'external',
       check: (input) => {

@@ -3406,9 +3406,13 @@ describe('mandates and stored credentials', () => {
       }
       return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
     });
+    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal) as unknown as { toolContext: Record<string, unknown> };
+    // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
+    // so the log only has to accept the rows. Without one the renewal is skipped by design.
+    agent.toolContext['auditLog'] = { record: (): void => {} };
     const out = await httpRequestTool.handler(
       { method: 'GET', ...req } as never,
-      makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal),
+      agent as never,
     ).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
     return { calls, out: String(out) };
   }
@@ -3540,5 +3544,67 @@ describe('mandates and stored credentials', () => {
     const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
     const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
+  });
+});
+
+/**
+ * The renewal posts to the provider and may rotate the refresh token there: an outward write
+ * that runs inside an `http_request` past the dispatch that records a mandate's writes. So it
+ * leaves its own pair of rows in the actor trail (`audit-log.ts`), and without a row it does
+ * not run — the request goes out on the stored token instead.
+ */
+describe('a mandate\'s renewal in the actor trail', () => {
+  const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; correlationId: string };
+  beforeEach(() => { resetOAuthRenewalBackoffForTests(); });
+
+  async function renewAs(principal: RequestPrincipal, auditLog: { record: (e: Rec) => void } | null): Promise<{ calls: string[]; stderr: string }> {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_expires_at: Date.now() - 1000 } },
+    }));
+    const calls: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      calls.push(url);
+      const body = url.includes('/oauth/token') ? JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }) : '{"ok":true}';
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const written: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { written.push(String(chunk)); return true; });
+    const agent = makeAgent(apiStore, makeVault(SEED), undefined, undefined, principal) as unknown as { toolContext: Record<string, unknown> };
+    agent.toolContext['auditLog'] = auditLog;
+    await httpRequestTool.handler({ url: 'https://api.crm.example/v1/contacts', method: 'GET' } as never, agent as never);
+    return { calls, stderr: written.join('') };
+  }
+
+  it('records attempt and returned around a mandate\'s renewal', async () => {
+    const recs: Rec[] = [];
+    const { calls } = await renewAs(MANDATE, { record: (e) => { recs.push(e); } });
+    expect(calls.filter((u) => u.includes('/oauth/token'))).toHaveLength(1);
+    expect(recs.map((r) => r.phase)).toEqual(['attempt', 'returned']);
+    for (const r of recs) expect(r).toMatchObject({ principal: MANDATE, action: 'api_setup:fetch_token', target: 'api_setup renewal crm-api' });
+    expect(recs[0]!.correlationId).toBe(recs[1]!.correlationId);
+  });
+
+  it('does not renew for a mandate when the attempt cannot be written, and says why on stderr', async () => {
+    for (const auditLog of [{ record: (): void => { throw new Error('disk full'); } }, null]) {
+      resetOAuthRenewalBackoffForTests();
+      const { calls, stderr } = await renewAs(MANDATE, auditLog);
+      expect(calls.some((u) => u.includes('/oauth/token')), String(auditLog)).toBe(false);
+      expect(calls.some((u) => u.includes('/v1/contacts')), 'the request still went out on the stored token').toBe(true);
+      expect(stderr).toMatch(/oauth token renewal refused for profile "crm-api": the renewal could not be recorded/);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('control: the owner\'s renewal runs and leaves no row', async () => {
+    const recs: Rec[] = [];
+    const { calls } = await renewAs(OWNER_PRINCIPAL, { record: (e) => { recs.push(e); } });
+    expect(calls.filter((u) => u.includes('/oauth/token'))).toHaveLength(1);
+    expect(recs).toEqual([]);
   });
 });

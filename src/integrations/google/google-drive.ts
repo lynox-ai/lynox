@@ -117,6 +117,7 @@ const DRIVE_WRITE_ACTIONS = new Set<DriveInput['action']>(['upload', 'create_doc
 
 export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<DriveInput> {
   return {
+    outwardWrite: (input) => (DRIVE_WRITE_ACTIONS.has(input.action) ? input.action : null),
     destructive: {
       mode: 'external',
       check: (input) => {

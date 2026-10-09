@@ -105,7 +105,9 @@ import { runInCallSlot } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
+import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
+import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 
@@ -240,6 +242,16 @@ function stableStringify(value: unknown): string {
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
+
+/** An open actor-trail entry: the attempt row is written, the outcome not yet. */
+interface OutwardTrail {
+  readonly log: AuditLog | null;
+  readonly principal: RequestPrincipal;
+  readonly runId: string | undefined;
+  readonly correlationId: string;
+  readonly action: string;
+  readonly target: string;
+}
 
 export interface SendStop {
   cause: SendStopCause;
@@ -3928,6 +3940,63 @@ export class Agent implements IAgent {
     return this._recordedToolCalls;
   }
 
+  /**
+   * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
+   * or `null` when there is nothing to record: the owner's call, or a call that writes
+   * nothing outside. Only the owner is exempt, so a principal kind added later is recorded
+   * until someone decides otherwise. `'refused'` when the row cannot be written — no trail store, or the
+   * insert threw — and the call must not run. The target is built from the call as the model
+   * sent it (`tc.input`), before any secret was resolved into it.
+   */
+  private _beginOutwardTrail(tc: BetaToolUseBlock, tool: ToolEntry): OutwardTrail | null | 'refused' {
+    if (isOwnerPrincipal(this.principal)) return null;
+    const label = tool.outwardWrite ? tool.outwardWrite(tc.input as never) : null;
+    if (label === null) return null;
+    const input = tc.input as { url?: unknown; action?: unknown };
+    const target = tc.name === 'http_request' && typeof input.url === 'string'
+      ? httpTarget(label, input.url)
+      : `${tc.name} ${label}`;
+    // Who acted and in which run are fixed here, at the attempt: a session reuses its agent
+    // across runs and resets `principal` per run, and an abandoned call can settle after the
+    // next run, the owner's, has begun.
+    const entry: OutwardTrail = {
+      log: this.toolContext?.auditLog ?? null, principal: this.principal, runId: this.currentRunId,
+      correlationId: newCorrelationId(), action: `${tc.name}:${label}`, target,
+    };
+    if (entry.log === null) return 'refused';
+    try {
+      entry.log.record({ principal: entry.principal, correlationId: entry.correlationId, action: entry.action, target, phase: 'attempt', runId: entry.runId });
+    } catch {
+      return 'refused';
+    }
+    return entry;
+  }
+
+  /** The outcome row for a trail `_beginOutwardTrail` opened. A failure to write it changes
+   *  nothing about the call, which has already run: the attempt row stands without an
+   *  outcome, which is what it then is. Written exactly once per attempt: by the handler's
+   *  settling (`_trailOnSettle`), or by the dispatch's catch when no handler started. */
+  private static _endOutwardTrail(trail: OutwardTrail, phase: AuditPhase): void {
+    try {
+      trail.log?.record({ principal: trail.principal, correlationId: trail.correlationId, action: trail.action, target: trail.target, phase, runId: trail.runId });
+    } catch { /* the attempt row stands alone */ }
+  }
+
+  /**
+   * The outcome is read from the HANDLER's own settling, not from the dispatch around it.
+   * The dispatch can give up on a call that goes on running — the per-tool timeout and a
+   * stopped run both stop waiting without cancelling it — and a step after the handler
+   * (scan, ledger, stream) can throw for a call whose write already happened. Read from the
+   * dispatch, both would say `failed` for a mail that went out. Read here, an abandoned call
+   * gets its outcome when it really ends, and its attempt stands alone until then.
+   */
+  private static _trailOnSettle(work: Promise<unknown>, trail: OutwardTrail): void {
+    work.then(
+      () => { Agent._endOutwardTrail(trail, 'returned'); },
+      () => { Agent._endOutwardTrail(trail, 'failed'); },
+    );
+  }
+
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
@@ -4202,10 +4271,20 @@ export class Agent implements IAgent {
       };
     }
 
+    // A mandate's call that writes outside the instance is recorded before it runs, and does
+    // not run unrecorded (PRD customer-granted-operator-access §3.13 "Verbundene Konten").
+    // After every gate the dispatch itself holds; the gates inside the handler come later,
+    // which is why the outcome is a second row and not part of this one.
+    const trail = this._beginOutwardTrail(tc, tool);
+    if (trail === 'refused') {
+      return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE, is_error: true };
+    }
+
     const timer = measureTool(tc.name);
     channels.toolStart.publish({ name: tc.name, agent: this.name });
 
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
+    let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
     const callSlot: CallSlot = {};
     try {
@@ -4216,9 +4295,12 @@ export class Agent implements IAgent {
       // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
       // never reads the field, so this is a no-op for it.
       this._pendingDowngradeTier = downgradeDecision;
-      const rawResult = runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
+      // Resolved ONCE: the trail and the timeout race below read the same promise, so a
+      // thenable's `then` runs once, not once per reader.
+      const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : tool.handler(processedInput, this));
+        : tool.handler(processedInput, this)));
+      if (trail !== null) { Agent._trailOnSettle(rawResult, trail); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching
@@ -4355,6 +4437,9 @@ export class Agent implements IAgent {
         content: sanitizedResult,
       };
     } catch (err: unknown) {
+      // Reached with the trail still open only when the handler never started (it threw while
+      // being called); a started handler records its own outcome when it settles.
+      if (trail !== null && !trailWatched) Agent._endOutwardTrail(trail, 'failed');
       const duration = timer.end();
       // A question nobody can answer is re-built with the question MASKED before anything
       // below reads it: its message leaves the agent, into the ledger here and into the

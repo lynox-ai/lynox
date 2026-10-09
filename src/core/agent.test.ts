@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
+import { AUDIT_UNAVAILABLE, type AuditLog } from './audit-log.js';
+import { httpRequestTool } from '../tools/builtin/http.js';
 import { noteAnsweredBy, noteNetworkContact } from './call-connection.js';
 import { approvalKey, currentEpoch, isApproved, recordApproval } from './untrusted-epoch.js';
 
@@ -6186,3 +6188,146 @@ describe('untrusted epoch for write approvals', () => {
   });
 });
 
+
+// PRD customer-granted-operator-access §3.6 (piece H2h): a mandate's tool call that writes
+// outside the instance leaves an `attempt` row before its handler runs and one outcome row
+// after; a call whose attempt cannot be written does not run. The log here is a recorder:
+// what reaches engine.db is pinned in audit-log.test.ts.
+describe('actor trail — a mandate\'s outward tool call', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; correlationId: string; runId?: string };
+  const recorder = (): { log: AuditLog; recs: Rec[] } => {
+    const recs: Rec[] = [];
+    return { recs, log: { record: (e: Rec) => { recs.push(e); } } as unknown as AuditLog };
+  };
+  const failing = { record: () => { throw new Error('disk full'); } } as unknown as AuditLog;
+  const outward = (name: string, outwardWrite: ToolEntry['outwardWrite'], handler?: ToolEntry['handler']): ToolEntry =>
+    ({ ...makeTool(name, handler), outwardWrite });
+  async function run(tool: ToolEntry, input: unknown, opts: { principal?: typeof MANDATE | undefined; auditLog?: AuditLog | null; onStream?: (e: unknown) => Promise<void> } = {}): Promise<{ agent: Agent; resultText: string; isError: boolean | undefined }> {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_w', name: tool.definition.name, input }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const toolContext = createToolContext({});
+    toolContext.auditLog = opts.auditLog === undefined ? null : opts.auditLog;
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [tool], currentRunId: 'run-trail-1', toolContext,
+      ...(opts.principal ? { principal: opts.principal } : {}),
+      ...(opts.onStream ? { onStream: opts.onStream as never } : {}),
+    });
+    await agent.send('go');
+    const msg = agent.getMessages().find(m => Array.isArray((m as { content: unknown }).content)
+      && ((m as { content: Array<{ type: string }> }).content).some(b => b.type === 'tool_result')) as { content: Array<{ type: string; content?: unknown; is_error?: boolean }> };
+    const block = msg.content.find(b => b.type === 'tool_result')!;
+    return { agent, resultText: JSON.stringify(block.content), isError: block.is_error };
+  }
+
+  it('records attempt and returned around a mandate\'s mail send, under one correlation id', async () => {
+    const { log, recs } = recorder();
+    const handler = vi.fn().mockResolvedValue('sent');
+    await run(outward('mail_send', () => 'send', handler), { to: 'x@example.invalid' }, { principal: MANDATE, auditLog: log });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    for (const r of recs) expect(r).toMatchObject({ principal: MANDATE, action: 'mail_send:send', target: 'mail_send send', runId: 'run-trail-1' });
+    expect(recs[0]!.correlationId).toBe(recs[1]!.correlationId);
+  });
+
+  it('names an http write by method, host and path — never its query, userinfo or body', async () => {
+    const { log, recs } = recorder();
+    await run(outward('http_request', httpRequestTool.outwardWrite, vi.fn().mockResolvedValue('ok')),
+      { url: 'https://user:pw@api.example.invalid/v1/items?api_key=k#f', method: 'POST', body: 'payload-text' }, { principal: MANDATE, auditLog: log });
+    expect(recs.map(r => [r.action, r.target])).toEqual([
+      ['http_request:POST', 'POST api.example.invalid/v1/items'], ['http_request:POST', 'POST api.example.invalid/v1/items'],
+    ]);
+  });
+
+  it('records nothing for a call that writes nothing outside, and nothing for the owner', async () => {
+    const a = recorder();
+    await run(outward('http_request', httpRequestTool.outwardWrite, vi.fn().mockResolvedValue('ok')), { url: 'https://api.example.invalid/', method: 'GET' }, { principal: MANDATE, auditLog: a.log });
+    expect(a.recs).toEqual([]);
+    const b = recorder();
+    const handler = vi.fn().mockResolvedValue('sent');
+    await run(outward('mail_send', () => 'send', handler), {}, { auditLog: b.log });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(b.recs).toEqual([]);
+  });
+
+  it('does not run a mandate\'s outward call whose attempt cannot be written, and says so in a fixed text', async () => {
+    for (const auditLog of [failing, null]) {
+      const handler = vi.fn().mockResolvedValue('sent');
+      const r = await run(outward('mail_send', () => 'send', handler), {}, { principal: MANDATE, auditLog });
+      expect(handler, String(auditLog)).not.toHaveBeenCalled();
+      expect(r.isError).toBe(true);
+      expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE).slice(1, -1));
+    }
+  });
+
+  it('names the actor of the attempt in the outcome, though the agent\'s principal changed meanwhile', async () => {
+    // A session reuses its agent and resets `principal` per run; an abandoned call can end
+    // after the owner's next run has begun.
+    const { log, recs } = recorder();
+    const handler = vi.fn(async (_input: unknown, agent: unknown) => {
+      (agent as { principal: unknown; currentRunId: unknown }).principal = { kind: 'owner' };
+      (agent as { currentRunId: unknown }).currentRunId = 'run-owner-2';
+      return 'sent';
+    });
+    await run(outward('mail_send', () => 'send', handler as never), {}, { principal: MANDATE, auditLog: log });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    for (const r of recs) expect(r).toMatchObject({ principal: MANDATE, runId: 'run-trail-1' });
+  });
+
+  it('records the outcome of a call the dispatch gave up on when the call really ends, not `failed` at the timeout', async () => {
+    const statics = Agent as unknown as { TOOL_TIMEOUT_MS: number };
+    const before = statics.TOOL_TIMEOUT_MS;
+    statics.TOOL_TIMEOUT_MS = 20;
+    try {
+      const { log, recs } = recorder();
+      let finish: (v: string) => void = () => {};
+      const handler = vi.fn(() => new Promise<string>((r) => { finish = r; }));
+      await run(outward('mail_send', () => 'send', handler), {}, { principal: MANDATE, auditLog: log });
+      // The dispatch timed out and moved on; the send is still pending.
+      expect(recs.map(r => r.phase)).toEqual(['attempt']);
+      finish('sent');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    } finally {
+      statics.TOOL_TIMEOUT_MS = before;
+    }
+  });
+
+  it('records any principal that is not the owner, whatever its kind', async () => {
+    // Only the owner is exempt: a kind added later is recorded, not waved through.
+    const { log, recs } = recorder();
+    const other = { kind: 'delegate', email: 'other@example.invalid' } as unknown as typeof MANDATE;
+    await run(outward('mail_send', () => 'send', vi.fn().mockResolvedValue('sent')), {}, { principal: other, auditLog: log });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+  });
+
+  it('control: the owner\'s outward call runs without any log', async () => {
+    const handler = vi.fn().mockResolvedValue('sent');
+    await run(outward('mail_send', () => 'send', handler), {}, { auditLog: null });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('records failed when the handler throws, and when it ends in a soft failure', async () => {
+    const thrown = recorder();
+    await run(outward('mail_send', () => 'send', vi.fn().mockRejectedValue(new Error('smtp down'))), {}, { principal: MANDATE, auditLog: thrown.log });
+    expect(thrown.recs.map(r => r.phase)).toEqual(['attempt', 'failed']);
+    const soft = recorder();
+    await run(outward('mail_send', () => 'send', vi.fn().mockRejectedValue(new ToolSoftFailure('HTTP 500', 'HTTP 500'))), {}, { principal: MANDATE, auditLog: soft.log });
+    expect(soft.recs.map(r => r.phase)).toEqual(['attempt', 'failed']);
+  });
+
+  it('records failed for a handler that throws before it returns a promise', async () => {
+    const { log, recs } = recorder();
+    const handler = vi.fn((): Promise<string> => { throw new Error('thrown while called'); });
+    await run(outward('mail_send', () => 'send', handler), {}, { principal: MANDATE, auditLog: log });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'failed']);
+  });
+
+  it('writes one outcome even when streaming the result throws afterwards', async () => {
+    const { log, recs } = recorder();
+    const onStream = async (e: unknown): Promise<void> => { if ((e as { type: string }).type === 'tool_result') throw new Error('stream gone'); };
+    await run(outward('mail_send', () => 'send', vi.fn().mockResolvedValue('sent')), {}, { principal: MANDATE, auditLog: log, onStream });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+  });
+});

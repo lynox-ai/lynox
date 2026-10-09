@@ -11,6 +11,8 @@ import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { newCorrelationId } from '../../core/audit-log.js';
+import type { AuditPhase } from '../../core/audit-log.js';
 import { secretsForProfile } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -1363,8 +1365,24 @@ async function runOAuthRenewal(
   //     the provider rejecting the refresh token and therefore the LIKELIEST
   //     renewal failure of all. The success shape is the narrow one, so that is
   //     what gets matched instead.
+  // The renewal posts to the provider and may rotate the refresh token there: an outward
+  // write that runs inside this call, past the dispatch that records a mandate's writes. So
+  // it is recorded here, the same way (`audit-log.ts`): no row, no renewal — the request
+  // continues on the stored token.
+  const trail = beginRenewalTrail(agent, profileId);
+  if (trail === 'refused') {
+    writeRenewalFailure(profileId, 'refused', 'the renewal could not be recorded in the instance log', agent);
+    return { ok: false };
+  }
+  let ended = false; // one outcome per attempt, though a later step of the try can still throw
+  const endTrail = (phase: AuditPhase): void => {
+    if (trail === null || ended) return;
+    ended = true;
+    try { agent.toolContext?.auditLog?.record({ ...trail, phase }); } catch { /* the attempt row stands alone */ }
+  };
   try {
     const answer = await mod.apiSetupTool.handler({ action: 'fetch_token', id: profileId }, agent);
+    endTrail('returned');
     if (typeof answer !== 'string' || !answer.startsWith('Token exchange OK')) {
       // stderr, not a refusal to the model: the stored token is still valid for
       // at least the buffer, so the request continues. This is what lets an
@@ -1378,9 +1396,36 @@ async function runOAuthRenewal(
     // that it does not convert. Either way it must not be silent: the request
     // continues on the stored token, but the grant may now be broken in a way
     // only a log will show.
+    endTrail('failed');
     writeRenewalFailure(profileId, 'threw', err instanceof Error ? err.message : String(err), agent);
     return { ok: false };
   }
+}
+
+/** The `attempt` row of a mandate's renewal, `null` for anyone else, `'refused'` when it
+ *  cannot be written. Same action as the tool call it stands in for. */
+function beginRenewalTrail(
+  agent: import('../../types/index.js').IAgent,
+  profileId: string,
+): import('../../core/audit-log.js').AuditEntry | null | 'refused' {
+  const principal = agent.principal;
+  if (isOwnerPrincipal(principal)) return null;
+  const log = agent.toolContext?.auditLog ?? null;
+  if (log === null) return 'refused';
+  const entry = {
+    principal,
+    action: 'api_setup:fetch_token',
+    target: `api_setup renewal ${profileId}`,
+    phase: 'attempt' as const,
+    correlationId: newCorrelationId(),
+    runId: agent.currentRunId,
+  };
+  try {
+    log.record(entry);
+  } catch {
+    return 'refused';
+  }
+  return entry;
 }
 
 /**
@@ -2061,6 +2106,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // read as well — see its docblock for why PUT/PATCH are restorable and POST/DELETE are
   // not. Declaring it here a second time is what let the two drift.
   undo: (input) => undoClassFor(input.method ?? 'GET'),
+  // The effective method, overrides included; one that is not a method counts as a write.
+  outwardWrite: (input) => {
+    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url) ?? 'OVERRIDE';
+    return method === 'GET' || method === 'HEAD' ? null : method;
+  },
   definition: {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only

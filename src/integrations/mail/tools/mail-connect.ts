@@ -70,6 +70,7 @@ function deriveId(address: string): string {
 
 export function createMailConnectTool(): ToolEntry<MailConnectInput> {
   return {
+    outwardWrite: () => 'connect',
     definition: {
       name: 'mail_connect',
       description:

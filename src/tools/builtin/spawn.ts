@@ -2744,6 +2744,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       if (heldForBatch > 0) agent.releaseExternalCost?.(heldForBatch);
     }
   },
+  // Spawning writes nothing outside; each call the child makes is classified on its own.
+  outwardWrite: () => null,
   destructive: {
     mode: 'external',
     check: (input: SpawnAgentInput, ctx) => {

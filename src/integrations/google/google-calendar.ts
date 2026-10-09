@@ -139,6 +139,7 @@ const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event',
 
 export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<CalendarInput> {
   return {
+    outwardWrite: (input) => (CALENDAR_WRITE_ACTIONS.has(input.action) ? input.action : null),
     destructive: {
       mode: 'external',
       check: (input) => {
