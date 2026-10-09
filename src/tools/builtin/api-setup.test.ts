@@ -1619,6 +1619,19 @@ describe('api_setup tool', () => {
       expect(sent.provenance && 'schema_version' in sent.provenance).toBe(false);
     });
 
+    it('reads a missing schema_version as 2 on update too', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      await apiSetupTool.handler({ action: 'create', profile: withV2({}) }, agent);
+      const result = await apiSetupTool.handler({
+        action: 'update',
+        profile: withV2({ description: 'changed', provenance: { source: 'manual' } as unknown as { source: 'manual'; schema_version: 2 } }),
+      }, agent);
+      expect(result).toContain('Updated API profile');
+      expect(store.get('test-api')?.description).toBe('changed');
+      expect(store.get('test-api')?.provenance?.schema_version).toBe(2);
+    });
+
     it.each([
       ['another number', 3],
       ['null', null],

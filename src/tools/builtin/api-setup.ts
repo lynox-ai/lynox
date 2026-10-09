@@ -266,6 +266,13 @@ function validateProfile(profile: ApiProfile): string | null {
       if (o.body_format !== undefined && o.body_format !== 'form' && o.body_format !== 'json') {
         return `Invalid auth.oauth.body_format "${o.body_format}": must be "form" or "json"`;
       }
+      // Every reader splits it as text (connect, the start route, the refresh), so a list
+      // saved here only failed later, at the link, with a TypeError. Not quoted back: the
+      // value is the model's own input.
+      const scope: unknown = o.scope;
+      if (scope !== undefined && typeof scope !== 'string') {
+        return 'Invalid auth.oauth.scope: must be text with the scopes separated by spaces, for example "contact_show email", not a list.';
+      }
       // The three `*_key` slots were checked HERE, against a local copy of the
       // vault-key pattern, and nowhere else. That is what made them the shallow
       // end of the function: a form check, with nothing asking whether the name
