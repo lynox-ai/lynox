@@ -52,7 +52,7 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
       input_schema: {
         type: 'object' as const,
         properties: {
-          account: { type: 'string', description: 'Account id. Omit to use the default account.' },
+          account: { type: 'string', description: 'Account id or its mail address. Omit to use the default account.' },
           to: { type: 'string', description: 'Recipient(s), comma-separated. Required.' },
           cc: { type: 'string', description: 'CC recipient(s), comma-separated.' },
           bcc: { type: 'string', description: 'BCC recipient(s), comma-separated.' },

@@ -54,7 +54,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       input_schema: {
         type: 'object' as const,
         properties: {
-          account: { type: 'string', description: 'Account id. Omit to use the default account.' },
+          account: { type: 'string', description: 'Account id or its mail address. Omit to use the default account.' },
           uid: { type: 'number', description: 'IMAP UID of the message to reply to. Required.' },
           body: { type: 'string', description: 'Plain-text reply body. Required.' },
           to: { type: 'string', description: 'Override recipient(s), comma-separated. Defaults to original sender.' },

@@ -53,7 +53,7 @@ beforeEach(() => {
     getDefault: () => provider,
     register: vi.fn(),
     unregister: vi.fn(),
-    list: vi.fn(),
+    list: () => ['acct-1'],
   } as unknown as MailRegistry;
 });
 

@@ -38,7 +38,7 @@ export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadIn
       input_schema: {
         type: 'object' as const,
         properties: {
-          account: { type: 'string', description: 'Account id. Omit to use the default account.' },
+          account: { type: 'string', description: 'Account id or its mail address. Omit to use the default account.' },
           uid: { type: 'number', description: 'IMAP UID returned by mail_search or mail_triage.' },
           folder: { type: 'string', description: 'Mailbox folder. Default: INBOX.' },
           include_html: { type: 'boolean', description: 'Also include the raw HTML body. Default false.' },
