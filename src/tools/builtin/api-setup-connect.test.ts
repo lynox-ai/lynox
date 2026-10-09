@@ -948,3 +948,49 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain(CLIENT_ID_VALUE);
   });
 });
+
+describe('a built-in preset profile is not held to checks that mean nothing for it', () => {
+  // Measured on 2026-10-08 with the full engine: models that chose the preset on
+  // their first call still lost rounds here, and two of nine gave up. The attach
+  // never reads `vault_keys` for oauth2, and a preset's catalogue entry says to
+  // create the profile directly, so neither demand bought anything.
+  const createBare = async (presetId: string, extra: Record<string, unknown> = {}): Promise<{ store: ApiStore; reply: string }> => {
+    const store = new ApiStore();
+    const agent = agentWith(store);
+    (agent as unknown as { promptUser: (q: unknown) => Promise<string> }).promptUser = async () => 'allow';
+    const reply = await apiSetupTool.handler({ action: 'create', profile: {
+      id: 'vetted-api',
+      name: 'Vetted',
+      base_url: 'http://shop.local/api',
+      description: 'Preset profile with nothing but the preset',
+      auth: { type: 'oauth2', oauth: {
+        client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+        preset_id: presetId, preset_params: {},
+      } },
+      ...extra,
+    } }, agent) as string;
+    return { store, reply };
+  };
+
+  it('saves a known preset profile with no vault_keys, endpoints, guidelines or avoid rules', async () => {
+    const { store, reply } = await createBare('vetted-shop');
+
+    expect(reply).toContain('Created API profile');
+    expect(store.get('vetted-api')?.auth?.oauth?.preset_id).toBe('vetted-shop');
+  });
+
+  it('still asks an oauth2 profile without a known preset for vault_keys', async () => {
+    // The control: without it the case above would pass if the check were gone for everyone.
+    const { reply } = await createBare('not-a-provider');
+
+    expect(reply).toContain('auth.vault_keys is required for auth.type="oauth2"');
+  });
+
+  it('still calls an oauth2 profile without a known preset incomplete', async () => {
+    const { reply } = await createBare('not-a-provider', { auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'not-a-provider',
+    } } });
+
+    expect(reply).toContain('Profile is incomplete');
+  });
+});

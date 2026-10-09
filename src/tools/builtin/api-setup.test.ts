@@ -1583,6 +1583,39 @@ describe('api_setup tool', () => {
       );
       expect(result).toContain('schema_version');
     });
+
+    it('reads schema_version "2" as the number and stores the number', async () => {
+      // A third of the measured runs sent the string; the loader reads anything but
+      // the number 2 as a v1 profile, so it is stored as the number.
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            provenance: { source: 'manual', schema_version: '2' as unknown as 2 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+      expect(store.get('test-api')?.provenance?.schema_version).toBe(2);
+    });
+
+    it('names the type when schema_version arrives as another string', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            provenance: { source: 'manual', schema_version: 'v2' as unknown as 2 },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('must be the number 2, not a string');
+      expect(result).not.toContain('only schema_version=2 is supported');
+    });
   });
 
   describe('bootstrap — docs_url path (Phase B)', () => {
