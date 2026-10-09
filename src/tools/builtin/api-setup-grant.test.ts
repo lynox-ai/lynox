@@ -3406,9 +3406,13 @@ describe('mandates and stored credentials', () => {
       }
       return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
     });
+    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal) as unknown as { toolContext: Record<string, unknown> };
+    // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
+    // so the log only has to accept the rows. Without one the renewal is skipped by design.
+    agent.toolContext['auditLog'] = { record: (): void => {} };
     const out = await httpRequestTool.handler(
       { method: 'GET', ...req } as never,
-      makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal),
+      agent as never,
     ).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
     return { calls, out: String(out) };
   }

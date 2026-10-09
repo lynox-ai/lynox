@@ -13464,9 +13464,14 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
         ...tm,
         getTrigger: (id: string) => (id === 'trg' || id === 'trg-1' ? { id: 'trg-1', created_by: createdBy } : undefined),
       });
+      // A mandate's hand start is recorded before it runs (H2h); what the rows hold is pinned
+      // in the actor-trail block. Here the log only has to accept them.
+      const origLog = engineRef['getAuditLog'];
+      engineRef['getAuditLog'] = (): unknown => ({ record: (): void => {} });
       try { await fn(run, mint, loop.claimHandRunMinter); } finally {
         engineRef['getWorkerLoop'] = origLoop;
         engineRef['getTaskManager'] = origTm;
+        engineRef['getAuditLog'] = origLog;
       }
     }
 

@@ -83,6 +83,10 @@ describe('httpTarget', () => {
     expect(httpTarget('DELETE', 'https://api.example.invalid/v1/customers/123456789012345678/notes'))
       .toBe('DELETE api.example.invalid/v1/customers/123456789012345678/notes');
   });
+  it('never masks the host, however long its labels are', () => {
+    const label = 'a'.repeat(30) + 'b'.repeat(15);
+    expect(httpTarget('POST', `https://${label}.example.invalid/v1/upload`)).toBe(`POST ${label}.example.invalid/v1/upload`);
+  });
   it('does not echo a URL it cannot parse', () => {
     expect(httpTarget('POST', 'not a url ?token=abc')).toBe('POST <unparsed url>');
   });

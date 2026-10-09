@@ -84,15 +84,17 @@ const OPAQUE_SEGMENT = /^(?=[^/]*[0-9])(?=[^/]*[A-Za-z])[^/]{16,}$/;
  * Where an HTTP write goes, as a row may name it: method, host and path. No userinfo, no
  * query, no fragment — those carry tokens and content. The path can carry one too (a
  * webhook URL, `/bot<token>/`), so a segment that reads as a key is replaced, and known
- * secret shapes are masked over the whole line. A key that is short, or letters only,
+ * secret shapes are masked over the path. A key that is short, or letters only,
  * stays readable: the row records where a write went, and a path is mostly names. A URL
  * that does not parse is named as such rather than echoed.
  */
 export function httpTarget(method: string, url: string): string {
   try {
     const u = new URL(url);
+    // The host is never masked: where a write went is what the row is for, and a long domain
+    // label must not read as a key and vanish from it.
     const path = u.pathname.split('/').map((seg) => (OPAQUE_SEGMENT.test(seg) ? '<key>' : seg)).join('/');
-    return maskSecretPatterns(`${method} ${u.host}${path}`, { includeGeneric: true });
+    return `${method} ${u.host}${maskSecretPatterns(path, { includeGeneric: true })}`;
   } catch {
     return `${method} <unparsed url>`;
   }

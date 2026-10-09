@@ -4295,10 +4295,12 @@ export class Agent implements IAgent {
       // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
       // never reads the field, so this is a no-op for it.
       this._pendingDowngradeTier = downgradeDecision;
-      const rawResult = runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
+      // Resolved ONCE: the trail and the timeout race below read the same promise, so a
+      // thenable's `then` runs once, not once per reader.
+      const rawResult = Promise.resolve(runInCallSlot(callSlot, () => this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
-        : tool.handler(processedInput, this));
-      if (trail !== null) { Agent._trailOnSettle(Promise.resolve(rawResult), trail); trailWatched = true; }
+        : tool.handler(processedInput, this)));
+      if (trail !== null) { Agent._trailOnSettle(rawResult, trail); trailWatched = true; }
       // Per-tool timeout: race an async handler against a wall-clock cap so a
       // handler that never settles can't hang the run. A rejection here is
       // caught below and rendered as an `is_error` tool_result with the matching
