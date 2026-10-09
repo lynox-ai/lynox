@@ -3377,9 +3377,9 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   // it the in-memory hand-run mark; only the question row still says who asked and whether a
   // run by hand did. Each case below is the state a restart leaves — a proposal the owner
   // stamped while its test question was open — read by a loop that never ran it.
-  function parkedAfterRestart(stamp: { createdBy: string; handRun?: boolean }, stamped = true): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
+  function parkedAfterRestart(stamp: { createdBy: string; handRun?: boolean }, stamped = true, maxRetries?: number): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
     const store = new PromptStore(history.getDb());
-    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M }) as TriggerRecord;
+    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, ...(maxRetries !== undefined ? { maxRetries } : {}) }) as TriggerRecord;
     const promptId = store.insertAskUser(`ask-${t.id}`, 'Which list?', ['A', 'B'], undefined, undefined, undefined, t.id, stamp);
     history.updateTrigger(t.id, { status: 'waiting', waitingUntil: store.getById(promptId)!.expires_at });
     if (stamped) tm.confirmTrigger(t.id, undefined, 'owner');
@@ -3427,6 +3427,29 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const after = tm.getTrigger(h.t.id)!;
     expect(after.status).toBe('failed');
     expect(after.next_run_at ?? null).toBeNull();
+    h.loop.stop();
+  });
+
+  it('255-b2: after a restart, an expired question a mandate\'s own run asked is not retried as the owner\'s schedule', async () => {
+    // The mandate started the stamped schedule by hand (no test, so no hand_run), it parked,
+    // the process restarted. No run holds the starter any more; the question does.
+    const h = parkedAfterRestart({ createdBy: M }, true, 2);
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.status).toBe('failed');
+    expect(after.retry_count ?? 0).toBe(0);
+    expect(after.next_run_at ?? null).toBeNull();
+    h.loop.stop();
+  });
+
+  it('255-b2 twin: the owner\'s question expired the same way keeps its retry', async () => {
+    const h = parkedAfterRestart({ createdBy: 'owner' }, true, 2);
+    expireQuestion(h.store, h.promptId, h.t.id);
+    await h.loop.tick();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.retry_count).toBe(1);
+    expect(after.next_run_at).not.toBeNull();
     h.loop.stop();
   });
 
@@ -3569,13 +3592,31 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.stringContaining('provider down'), 'failed');
   });
 
+  it.each(['throws', 'returns'] as const)('a mandate\'s run that %s after a shutdown cleared the running tasks is still not retried', async (end) => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
+    const { loop, engine, session } = setup(task);
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => {
+      loop.stop();
+      expect(loop.runningStarterTag('hr-lock')).toBeUndefined();
+      if (end === 'throws') throw new Error('provider down');
+      return 'Ran.';
+    });
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    const calls = (engine.getTaskManager()!.recordTaskRun as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![3]).toEqual({ noRetry: true });
+  });
+
   it('every run result the loop records goes through the one writer that withholds the retry', () => {
     // A guard on the SOURCE, because the rule is "no path records around it": a new failure
     // path written as a direct `recordTaskRun` would retry a run a mandate started.
     const src = readFileSync(new URL('./worker-loop.ts', import.meta.url), 'utf8');
-    const direct = [...src.matchAll(/\.recordTaskRun\(/g)].length;
-    expect(direct).toBe(1);
-    expect(src).toMatch(/#recordRun\([^)]*\)[^{]*\{\s*tm\?\.recordTaskRun\(id, result, status, \.\.\.\(this\.#startedByOther\(id\)/);
+    // What the writer does is pinned by the behaviour tests around this one; this pins only
+    // that nothing records past it.
+    const code = src.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
+    expect(code.filter((line) => line.includes('recordTaskRun')).map((line) => line.trim().slice(0, 41)))
+      .toEqual(['tm?.recordTaskRun(id, result, status, ...']);
     // Positive control: the writer is in use at more than one place.
     expect([...src.matchAll(/this\.#recordRun\(/g)].length).toBeGreaterThan(10);
   });

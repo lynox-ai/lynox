@@ -14378,9 +14378,9 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
 
     it('control: a mandate changes the model of its own conversation', async () => {
-      sessionRanBy(MANDATE, { setModel: vi.fn(), getModelTier: vi.fn(() => 'fast') });
+      sessionRanBy(MANDATE, { repickModel: vi.fn(() => ({ ok: true, tier: 'fast', modelId: 'm' })) });
       asMandate();
-      expect((await jsonFetch(`/api/sessions/${OWN}/model`, { method: 'PATCH', body: JSON.stringify({ tier: 'fast' }) })).status).not.toBe(403);
+      expect((await jsonFetch(`/api/sessions/${OWN}/model`, { method: 'PATCH', body: JSON.stringify({ tier: 'fast' }) })).status).toBe(200);
     });
   });
 
