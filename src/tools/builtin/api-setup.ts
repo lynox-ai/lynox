@@ -34,7 +34,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, hiddenFromProfile, mandateMayConnect, mayServeAsClientId, secretsForProfile } from '../../core/profile-secret-view.js';
+import { connectionWaits, hiddenFromProfile, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -1799,6 +1799,21 @@ ${draftJson}
         return `Error: profile "${profile.id}" is set up through the built-in "${priorPreset.id}" provider, and a save cannot remove or change auth.oauth.preset_id or auth.type: the sign-in and the scopes it may ask for belong to the provider, not to the profile. Nothing was saved. Scopes this provider allows: ${[...priorPreset.requiredScopes, ...priorPreset.allowedScopes].join(' ')}. Connecting here cannot authorize a scope outside that list, so tell the user it is not available rather than offering it. Another way of signing in to the same API replaces this connection, because one host holds one profile: ask the user first, then delete this profile and create the new one.`;
       }
       if (!isOwnerPrincipal(agent.principal)) profile.created_by = principalTag(agent.principal);
+      // A mandate's oauth2 profile writes its tokens to the pair its id derives. Where that pair
+      // already holds a value, the first exchange would write over it, so the id is refused
+      // here. Only when the profile becomes oauth2 under this id: a later save of the same
+      // profile, and a retry after a connect whose save failed, go through as before.
+      // Not for an id whose slots this instance guards (`protectedDerivedSlot`): the save refuses
+      // that id anyway, and the answer must not depend on whether the guarded name holds a value.
+      if (!isOwnerPrincipal(agent.principal) && profile.auth?.type === 'oauth2' && prior?.auth?.type !== 'oauth2' && protectedDerivedSlot(profile) === null) {
+        const occupied = agent.secretStore ? occupiedTokenSlots(agent.secretStore, profile.id) : null;
+        if (occupied === null) {
+          return `Error: the token slots of "${profile.id}" cannot be checked from here, so the OAuth profile was not saved. Nothing was saved. This session does not see the whole store of secrets, as in a sub-agent or a workflow step.`;
+        }
+        if (occupied.length > 0) {
+          return `Error: ${occupied.map((n) => `"${n}"`).join(' and ')}, where the tokens of "${profile.id}" would go, already ${occupied.length === 1 ? 'holds' : 'hold'} a value. Nothing was saved. Save the profile under a different id, so its tokens get names of their own.`;
+        }
+      }
       // The owner's save of a mandate's profile makes it the owner's, and the answer says what
       // the mandate had chosen, so the owner adopts it knowingly rather than by a re-save.
       const adopted = isOwnerPrincipal(agent.principal) && prior !== undefined && isMandateAuthored(prior) ? prior : undefined;
@@ -2459,6 +2474,12 @@ ${draftJson}
         return input.output_secret_name === undefined
           ? `Error: "${outputName}", where this profile's token would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its token gets a name of its own.`
           : `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
+      }
+      // Past that, a profile a mandate wrote stores its token in its own slot and nowhere else. Its token
+      // endpoint can be one the mandate chose, so a name of its choosing would put a value of
+      // that endpoint's choosing under any name the instance reads.
+      if (isMandateAuthored(profile) && outputName !== accessTokenKey(input.id)) {
+        return `Error: output_secret_name "${outputName}" is not available for this profile. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       // The same question for the refresh slot: a provider that rotates the refresh token on
       // this exchange has it written there below, whatever grant was asked for.
