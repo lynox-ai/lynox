@@ -491,6 +491,26 @@ describe('sendMail — recordSentMail integration', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('records a follow-up when asked to, and links it on the sent-mail row', async () => {
+    const provider = fakeProvider();
+    const registry = fakeRegistry(provider);
+    const recordSentMail = vi.fn();
+    const recordFollowup = vi.fn(() => 'fu-1');
+    const ctx = {
+      stateDb: { recordSentMail, recordFollowup },
+      getAccountConfig: () => null,
+    } as unknown as import('./context.js').MailContext;
+    const result = await sendMail(
+      registry,
+      { to: [RECIPIENT], subject: 'follow me', body: 'b' },
+      { trackFollowup: { reminder_in_days: 3, reason: 'awaiting the offer' } },
+      ctx,
+    );
+    expect(result.ok && result.followupId).toBe('fu-1');
+    expect(recordFollowup).toHaveBeenCalledTimes(1);
+    expect((recordSentMail.mock.calls[0]?.[0] as Record<string, unknown>).followupId).toBe('fu-1');
+  });
+
   it('swallows recordSentMail throws — observational write must not fail the user-visible send', async () => {
     const provider = fakeProvider();
     const registry = fakeRegistry(provider);

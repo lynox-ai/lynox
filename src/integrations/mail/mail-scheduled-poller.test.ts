@@ -8,8 +8,13 @@ let db: MailStateDb;
 let sendCalls: MailSendInput[];
 let provider: MailProvider;
 let registry: MailRegistry;
-/** Answers from the same DB the rows live in, like the engine's MailContext. */
-const accounts = { getAccountConfig: (id: string) => db.getAccount(id) };
+/**
+ * Answers from the same DB the rows live in, and carries a state DB like the
+ * engine's MailContext does — so a poller that passed the whole object on would
+ * switch on the sent-mail log, and `sentLog` would see it.
+ */
+const sentLog = vi.fn();
+const accounts = { getAccountConfig: (id: string) => db.getAccount(id), stateDb: { recordSentMail: sentLog, recordFollowup: vi.fn() } };
 let sendImpl: (input: MailSendInput) => Promise<MailSendResult>;
 
 const ACCOUNT: MailAccountConfig = {
@@ -26,6 +31,7 @@ const ACCOUNT: MailAccountConfig = {
 
 beforeEach(() => {
   db = new MailStateDb({ path: ':memory:' });
+  sentLog.mockClear();
   db.upsertAccount(ACCOUNT);
   sendCalls = [];
   sendImpl = async (input: MailSendInput): Promise<MailSendResult> => {
@@ -83,6 +89,8 @@ describe('mail-scheduled-poller', () => {
     poller.stop();
     expect(sendCalls).toHaveLength(1);
     expect(result.fired).toBe(1);
+    // The account lookup alone reaches sendMail: no sidebar write for a scheduled send.
+    expect(sentLog).not.toHaveBeenCalled();
   });
 
   it('fires a due send + marks sent_at', async () => {
