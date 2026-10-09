@@ -993,4 +993,14 @@ describe('a built-in preset profile is not held to checks that mean nothing for 
 
     expect(reply).toContain('Profile is incomplete');
   });
+
+  it('still calls a non-oauth2 profile incomplete when it carries a known preset id', async () => {
+    // The exemption is for oauth2 profiles only. A bearer profile reads its token from
+    // vault_keys, so a preset id riding along on it must not buy it out of the check.
+    const { reply } = await createBare('vetted-shop', { auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'vetted-shop', preset_params: {},
+    } } });
+
+    expect(reply).toContain('Profile is incomplete');
+  });
 });

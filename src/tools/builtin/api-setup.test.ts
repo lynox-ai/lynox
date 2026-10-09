@@ -1602,6 +1602,13 @@ describe('api_setup tool', () => {
       expect(store.get('test-api')?.provenance?.schema_version).toBe(2);
     });
 
+    it('leaves the caller\'s profile object as it was when it reads "2" as the number', async () => {
+      const agent = createMockAgent(new ApiStore());
+      const sent = withV2({ provenance: { source: 'manual', schema_version: '2' as unknown as 2 } });
+      await apiSetupTool.handler({ action: 'create', profile: sent }, agent);
+      expect(sent.provenance?.schema_version).toBe('2');
+    });
+
     it('names the type when schema_version arrives as another string', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(
