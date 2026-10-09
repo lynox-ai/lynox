@@ -13787,13 +13787,15 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
     });
 
     it('answers 503, mints no marker and starts nothing when the attempt cannot be written', async () => {
-      const l = loop(() => Promise.resolve({ ok: true }));
-      await withEngine({ getWorkerLoop: () => l.loop, getTaskManager: () => tm, getAuditLog: () => failingLog }, async () => {
-        asMandate();
-        expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(503);
-      });
-      expect(l.mint).not.toHaveBeenCalled();
-      expect(l.runTriggerNow).not.toHaveBeenCalled();
+      for (const auditLog of [failingLog, null]) {
+        const l = loop(() => Promise.resolve({ ok: true }));
+        await withEngine({ getWorkerLoop: () => l.loop, getTaskManager: () => tm, getAuditLog: () => auditLog }, async () => {
+          asMandate();
+          expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status, String(auditLog)).toBe(503);
+        });
+        expect(l.mint).not.toHaveBeenCalled();
+        expect(l.runTriggerNow).not.toHaveBeenCalled();
+      }
     });
 
     it('leaves no row for the owner', async () => {
