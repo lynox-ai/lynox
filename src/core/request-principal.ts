@@ -21,8 +21,13 @@ export type RequestPrincipal =
       /** How the mandate is shown (one line, as the control plane folded it). For the actor
        *  trail only; identity, tags and comparisons stay on `email`. */
       readonly display?: string | undefined;
-      /** Which grant this login came from. For the actor trail only. */
+      /** Which grant this login came from. For the actor trail, and the key the engine
+       *  records the mandate's end under (`mandate-ends.ts`). */
       readonly mandateId?: string | undefined;
+      /** When the mandate itself ends, unix seconds, as the web UI signed it into the session
+       *  (not the session's own end, which comes much sooner). Absent in a cookie minted
+       *  before the web UI signed it. */
+      readonly mandateExp?: number | undefined;
     };
 
 /** The prefix every mandate tag carries; the due query matches on it in SQL. */

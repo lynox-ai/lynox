@@ -24,6 +24,7 @@ import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
+import { MandateEnds } from './mandate-ends.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
@@ -235,6 +236,7 @@ export class Engine {
    * (S1 re-points the read/write paths). Null when init fails (graceful degrade).
    */
   private engineDb: EngineDb | null = null;
+  private _mandateEnds: MandateEnds | null = null;
   private securityAudit: import('./security-audit.js').SecurityAudit | null = null;
   private context: LynoxContext | null = null;
   private briefing: string | undefined = undefined;
@@ -1118,6 +1120,8 @@ export class Engine {
     this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
     // The actor trail rides engine.db as well (v22), for the same reason: it is always opened.
     this._toolContext.auditLog = this.engineDb ? new AuditLog(this.engineDb.getDb()) : null;
+    // And the end of each mandate (v24), which a later reader checks without a request.
+    this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -2317,6 +2321,8 @@ export class Engine {
   getRunHistory(): RunHistory | null { return this.runHistory; }
   getEngineDb(): EngineDb | null { return this.engineDb; }
   getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
+  /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
+  getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
   /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }

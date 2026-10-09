@@ -276,6 +276,13 @@ describe('session tokens with a principal', () => {
 		expect(readSessionToken(tok, SECRET)).toEqual({ iat: expect.any(Number), principal: mandateAt(nowS) });
 	});
 
+	it('reads a principal minted before the mandate\'s end was signed, without one', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		const p = readSessionToken(sign(`aaaaaaaaaaaaaaaa.${b64(mandateAt(nowS))}.${nowS}`), SECRET)?.principal;
+		expect(p?.email).toBe(LOGIN.email);
+		expect(p?.mandate_exp).toBeUndefined();
+	});
+
 	it('reads a token without a principal as the owner (null), as before', () => {
 		expect(readSessionToken(createSessionToken(SECRET), SECRET)?.principal).toBeNull();
 	});
@@ -316,6 +323,8 @@ describe('session tokens with a principal', () => {
 			{ ...mandateAt(nowS), email: '' },
 			{ ...mandateAt(nowS), display: 7 },
 			{ ...mandateAt(nowS), mandate_id: null },
+			{ ...mandateAt(nowS), mandate_exp: 'later' },
+			{ ...mandateAt(nowS), mandate_exp: nowS + MANDATE_SESSION_MAX_S - 1 },
 		]) {
 			expect(readSessionToken(sign(`aaaaaaaaaaaaaaaa.${b64(p)}.${nowS}`), SECRET), JSON.stringify(p)).toBeNull();
 		}
@@ -328,6 +337,17 @@ describe('loginSession', () => {
 		const s = loginSession(SECRET, null)!;
 		expect(s.maxAge).toBe(SESSION_MAX_AGE_S);
 		expect(s.token.split('.')).toHaveLength(3);
+	});
+
+	it('signs the mandate\'s own end beside the session\'s, so the engine can keep it (B9)', () => {
+		vi.useFakeTimers();
+		const t0 = Date.UTC(2026, 9, 8, 12, 0, 0);
+		vi.setSystemTime(t0);
+		const endsInAWeek = { ...LOGIN, mandate_expires_at: new Date(t0 + 7 * 86_400_000).toISOString() };
+		const p = mandateSessionPrincipal(endsInAWeek)!;
+		expect(p.exp).toBe(Math.floor(t0 / 1000) + MANDATE_SESSION_MAX_S);
+		expect(p.mandate_exp).toBe(Math.floor(t0 / 1000) + 7 * 86_400);
+		expect(readSessionToken(loginSession(SECRET, endsInAWeek)!.token, SECRET)?.principal?.mandate_exp).toBe(p.mandate_exp);
 	});
 
 	it('gives a mandate login a principal session of at most 15 minutes', () => {

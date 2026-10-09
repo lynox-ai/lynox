@@ -946,6 +946,17 @@ const MIGRATIONS: string[] = [
   // every population: no CREATE of `tasks` ever had the column, and no later version rebuilds it.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (23);
    ALTER TABLE tasks ADD COLUMN created_by TEXT;`,
+
+  // v24: when each mandate ends (mandate-ends.ts). A mandate's session cookie lasts minutes, so
+  // the end a stamped run checks long after the mandate's last request has to be stored.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (24);
+   CREATE TABLE IF NOT EXISTS mandate_ends (
+     mandate_id TEXT PRIMARY KEY,
+     ends_at INTEGER NOT NULL,
+     issued_at INTEGER NOT NULL,
+     revoked_at INTEGER,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 /**

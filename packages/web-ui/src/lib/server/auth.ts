@@ -29,6 +29,10 @@ export interface SessionPrincipal {
 	mandate_id: string;
 	/** Unix seconds. The session ends here, signed, whatever the cookie's Max-Age says. */
 	exp: number;
+	/** Unix seconds. The mandate itself ends here; never earlier than `exp`. The engine keeps
+	 *  it for what runs after the session (a connection the mandate made, PRD §3.13 B9). Absent
+	 *  in a cookie minted before this field existed. */
+	mandate_exp?: number;
 }
 
 /**
@@ -41,7 +45,7 @@ export function mandateSessionPrincipal(p: MandateLoginPrincipal, nowS = Math.fl
 	if (!Number.isFinite(mandateEndS)) return null;
 	const exp = Math.min(nowS + MANDATE_SESSION_MAX_S, mandateEndS);
 	if (exp <= nowS) return null;
-	return { v: 1, kind: 'mandate', email: p.email, display: p.display, mandate_id: p.mandate_id, exp };
+	return { v: 1, kind: 'mandate', email: p.email, display: p.display, mandate_id: p.mandate_id, exp, mandate_exp: mandateEndS };
 }
 
 /**
@@ -75,7 +79,10 @@ function parseSessionPrincipal(part: string): SessionPrincipal | null {
 	if (typeof display !== 'string' || display.length === 0) return null;
 	if (typeof mandateId !== 'string' || mandateId.length === 0) return null;
 	if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null;
-	return { v: 1, kind: 'mandate', email, display, mandate_id: mandateId, exp };
+	const mandateExp = p['mandate_exp'];
+	if (mandateExp === undefined) return { v: 1, kind: 'mandate', email, display, mandate_id: mandateId, exp };
+	if (typeof mandateExp !== 'number' || !Number.isSafeInteger(mandateExp) || mandateExp < exp) return null;
+	return { v: 1, kind: 'mandate', email, display, mandate_id: mandateId, exp, mandate_exp: mandateExp };
 }
 
 /**

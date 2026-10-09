@@ -1740,6 +1740,19 @@ export class LynoxHTTPApi {
     return this.#handRunMinters.get(workerLoop) ?? null;
   }
 
+  /**
+   * Keep the end a mandate's request carried (mandate-ends.ts), for readers that run later
+   * without a request. A failed write does not refuse the request: the stored end then stays
+   * where it was, and a reader treats a missing or past end as ended, the closed direction.
+   */
+  private _recordMandateEnd(principal: RequestPrincipal, issuedAtS: number): void {
+    try {
+      this.engine?.getMandateEnds()?.record(principal, issuedAtS);
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] mandate end not recorded: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
   private _principalOf(req: IncomingMessage): RequestPrincipal {
     return this._principalResolver(req);
   }
@@ -1929,11 +1942,17 @@ export class LynoxHTTPApi {
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
     if (nowS >= session.exp) return null;
-    return { iat: timestamp, principal: { kind: 'mandate', email: session.email, display: session.display, mandateId: session.mandateId } };
+    return {
+      iat: timestamp,
+      principal: {
+        kind: 'mandate', email: session.email, display: session.display, mandateId: session.mandateId,
+        ...(session.mandateExp !== undefined ? { mandateExp: session.mandateExp } : {}),
+      },
+    };
   }
 
   /** The signed principal part of a session cookie; null for anything this engine does not know. */
-  private static _parseSessionPrincipal(part: string): { email: string; display: string; mandateId: string; exp: number } | null {
+  private static _parseSessionPrincipal(part: string): { email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
     let raw: unknown;
     try {
       raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -1948,7 +1967,13 @@ export class LynoxHTTPApi {
     if (typeof display !== 'string' || display.length === 0) return null;
     if (typeof mandateId !== 'string' || mandateId.length === 0) return null;
     if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null;
-    return { email, display, mandateId, exp };
+    // The mandate's own end (B9). Absent in a cookie minted before the web UI signed it; when
+    // present it is a whole number of seconds and never earlier than the session's end, which
+    // the web UI takes as the earlier of the two.
+    const mandateExp = p['mandate_exp'];
+    if (mandateExp === undefined) return { email, display, mandateId, exp };
+    if (typeof mandateExp !== 'number' || !Number.isSafeInteger(mandateExp) || mandateExp < exp) return null;
+    return { email, display, mandateId, exp, mandateExp };
   }
 
   /**
@@ -2715,7 +2740,10 @@ export class LynoxHTTPApi {
           // `user` even when no admin secret is set (D6): the admin routes are the
           // owner's, never the recipient's.
           authScope = adminSecret || session.principal !== null ? 'user' : 'admin';
-          if (session.principal !== null) this._sessionPrincipal.set(req, session.principal);
+          if (session.principal !== null) {
+            this._sessionPrincipal.set(req, session.principal);
+            this._recordMandateEnd(session.principal, session.iat);
+          }
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
           // Never re-mint a principal cookie (D2): the refresh below mints a cookie
