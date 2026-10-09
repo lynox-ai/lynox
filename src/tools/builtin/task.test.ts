@@ -606,6 +606,31 @@ describe('Task Tools', () => {
       expect(after.edited_by).toBeFalsy();
       expect(after.confirmed_at).toBeTruthy();
     });
+
+    // A to-do carries no mark, so a mandate's turn may neither create nor change one — the rule
+    // the task routes apply.
+    it('task_create by a mandate refuses a to-do, and creates nothing', async () => {
+      const result = await taskCreateTool.handler({ title: 'Mandate to-do' }, makeAgent(undefined, mandate));
+      expect(result).toBe('Error: only the owner of this instance can create a to-do.');
+      expect(tm.list({}).some((x) => x.title === 'Mandate to-do')).toBe(false);
+    });
+
+    it('control: the owner\'s task_create makes a to-do', async () => {
+      await taskCreateTool.handler({ title: 'Owner to-do' }, makeAgent());
+      expect(tm.list({}).some((x) => x.title === 'Owner to-do')).toBe(true);
+    });
+
+    it.each([
+      ['a field', { title: 'changed' }],
+      ['completion', { status: 'completed' }],
+    ])('task_update of %s on a to-do by a mandate is refused, and changes nothing', async (_label, change) => {
+      const t = tm.create({ title: 'Owner to-do' });
+      const result = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+      expect(result).toBe('Error: only the owner of this instance can change a to-do.');
+      const after = tm.getTask(t.id)!;
+      expect(after.title).toBe('Owner to-do');
+      expect(after.status).not.toBe('completed');
+    });
   });
 
   describe('task_update', () => {

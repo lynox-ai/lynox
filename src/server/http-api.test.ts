@@ -987,10 +987,10 @@ describe('LynoxHTTPApi', () => {
       const origLog = engineRef['getAuditLog'];
       const origHistory = engineRef['getRunHistory'];
       engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
-      engineRef['getRunHistory'] = () => ({ deleteTask: () => true, deleteTrigger: () => false });
+      engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
       try {
         const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
-        const res = await fetch(`${baseUrl}/api/tasks/task-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
+        const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
         expect(res.status).toBe(200);
       } finally { engineRef['getAuditLog'] = origLog; engineRef['getRunHistory'] = origHistory; }
       expect(rows[0]?.principal).toEqual({ kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id });
@@ -13702,7 +13702,29 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
   describe('DELETE /api/tasks/:id', () => {
     const history = (deleted: boolean): Record<string, unknown> => ({
+      getTask: vi.fn().mockReturnValue(undefined),
       deleteTask: vi.fn().mockReturnValue(false), deleteTrigger: vi.fn().mockReturnValue(deleted),
+    });
+
+    it('refuses a mandate\'s delete of a to-do before anything runs: nothing deleted, no row', async () => {
+      const h = { ...history(true), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h }, async () => {
+        asMandate();
+        const res = await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete a to-do.');
+      });
+      expect(h.deleteTask).not.toHaveBeenCalled();
+      expect(h['deleteTrigger']).not.toHaveBeenCalled();
+      expect(rows()).toEqual([]);
+    });
+
+    it('control: the owner deletes a to-do', async () => {
+      const h = { ...history(false), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h }, async () => {
+        expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(200);
+      });
+      expect(h.deleteTask).toHaveBeenCalledWith('todo-1');
     });
 
     it('records attempt and done around a mandate\'s delete', async () => {
@@ -13946,13 +13968,14 @@ describe('PUT /api/secrets/:name and a mandate', () => {
 
 
 describe('a mandate and a to-do', () => {
-  // A to-do has no stamp to drop and records no one who set it up, so a mandate's change to
-  // one can be neither marked nor bound to the mandate: it is refused. A trigger is marked.
+  // A to-do has no stamp to drop and records no one who set it up, so nothing on it would
+  // carry a mandate's act: creating, changing, completing it is refused. A trigger is marked.
   const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
   afterEach(() => {
     api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
     mockTaskMarkEditedBy.mockReturnValue(true);
     mockTaskGetTask.mockReturnValue(undefined);
+    mockTaskUpdate.mockReset().mockReturnValue({ id: 'task-1', title: 'Updated' });
   });
 
   it.each([
@@ -13977,6 +14000,38 @@ describe('a mandate and a to-do', () => {
     expect(res.status).toBe(200);
     expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', 'mandate:recipient@example.invalid', true);
     expect(mockTaskUpdate).toHaveBeenCalled();
+  });
+
+  it('leaves a mandate\'s change to an unknown id at 404', async () => {
+    mockTaskMarkEditedBy.mockReturnValue(false);
+    mockTaskUpdate.mockReturnValueOnce(undefined);
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks/nope', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
+    expect(res.status).toBe(404);
+  });
+
+  it('refuses a mandate\'s new to-do, and creates nothing', async () => {
+    mockTaskCreate.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a to-do' }) });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can create a to-do.');
+    expect(mockTaskCreate).not.toHaveBeenCalled();
+  });
+
+  it('control: a mandate\'s new one-off schedule is created', async () => {
+    mockTaskCreate.mockClear();
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a run', runAt: '2026-11-01T09:00:00Z' }) });
+    expect(res.status).toBe(201);
+    expect(mockTaskCreate).toHaveBeenCalled();
+  });
+
+  it('control: the owner creates a to-do', async () => {
+    mockTaskCreate.mockClear();
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a to-do' }) });
+    expect(res.status).toBe(201);
+    expect(mockTaskCreate).toHaveBeenCalled();
   });
 
   it('control: the owner changes a to-do', async () => {

@@ -88,7 +88,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { BulkTriggerLockedError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
+import { BulkTriggerLockedError, TriggerTierUnsupportedError, createsTrigger, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
 import { computeScopeMode, FULL_SCOPES, STANDARD_SCOPES } from '../integrations/google/google-auth.js';
@@ -1790,9 +1790,12 @@ export class LynoxHTTPApi {
    * customer-granted-operator-access §3.12 point 3): every kind of change — fields,
    * schedule, the enabled switch, completion — not only the instruction. The owner's
    * changes are left exactly as they were: they neither mark nor clear. A to-do has no
-   * stamp to drop and records no one who set it up, so a mandate's change to one could be
-   * neither marked nor bound to the mandate: it is refused. Returns true when it answered
-   * the request itself (a refused to-do, or a bulk trigger, which no request may change).
+   * stamp to drop and records no one who set it up: an actor-trail row would record the
+   * act, but nothing on the to-do would carry it, and no stance opens a route without a
+   * mark on what it changes. So a mandate may not create, change, complete or delete a
+   * to-do; the task routes and the `task_update` tool refuse it alike. Returns true when it
+   * answered the request itself (a refused to-do, or a bulk trigger, which no request may
+   * change).
    */
   private _markMandateEdit(req: IncomingMessage, res: ServerResponse, taskManager: TaskManager, id: string): boolean {
     const principal = this._principalOf(req);
@@ -7083,6 +7086,10 @@ export class LynoxHTTPApi {
       if (runAt && Number.isNaN(Date.parse(runAt))) {
         errorResponse(res, 400, 'Invalid runAt: must be ISO 8601 datetime'); return;
       }
+      // A mandate's act is marked on the schedule it creates; a to-do carries no such mark.
+      if (!byOwner && !createsTrigger({ assignee, nextRunAt: runAt, scheduleCron })) {
+        errorResponse(res, 403, 'Only the owner of this instance can create a to-do.'); return;
+      }
       try {
         // A human creating a schedule via this authenticated route IS the consent
         // action for a `run_agent` trigger (mirrors the pipelineId branch above,
@@ -7171,6 +7178,10 @@ export class LynoxHTTPApi {
       const runHistory = engine.getRunHistory();
       if (!requireService(res, runHistory, 'History')) return;
       // A mandate may delete the owner's schedules; each delete is recorded (PRD §3.13, N10b).
+      // A to-do is the owner's alone (see `_markMandateEdit`).
+      if (!isOwnerPrincipal(this._principalOf(_req)) && runHistory.getTask(params['id']!) !== undefined) {
+        errorResponse(res, 403, 'Only the owner of this instance can delete a to-do.'); return;
+      }
       const trail = this._beginRequestTrail(_req, res, 'DELETE /api/tasks/:id', params['id']!);
       if (trail === false) return;
       // A row id lives in exactly one table after the v42 split — try the TODO

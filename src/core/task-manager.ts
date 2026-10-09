@@ -180,6 +180,22 @@ export interface WeekSummary {
 const VALID_STATUSES = new Set<string>(['open', 'in_progress', 'completed', 'failed']);
 const VALID_PRIORITIES = new Set<string>(['low', 'medium', 'high', 'urgent']);
 
+/**
+ * Whether {@link TaskManager.create} makes these params an AGENT-TRIGGER (→ `triggers`
+ * table, fired by the WorkerLoop) rather than a USER-TODO (→ `tasks` table, never fired):
+ * a row is a trigger if it carries ANY firing/agent attribute. Mirrors the migration-v42
+ * predicate. `assignee: 'lynox'` alone counts, because create gives such a row a run time
+ * of now. Exported so a caller can tell before the write which of the two it asks for.
+ */
+export function createsTrigger(params: Pick<TaskCreateParams, 'assignee' | 'nextRunAt' | 'scheduleCron' | 'watchConfig' | 'pipelineId' | 'taskType'>): boolean {
+  return params.assignee === 'lynox'
+    || Boolean(params.nextRunAt)
+    || Boolean(params.scheduleCron)
+    || Boolean(params.watchConfig)
+    || Boolean(params.pipelineId)
+    || Boolean(params.taskType && params.taskType !== 'manual');
+}
+
 export class TaskManager {
   constructor(private history: RunHistory) {}
 
@@ -226,16 +242,7 @@ export class TaskManager {
       resolvedTaskType = resolvedTaskType ?? 'manual';
     }
 
-    // A row is an AGENT-TRIGGER (→ `triggers` table, fired by the WorkerLoop) if
-    // it carries ANY firing/agent attribute; otherwise it's a USER-TODO (→
-    // `tasks` table, never fired). Mirrors the migration-v42 predicate. The
-    // auto-trigger above already stamped resolvedNextRunAt for assignee=lynox.
-    const willBeTrigger = params.assignee === 'lynox'
-      || Boolean(resolvedNextRunAt)
-      || Boolean(params.scheduleCron)
-      || Boolean(params.watchConfig)
-      || Boolean(params.pipelineId)
-      || Boolean(resolvedTaskType && resolvedTaskType !== 'manual');
+    const willBeTrigger = createsTrigger(params);
 
     if (willBeTrigger) {
       // Reject any pipeline destined for background execution (cron, explicit
