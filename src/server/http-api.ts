@@ -3144,13 +3144,14 @@ export class LynoxHTTPApi {
         }
       }
       // A mandate reaches only a conversation it started (PRD customer-granted-operator-access
-      // §3.13 E1, N2). It names no id for a thread that does not exist yet: a new conversation
-      // gets an id drawn here, so a mandate cannot claim an id the engine will open later — an
-      // agent escalation opens `escalation-<task id>` itself, and the owner's next escalation
-      // would have landed in a thread the mandate held. An escalation thread is the owner's.
+      // §3.13 E1, N2). It names no id for a thread that does not exist yet (`ownedBy` refuses a
+      // missing row): a new conversation gets an id drawn here, so a mandate cannot claim an id
+      // the engine will open later — an agent escalation opens `escalation-<task id>` itself,
+      // and the owner's next escalation would have landed in a thread the mandate held. An
+      // escalation thread is the owner's whatever its row says.
       const principal = this._principalOf(_req);
       if (threadId !== undefined && !isOwnerPrincipal(principal)) {
-        if (ESCALATION_ID_REGEX.test(threadId) || this._threadRow(threadId) === undefined) {
+        if (ESCALATION_ID_REGEX.test(threadId)) {
           errorResponse(res, 403, 'Only the owner of this instance, or the person who started it, can continue this conversation.');
           return;
         }
@@ -4561,6 +4562,7 @@ export class LynoxHTTPApi {
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       // The changeset is the last run's work and outlives it: only that run's principal (or
       // the owner) accepts or rolls it back, even in the mandate's own conversation (§3.13 E7).
+      // The next run replaces it, whoever starts it, as it always has.
       if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), this._lastRunRow(session)])) return;
       const csm = session.getChangesetManager();
       if (!csm || !csm.hasChanges()) {
@@ -4614,9 +4616,10 @@ export class LynoxHTTPApi {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
-      // Compacting rewrites the conversation the last run left, the owner's turns included:
-      // the conversation and that run must be the request's own (§3.13 E7). After an owner's
-      // run in a mandate's conversation, the mandate cannot compact it.
+      // Compacting rewrites the conversation the last run left: the conversation and that
+      // run must be the request's own (§3.13 E7). While the owner's run is the last one in a
+      // mandate's conversation, the mandate cannot compact it; after a run of its own it can,
+      // the owner's earlier turns included — they are in its own conversation, which it reads.
       if (this._refuseUnlessOwns(_req, res, 'compact this conversation', () => [this._threadRow(sessionId), this._lastRunRow(session)])) return;
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'Cannot compact while a run is in progress');

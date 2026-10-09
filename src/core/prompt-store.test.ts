@@ -72,6 +72,13 @@ describe('PromptStore', () => {
       expect(latest.hand_run).toBe(1);
       expect(store.getLatestForTrigger('trg-other')).toBeUndefined();
     });
+
+    it('of two questions of one trigger, finds the newer', () => {
+      const older = store.insertAskUser('s-7', 'first?', undefined, undefined, undefined, undefined, 'trg-2', { createdBy: 'owner' });
+      db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 hour'), status = 'answered' WHERE id = ?`).run(older);
+      const newer = store.insertAskUser('s-7', 'second?', undefined, undefined, undefined, undefined, 'trg-2', { createdBy: 'mandate:setup@example.org', handRun: true });
+      expect(store.getLatestForTrigger('trg-2')!.id).toBe(newer);
+    });
   });
 
   describe('single-question ask_user', () => {

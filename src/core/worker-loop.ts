@@ -285,8 +285,10 @@ export interface ActiveTask {
    * stamp may have changed since the test began.
    */
   handRun: boolean;
-  /** Who started the run by hand, when a request did; absent for a run the schedule fired.
-   *  `POST /api/tasks/:id/stop` reads it: a mandate stops only a run it started (§3.13 E7). */
+  /** Who started the run by hand, when a request did, or whose answered question it picked
+   *  up after a restart; absent for a run the schedule fired. `POST /api/tasks/:id/stop`
+   *  reads it (a mandate stops only a run it started, §3.13 E7), and so does `#recordRun`
+   *  (no retry). */
   starter?: RequestPrincipal | undefined;
 }
 
@@ -475,6 +477,27 @@ export class WorkerLoop {
     const active = this.activeTasks.get(taskId);
     if (active === undefined) return undefined;
     return principalTag(active.starter ?? OWNER_PRINCIPAL);
+  }
+
+  /**
+   * Records a run's result. Every result this loop writes goes through here, so a run a
+   * non-owner started gets no retry whichever path ends it: a retry carries no request and
+   * would run as the owner's schedule with the full tool set (§3.12 point 6, "once per
+   * request"). Read off the running entry, so a run that took its starter from an answered
+   * question after a restart is covered too. A test pins that this is the only caller.
+   */
+  #recordRun(
+    tm: ReturnType<Engine['getTaskManager']> | undefined,
+    id: string,
+    result: string,
+    status: 'success' | 'failed' | 'timeout' | 'stopped',
+  ): void {
+    tm?.recordTaskRun(id, result, status, ...(this.#startedByOther(id) ? [{ noRetry: true }] : []));
+  }
+
+  #startedByOther(id: string): boolean {
+    const starter = this.activeTasks.get(id)?.starter;
+    return starter !== undefined && !isOwnerPrincipal(starter);
   }
 
   stopTask(taskId: string): StopOutcome {
@@ -813,8 +836,8 @@ export class WorkerLoop {
             try {
               // A proposal's expired question was a test's: recorded as one, so its
               // schedule stays as it was.
-              if (proposal) await runAsHandRun(parked.id, async () => { taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed'); });
-              else taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
+              if (proposal) await runAsHandRun(parked.id, async () => { this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed'); });
+              else this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed');
             } catch (err: unknown) {
               process.stderr.write(
                 `[lynox:worker] could not record the expired wait for ${parked.id}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -1272,17 +1295,14 @@ export class WorkerLoop {
       // so its failure is reported now or never.
       // Nor is a run a non-owner started by hand: a retry carries no request and would run
       // as the owner's schedule with the full tool set (§3.12 point 6, "once per request").
-      const startedByOther = entry.starter !== undefined && !isOwnerPrincipal(entry.starter);
       const willRetry = status !== 'stopped'
         && !isHandRunOf(task.id)
-        && !startedByOther
+        && !this.#startedByOther(task.id)
         && (task.max_retries ?? 0) > 0
         && (task.retry_count ?? 0) < (task.max_retries ?? 0);
 
       const taskManager = this.engine.getTaskManager();
-      if (taskManager) {
-        taskManager.recordTaskRun(task.id, errorMsg, status, ...(startedByOther ? [{ noRetry: true }] : []));
-      }
+      this.#recordRun(taskManager, task.id, errorMsg, status);
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
@@ -1358,7 +1378,7 @@ export class WorkerLoop {
       }),
     });
     if (outcome.status === 'pending') {
-      this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
+      this.#recordRun(this.engine.getTaskManager(), task.id, outcome.summary, 'success');
       this.engine.getRunHistory()?.updateTrigger(task.id, {
         status: 'open',
         nextRunAt: new Date(Date.now() + BULK_RETRY_DELAY_MS).toISOString(),
@@ -1425,10 +1445,10 @@ export class WorkerLoop {
       // it for a person to resume.
       if (signal.aborted && ownerStopped()) {
         ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.stoppedByOwner);
-        this.engine.getTaskManager()?.recordTaskRun(task.id, 'Bulk preview stopped on your instruction.', 'stopped');
+        this.#recordRun(this.engine.getTaskManager(), task.id, 'Bulk preview stopped on your instruction.', 'stopped');
         return;
       }
-      this.engine.getTaskManager()?.recordTaskRun(task.id, outcome.summary, 'success');
+      this.#recordRun(this.engine.getTaskManager(), task.id, outcome.summary, 'success');
       this.engine.getRunHistory()?.updateTrigger(task.id, {
         status: 'open',
         nextRunAt: new Date(outcome.retryAt ?? Date.now()).toISOString(),
@@ -1476,7 +1496,8 @@ export class WorkerLoop {
     const taskManager = this.engine.getTaskManager();
 
     if (taskManager) {
-      taskManager.recordTaskRun(
+      this.#recordRun(
+        taskManager,
         task.id,
         result.success
           ? `Backup created: ${result.path} (${String(result.duration_ms)}ms)`
@@ -1512,7 +1533,7 @@ export class WorkerLoop {
     });
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      taskManager.recordTaskRun(task.id, 'reminder fired', 'success');
+      this.#recordRun(taskManager, task.id, 'reminder fired', 'success');
     }
   }
 
@@ -1541,6 +1562,9 @@ export class WorkerLoop {
     // mandate's tool lock across a restart instead of coming back as the owner's run. It
     // only narrows the tools: nothing that grants a hand run reads it.
     const starter = handStarter ?? (isMandateTag(answered?.created_by) ? principalFromTag(answered?.created_by) : undefined);
+    // And the run is that mandate's from here on: it may stop it, and it is not retried.
+    const running = this.activeTasks.get(task.id);
+    if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const triggerTier = admittedTriggerTier(task.model_tier);
     const session = this.engine.createSession({
       autonomy: 'autonomous',
@@ -1981,13 +2005,11 @@ export class WorkerLoop {
       // restarted the run its owner had just stopped. The flag is sufficient here
       // because the controller abort is what produced the dismissal. Declared above the
       // block because the notification below reads it too.
-      taskManager.recordTaskRun(
+      this.#recordRun(
+        taskManager,
         task.id,
         truncatedResult,
         endedByOwner ? 'stopped' : (questionWentUnanswered || budgetCut !== null ? 'failed' : 'success'),
-        // A run a non-owner started (or whose question it asked) gets no retry: the retry
-        // would carry no request and run as the owner's schedule (§3.12 point 6).
-        ...(starter !== undefined && !isOwnerPrincipal(starter) ? [{ noRetry: true }] : []),
       );
     }
 
@@ -2080,11 +2102,12 @@ export class WorkerLoop {
       // A proposal is not switched off by its own test run: it does not fire anyway, and
       // the owner stamping it is how it would start.
       if (isHandRunOf(task.id)) {
-        tm?.recordTaskRun(task.id, `Not run: workflow "${planned.id}" needs first-run confirmation by the owner.`, 'failed');
+        this.#recordRun(tm, task.id, `Not run: workflow "${planned.id}" needs first-run confirmation by the owner.`, 'failed');
         return;
       }
       tm?.setEnabled?.(task.id, false);
-      tm?.recordTaskRun(
+      this.#recordRun(
+        tm,
         task.id,
         `Not run: workflow "${planned.id}" needs first-run confirmation. Schedule it from the workflow library (the consent step confirms it) — the schedule has been disabled.`,
         'failed',
@@ -2160,7 +2183,7 @@ export class WorkerLoop {
     // NOT just push. Record the failure, then open (or bump) an unread chat
     // thread loaded with the run's context — the user opens it + fixes in chat
     // (Slice C adds the retry/diagnose tools that act on the reply).
-    this.engine.getTaskManager()?.recordTaskRun(task.id, `Pipeline ${result.status ?? 'unknown'}${grantReport}`, 'failed');
+    this.#recordRun(this.engine.getTaskManager(), task.id, `Pipeline ${result.status ?? 'unknown'}${grantReport}`, 'failed');
     const stepDetail = (result.stepErrors ?? [])
       .filter(s => s.error)
       .map(s => `• ${s.stepId}: ${s.error}`)
@@ -2187,7 +2210,7 @@ export class WorkerLoop {
   private recordAndNotify(task: TriggerRecord, resultSummary: string, success: boolean): void {
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      taskManager.recordTaskRun(task.id, resultSummary, success ? 'success' : 'failed');
+      this.#recordRun(taskManager, task.id, resultSummary, success ? 'success' : 'failed');
     }
 
     if (this.notificationRouter.hasChannels()) {
@@ -2232,7 +2255,7 @@ export class WorkerLoop {
     if (!config.url) {
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
-        taskManager.recordTaskRun(task.id, 'Watch task missing URL in config', 'failed');
+        this.#recordRun(taskManager, task.id, 'Watch task missing URL in config', 'failed');
       }
       return;
     }
@@ -2272,7 +2295,7 @@ export class WorkerLoop {
       // No change — record run silently, don't notify
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
-        taskManager.recordTaskRun(task.id, 'No changes detected', 'success');
+        this.#recordRun(taskManager, task.id, 'No changes detected', 'success');
       }
       return;
     }
@@ -2348,7 +2371,7 @@ export class WorkerLoop {
     config.last_hash = currentHash;
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      taskManager.recordTaskRun(task.id, truncatedAnalysis, 'success');
+      this.#recordRun(taskManager, task.id, truncatedAnalysis, 'success');
       // A test run of a proposal does not move the baseline: the first run after the
       // owner's stamp compares against what the proposal was set up with.
       if (!isHandRunOf(task.id)) taskManager.updateWatchConfig(task.id, config);

@@ -3150,6 +3150,14 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(created.mock.calls.at(-1)?.[0]).toBe(byOwner.sessionId);
       expect(created.mock.calls.at(-1)?.[1]).not.toHaveProperty('created_by');
     });
+
+    it('tells who ran in the session last: the principal it was built for until a run says otherwise', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const mandate = { kind: 'mandate' as const, email: 'setup@example.org' };
+      expect(engine.createSession({ principal: mandate }).lastRunPrincipal).toEqual(mandate);
+      expect(engine.createSession().lastRunPrincipal).toEqual({ kind: 'owner' });
+    });
   });
 
   // -- Slice B (#86/#80): compact() persists the summary durably to thread.summary --
