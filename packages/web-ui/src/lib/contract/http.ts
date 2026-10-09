@@ -438,3 +438,33 @@ export interface OAuthRefreshResponse {
    */
   refresh_handle?: string;
 }
+
+// === OAuth revoke — POST /internal/oauth/google/revoke (engine → CP) ===
+
+/**
+ * Revoke the grant behind a refresh handle at Google, on behalf of the instance
+ * that holds it.
+ *
+ * A brokered instance holds only the sealed handle, never the refresh token, so
+ * once its access token has expired it cannot revoke at Google itself. The
+ * control plane can open the handle and can.
+ *
+ * Authenticated exactly like the refresh: `x-instance-secret`, matched against
+ * `instances.instanceSecret` in constant time, and the handle must unseal under
+ * that instance's key.
+ */
+export interface OAuthRevokeRequest {
+  instance_id: string;
+  /** The handle the instance holds — the one it is about to drop. */
+  refresh_handle: string;
+}
+
+/**
+ * `revoked: true` only when Google confirmed the grant is gone: it answered the
+ * revoke with success, or reported the token as already invalid. Every other
+ * outcome is an error status, never `revoked: false` with a 200 — the engine
+ * reports "not confirmed at Google" for anything but this exact answer.
+ */
+export interface OAuthRevokeResponse {
+  revoked: true;
+}

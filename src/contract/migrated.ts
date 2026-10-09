@@ -113,6 +113,8 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'BROKER_START_GOLDEN', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN') },
   { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
+  { name: 'OAuthRevokeRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeRequest') },
+  { name: 'OAuthRevokeResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeResponse') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },

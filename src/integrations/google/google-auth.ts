@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import type { OAuthRefreshRequest, OAuthRefreshResponse } from '../../contract/http.js';
+import type { OAuthRefreshRequest, OAuthRefreshResponse, OAuthRevokeRequest, OAuthRevokeResponse } from '../../contract/http.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
@@ -442,6 +442,16 @@ function validateControlPlaneRefresh(json: unknown): OAuthRefreshResponse {
     expires_at: expiresAt,
     ...(typeof handle === 'string' ? { refresh_handle: handle } : {}),
   };
+}
+
+/**
+ * The control plane's revoke answer, or null for anything that is not exactly
+ * the confirmation the contract defines — the caller then reports the grant as
+ * not confirmed at Google.
+ */
+function readControlPlaneRevoke(json: unknown): OAuthRevokeResponse | null {
+  if (typeof json !== 'object' || json === null) return null;
+  return (json as Record<string, unknown>)['revoked'] === true ? { revoked: true } : null;
 }
 
 /**
@@ -1118,14 +1128,43 @@ export class GoogleAuth {
    * allow-list without Google's host), time out, or be answered with an error.
    * In each of those cases the local grant is still gone, which is what the user
    * asked for on this side, and the caller says that Google was not told.
+   *
+   * A brokered grant goes through the control plane first. Such an instance
+   * holds a sealed handle instead of the refresh token, so on its own it can
+   * only present the access token — which Google refuses once it has expired.
+   * The control plane opens the handle and revokes the refresh token itself.
+   * The control-plane call is a connector call like the refresh, so the same
+   * network policy applies to it: under `deny-all` it is refused too.
    */
   async revoke(): Promise<{ revokedAtGoogle: boolean }> {
     let revokedAtGoogle = false;
+    const handle = this.tokenData?.refresh_handle;
+    const cp = handle ? readControlPlaneIdentity() : null;
+    if (cp && handle) {
+      try {
+        const res = await cpFetch(cp.url, '/internal/oauth/google/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-instance-secret': cp.secret },
+          body: JSON.stringify({
+            instance_id: cp.instanceId,
+            refresh_handle: handle,
+          } satisfies OAuthRevokeRequest),
+          signal: AbortSignal.timeout(10_000),
+        }, this.hostPolicy);
+        // Confirmed only by the exact answer the contract defines; any other
+        // body, status or a parse failure leaves it unconfirmed.
+        if (res.ok) {
+          revokedAtGoogle = readControlPlaneRevoke(await res.json().catch(() => null)) !== null;
+        }
+      } catch {
+        // Refused by the network policy, or no answer: try the direct call below.
+      }
+    }
     // The refresh token when there is one: Google revokes the whole grant from
     // either, but an access token only while it is still valid — an hour after it
     // expired the call would fail and the grant would stay live at Google.
     const token = this.tokenData?.refresh_token || this.tokenData?.access_token;
-    if (token) {
+    if (token && !revokedAtGoogle) {
       try {
         const res = await googleFetch(REVOKE_URL, {
           method: 'POST',

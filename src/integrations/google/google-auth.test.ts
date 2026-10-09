@@ -2346,4 +2346,150 @@ describe('refresh through the control plane (the client secret stays there)', ()
     expect(token).toBe('google-token');
     expect(vault.stored()['refresh_handle']).toBe('sealed-handle-1');
   });
+
+  // Revoke for a brokered grant. The instance holds the sealed handle, not the
+  // refresh token, so without the control plane it can only present the access
+  // token — which Google refuses once it has expired.
+  describe('revoke through the control plane', () => {
+    const REVOKE = `${CP}/internal/oauth/google/revoke`;
+    const GOOGLE_REVOKE = 'https://oauth2.googleapis.com/revoke';
+    const urls = (): string[] => mockFetch.mock.calls.map((c) => String(c[0]));
+
+    it('asks the control plane to revoke, reports its confirmation, and does not call Google itself', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ revoked: true }) });
+
+      const result = await authWith(vault).revoke();
+
+      expect(result.revokedAtGoogle).toBe(true);
+      expect(urls()).toEqual([REVOKE]);
+      const init = mockFetch.mock.calls[0]![1] as RequestInit;
+      expect((init.headers as Record<string, string>)['x-instance-secret']).toBe('instance-secret-value');
+      expect(JSON.parse(String(init.body))).toEqual({ instance_id: 'inst-1', refresh_handle: 'sealed-handle-1' });
+      expect(vault.delete, 'the local grant is dropped').toHaveBeenCalled();
+    });
+
+    it('falls back to Google directly, and reports it unconfirmed, when the control plane does not confirm', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status: 502, json: async () => ({ error: 'x' }) })
+        .mockResolvedValueOnce({ ok: false, status: 400 });
+
+      const result = await authWith(vault).revoke();
+
+      expect(result.revokedAtGoogle).toBe(false);
+      expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+      expect(String((mockFetch.mock.calls[1]![1] as RequestInit).body), 'only the access token is left to present').toContain('token=old-token-aaaaaaaa');
+      expect(vault.delete).toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a 200 without the confirmation', { revoked: false }],
+      ['a 200 with an empty body', {}],
+      ['a 200 with a string', { revoked: 'true' }],
+      ['a 200 with a number', { revoked: 1 }],
+    ])('does not count %s as confirmed', async (_name, body) => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => body })
+        .mockResolvedValueOnce({ ok: false, status: 400 });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(false);
+      expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+    });
+
+    // A control plane that predates the revoke route answers 404 (or 501 where
+    // the broker is not configured). That must read as "not confirmed" and take
+    // the direct path — never as a confirmation, never as an error.
+    it.each([
+      ['404 from a control plane without the route', 404, 'Not Found'],
+      ['501 from a control plane without a broker', 501, '{"error":"Google OAuth is not configured on this control plane"}'],
+    ])('treats %s as unconfirmed and revokes directly', async (_name, status, text) => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status, json: async () => JSON.parse(text.startsWith('{') ? text : '{"revoked":true}') as unknown, text: async () => text })
+        .mockResolvedValueOnce({ ok: false, status: 400 });
+
+      const result = await authWith(vault).revoke();
+
+      expect(result.revokedAtGoogle).toBe(false);
+      expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+      expect(vault.delete, 'the local grant is dropped').toHaveBeenCalled();
+    });
+
+    it('falls back to Google directly when the control plane cannot be reached', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockRejectedValueOnce(new TypeError('fetch failed'))
+        .mockResolvedValueOnce({ ok: true });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(true);
+      expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+    });
+
+    it('does not take a confirmation from an error status', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ revoked: true }) })
+        .mockResolvedValueOnce({ ok: false, status: 400 });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(false);
+    });
+
+    it('bounds the control-plane call in time', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ revoked: true }) });
+      const timeout = vi.spyOn(AbortSignal, 'timeout');
+      try {
+        await authWith(vault).revoke();
+        const signal = (mockFetch.mock.calls[0]![1] as RequestInit).signal;
+        const created = timeout.mock.calls.findIndex((c) => c[0] === 10_000);
+        expect(created, 'a ten-second timeout was created').toBeGreaterThanOrEqual(0);
+        expect(signal, 'and it is the one on the control-plane request').toBe(timeout.mock.results[created]!.value);
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+
+    it('under deny-all reaches neither the control plane nor Google, and still drops the grant here', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      const auth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        hostPolicy: { networkPolicy: 'deny-all', allowedHosts: undefined, allowedWildcards: [], enforceHttps: false },
+      });
+
+      expect((await auth.revoke()).revokedAtGoogle).toBe(false);
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(vault.delete).toHaveBeenCalled();
+    });
+
+    it('without a handle revokes at Google directly, as before', async () => {
+      setEnv(true);
+      const vault = vaultWith({});
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(true);
+      expect(urls()).toEqual([GOOGLE_REVOKE]);
+      expect(String((mockFetch.mock.calls[0]![1] as RequestInit).body)).toContain('token=refresh-token-bbbbbbbb');
+    });
+
+    it('with a handle but no control-plane identity revokes at Google directly', async () => {
+      setEnv(false);
+      const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+      mockFetch.mockResolvedValueOnce({ ok: true });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(true);
+      expect(urls()).toEqual([GOOGLE_REVOKE]);
+    });
+  });
 });
