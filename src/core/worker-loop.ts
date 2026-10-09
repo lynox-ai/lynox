@@ -16,10 +16,10 @@ import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRun
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
-import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
+import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter } from './notification-router.js';
+import type { NotificationRouter, NotificationMessage } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -39,6 +39,81 @@ import { compose, engineText, renderFence } from './data-boundary.js';
  *  `ask-user.ts`. It is one more literal copy of a marker spelled out in several
  *  places, engine and web UI alike; every copy must stay spelled the same. */
 const DISMISSED_ANSWER = '__dismissed__';
+
+/** Above this many waiting triggers in one tick, one summary replaces the single reminders. */
+const CONSENT_REMINDER_BATCH = 3;
+
+/**
+ * The reminders for the triggers whose reminder a tick just claimed.
+ *
+ * The headline is the engine's own sentence, never the trigger's title: an unconfirmed
+ * `run_agent` trigger is typically one an agent wrote, possibly after reading outside
+ * content, and a push headline is the line an owner acts on without opening anything. The
+ * title goes into the body through {@link reminderTitle}, beside where to review the trigger
+ * — the wording says to look before confirming, not to confirm. The whole body stays within
+ * {@link REMINDER_BODY_MAX}, the shortest cut a channel applies (web push), so the review
+ * pointer and the outside-content note survive a title of any length. More than
+ * {@link CONSENT_REMINDER_BATCH} at once (the first tick after an upgrade, say) become one
+ * summary, so a backlog does not arrive as a burst.
+ */
+export function consentReminderMessages(triggers: readonly TriggerRecord[]): NotificationMessage[] {
+  if (triggers.length === 0) return [];
+  if (triggers.length > CONSENT_REMINDER_BATCH) {
+    return [{
+      title: `\u23F8 ${String(triggers.length)} scheduled actions are waiting for your confirmation`,
+      body: 'They came due and have not run. Review each one under Automation \u203A Triggers before you confirm it.',
+      priority: 'normal',
+    }];
+  }
+  return triggers.map((t) => {
+    const outside = t.created_untrusted ? ' It was set up after reading content from outside.' : '';
+    return {
+      title: '\u23F8 A scheduled action is waiting for your confirmation',
+      body: `It came due and has not run.${outside} Review \u201C${reminderTitle(t.title)}\u201D under Automation \u203A Triggers before you confirm it.`,
+      taskId: t.id,
+      priority: 'normal' as const,
+    };
+  });
+}
+
+/** Web push cuts a body at 240 characters (`web-push-channel.ts`); nothing longer may matter. */
+export const REMINDER_BODY_MAX = 240;
+const REMINDER_TITLE_MAX = 80;
+
+/**
+ * A trigger title as the reminder quotes it: one line, without the characters that could
+ * make agent-written text read as the engine's — double quote marks and their look-alikes
+ * that would visibly close the quote around it, bidi controls that reorder what follows,
+ * invisible format characters, C0/C1 controls, lone surrogates — and cut to {@link REMINDER_TITLE_MAX} UTF-16 units on a code-point
+ * boundary, so an emoji is never split.
+ */
+/** Half of a surrogate pair with no other half (no `u` flag: it has to see code units). */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+const REMINDER_TITLE_STRIP = new RegExp(
+  '['
+  // double quote marks and their look-alikes, which could close the quote around the title
+  + '"\\u201C\\u201D\\u201E\\u201F\\u2033\\u2036\\u275D\\u275E\\u301D\\u301E\\u301F\\uFF02\\u02DD'
+  // bidi embeddings, overrides, isolates and marks, which reorder or hide what follows
+  + '\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C'
+  // zero-width and invisible format characters, and the tag block
+  + '\\u200B-\\u200D\\u2060\\uFEFF\\u{E0000}-\\u{E007F}'
+  + ']|\\u2019{2,}',
+  'gu',
+);
+
+export function reminderTitle(title: string): string {
+  const cleaned = collapseToSingleLine(title.replace(LONE_SURROGATE, '').replace(REMINDER_TITLE_STRIP, ''));
+  if (cleaned.length <= REMINDER_TITLE_MAX) return cleaned;
+  // Measured in UTF-16 units, as the channel's cut measures — an emoji counts twice — but
+  // cut only between code points.
+  let out = '';
+  for (const point of cleaned) {
+    if (out.length + point.length > REMINDER_TITLE_MAX - 1) break;
+    out += point;
+  }
+  return `${out}\u2026`;
+}
 
 /** What a swept run's result reads as. It is a RESULT, not a status: the status
  *  the sweep writes is `failed`, and this is the line a human sees next to it. */
@@ -877,6 +952,30 @@ export class WorkerLoop {
         );
       }
 
+      // The consent reminder. `getDueTriggers` holds an unconfirmed `run_agent` trigger
+      // back without touching it — no disable, no failed run, `next_run_at` kept so that
+      // confirming makes it due in place — and that care is what made the wait invisible:
+      // nothing ran, so nothing said anything. This tells the owner once per unconfirmed
+      // phase, the first time such a trigger would have run. It records no run and changes
+      // nothing else on the trigger. With no channel configured it waits rather than claiming
+      // the reminder, so a channel added later still gets it; a channel that is configured but
+      // fails to deliver does use it up (the router reports per channel, and retrying every
+      // minute would be worse). Fenced like the wait sweep: a failure here must not stop the
+      // dispatch below.
+      try {
+        if (this.notificationRouter.hasChannels()) {
+          const claimed = taskManager.getAwaitingConsentUnreminded()
+            .filter((waiting) => taskManager.markConsentReminded(waiting.id));
+          for (const message of consentReminderMessages(claimed)) {
+            void this.notificationRouter.notify(message);
+          }
+        }
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:worker] consent reminder failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
       // Missed run detection: warn about tasks that were due >10min ago
       const now = Date.now();
       for (const task of dueTasks) {
@@ -1191,7 +1290,8 @@ export class WorkerLoop {
             // the deterministic effects it needs an explicit human first-run-confirm
             // (`run_workflow` has its own confirmedAt gate in executePipeline;
             // backup/notify are deterministic → exempt). getDueTriggers already
-            // excludes an unconfirmed one, so this branch is normally unreachable; if
+            // excludes an unconfirmed one, so this branch is normally unreachable (the
+            // owner hears about such a trigger from the consent reminder in tick); if
             // a `confirmed_at`-less run_agent trigger ever reaches dispatch (a direct
             // executeTask call, a bypassed read path), refuse it — record + stop,
             // NEVER mint the autonomous run.

@@ -821,6 +821,17 @@ export class TaskManager {
     return this.history.getExpiredWaitingTriggers(now);
   }
 
+  /** Unconfirmed `run_agent` triggers that came due and whose owner was not told yet —
+   *  the tick's consent-reminder pass. `getDueTriggers` above holds them back. */
+  getAwaitingConsentUnreminded(now?: string): TriggerRecord[] {
+    return this.history.getAwaitingConsentUnreminded(now);
+  }
+
+  /** Claim a trigger's consent reminder; true for exactly one caller per unconfirmed phase. */
+  markConsentReminded(id: string): boolean {
+    return this.history.markConsentReminded(id);
+  }
+
   /** Every parked trigger, deadline or not (§0 A10) — the tick's re-arm pass. */
   getWaitingTriggers(): TriggerRecord[] {
     return this.history.getWaitingTriggers();
