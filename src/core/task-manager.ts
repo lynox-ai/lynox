@@ -396,8 +396,8 @@ export class TaskManager {
    * task under it, at any depth, is its own too: those the owner added are not the mandate's
    * to delete, and one further down holds the delete back as much. Checked on rows read from
    * the table the delete removes from. The owner's and the engine's delete (no principal) is
-   * the legacy one, unchanged and without that read: it also clears the mirror and the subtasks
-   * of an id whose own row is gone.
+   * the legacy one, unchanged and without that read: it also clears the mirror of an id whose
+   * legacy row is gone.
    */
   deleteTodo(id: string, by?: RequestPrincipal): boolean {
     if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
