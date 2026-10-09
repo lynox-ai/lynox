@@ -41,6 +41,37 @@ describe('SecretStore', () => {
     }
   });
 
+  // PRD §3.13 B9: the engine sets a check every resolve asks, so a token of a connection whose
+  // mandate has ended reaches nobody, whichever way it is asked for.
+  describe('resolve guard', () => {
+    const vaulted = (): SecretStore => new SecretStore(undefined, mockVault([
+      ['BOOKS_API_ACCESS_TOKEN', { value: 'token-value-1234', scope: 'any', ttlMs: 0 }],
+      ['OTHER_KEY', { value: 'other-value-1234', scope: 'any', ttlMs: 0 }],
+    ]));
+
+    it('withholds what the guard refuses, by resolve and by reference alike, and nothing else', () => {
+      const store = vaulted();
+      store.setResolveGuard((name) => name !== 'BOOKS_API_ACCESS_TOKEN');
+      expect(store.resolve('BOOKS_API_ACCESS_TOKEN')).toBeNull();
+      expect(store.resolveSecretRefs({ h: 'secret:BOOKS_API_ACCESS_TOKEN' })).toEqual({ h: 'secret:BOOKS_API_ACCESS_TOKEN' });
+      expect(store.resolve('OTHER_KEY')).toBe('other-value-1234');
+    });
+
+    it('withholds the value when the guard throws', () => {
+      const store = vaulted();
+      store.setResolveGuard(() => { throw new Error('no profiles'); });
+      expect(store.resolve('OTHER_KEY')).toBeNull();
+    });
+
+    it('control: without a guard, or with it removed again, the value is handed out', () => {
+      const store = vaulted();
+      expect(store.resolve('BOOKS_API_ACCESS_TOKEN')).toBe('token-value-1234');
+      store.setResolveGuard(() => false);
+      store.setResolveGuard(null);
+      expect(store.resolve('BOOKS_API_ACCESS_TOKEN')).toBe('token-value-1234');
+    });
+  });
+
   // === Loading ===
 
   describe('loading from env vars', () => {

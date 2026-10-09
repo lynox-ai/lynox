@@ -11,7 +11,9 @@ const NOW = 1_700_000_000;
 const VERIFIER = 'a'.repeat(43);
 const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
 
-const good = { state: STATE, profileId: 'bexio', verifier: VERIFIER } as const;
+const good = { state: STATE, profileId: 'bexio', verifier: VERIFIER, by: { tag: 'owner' } } as const;
+/** The `by` field `good` signs, as the payload carries it. */
+const BY = Buffer.from(JSON.stringify({ tag: 'owner' })).toString('base64url');
 
 describe('the round-trip', () => {
   it('returns exactly what was signed', () => {
@@ -60,7 +62,7 @@ describe('the derivation purpose separates this flow from the Google one', () =>
   // properties that a later edit can collapse. This asserts the separation
   // that survives such an edit.
   it('refuses a payload signed with the Google flow purpose', () => {
-    const payload = `${STATE}.bexio.${VERIFIER}.${String(NOW)}`;
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}`;
     const googleKey = createHmac('sha256', 'lynox-oauth-state').update(SECRET).digest();
     const googleSig = createHmac('sha256', googleKey).update(payload).digest('hex');
     expect(verifyProfileOAuthState(`${payload}.${googleSig}`, SECRET, NOW)).toBeNull();
@@ -93,7 +95,7 @@ describe('the timestamp', () => {
     // `parseInt('1700000000abc', 10)` is 1700000000. The signature covers the
     // RAW field, so this cannot verify anyway — the pattern makes the refusal
     // independent of that, which matters if the payload is ever re-ordered.
-    const payload = `${STATE}.bexio.${VERIFIER}.${String(NOW)}abc`;
+    const payload = `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}abc`;
     const key = createHmac('sha256', 'lynox-profile-oauth-state').update(SECRET).digest();
     const sig = createHmac('sha256', key).update(payload).digest('hex');
     expect(verifyProfileOAuthState(`${payload}.${sig}`, SECRET, NOW)).toBeNull();
@@ -102,10 +104,10 @@ describe('the timestamp', () => {
 
 describe('the shape is refused before anything is trusted', () => {
   it.each([
-    ['too few fields', `${STATE}.bexio.${VERIFIER}.${String(NOW)}`],
-    ['too many fields', `${STATE}.bexio.${VERIFIER}.${String(NOW)}.deadbeef.extra`],
+    ['too few fields', `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}`],
+    ['too many fields', `${STATE}.bexio.${VERIFIER}.${BY}.${String(NOW)}.deadbeef.extra`],
     ['empty string', ''],
-    ['an empty field', `.bexio.${VERIFIER}.${String(NOW)}.deadbeef`],
+    ['an empty field', `.bexio.${VERIFIER}.${BY}.${String(NOW)}.deadbeef`],
   ])('refuses %s', (_label, raw) => {
     expect(verifyProfileOAuthState(raw, SECRET, NOW)).toBeNull();
   });
@@ -116,7 +118,7 @@ describe('the shape is refused before anything is trusted', () => {
     // length guard this input is an exception, not a refusal.
     const cookie = signProfileOAuthState(good, SECRET, NOW) ?? '';
     const parts = cookie.split('.');
-    const tampered = [...parts.slice(0, 4), 'zzzz'].join('.');
+    const tampered = [...parts.slice(0, 5), 'zzzz'].join('.');
     expect(() => verifyProfileOAuthState(tampered, SECRET, NOW)).not.toThrow();
     expect(verifyProfileOAuthState(tampered, SECRET, NOW)).toBeNull();
   });
@@ -124,7 +126,7 @@ describe('the shape is refused before anything is trusted', () => {
   it('refuses a truncated signature without throwing', () => {
     const cookie = signProfileOAuthState(good, SECRET, NOW) ?? '';
     const parts = cookie.split('.');
-    const tampered = [...parts.slice(0, 4), (parts[4] ?? '').slice(0, 10)].join('.');
+    const tampered = [...parts.slice(0, 5), (parts[5] ?? '').slice(0, 10)].join('.');
     expect(() => verifyProfileOAuthState(tampered, SECRET, NOW)).not.toThrow();
     expect(verifyProfileOAuthState(tampered, SECRET, NOW)).toBeNull();
   });
@@ -171,5 +173,71 @@ describe('signing refuses what the format cannot carry', () => {
     expect(signProfileOAuthState({ ...good, verifier: 'a'.repeat(128) }, SECRET, NOW)).not.toBeNull();
     expect(signProfileOAuthState({ ...good, profileId: 'a'.repeat(64) }, SECRET, NOW)).not.toBeNull();
     expect(signProfileOAuthState({ ...good, profileId: 'a' }, SECRET, NOW)).not.toBeNull();
+  });
+});
+
+describe('who started the connection rides inside the signature (PRD §3.13)', () => {
+  const MANDATE = { tag: 'mandate:helper.name@example.invalid', mandateId: 'b3c1a2d4-0000-4000-8000-000000000001' };
+  const ourSig = (payload: string): string => {
+    const key = createHmac('sha256', 'lynox-profile-oauth-state').update(SECRET).digest();
+    return createHmac('sha256', key).update(payload).digest('hex');
+  };
+
+  it('carries a mandate with its id across, an address with dots included', () => {
+    const cookie = signProfileOAuthState({ ...good, by: MANDATE }, SECRET, NOW) ?? '';
+    expect(cookie.split('.')).toHaveLength(6);
+    expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, by: MANDATE });
+  });
+
+  // Whatever id the login contract accepted has to be able to start a connection; a narrower
+  // rule here would turn every such session's connect into an error page.
+  it('carries any mandate id the login contract admits, dots and the full length included', () => {
+    for (const mandateId of ['m.2026.10', 'x'.repeat(64)]) {
+      const by = { tag: MANDATE.tag, mandateId };
+      const cookie = signProfileOAuthState({ ...good, by }, SECRET, NOW) ?? '';
+      expect(verifyProfileOAuthState(cookie, SECRET, NOW)).toEqual({ ...good, by });
+    }
+  });
+
+  // The reader caps the encoded field. A principal valid on its face whose encoding is longer
+  // must not be signed: the user would consent at the provider and then be turned away.
+  it('does not sign a principal whose encoding the reader would refuse', () => {
+    const by = { tag: `mandate:${'\u00fc'.repeat(290)}@example.invalid`, mandateId: 'x'.repeat(64) };
+    expect(signProfileOAuthState({ ...good, by }, SECRET, NOW)).toBeNull();
+  });
+
+  it('refuses a cookie whose principal was swapped for the owner', () => {
+    const cookie = signProfileOAuthState({ ...good, by: MANDATE }, SECRET, NOW) ?? '';
+    const parts = cookie.split('.');
+    const swapped = [...parts.slice(0, 3), BY, ...parts.slice(4)].join('.');
+    expect(swapped).not.toBe(cookie);
+    expect(verifyProfileOAuthState(swapped, SECRET, NOW)).toBeNull();
+  });
+
+  it('refuses a cookie from before the principal was carried, though its signature is good', () => {
+    const payload = `${STATE}.bexio.${VERIFIER}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  it.each([
+    ['a mandate without its id', { tag: MANDATE.tag }],
+    ['the owner with a mandate id', { tag: 'owner', mandateId: MANDATE.mandateId }],
+    ['a tag that is neither', { tag: 'member:someone' }],
+    ['a mandate tag with no address', { tag: 'mandate:', mandateId: MANDATE.mandateId }],
+    ['a mandate id with a control character', { tag: MANDATE.tag, mandateId: 'a\u0007b' }],
+    ['a mandate id longer than the login contract allows', { tag: MANDATE.tag, mandateId: 'x'.repeat(65) }],
+    ['a mandate id with surrounding space', { tag: MANDATE.tag, mandateId: ' abc' }],
+  ])('neither signs nor reads %s', (_label, by) => {
+    expect(signProfileOAuthState({ ...good, by }, SECRET, NOW)).toBeNull();
+    const field = Buffer.from(JSON.stringify(by.mandateId === undefined ? { tag: by.tag } : { tag: by.tag, mandate_id: by.mandateId })).toString('base64url');
+    const payload = `${STATE}.bexio.${VERIFIER}.${field}.${String(NOW)}`;
+    expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+  });
+
+  it('does not read a principal field that is not the JSON it signs', () => {
+    for (const field of [Buffer.from('not json').toString('base64url'), Buffer.from('"owner"').toString('base64url')]) {
+      const payload = `${STATE}.bexio.${VERIFIER}.${field}.${String(NOW)}`;
+      expect(verifyProfileOAuthState(`${payload}.${ourSig(payload)}`, SECRET, NOW)).toBeNull();
+    }
   });
 });

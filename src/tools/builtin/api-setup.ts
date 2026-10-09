@@ -34,7 +34,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { hiddenFromProfile, secretsForProfile } from '../../core/profile-secret-view.js';
+import { hiddenFromProfile, mandateMayConnect, mayServeAsClientId, secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -1476,6 +1476,19 @@ export function adoptionNote(prior: ApiProfile, saved: ApiProfile): string {
 }
 
 /**
+ * Whose consent a first exchange records (`OAuthGrantRecord.connected_by`). A renewal never asks:
+ * a stamp already on the grant stays, whoever's turn renews it. A mandate counts only on a profile
+ * it wrote itself; its turn reaching the owner's profile, through the attach's renewal, leaves
+ * the owner's tokens the owner's. A mandate stamp without the mandate's id — a run started without
+ * a session — is kept as it is, and such tokens are then not handed out (`connectionTokenAllowed`).
+ */
+function consentOf(agent: IAgent, profile: ApiProfile): Pick<OAuthGrantRecord, 'connected_by' | 'connected_mandate_id'> {
+  const p = agent.principal;
+  if (p.kind !== 'mandate' || profile.created_by !== principalTag(p)) return { connected_by: 'owner' };
+  return p.mandateId === undefined ? { connected_by: principalTag(p) } : { connected_by: principalTag(p), connected_mandate_id: p.mandateId };
+}
+
+/**
  * A mandate's turn changes only a profile the mandate wrote (PRD customer-granted-operator-
  * access §3.13, H2). Every rule that reads a profile — the preset write refusal, the vetted
  * host, the names the engine resolves — holds only while the profile is the one its author
@@ -1768,12 +1781,6 @@ ${draftJson}
       // to record, never the input's: a mandate's save records the mandate.
       const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
       if (foreignSave) return foreignSave;
-      // A provider preset connects an account, and connecting is the owner's: a mandate's turn
-      // prepares a profile but does not name a preset (PRD §3.13, interim scope — see the
-      // register row on who owns a connection).
-      if (!isOwnerPrincipal(agent.principal) && profile.auth?.oauth?.preset_id !== undefined) {
-        return `Error: profile "${profile.id}" names a provider preset, and connecting an account through one is for the owner to do. Nothing was saved. Save it without auth.oauth.preset_id, or ask the owner to set it up and connect.`;
-      }
       delete profile.created_by;
       const prior = agent.toolContext?.apiStore?.get(profile.id);
       // A save may not take a profile off the built-in provider it was set up with. A model
@@ -2071,8 +2078,10 @@ ${draftJson}
       if (!apiStore) return 'Error: API store unavailable — cannot build a connect link. Restart the engine and retry.';
       const profile = apiStore.get(id);
       if (!profile) return `Error: API profile "${id}" not found. Create it first with action=create.`;
-      if (!isOwnerPrincipal(agent.principal)) {
-        return `Error: connecting an account is for the owner to do, so this session does not hand out a link for profile "${id}". Ask the owner to connect it.`;
+      // A session under a mandate connects a profile it set up itself (PRD §3.13): the consent
+      // is recorded as its own, and an account somebody else prepared is theirs to connect.
+      if (!isOwnerPrincipal(agent.principal) && profile.created_by !== principalTag(agent.principal)) {
+        return `Error: profile "${id}" was not set up in this session's name, so this session does not hand out a link for it. Ask the owner to connect it.`;
       }
       if (profile.auth?.type !== 'oauth2') {
         return `Error: profile "${id}" has auth.type="${authTypeForModel(profile.auth?.type)}", not "oauth2". Connecting sends the user to a provider to authorize; a profile that carries a static credential does not need it.`;
@@ -2182,6 +2191,14 @@ ${draftJson}
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
         }
         return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
+      }
+      // The two refusals the route gives before anything is sent, asked here as well.
+      if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
+        return `Error: profile "${id}" names "${clientIdKey}" as its client id, and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. Store the client id under a name of its own, update auth.oauth.client_id_key, then connect.`;
+      }
+      if (!isOwnerPrincipal(agent.principal) && agent.secretStore
+        && !mandateMayConnect(agent.secretStore, apiStore, principalTag(agent.principal), profile)) {
+        return `Error: connecting "${id}" would store its token under a name a profile of somebody else reads, so the route would refuse it. Nothing was sent. Tell the owner which account you meant to connect.`;
       }
       // Built from the parsed object, never by string surgery on the raw value.
       // The path prefix is kept deliberately: an engine served under one needs
@@ -2427,12 +2444,19 @@ ${draftJson}
         return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
       }
       // A profile a mandate wrote does not write over what it may not read either: a value
-      // from the environment, or any account connected through a preset, whose requests would then
-      // carry a token this profile minted (`profile-secret-view.ts`).
-      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName)) {
+      // from the environment, a name another author's profile or another preset connection
+      // reads, whose requests would then carry a token this profile minted, or a token slot of
+      // its own that somebody else's consent filled (`profile-secret-view.ts`). Its own slot
+      // with no consent recorded yet is where this exchange records the first one.
+      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName, true)) {
         return input.output_secret_name === undefined
           ? `Error: "${outputName}", where this profile's token would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its token gets a name of its own.`
           : `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
+      }
+      // The same question for the refresh slot: a provider that rotates the refresh token on
+      // this exchange has it written there below, whatever grant was asked for.
+      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, refreshTokenKey(input.id), true)) {
+        return `Error: "${refreshTokenKey(input.id)}", where a renewed refresh token of this profile would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its tokens get names of their own.`;
       }
       // Never a slot the refresh token lives in: the access token would be written
       // over it, and the grant would go with it. Both slots, because a profile can
@@ -2679,6 +2703,7 @@ ${draftJson}
         delete next.revoked_fp;
         delete next.revoked_at;
         next.written = mergeWrites(current, writes);
+        if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
       }, tokenExpiresAt);
       // Deleted while the exchange was out: there is no profile to hold the

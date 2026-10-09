@@ -22,7 +22,7 @@ describe('the generated pair', () => {
       const { verifier } = createPkcePair();
       expect(verifier).not.toContain('.');
       const signed = signProfileOAuthState(
-        { state: 'a'.repeat(36), profileId: 'bexio', verifier },
+        { state: 'a'.repeat(36), profileId: 'bexio', verifier, by: { tag: 'owner' } },
         'secret',
         1_700_000_000,
       );

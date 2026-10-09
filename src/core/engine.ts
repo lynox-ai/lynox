@@ -26,6 +26,7 @@ import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
+import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
@@ -1532,6 +1533,8 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
+      this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
         const apiContext = this._apiStore.formatForSystemPrompt();
         this.briefing = this.briefing ? `${this.briefing}\n\n${apiContext}` : apiContext;

@@ -42,6 +42,8 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { LOGIN_PRINCIPAL_ID_MAX } from '../contract/http.js';
+import { MANDATE_TAG_PREFIX } from './request-principal.js';
 
 /** Mirrors `PROFILE_ID_PATTERN` in `api-store.ts`. Dot-free, which is what lets
  *  the payload be dot-separated without any encoding. */
@@ -55,6 +57,9 @@ const STATE_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 
 const PURPOSE = 'lynox-profile-oauth-state';
 
+/** The encoded principal field, as the reader accepts it and so as the signer may write it. */
+const PRINCIPAL_FIELD = /^[A-Za-z0-9_-]{1,800}$/;
+
 /** Ten minutes: longer than any human flow, shorter than a stolen cookie is useful. */
 export const PROFILE_OAUTH_STATE_TTL_SEC = 10 * 60;
 
@@ -66,6 +71,57 @@ export interface ProfileOAuthState {
   readonly profileId: string;
   /** PKCE code verifier; the challenge derived from it goes to the provider. */
   readonly verifier: string;
+  /**
+   * Who started the connection, so the callback — which no session reaches — can record whose
+   * consent it is (`OAuthGrantRecord.connected_by`). The tag carries an address, and an address
+   * carries dots, so it travels base64url-encoded inside the signed payload.
+   */
+  readonly by: ConnectingPrincipal;
+}
+
+/** The principal of a connection's start, as the state cookie carries it. */
+export interface ConnectingPrincipal {
+  /** `principalTag` of the session: `owner`, or `mandate:<address>`. */
+  readonly tag: string;
+  /** The mandate's id; required for a mandate, absent for the owner. */
+  readonly mandateId?: string | undefined;
+}
+
+/** What a `by` field may hold: the owner, or a mandate tag with its mandate id. */
+function validPrincipal(by: ConnectingPrincipal): boolean {
+  if (by.tag === 'owner') return by.mandateId === undefined;
+  return by.tag.startsWith(MANDATE_TAG_PREFIX) && by.tag.length > MANDATE_TAG_PREFIX.length && by.tag.length <= 320
+    && typeof by.mandateId === 'string' && validMandateId(by.mandateId);
+}
+
+/**
+ * The mandate id as the login contract admits it, not narrower: a session whose id the contract
+ * accepted must be able to start a connection. It travels base64url-encoded, so its characters
+ * do not have to suit the cookie.
+ */
+function validMandateId(id: string): boolean {
+  return id.length > 0 && id.length <= LOGIN_PRINCIPAL_ID_MAX && id.trim() === id
+    && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(id);
+}
+
+function encodePrincipal(by: ConnectingPrincipal): string {
+  return Buffer.from(JSON.stringify(by.mandateId === undefined ? { tag: by.tag } : { tag: by.tag, mandate_id: by.mandateId })).toString('base64url');
+}
+
+/** The `by` field back, or null for anything this module did not encode. */
+function decodePrincipal(field: string): ConnectingPrincipal | null {
+  if (!PRINCIPAL_FIELD.test(field)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(field, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const { tag, mandate_id: mandateId } = parsed as { tag?: unknown; mandate_id?: unknown };
+  if (typeof tag !== 'string' || (mandateId !== undefined && typeof mandateId !== 'string')) return null;
+  const by: ConnectingPrincipal = mandateId === undefined ? { tag } : { tag, mandateId };
+  return validPrincipal(by) ? by : null;
 }
 
 /**
@@ -86,6 +142,10 @@ export function signProfileOAuthState(
   if (!STATE_PATTERN.test(v.state)) return null;
   if (!PROFILE_ID_PATTERN.test(v.profileId)) return null;
   if (!VERIFIER_PATTERN.test(v.verifier)) return null;
+  if (!validPrincipal(v.by)) return null;
+  // The reader caps the field; a principal whose encoding is longer would be signed here and
+  // refused there, after the user had already consented at the provider.
+  if (!PRINCIPAL_FIELD.test(encodePrincipal(v.by))) return null;
   if (!Number.isInteger(nowSec) || nowSec < 0) return null;
   // The verifier's own charset admits `.` and `~`; the payload is dot-separated,
   // so a verifier carrying a dot would split into the wrong number of fields.
@@ -93,7 +153,7 @@ export function signProfileOAuthState(
   // generator that emits dots is a defect to fix, not input to accommodate.
   if (v.verifier.includes('.')) return null;
 
-  const payload = `${v.state}.${v.profileId}.${v.verifier}.${String(nowSec)}`;
+  const payload = `${v.state}.${v.profileId}.${v.verifier}.${encodePrincipal(v.by)}.${String(nowSec)}`;
   return `${payload}.${sign(payload, secret)}`;
 }
 
@@ -116,10 +176,12 @@ export function verifyProfileOAuthState(
 ): ProfileOAuthState | null {
   if (!secret || !raw) return null;
 
+  // Six fields. A cookie from before the principal was carried has five and is refused: it
+  // cannot say whose consent it is, and it lived ten minutes at most.
   const parts = raw.split('.');
-  if (parts.length !== 5) return null;
-  const [state, profileId, verifier, tsStr, sig] = parts;
-  if (!state || !profileId || !verifier || !tsStr || !sig) return null;
+  if (parts.length !== 6) return null;
+  const [state, profileId, verifier, byField, tsStr, sig] = parts;
+  if (!state || !profileId || !verifier || !byField || !tsStr || !sig) return null;
 
   // `parseInt` accepts leading garbage ("12abc" → 12) and a leading `+`/`-`;
   // the pattern is what makes the timestamp a number this engine wrote.
@@ -132,7 +194,7 @@ export function verifyProfileOAuthState(
   if (nowSec < ts) return null;
   if (nowSec - ts > PROFILE_OAUTH_STATE_TTL_SEC) return null;
 
-  const expected = sign(`${state}.${profileId}.${verifier}.${tsStr}`, secret);
+  const expected = sign(`${state}.${profileId}.${verifier}.${byField}.${tsStr}`, secret);
   const sigBuf = Buffer.from(sig, 'hex');
   const expBuf = Buffer.from(expected, 'hex');
   // `Buffer.from(x, 'hex')` truncates at the first non-hex character rather
@@ -144,8 +206,10 @@ export function verifyProfileOAuthState(
   if (!STATE_PATTERN.test(state)) return null;
   if (!PROFILE_ID_PATTERN.test(profileId)) return null;
   if (!VERIFIER_PATTERN.test(verifier)) return null;
+  const by = decodePrincipal(byField);
+  if (by === null) return null;
 
-  return { state, profileId, verifier };
+  return { state, profileId, verifier, by };
 }
 
 function sign(payload: string, secret: string): string {
