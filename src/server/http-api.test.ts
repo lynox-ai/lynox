@@ -999,13 +999,15 @@ describe('LynoxHTTPApi', () => {
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
       const origLog = engineRef['getAuditLog'];
       const origHistory = engineRef['getRunHistory'];
+      const origTm = engineRef['getTaskManager'];
       engineRef['getAuditLog'] = () => ({ record: (e: { principal: unknown }) => { rows.push(e); } });
       engineRef['getRunHistory'] = () => ({ getTask: () => undefined, deleteTask: () => false, deleteTrigger: () => true });
+      engineRef['getTaskManager'] = () => ({ deleteTodo: () => false });
       try {
         const mandate = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
         const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
         expect(res.status).toBe(200);
-      } finally { engineRef['getAuditLog'] = origLog; engineRef['getRunHistory'] = origHistory; }
+      } finally { engineRef['getAuditLog'] = origLog; engineRef['getRunHistory'] = origHistory; engineRef['getTaskManager'] = origTm; }
       expect(rows[0]?.principal).toEqual({ kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id });
     });
 
@@ -6719,7 +6721,7 @@ describe('LynoxHTTPApi', () => {
       for (const modelTier of ['fast', 'balanced', 'deep', null, '']) {
         const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier }) });
         expect(res.status, String(modelTier)).toBe(200);
-        expect(mockTaskUpdate).toHaveBeenLastCalledWith('task-1', expect.objectContaining({ modelTier }));
+        expect(mockTaskUpdate).toHaveBeenLastCalledWith('task-1', expect.objectContaining({ modelTier }), undefined, OWNER_PRINCIPAL);
       }
       mockTaskUpdate.mockClear();
       for (const modelTier of ['opus', 'DEEP', 3, {}]) {
@@ -6739,7 +6741,7 @@ describe('LynoxHTTPApi', () => {
         expect(mockTaskUpdate).not.toHaveBeenCalled();
         const clear = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: null }) });
         expect(clear.status).toBe(200);
-        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }));
+        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }), undefined, OWNER_PRINCIPAL);
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -13559,7 +13561,7 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
       const ok = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'deep' }) });
       expect(ok.status).toBe(200);
       expect(mockTaskMarkEditedBy).toHaveBeenCalledWith('task-1', TAG, true);
-      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }));
+      expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'deep' }), undefined, expect.objectContaining({ kind: 'mandate' }));
     });
 
     it('marks a trigger before switching it on or off, and before completing it', async () => {
