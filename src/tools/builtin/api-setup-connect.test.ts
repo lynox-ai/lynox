@@ -1117,6 +1117,12 @@ describe('view tells the model what a preset connection may ask for', () => {
     expect(reply).toContain('OAuth scopes the "example-shop" preset allows: read_orders. No other scope can be added');
   });
 
+  it('names the scopes as connect requests them, not as the profile spells them', async () => {
+    const reply = await view({ scope: 'read_orders  read_orders' });
+
+    expect(reply).toContain('OAuth scopes this connection asks for: read_orders\n');
+  });
+
   it('gives the token expiry from the stored timestamp', async () => {
     const reply = await view({ token_expires_at: Date.UTC(2026, 9, 9, 15, 52, 38) });
 
