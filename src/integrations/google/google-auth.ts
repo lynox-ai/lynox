@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import type { OAuthRefreshRequest, OAuthRefreshResponse, OAuthRevokeRequest } from '../../contract/http.js';
+import type { OAuthRefreshRequest, OAuthRefreshResponse, OAuthRevokeRequest, OAuthRevokeResponse } from '../../contract/http.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
@@ -442,6 +442,16 @@ function validateControlPlaneRefresh(json: unknown): OAuthRefreshResponse {
     expires_at: expiresAt,
     ...(typeof handle === 'string' ? { refresh_handle: handle } : {}),
   };
+}
+
+/**
+ * The control plane's revoke answer, or null for anything that is not exactly
+ * the confirmation the contract defines — the caller then reports the grant as
+ * not confirmed at Google.
+ */
+function readControlPlaneRevoke(json: unknown): OAuthRevokeResponse | null {
+  if (typeof json !== 'object' || json === null) return null;
+  return (json as Record<string, unknown>)['revoked'] === true ? { revoked: true } : null;
 }
 
 /**
@@ -1144,8 +1154,7 @@ export class GoogleAuth {
         // Confirmed only by the exact answer the contract defines; any other
         // body, status or a parse failure leaves it unconfirmed.
         if (res.ok) {
-          const body: unknown = await res.json().catch(() => null);
-          revokedAtGoogle = typeof body === 'object' && body !== null && (body as Record<string, unknown>)['revoked'] === true;
+          revokedAtGoogle = readControlPlaneRevoke(await res.json().catch(() => null)) !== null;
         }
       } catch {
         // Refused by the network policy, or no answer: try the direct call below.

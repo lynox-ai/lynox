@@ -2389,6 +2389,7 @@ describe('refresh through the control plane (the client secret stays there)', ()
       ['a 200 without the confirmation', { revoked: false }],
       ['a 200 with an empty body', {}],
       ['a 200 with a string', { revoked: 'true' }],
+      ['a 200 with a number', { revoked: 1 }],
     ])('does not count %s as confirmed', async (_name, body) => {
       setEnv(true);
       const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
@@ -2398,6 +2399,43 @@ describe('refresh through the control plane (the client secret stays there)', ()
 
       expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(false);
       expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+    });
+
+    it('falls back to Google directly when the control plane cannot be reached', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockRejectedValueOnce(new TypeError('fetch failed'))
+        .mockResolvedValueOnce({ ok: true });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(true);
+      expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+    });
+
+    it('does not take a confirmation from an error status', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ revoked: true }) })
+        .mockResolvedValueOnce({ ok: false, status: 400 });
+
+      expect((await authWith(vault).revoke()).revokedAtGoogle).toBe(false);
+    });
+
+    it('bounds the control-plane call in time', async () => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ revoked: true }) });
+      const timeout = vi.spyOn(AbortSignal, 'timeout');
+      try {
+        await authWith(vault).revoke();
+        const signal = (mockFetch.mock.calls[0]![1] as RequestInit).signal;
+        const created = timeout.mock.calls.findIndex((c) => c[0] === 10_000);
+        expect(created, 'a ten-second timeout was created').toBeGreaterThanOrEqual(0);
+        expect(signal, 'and it is the one on the control-plane request').toBe(timeout.mock.results[created]!.value);
+      } finally {
+        timeout.mockRestore();
+      }
     });
 
     it('under deny-all reaches neither the control plane nor Google, and still drops the grant here', async () => {
