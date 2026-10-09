@@ -22,7 +22,7 @@ import type { Session } from './session.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
-import { flattenPrompt } from './prompt-value.js';
+import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling, checkPersistentBudget } from './session-budget.js';
@@ -1661,11 +1661,14 @@ export class WorkerLoop {
       // null if that init fails — so a store captured when the task started
       // could be stale in both directions.
       const promptStore = this.engine.getPromptStore();
-      // A background task surfaces through a notification body, which is plain
-      // text with no renderer — so the frame/value split has nothing to protect
-      // here and the flattened form is the honest one. This is the ONE
-      // difference from the HTTP path that is deliberate, not a gap.
+      // The flattened form is what the notification body and the `question` column carry.
+      // The SEGMENTS are stored beside it whenever the prompt has a value, exactly as the
+      // HTTP path does: the owner's UI renders a stored question from them, and without
+      // them it parses the flattened text as markdown, where a multi-line value (a write's
+      // body, N12-4) can close the code fence the frame opened and forge a line.
       const question = flattenPrompt(rawQuestion);
+      const segments = promptSegments(rawQuestion);
+      const storedSegments = segments.some((s) => s.kind === 'value') ? segments : undefined;
       // Already cancelled: `waitForSettled` would settle 'aborted' at once, but
       // only AFTER this inserted a row and pushed a high-priority question at a
       // user whose task is gone. Refuse before either side effect.
@@ -1679,7 +1682,7 @@ export class WorkerLoop {
       }
       // Who asked, and whether a run by hand did: what the sweep and the re-arm read after
       // a restart, when this run is gone (register: hand-run question origin).
-      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id, {
+      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
         createdBy: principalTag(starter ?? OWNER_PRINCIPAL),
         handRun: active?.handRun === true,
       });
@@ -1735,7 +1738,11 @@ export class WorkerLoop {
       // never stored in the vault still reaches the mail body; that is a narrower gap
       // than the one it replaces, and it is the same gap the model-facing path has.
       const secretStore = this.engine.getSecretStore();
-      const offBoxQuestion = secretStore ? secretStore.maskAll(question) : question;
+      // And WITHOUT the segments a gate marked on-box-only (a write's body values, see
+      // `onBoxBlock`): the stored row keeps them for the owner's own UI, the copy that leaves
+      // the box carries the field names the question lists, never the values.
+      const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
+      const offBoxQuestion = secretStore ? secretStore.maskAll(offBoxText) : offBoxText;
       void this.notificationRouter.notify({
         title: `\u2753 ${task.title}`,
         body: offBoxQuestion,
@@ -1939,14 +1946,17 @@ export class WorkerLoop {
       // reads the original twice and redacts the union once.
       const store = this.engine.getSecretStore();
       const mask = (t: string): string => store ? store.maskAll(t) : maskSecretPatterns(t);
-      const q = mask(answered.question);
+      // Capped like the answer below: since N12-4 a write's question carries its body, up to
+      // 64 KiB, and this text lands in the opening prompt of every re-armed turn.
+      const limit = this.engine.getUserConfig().max_tool_result_chars ?? 80_000;
+      const rawQ = mask(answered.question);
+      const q = rawQ.length > limit ? `${rawQ.slice(0, limit)}\n[truncated]` : rawQ;
       // ⛔ CAPPED, because this is the one consumer of an answer that had no bound. The
       // live tool-result path truncates at `max_tool_result_chars`; this path composed the
       // stored string verbatim, and `answerUser` stores what the request body carried —
       // bounded only by the 30 MB body cap. The teardown fix turns this from the
       // crash-only path into the every-deploy one, so the missing bound is now the
       // ordinary case rather than the rare one.
-      const limit = this.engine.getUserConfig().max_tool_result_chars ?? 80_000;
       const raw = mask(answered.answer ?? '');
       const a = raw.length > limit ? `${raw.slice(0, limit)}\n[truncated]` : raw;
       prompt = compose([

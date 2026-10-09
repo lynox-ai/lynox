@@ -19,7 +19,8 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 import { bumpNow, recordApproval } from '../../core/untrusted-epoch.js';
-import { flattenPrompt } from '../../core/prompt-value.js';
+import { SHOWN_BODY_MAX_BYTES, sentBytes } from '../../core/outbound-write.js';
+import { flattenPrompt, offBoxPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
@@ -5727,14 +5728,14 @@ describe('write approvals per method and host (270)', () => {
     ]);
     expect(prompt).toHaveBeenCalledTimes(1);
     expect(first).toContain('denied by user');
-    expect(second).toContain('was not asked: the same write was denied earlier in this batch');
+    expect(second).toContain('was not asked: a POST to this host was denied earlier in this batch');
     // …and only in that batch: the next batch asks again.
     const next = agent270({ batch: {} });
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, next.agent);
     expect(next.prompt).toHaveBeenCalledTimes(1);
   });
 
-  it('(9) the question names path, query keys and field names, never a value, and a name cannot break a line', async () => {
+  it('(9) the question line names path, query keys and field names; values only in the on-box block; a name cannot break a line', async () => {
     const { agent, prompt } = agent270({ mask: (t) => t.replaceAll('sk-live-canary', '[secret]') });
     await visible({
       url: 'https://h.example/v1/sk-live-canary/items?token=CANARY-QUERY&page=2',
@@ -5742,12 +5743,19 @@ describe('write approvals per method and host (270)', () => {
       body: JSON.stringify({ name: 'CANARY-VALUE', 'evil\nAllow?': 1 }),
     }, agent);
     const q = question(prompt, 0);
-    expect(q).toContain('/v1/[secret]/items?token=…&page=…');
-    expect(q).toContain('"name"');
+    const line = q.split('\n')[0]!;
+    expect(line).toContain('/v1/[secret]/items?token=…&page=…');
+    expect(line).toContain('"name"');
+    expect(line).toMatch(/— Allow outbound data\?$/);
+    expect(line).not.toContain('CANARY-VALUE');
     expect(q).not.toContain('sk-live-canary');
     expect(q).not.toContain('CANARY-QUERY');
-    expect(q).not.toContain('CANARY-VALUE');
-    expect(q).not.toContain('\n');
+    // N12-4: the value is shown, in the block below the question line, and only on the box.
+    expect(q).toContain('"name": "CANARY-VALUE"');
+    const off = flattenPrompt(offBoxPrompt(prompt.mock.calls[0]![0] as PromptText));
+    expect(off).not.toContain('CANARY-VALUE');
+    expect(off).not.toContain('```');
+    expect(off).toBe(line);
   });
 
   it('(11, 12) a send path of the table asks even after the host was approved, and every time', async () => {
@@ -6030,6 +6038,117 @@ describe('write approvals per method and host (270)', () => {
     const { agent } = agent270({ answer: 'Deny' });
     await runInCallSlot(refused, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent));
     expect(refused.contactedNetwork).toBeUndefined();
+  });
+
+  describe('(N12-4) the body\'s values in the question', () => {
+    const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'helper@example.test' };
+    const CAP = SHOWN_BODY_MAX_BYTES;
+    /** A JSON object of exactly `bytes` bytes as sent, with many short fields so the indented
+     *  display is far longer than the body. */
+    function jsonOfBytes(bytes: number): string {
+      const fields: string[] = [];
+      let i = 0;
+      const tail = '"last":"END"}';
+      let body = '{';
+      while (sentBytes(body + `"f${i}":1,` + tail) <= bytes) { body += `"f${i}":1,`; i++; }
+      body += tail;
+      const pad = bytes - sentBytes(body);
+      return pad > 0 ? body.replace('"END"', `"END${'x'.repeat(pad)}"`) : body;
+    }
+
+    it('a body of exactly the limit is asked and shown whole, though the display is longer', async () => {
+      const body = jsonOfBytes(CAP);
+      expect(sentBytes(body)).toBe(CAP);
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      await visible({ url: 'https://h.example/a', method: 'POST', body }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      const q = question(prompt, 0);
+      expect(q.length).toBeGreaterThan(CAP);
+      expect(q).toContain('"f0": 1');
+      expect(q).toContain('"last": "END');
+    });
+
+    it('a body one byte over is refused in a mandate session, and the way out for text is to split', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      const out = await visible({ url: 'https://h.example/a', method: 'POST', body: jsonOfBytes(CAP + 1) }, agent);
+      expect(out).toContain(`(${CAP + 1} bytes) is larger than the ${CAP} bytes an approval question shows whole. Split it into several smaller writes`);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('an inline file over the limit is refused in a mandate session, and the way out is a URL', async () => {
+      const b64 = Buffer.from(new Uint8Array(CAP)).toString('base64');
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      const out = await visible({ url: 'https://h.example/a', method: 'POST', body: JSON.stringify({ product: { images: [{ attachment: b64 }] } }) }, agent);
+      expect(out).toContain('carries a file inline, larger than');
+      expect(out).toContain('Send the file by URL');
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it('the owner is asked with the field names when the body is over the limit, never with part of it', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: 'https://h.example/a', method: 'POST', body: jsonOfBytes(CAP + 1) }, agent);
+      const q = question(prompt, 0);
+      expect(q).toContain(`The body (${CAP + 1} bytes) is too large to show; its field names are listed.`);
+      expect(q).not.toContain('```');
+      expect(q).not.toContain('"f0": 1');
+    });
+
+    it('a secret the vault knows is masked inside the values, and one written with escapes is refused for a mandate', async () => {
+      const secret = 'sk-live-canary"x';
+      const mask = (t: string) => t.replaceAll(secret, '[secret]');
+      const plain = agent270({ principal: MANDATE, mask });
+      await visible({ url: 'https://h.example/a', method: 'POST', body: JSON.stringify({ token: secret }) }, plain.agent);
+      const q = question(plain.prompt, 0);
+      expect(q).toContain('"token": "[secret]"');
+      expect(q).not.toContain('sk-live-canary');
+
+      const escaped = agent270({ principal: MANDATE, mask });
+      const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{"token":"\\u0073k-live-canary\\"x"}' }, escaped.agent);
+      expect(out).toContain('holds a stored secret in an escaped or percent-encoded form');
+      expect(escaped.prompt).not.toHaveBeenCalled();
+    });
+
+    it('a body with a duplicate key is shown as it is sent, both values visible', async () => {
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      await visible({ url: 'https://h.example/a', method: 'POST', body: '{"amount":"1","amount":"1000"}' }, agent);
+      const q = question(prompt, 0);
+      expect(q).toContain('"amount":"1","amount":"1000"');
+    });
+
+    it('two Content-Type keys of different case are read together, and are no form', async () => {
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'content-type': 'text/plain' }, body: 'x=a+b' }, agent);
+      expect(question(prompt, 0)).toContain('x=a+b');
+      expect(question(prompt, 0)).not.toContain('x = a b');
+    });
+
+    it('invisible characters in a value are shown as their code point, not removed', async () => {
+      const { agent, prompt } = agent270({ principal: MANDATE });
+      await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'note=ok\u202eevil\u0007' }, agent);
+      const q = question(prompt, 0);
+      expect(q).toContain('note = ok⟨U+202E⟩evil⟨U+0007⟩');
+      expect(q).not.toMatch(/[\u202e\u0007]/);
+    });
+
+    it('parallel calls of one batch share an answer only for the same body', async () => {
+      const batch = {};
+      const { agent, prompt } = agent270({ batch, answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Deny'; } });
+      const [first, other, same] = await Promise.all([
+        visible({ url: 'https://h.example/a', method: 'POST', body: '{"amount":"1"}' }, agent),
+        visible({ url: 'https://h.example/a', method: 'POST', body: '{"amount":"1000"}' }, agent),
+        visible({ url: 'https://h.example/a', method: 'POST', body: '{"amount":"1"}' }, agent),
+      ]);
+      // The first question is denied and the identical third shares its answer. The second was
+      // never shown, so it does not get the person's "denied": it is refused as not asked.
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(question(prompt, 0)).toContain('"amount": "1"');
+      expect(first).toContain('denied by user');
+      expect(same).toContain('denied by user');
+      expect(other).toContain('was not asked: a POST to this host was denied earlier in this batch');
+    });
   });
 
   it('reports the answering host for the answer\'s marker, and no host once a hop left it', async () => {
