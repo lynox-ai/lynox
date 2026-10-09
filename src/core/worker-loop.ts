@@ -503,9 +503,11 @@ export class WorkerLoop {
     id: string,
     result: string,
     status: 'success' | 'failed' | 'timeout' | 'stopped',
-    run: RunStarterSlot | undefined = this.#runSlotOf(id),
+    run?: RunStarterSlot | null,
   ): void {
-    tm?.recordTaskRun(id, result, status, ...(startedByOther(run) ? [{ noRetry: true }] : []));
+    // `null`: the caller decided there is no run, so nothing is looked up.
+    const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
+    tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : []));
   }
 
   /**
@@ -856,7 +858,7 @@ export class WorkerLoop {
               // schedule stays as it was.
               // After a restart no run holds the starter; the question still says who asked.
               const run = this.activeTasks.get(parked.id)
-                ?? (isMandateTag(asked?.created_by) ? { starter: principalFromTag(asked?.created_by) } : undefined);
+                ?? (isMandateTag(asked?.created_by) ? { starter: principalFromTag(asked?.created_by) } : null);
               if (proposal) await runAsHandRun(parked.id, async () => { this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run); });
               else this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run);
             } catch (err: unknown) {
