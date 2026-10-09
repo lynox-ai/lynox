@@ -1609,6 +1609,30 @@ describe('api_setup tool', () => {
       expect(sent.provenance?.schema_version).toBe('2');
     });
 
+    it('reads a provenance without schema_version as version 2 and stores the number', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const sent = withV2({ provenance: { source: 'manual' } as unknown as { source: 'manual'; schema_version: 2 } });
+      const result = await apiSetupTool.handler({ action: 'create', profile: sent }, agent);
+      expect(result).toContain('Created API profile');
+      expect(store.get('test-api')?.provenance?.schema_version).toBe(2);
+      expect(sent.provenance && 'schema_version' in sent.provenance).toBe(false);
+    });
+
+    it.each([
+      ['another number', 3],
+      ['null', null],
+    ])('still refuses a schema_version that is there and wrong: %s', async (_label, value) => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store);
+      const result = await apiSetupTool.handler(
+        { action: 'create', profile: withV2({ provenance: { source: 'manual', schema_version: value as unknown as 2 } }) },
+        agent,
+      );
+      expect(result).toContain('only schema_version=2 is supported');
+      expect(store.get('test-api')).toBeUndefined();
+    });
+
     it('names the type when schema_version arrives as another string', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(
