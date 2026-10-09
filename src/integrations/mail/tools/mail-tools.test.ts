@@ -784,9 +784,9 @@ describe('mail_reply tool', () => {
     expect(provider.send.mock.calls[0]![0].subject).toBe('Re: Question');
   });
 
-  it('reply_all unions To+Cc minus our own address (accountId-as-email heuristic)', async () => {
-    // Use an account whose id IS the email address so the dedup heuristic kicks in
-    const myProvider = new FakeProvider('user@example.com');
+  it('reply_all unions To+Cc minus the address the reply goes out from', async () => {
+    // An id that is not the address: the address, not the id, is what is left out.
+    const myProvider = new FakeProvider('me', 'user@example.com');
     // PR3: registry.add no longer auto-defaults — must set explicitly
     const myRegistry = new InMemoryMailRegistry();
     myRegistry.add(myProvider);
@@ -1225,8 +1225,9 @@ describe('mail_reply — smart reply-from', () => {
   // reply goes out from is left out of Cc; the mailbox the original was read from stays in Cc,
   // which the preview shows before sending (removing a recipient silently would surprise more).
   it('reply_all after a sender switch leaves out the sending account, keeps the read mailbox', async () => {
-    const personal = new FakeProvider('personal');
-    const business = new FakeProvider('business');
+    // Each provider carries its account's address, as the real providers do.
+    const personal = new FakeProvider('personal', 'user@gmail.com');
+    const business = new FakeProvider('business', 'User@Example.com');
     const ctx = makeStubContext([
       { ...businessAccount('personal', 'user@gmail.com'), type: 'personal' },
       // Stored as typed, in mixed case; the original names it in lower case.
@@ -1252,6 +1253,34 @@ describe('mail_reply — smart reply-from', () => {
     expect(cc, 'the sending account is not copied on its own reply').not.toContain('user@example.com');
     expect(cc, 'the mailbox it was read from stays').toContain('user@gmail.com');
     expect(cc, 'other recipients stay').toContain('colleague@example.org');
+  });
+
+  // Google reconnected in the running process as another account: the stored row still names the
+  // old address, the provider sends as the new one. Reply-all leaves out the address the reply
+  // goes out from, read where the provider reads it — not the stale row.
+  it('reply_all after a Gmail reconnect leaves out the live sending address, not the stored one', async () => {
+    const gmail = Object.assign(new FakeProvider('gmail-old', 'old@gmail.com'), { fromAddress: vi.fn(async () => 'new@gmail.com') });
+    const ctx = makeStubContext([{ ...businessAccount('gmail-old', 'old@gmail.com'), type: 'personal' }]);
+    const reg = new InMemoryMailRegistry();
+    reg.add(gmail);
+    gmail.fetch.mockResolvedValue({
+      envelope: {
+        ...envelope(44, { messageId: '<inbound44@x>', from: 'alice@example.org', subject: 'Plan' }),
+        to: [{ address: 'New@Gmail.com' }],
+        cc: [{ address: 'colleague@example.org' }, { address: 'old@gmail.com' }],
+      },
+      text: 'hi', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    gmail.send.mockResolvedValue({ messageId: '<r44@x>', accepted: [], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+
+    await createMailReplyTool(reg, ctx).handler({ account: 'gmail-old', uid: 44, body: 'Reply', reply_all: true }, agent);
+
+    const cc = (gmail.send.mock.calls[0]![0].cc ?? []).map(a => a.address.toLowerCase());
+    expect(cc, 'the live sending address is not copied on its own reply').not.toContain('new@gmail.com');
+    expect(cc, 'other recipients stay, the stored old address too — it no longer sends').toEqual(['colleague@example.org', 'old@gmail.com']);
+    expect(prompt, 'the confirmation shows the same address as the sender').toContain('**From:** new@gmail.com (account gmail-old)');
   });
 
   it('uses the account matching the original recipient address', async () => {
