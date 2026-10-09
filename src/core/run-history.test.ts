@@ -2412,6 +2412,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
         -- and active_runs (created v33); v57 ALTERs it (created_by). Minimal stub.
         CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
+        -- and tasks (created v1, rebuilt v42); v58 ALTERs it (created_by). Minimal stub.
+        CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
         INSERT INTO tasks (id, title, assignee, priority, due_date) VALUES ('m-todo','Pay invoice','user','high','2026-07-01');
         INSERT INTO tasks (id, title) VALUES ('m-todo-null','Loose note');
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('m-cron','Digest','lynox','scheduled','0 9 * * *','2020-01-01T00:00:00.000Z');
@@ -2492,6 +2494,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
         -- and active_runs (created v33); v57 ALTERs it (created_by). Minimal stub.
         CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
+        -- and tasks (created v1, rebuilt v42); v58 ALTERs it (created_by). Minimal stub.
+        CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
         -- a TRIGGER parent (scheduled) + a kept-TODO child pointing at it (cross-table)
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('par-trig','Weekly job','lynox','scheduled','0 9 * * 1','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-trig','Subtask','user','par-trig');
@@ -2579,6 +2583,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
         -- and active_runs (created v33); v57 ALTERs it (created_by). Minimal stub.
         CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
+        -- and tasks (created v1, rebuilt v42); v58 ALTERs it (created_by). Minimal stub.
+        CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
       `);
@@ -2888,5 +2894,27 @@ describe('RunHistory', () => {
       expect(() => db.prepare("INSERT INTO scopes (id, type, name, parent_id) VALUES ('ctx-2', 'context', 'B', 'global')").run()).not.toThrow();
       h.close();
     });
+  });
+});
+
+describe('history.db v58 — who created a to-do', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+
+  it('adds an empty created_by to a populated tasks table, so every older to-do reads as the owner\'s', () => {
+    // A v57 database: the current schema with v58's column and version taken back out.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig58-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    const before = new RunHistory(path);
+    before.insertTask({ id: 'old1', title: 'kept' });
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by;');
+    before.close();
+
+    const after = new RunHistory(path);
+    try {
+      expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(58);
+    } finally { after.close(); }
   });
 });

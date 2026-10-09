@@ -4,7 +4,6 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { createsTrigger } from '../../core/task-manager.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -466,11 +465,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         return `Task scheduled for ${input.run_at}: ${formatTaskLine(task, pendingConsent(task))}`;
       }
 
-      // A mandate's act is marked on the schedule it creates; a to-do carries no such mark,
-      // so a mandate's turn may not create one — the rule of `POST /api/tasks`.
-      if (!isOwnerPrincipal(agent.principal) && !createsTrigger(baseParams)) {
-        return 'Error: only the owner of this instance can create a to-do.';
-      }
+      // A mandate's act is marked on the schedule it creates; a to-do it creates records it as
+      // its creator, and a subtask goes only under a to-do of its own (`TaskManager.create`).
       const task = managerRef.create(baseParams);
       return `Task created: ${formatTaskLine(task, pendingConsent(task))}`;
     } catch (e: unknown) {
@@ -523,17 +519,15 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       // owner's stamp off it, the rule the HTTP routes apply (`_markMandateEdit`), so a stamped
       // schedule stops until the owner stamps it again (PRD §3.12 point 3, H2). Resolved under
       // the same scope as the write below, and before it: the mark must land on the trigger
-      // the write changes. A TODO is not a trigger and carries no mark, so a mandate's change
-      // to one is refused, as the HTTP routes refuse it.
+      // the write changes. A TODO is not a trigger and carries no mark: a mandate changes only a
+      // to-do of its own, which `complete` and `update` check on the row they resolve, as the
+      // HTTP routes do.
       if (!isOwnerPrincipal(agent.principal)) {
         const trigger = managerRef.getTrigger(input.task_id, scopeFilter);
         if (trigger) managerRef.markEditedBy(trigger.id, principalTag(agent.principal), true);
-        else if (managerRef.getTask(input.task_id, scopeFilter) !== undefined) {
-          return 'Error: only the owner of this instance can change a to-do.';
-        }
       }
       if (input.status === 'completed') {
-        const task = managerRef.complete(input.task_id, scopeFilter);
+        const task = managerRef.complete(input.task_id, scopeFilter, agent.principal);
         if (!task) return `Task not found: ${input.task_id}`;
         return `Task completed: ${formatTaskLine(task)}`;
       }
@@ -548,7 +542,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         tags: input.tags,
         nextRunAt: input.run_at,
         scheduleCron: input.schedule,
-      }, scopeFilter);
+      }, scopeFilter, agent.principal);
       if (!task) return `Task not found: ${input.task_id}`;
       // Surface the new schedule when it changed so the agent can confirm
       // the reschedule landed (mirrors the create path's "scheduled for …"

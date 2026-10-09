@@ -49,6 +49,24 @@ describe('TaskStore (Foundation Rework v2 — S3c)', () => {
     tmpDirs.length = 0;
   });
 
+  it('carries who created a to-do, set once: a re-write neither clears nor replaces it', () => {
+    const { store, engine } = make();
+    const createdBy = (): unknown => (engine.getDb().prepare('SELECT created_by FROM tasks WHERE id = ?').get('k1') as { created_by: unknown }).created_by;
+    store.upsert(baseRow({ createdBy: 'mandate:a@example.invalid' }));
+    expect(createdBy()).toBe('mandate:a@example.invalid');
+    expect(store.getRecord('k1')?.created_by).toBe('mandate:a@example.invalid');
+    store.upsert(baseRow({ createdBy: null }));
+    expect(createdBy()).toBe('mandate:a@example.invalid');
+    store.upsert(baseRow({ createdBy: 'mandate:b@example.invalid' }));
+    expect(createdBy()).toBe('mandate:a@example.invalid');
+  });
+
+  it('control: a to-do written with no creator has none', () => {
+    const { store } = make();
+    store.upsert(baseRow());
+    expect(store.getRecord('k1')?.created_by ?? null).toBeNull();
+  });
+
   it('upsert → get round-trips a task', () => {
     const { store } = make();
     store.upsert(baseRow());

@@ -358,7 +358,7 @@ export class TriggerStore {
         -- written here at all; only markEditedBy writes it.
         created_by = COALESCE(triggers.created_by, excluded.created_by),
         -- Who stamped goes with the stamp: no stamp, no stamper.
-        confirmed_by = CASE WHEN excluded.confirmed_at IS NULL THEN NULL
+        confirmed_by = CASE WHEN COALESCE(excluded.confirmed_at, '') = '' THEN NULL
                             ELSE COALESCE(excluded.confirmed_by, triggers.confirmed_by) END,
         updated_at = excluded.updated_at
     `).run(
@@ -724,7 +724,9 @@ export class TriggerStore {
    * determinism.
    *
    * CONSENT GATE (triggers-consent, engine.db v6): an unconfirmed `run_agent`
-   * trigger is NOT due — `NOT (effect = 'run_agent' AND confirmed_at IS NULL)`.
+   * trigger is NOT due — `NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')`.
+   * An empty stamp counts as none, as it does in JS (`!confirmed_at`, e.g.
+   * `mandateNeedsOwnerStamp`): the two sides must agree, and they agree on the closed side.
    * This is the PRIMARY enforcement of the human first-run-confirm on autonomous
    * agent triggers (the injection-amplification hole): an agent-created
    * `run_agent` trigger (which lands `confirmed_at = NULL`, fail-closed) is simply
@@ -775,8 +777,8 @@ export class TriggerStore {
          AND status != 'completed'
          AND status != ?
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
-         AND NOT (effect = 'run_agent' AND confirmed_at IS NULL)
-         AND NOT (confirmed_at IS NULL AND COALESCE(edited_by, created_by, '') LIKE ?)
+         AND NOT (effect = 'run_agent' AND COALESCE(confirmed_at, '') = '')
+         AND NOT (COALESCE(confirmed_at, '') = '' AND COALESCE(edited_by, created_by, '') LIKE ?)
          AND (lease_until IS NULL OR lease_until <= ?)
        ORDER BY next_run_at ASC`,
     ).all(now, WAITING, MANDATE_TAG_LIKE, now) as TriggerFullDbRow[];

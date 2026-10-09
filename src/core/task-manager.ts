@@ -7,6 +7,7 @@ import { readEnvAlias } from './env.js';
 import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
+import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
 
 /**
  * Derive the clean trigger axes {@link TriggerSource} (what FIRES it) +
@@ -49,6 +50,31 @@ export class TriggerTierUnsupportedError extends Error {
     super(`A model tier applies only to agent tasks and watches; this trigger's runs (${effect}) do not use it.`);
     this.name = 'TriggerTierUnsupportedError';
   }
+}
+
+/** Thrown when a mandate acts on a to-do it did not create (PRD customer-granted-operator-access
+ *  §3.12 points 1 and 3, §3.13 N10b: a mandate reaches only what it set up). */
+export class ForeignTodoError extends Error {
+  constructor(what: string) {
+    super(`Only the owner of this instance, or the person who created it, can ${what} this to-do.`);
+    this.name = 'ForeignTodoError';
+  }
+}
+
+/** Thrown when a mandate deletes its own to-do while subtasks the owner added hang under it:
+ *  deleting the to-do would delete them too. Says what can be done, since there is no way to
+ *  detach a subtask: the owner deletes those subtasks or the to-do, and the mandate can ask. */
+export class TodoHasForeignSubtasksError extends Error {
+  constructor() {
+    super('This to-do was not deleted: it has subtasks the owner of this instance added, and deleting it would delete them too. The owner can delete those subtasks, or this to-do; ask the owner.');
+    this.name = 'TodoHasForeignSubtasksError';
+  }
+}
+
+/** A to-do the request may act on: every one for the owner (and for the engine, which passes
+ *  no principal), only its own for a mandate. Checked on the row the write resolved. */
+function refuseForeignTodo(task: TaskRecord, by: RequestPrincipal | undefined, what: string): void {
+  if (by !== undefined && !ownedBy(task, by)) throw new ForeignTodoError(what);
 }
 
 function refuseBulkTrigger(trigger: TriggerRecord): void {
@@ -119,8 +145,10 @@ export interface TaskCreateParams {
    *  workflow run the trigger starts is seeded from it. */
   createdUntrusted?: string | undefined;
   /** Principal tag of the creating request (request-principal.ts): `owner` or
-   *  `mandate:<address>`. Supplied only by the HTTP create route; the agent tool and the
-   *  engine leave it absent. A trigger a mandate created is due only once the owner stamped it. */
+   *  `mandate:<address>`. The HTTP create route always supplies it, the `task_create` tool for
+   *  a mandate; the engine leaves it absent. A trigger a mandate created is due only once the
+   *  owner stamped it. A to-do records it only for a mandate (the owner's stays NULL), and a
+   *  mandate's subtask hangs only under a to-do of its own. */
   createdBy?: string | undefined;
   /** Principal tag of whoever supplied `confirmedAt` — only ever the owner. */
   confirmedBy?: string | undefined;
@@ -223,6 +251,12 @@ export class TaskManager {
       if (!parent) {
         throw new Error(`Parent task not found: ${params.parentTaskId}`);
       }
+      // A mandate hangs a subtask only under a to-do of its own: a subtask under the owner's
+      // would tie a row of the mandate's into the owner's, and completing or deleting it
+      // reaches its subtasks.
+      if (isMandateTag(params.createdBy) && parent.created_by !== params.createdBy) {
+        throw new ForeignTodoError('add a subtask to');
+      }
     }
 
     if (params.priority && !VALID_PRIORITIES.has(params.priority)) {
@@ -307,12 +341,15 @@ export class TaskManager {
       dueDate: params.dueDate ? params.dueDate.slice(0, 10) : undefined,
       tags: params.tags ? JSON.stringify(params.tags) : undefined,
       parentTaskId: params.parentTaskId,
+      ...(isMandateTag(params.createdBy) ? { createdBy: params.createdBy } : {}),
     });
 
     return this.history.getTask(id)!;
   }
 
-  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | TriggerRecord | undefined {
+  /** @param by The request's principal, when a request completes it: a mandate completes only
+   *  a to-do of its own, and only its own subtasks with it. Absent for the engine. */
+  complete(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     // An AGENT-TRIGGER has no subtask cascade — just flip its status. Carry
@@ -329,6 +366,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    refuseForeignTodo(task, by, 'complete');
 
     const now = new Date().toISOString();
     // Carry the scope guard into the UPDATE so a concurrent re-scope
@@ -342,12 +380,32 @@ export class TaskManager {
     // its update silently no-ops, which is the desired safe failure.
     const subtasks = this.history.getTasks({ parentTaskId: task.id });
     for (const sub of subtasks) {
-      if (sub.status !== 'completed') {
+      // A mandate's completion takes along only the subtasks it created; the owner's stay open.
+      if (sub.status !== 'completed' && (by === undefined || ownedBy(sub, by))) {
         this.history.updateTask(sub.id, { status: 'completed', completedAt: now }, scopeOpts);
       }
     }
 
     return this.history.getTask(task.id, scopeOpts);
+  }
+
+  /**
+   * Deletes the to-do with exactly this id, as `DELETE /api/tasks/:id` does; `deleteTask`
+   * takes its direct subtasks along. Returns false when there is no such to-do (the caller
+   * tries the triggers next). A mandate deletes only a to-do of its own, and only while every
+   * task under it, at any depth, is its own too: those the owner added are not the mandate's
+   * to delete, and one further down holds the delete back as much. Checked on rows read from
+   * the table the delete removes from. The owner's and the engine's delete (no principal) is
+   * the legacy one, unchanged and without that read: it also clears the mirror of an id whose
+   * legacy row is gone.
+   */
+  deleteTodo(id: string, by?: RequestPrincipal): boolean {
+    if (by === undefined || isOwnerPrincipal(by)) return this.history.deleteTask(id);
+    const { task, descendants } = this.history.getTaskDeleteSet(id);
+    if (task === undefined) return false;
+    refuseForeignTodo(task, by, 'delete');
+    if (descendants.some((sub) => !ownedBy(sub, by))) throw new TodoHasForeignSubtasksError();
+    return this.history.deleteTask(id);
   }
 
   reopen(id: string, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | TriggerRecord | undefined {
@@ -370,7 +428,9 @@ export class TaskManager {
     return this.history.getTask(task.id, scopeOpts);
   }
 
-  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined): TaskRecord | TriggerRecord | undefined {
+  /** @param by The request's principal, when a request changes it: a mandate changes only a
+   *  to-do of its own. Absent for the engine. */
+  update(id: string, params: TaskUpdateParams, scopeFilter?: Array<{ type: string; id: string }> | undefined, by?: RequestPrincipal): TaskRecord | TriggerRecord | undefined {
     const scopeOpts = scopeFilter && scopeFilter.length > 0 ? { scopeFilter } : undefined;
 
     if (params.status && !VALID_STATUSES.has(params.status)) {
@@ -459,6 +519,7 @@ export class TaskManager {
 
     const task = this.history.getTask(id, scopeOpts);
     if (!task) return undefined;
+    refuseForeignTodo(task, by, 'change');
 
     const updateParams: {
       title?: string | undefined;

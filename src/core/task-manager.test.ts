@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, TriggerTierUnsupportedError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, admittedTriggerTier } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
@@ -1074,5 +1074,240 @@ describe('a bulk run\'s trigger', () => {
     expect(tm.complete(other.id)?.status).toBe('completed');
     expect(tm.reopen(other.id)?.status).toBe('open');
     expect(tm.confirmTrigger(other.id)?.confirmed_at).toBeTruthy();
+  });
+});
+
+// PRD customer-granted-operator-access §3.12 points 1 and 3, §3.13 N10b (H2c-2): a mandate
+// reaches only the to-dos it created. Through the real stores, once with the to-do reads on
+// history.db and once on the engine.db mirror (the subject-graph flag), since the ownership
+// check reads whichever the flag selects.
+describe.each([false, true])('a mandate\'s own to-dos (subject graph %s)', (graph) => {
+  const M: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid' };
+  const OTHER: RequestPrincipal = { kind: 'mandate', email: 'someone@example.invalid' };
+  const TAG = 'mandate:helper@example.invalid';
+  let dir: string;
+  let history: RunHistory;
+  let engine: EngineDb;
+  let tm: TaskManager;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-own-todo-'));
+    history = new RunHistory(join(dir, 'history.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine, graph);
+    tm = new TaskManager(history);
+  });
+  afterEach(() => {
+    engine.close();
+    history.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Every to-do row in both stores, for "nothing changed". */
+  const snapshot = (): unknown => ({
+    legacy: history.getDb().prepare('SELECT * FROM tasks ORDER BY id').all(),
+    mirror: engine.getDb().prepare('SELECT * FROM tasks ORDER BY id').all(),
+  });
+  const createdBy = (id: string): unknown => ({
+    legacy: (history.getDb().prepare('SELECT created_by FROM tasks WHERE id = ?').get(id) as { created_by: unknown } | undefined)?.created_by,
+    mirror: (engine.getDb().prepare('SELECT created_by FROM tasks WHERE id = ?').get(id) as { created_by: unknown } | undefined)?.created_by,
+  });
+  const mine = (title = 'mine', parentTaskId?: string): string => tm.create({ title, createdBy: TAG, ...(parentTaskId ? { parentTaskId } : {}) }).id;
+  const owners = (title = 'owner\'s', parentTaskId?: string): string => tm.create({ title, ...(parentTaskId ? { parentTaskId } : {}) }).id;
+
+  it('records the mandate as the creator of its to-do, in both stores, and the owner as none', () => {
+    const a = mine();
+    const b = owners();
+    expect(createdBy(a)).toEqual({ legacy: TAG, mirror: TAG });
+    expect(createdBy(b)).toEqual({ legacy: null, mirror: null });
+    expect(tm.getTask(a)!.created_by).toBe(TAG);
+  });
+
+  it('the owner\'s creating request records no creator, as before', () => {
+    const id = tm.create({ title: 'by the owner', createdBy: 'owner' }).id;
+    expect(createdBy(id)).toEqual({ legacy: null, mirror: null });
+  });
+
+  describe('update', () => {
+    it('lets a mandate change its own to-do', () => {
+      const id = mine();
+      expect(tm.update(id, { title: 'changed' }, undefined, M)?.title).toBe('changed');
+    });
+
+    it.each([
+      ['the owner\'s', (): string => owners()],
+      ['another mandate\'s', (): string => tm.create({ title: 'x', createdBy: 'mandate:someone@example.invalid' }).id],
+    ])('refuses a mandate %s to-do, and changes nothing', (_l, make) => {
+      const id = make();
+      const before = snapshot();
+      expect(() => tm.update(id, { title: 'changed', status: 'completed' }, undefined, M)).toThrow(
+        new ForeignTodoError('change'),
+      );
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('lets the owner change a mandate\'s to-do', () => {
+      const id = mine();
+      expect(tm.update(id, { title: 'changed' }, undefined, OWNER_PRINCIPAL)?.title).toBe('changed');
+      expect(createdBy(id)).toEqual({ legacy: TAG, mirror: TAG });
+    });
+
+    it('refuses a mandate a legacy to-do with no creator: a row from before v58 is the owner\'s', () => {
+      const id = owners();
+      history.getDb().prepare('UPDATE tasks SET created_by = NULL WHERE id = ?').run(id);
+      expect(() => tm.update(id, { title: 'x' }, undefined, M)).toThrow(ForeignTodoError);
+    });
+
+    it('leaves an unknown id unknown', () => {
+      expect(tm.update('nope', { title: 'x' }, undefined, M)).toBeUndefined();
+    });
+  });
+
+  describe('complete', () => {
+    it('lets a mandate complete its own to-do, and takes along only its own subtasks', () => {
+      const parent = mine();
+      const ownSub = mine('own sub', parent);
+      const ownerSub = owners('owner sub', parent);
+      expect(tm.complete(parent, undefined, M)?.status).toBe('completed');
+      expect(tm.getTask(ownSub)!.status).toBe('completed');
+      expect(tm.getTask(ownerSub)!.status).toBe('open');
+    });
+
+    it('control: the owner\'s completion takes along every subtask, as before', () => {
+      const parent = mine();
+      const ownSub = mine('own sub', parent);
+      const ownerSub = owners('owner sub', parent);
+      expect(tm.complete(parent, undefined, OWNER_PRINCIPAL)?.status).toBe('completed');
+      expect(tm.getTask(ownSub)!.status).toBe('completed');
+      expect(tm.getTask(ownerSub)!.status).toBe('completed');
+    });
+
+    it('refuses a mandate the owner\'s to-do, and changes nothing', () => {
+      const parent = owners();
+      owners('sub', parent);
+      const before = snapshot();
+      expect(() => tm.complete(parent, undefined, M)).toThrow(new ForeignTodoError('complete'));
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('lets the owner complete a mandate\'s to-do', () => {
+      expect(tm.complete(mine(), undefined, OWNER_PRINCIPAL)?.status).toBe('completed');
+    });
+  });
+
+  describe('a subtask', () => {
+    it('goes under a mandate\'s own to-do', () => {
+      const parent = mine();
+      const sub = mine('sub', parent);
+      expect(tm.getTask(sub)!.parent_task_id).toBe(parent);
+    });
+
+    it.each([
+      ['the owner\'s', (): string => owners()],
+      ['another mandate\'s', (): string => tm.create({ title: 'x', createdBy: 'mandate:someone@example.invalid' }).id],
+    ])('is refused under %s to-do, and nothing is created', (_l, make) => {
+      const parent = make();
+      const before = snapshot();
+      expect(() => mine('sub', parent)).toThrow(new ForeignTodoError('add a subtask to'));
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('control: the owner adds one under a mandate\'s to-do', () => {
+      const parent = mine();
+      expect(tm.getTask(owners('sub', parent))!.parent_task_id).toBe(parent);
+    });
+  });
+
+  describe('deleteTodo', () => {
+    const gone = (id: string): boolean =>
+      history.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id) === undefined
+      && engine.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id) === undefined;
+
+    it('deletes a mandate\'s own to-do with its own subtasks, from both stores', () => {
+      const parent = mine();
+      const sub = mine('sub', parent);
+      expect(tm.deleteTodo(parent, M)).toBe(true);
+      expect(gone(parent)).toBe(true);
+      expect(gone(sub)).toBe(true);
+    });
+
+    it('refuses with 409 while a subtask of the owner\'s hangs under it, and changes no row, the to-do included', () => {
+      const parent = mine();
+      mine('own sub', parent);
+      owners('owner sub', parent);
+      const before = snapshot();
+      expect(() => tm.deleteTodo(parent, M)).toThrow(TodoHasForeignSubtasksError);
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('says what can be done, since a subtask cannot be detached', () => {
+      expect(new TodoHasForeignSubtasksError().message).toBe(
+        'This to-do was not deleted: it has subtasks the owner of this instance added, and deleting it would delete them too. The owner can delete those subtasks, or this to-do; ask the owner.',
+      );
+    });
+
+    it('sees an owner\'s subtask the engine.db mirror does not link, and the hundred-and-first', () => {
+      const parent = mine();
+      for (let i = 0; i < 100; i++) mine(`own ${String(i)}`, parent);
+      const late = owners('owner sub', parent);
+      // The mirror's parent link can be NULL for an older row; the delete removes by the legacy link.
+      engine.getDb().prepare('UPDATE tasks SET parent_task_id = NULL WHERE id = ?').run(late);
+      expect(() => tm.deleteTodo(parent, M)).toThrow(TodoHasForeignSubtasksError);
+      expect(gone(late)).toBe(false);
+    });
+
+    it('refuses with 409 for a subtask of the owner\'s further down, and changes no row', () => {
+      const parent = mine();
+      const sub = mine('own sub', parent);
+      owners('owner grandchild', sub);
+      const before = snapshot();
+      expect(() => tm.deleteTodo(parent, M)).toThrow(TodoHasForeignSubtasksError);
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('refuses a mandate the owner\'s to-do, and changes nothing', () => {
+      const id = owners();
+      const before = snapshot();
+      expect(() => tm.deleteTodo(id, M)).toThrow(new ForeignTodoError('delete'));
+      expect(snapshot()).toEqual(before);
+    });
+
+    it('deletes only by the exact id: a prefix finds nothing', () => {
+      const id = mine();
+      expect(tm.deleteTodo(id.slice(0, 4), M)).toBe(false);
+      expect(gone(id)).toBe(false);
+    });
+
+    it('control: the owner deletes a mandate\'s to-do, with every subtask under it', () => {
+      const parent = mine();
+      const ownerSub = owners('owner sub', parent);
+      expect(tm.deleteTodo(parent, OWNER_PRINCIPAL)).toBe(true);
+      expect(gone(parent)).toBe(true);
+      expect(gone(ownerSub)).toBe(true);
+    });
+
+    it('control: the engine (no principal) deletes a mandate\'s to-do with the owner\'s subtask under it', () => {
+      const parent = mine();
+      const ownerSub = owners('owner sub', parent);
+      expect(tm.deleteTodo(parent)).toBe(true);
+      expect(gone(parent)).toBe(true);
+      expect(gone(ownerSub)).toBe(true);
+    });
+
+    it.each([
+      ['the owner', OWNER_PRINCIPAL],
+      ['the engine (no principal)', undefined],
+    ] as const)('control: %s still clears a to-do the legacy table no longer holds from the mirror', (_l, by) => {
+      const id = mine();
+      history.getDb().prepare('DELETE FROM tasks WHERE id = ?').run(id);
+      expect(engine.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id)).toBeDefined();
+      tm.deleteTodo(id, by);
+      expect(engine.getDb().prepare('SELECT 1 FROM tasks WHERE id = ?').get(id)).toBeUndefined();
+    });
+
+    it('answers false for an unknown id', () => {
+      expect(tm.deleteTodo('nope', M)).toBe(false);
+      expect(tm.deleteTodo('nope', OTHER)).toBe(false);
+    });
   });
 });

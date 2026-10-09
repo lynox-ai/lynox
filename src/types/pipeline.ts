@@ -266,6 +266,8 @@ export interface TaskRecord {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** Who created it, as a `principalTag`; null (or absent, from an older row) is the owner. */
+  created_by?: string | null | undefined;
 }
 
 /** What FIRES a trigger (the condition provider) — the clean `source` axis

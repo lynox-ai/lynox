@@ -940,6 +940,12 @@ const MIGRATIONS: string[] = [
    );
    CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
    BEGIN SELECT RAISE(ABORT, 'audit_log rows are never changed'); END;`,
+
+  // v23: the to-do mirror carries who created a to-do (history.db v58), so the read side of a
+  // subject-graph tenant answers "whose is this" as the legacy table does. An ALTER is safe on
+  // every population: no CREATE of `tasks` ever had the column, and no later version rebuilds it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (23);
+   ALTER TABLE tasks ADD COLUMN created_by TEXT;`,
 ];
 
 /**

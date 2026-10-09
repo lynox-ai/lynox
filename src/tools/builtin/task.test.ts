@@ -607,35 +607,12 @@ describe('Task Tools', () => {
       expect(after.confirmed_at).toBeTruthy();
     });
 
-    // A to-do carries no mark, so a mandate's turn may neither create nor change one — the rule
-    // the task routes apply.
-    it('task_create by a mandate refuses a to-do, and creates nothing', async () => {
-      const result = await taskCreateTool.handler({ title: 'Mandate to-do' }, makeAgent(undefined, mandate));
-      expect(result).toBe('Error: only the owner of this instance can create a to-do.');
-      expect(tm.list({}).some((x) => x.title === 'Mandate to-do')).toBe(false);
-    });
-
+    // To-dos: a mandate's turn reaches only those it created — see 'a mandate's turn and its
+    // to-dos' below, which runs with the to-do reads on either store.
     it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
       const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
       expect(result).toMatch(/^Task created: /);
       expect(tm.listTriggers({}).some((x) => x.title === 'Mandate run')).toBe(true);
-    });
-
-    it('control: the owner\'s task_create makes a to-do', async () => {
-      await taskCreateTool.handler({ title: 'Owner to-do' }, makeAgent());
-      expect(tm.list({}).some((x) => x.title === 'Owner to-do')).toBe(true);
-    });
-
-    it.each([
-      ['a field', { title: 'changed' }],
-      ['completion', { status: 'completed' }],
-    ])('task_update of %s on a to-do by a mandate is refused, and changes nothing', async (_label, change) => {
-      const t = tm.create({ title: 'Owner to-do' });
-      const result = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
-      expect(result).toBe('Error: only the owner of this instance can change a to-do.');
-      const after = tm.getTask(t.id)!;
-      expect(after.title).toBe('Owner to-do');
-      expect(after.status).not.toBe('completed');
     });
   });
 
@@ -1419,5 +1396,90 @@ describe('a failure that will not be retried says so', () => {
     expect(both).toContain('SCHEDULE OFF');
     expect(both).toContain(NOTE);
     expect(both.indexOf('SCHEDULE OFF')).toBeLessThan(both.indexOf(NOTE));
+  });
+});
+
+// PRD customer-granted-operator-access §3.12 points 1 and 3, §3.13 N10b (H2c-2): a mandate's
+// turn creates to-dos under its own name and changes only those, the rule of the task routes.
+// Once with the to-do reads on history.db, once on the engine.db mirror.
+describe.each([false, true])('a mandate\'s turn and its to-dos (subject graph %s)', (graph) => {
+  const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+  const TAG = 'mandate:setup@example.org';
+  let dir: string;
+  let history: RunHistory;
+  let engine: EngineDb;
+  let tm: TaskManager;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-task-tool-own-'));
+    history = new RunHistory(join(dir, 'test.db'));
+    engine = new EngineDb(join(dir, 'engine.db'));
+    history.setVerbGraph(engine, graph);
+    tm = new TaskManager(history);
+    sharedTaskManager = tm;
+    sharedHistory = history;
+  });
+  afterEach(() => {
+    sharedTaskManager = null;
+    sharedHistory = null;
+    engine.close();
+    history.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('task_create by a mandate makes a to-do recorded under its name', async () => {
+    const result = await taskCreateTool.handler({ title: 'Mandate to-do' }, makeAgent(undefined, mandate));
+    expect(result).toMatch(/^Task created: /);
+    const t = tm.list({}).find((x) => x.title === 'Mandate to-do')!;
+    expect(t.created_by).toBe(TAG);
+  });
+
+  it('control: the owner\'s task_create makes a to-do with no creator recorded', async () => {
+    await taskCreateTool.handler({ title: 'Owner to-do' }, makeAgent());
+    const t = tm.list({}).find((x) => x.title === 'Owner to-do')!;
+    expect(t.created_by ?? null).toBeNull();
+  });
+
+  it('task_create by a mandate refuses a subtask under the owner\'s to-do, and creates nothing', async () => {
+    const parent = tm.create({ title: 'Owner to-do' });
+    const result = await taskCreateTool.handler({ title: 'sub', parent_task_id: parent.id }, makeAgent(undefined, mandate));
+    expect(result).toBe('Error: Only the owner of this instance, or the person who created it, can add a subtask to this to-do.');
+    expect(tm.list({}).some((x) => x.title === 'sub')).toBe(false);
+  });
+
+  it('control: task_create by a mandate adds a subtask under its own to-do', async () => {
+    const parent = tm.create({ title: 'Mandate to-do', createdBy: TAG });
+    await taskCreateTool.handler({ title: 'sub', parent_task_id: parent.id }, makeAgent(undefined, mandate));
+    expect(tm.list({}).find((x) => x.title === 'sub')?.parent_task_id).toBe(parent.id);
+  });
+
+  it.each([
+    ['a field', { title: 'changed' }, 'change'],
+    ['completion', { status: 'completed' }, 'complete'],
+  ])('task_update of %s on the owner\'s to-do by a mandate is refused, and changes nothing', async (_label, change, what) => {
+    const t = tm.create({ title: 'Owner to-do' });
+    const result = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+    expect(result).toBe(`Error: Only the owner of this instance, or the person who created it, can ${what} this to-do.`);
+    const after = tm.getTask(t.id)!;
+    expect(after.title).toBe('Owner to-do');
+    expect(after.status).not.toBe('completed');
+  });
+
+  it.each([
+    ['a field', { title: 'changed' }],
+    ['completion', { status: 'completed' }],
+  ])('task_update of %s on its own to-do by a mandate goes through', async (_label, change) => {
+    const t = tm.create({ title: 'Mandate to-do', createdBy: TAG });
+    const result = await taskUpdateTool.handler({ task_id: t.id, ...change }, makeAgent(undefined, mandate));
+    expect(result).not.toMatch(/^Error/);
+    const after = tm.getTask(t.id)!;
+    if ('title' in change) expect(after.title).toBe('changed');
+    else expect(after.status).toBe('completed');
+  });
+
+  it('control: the owner\'s task_update changes a mandate\'s to-do', async () => {
+    const t = tm.create({ title: 'Mandate to-do', createdBy: TAG });
+    await taskUpdateTool.handler({ task_id: t.id, title: 'changed' }, makeAgent());
+    expect(tm.getTask(t.id)!.title).toBe('changed');
   });
 });

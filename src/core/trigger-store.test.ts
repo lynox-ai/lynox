@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { TriggerStore, triggerRecordToRow, type TriggerRow } from './trigger-store.js';
 import type { TriggerRecord } from '../types/pipeline.js';
+import { mandateNeedsOwnerStamp } from './request-principal.js';
 
 describe('TriggerStore (Foundation Rework v2 — S3b)', () => {
   const tmpDirs: string[] = [];
@@ -428,6 +429,37 @@ describe('TriggerStore — mandate gate (PRD customer-granted-operator-access §
     expect(dueIds(store)).not.toContain('m');
     expect(store.setConfirmedAt('m', STAMP, 'owner')).toBe(true);
     expect(dueIds(store)).toContain('m');
+  });
+
+  // An empty stamp is no stamp, on both sides: the due query reads '' as it reads NULL, as the
+  // JS checks (`!confirmed_at`) do. Where they disagreed, '' would let a mandate's schedule run.
+  it('reads an empty stamp as none: a mandate\'s schedule stamped \'\' is not due', () => {
+    const { store, engine } = make();
+    insertWorkflowSchedule(store, 'e', { createdBy: MANDATE, confirmedAt: STAMP, confirmedBy: 'owner' });
+    expect(dueIds(store)).toContain('e');
+    engine.getDb().prepare("UPDATE triggers SET confirmed_at = '' WHERE id = 'e'").run();
+    expect(dueIds(store)).not.toContain('e');
+    expect(mandateNeedsOwnerStamp(store.getById('e')!)).toBe(true);
+  });
+
+  it('reads an empty stamp as none for the run_agent consent gate as well', () => {
+    const { store } = make();
+    store.insert({ id: 'a', title: 'x', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * *', nextRunAt: PAST, confirmedAt: '' });
+    store.insert({ id: 'b', title: 'x', source: 'cron', effect: 'run_agent', scheduleCron: '0 9 * * *', nextRunAt: PAST, confirmedAt: STAMP });
+    expect(dueIds(store)).toEqual(['b']);
+  });
+
+  it('a re-write with an empty stamp drops who stamped, as one with none does', () => {
+    const { store } = make();
+    const row = {
+      id: 'u', title: 'x', description: '', source: 'cron' as const, effect: 'run_agent' as const,
+      conditionJson: JSON.stringify({ schedule_cron: '0 9 * * *', watch_config: null }), paramsJson: '{}',
+      status: 'open' as const, enabled: true, retryCount: 0,
+    };
+    store.upsert({ ...row, confirmedAt: STAMP, confirmedBy: 'owner' });
+    expect(store.getById('u')!.confirmed_by).toBe('owner');
+    store.upsert({ ...row, confirmedAt: '' });
+    expect(store.getById('u')!.confirmed_by ?? null).toBeNull();
   });
 
   it('the owner path is unchanged: an owner-created and an untagged workflow schedule are due without a schedule stamp', () => {
