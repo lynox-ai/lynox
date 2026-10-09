@@ -594,7 +594,7 @@ describe('api_setup tool', () => {
       expect(await apiSetupTool.handler({ action: 'update', profile: { ...SAMPLE_PROFILE, name: 'Changed' } }, agent)).toContain('Updated API profile');
       expect(stored(store).name).toBe('Changed');
       expect(stored(store).created_by).toBe('mandate:setup@example.org');
-      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent)).toContain('Deleted');
+      expect(await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, { ...agent, promptUser: async () => 'Allow' })).toContain('Deleted');
     });
 
     it('the owner\'s update of a mandate\'s profile makes it the owner\'s, and names what the save keeps from it', async () => {
@@ -715,7 +715,7 @@ describe('api_setup tool', () => {
       const filePath = join(mockLynoxDir, 'apis', 'test-api.json');
       expect(existsSync(filePath)).toBe(true);
 
-      const result = await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, agent);
+      const result = await apiSetupTool.handler({ action: 'delete', id: 'test-api' }, { ...agent, promptUser: async () => 'Allow' });
       expect(result).toContain('Deleted');
       expect(existsSync(filePath)).toBe(false);
     });
