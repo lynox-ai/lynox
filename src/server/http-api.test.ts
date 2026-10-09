@@ -130,6 +130,7 @@ const mockTaskComplete = vi.fn().mockReturnValue({ id: 'task-1', status: 'comple
 const mockTaskCreatePipeline = vi.fn().mockReturnValue({ id: 'sched-1', title: 'Scheduled', pipeline_id: 'wf-sched', task_type: 'pipeline' });
 const mockTaskSetEnabled = vi.fn().mockReturnValue(true);
 const mockTaskMarkEditedBy = vi.fn().mockReturnValue(true);
+const mockTaskCreateScheduled = vi.fn().mockReturnValue({ id: 'cron-1', title: 'Cron' });
 // A to-do lookup: none by default, so an unmarked id reads as "no such row" (the route's 404).
 const mockTaskGetTask = vi.fn().mockReturnValue(undefined);
 const mockTaskGetTrigger = vi.fn().mockReturnValue({ id: 'task-1', effect: 'run_agent' });
@@ -279,6 +280,7 @@ vi.mock('../core/engine.js', () => ({
       update: mockTaskUpdate,
       complete: mockTaskComplete,
       createPipelineTask: mockTaskCreatePipeline,
+      createScheduled: mockTaskCreateScheduled,
       setEnabled: mockTaskSetEnabled,
       confirmTrigger: mockConfirmTrigger,
       markEditedBy: mockTaskMarkEditedBy,
@@ -13719,6 +13721,18 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       expect(rows()).toEqual([]);
     });
 
+    it('never deletes a to-do for a mandate, even one its check did not find', async () => {
+      // The check reads the task store, the delete the legacy table: a to-do whose mirror
+      // write failed is missing from the one and present in the other.
+      const h = { ...history(false), deleteTask: vi.fn().mockReturnValue(true) };
+      await withEngine({ getRunHistory: () => h }, async () => {
+        asMandate();
+        expect((await jsonFetch('/api/tasks/todo-1', { method: 'DELETE' })).status).toBe(404);
+      });
+      expect(h.deleteTask).not.toHaveBeenCalled();
+      expectPair('DELETE /api/tasks/:id', 'todo-1', 'refused');
+    });
+
     it('control: the owner deletes a to-do', async () => {
       const h = { ...history(false), getTask: vi.fn().mockReturnValue({ id: 'todo-1', title: 'a to-do' }), deleteTask: vi.fn().mockReturnValue(true) };
       await withEngine({ getRunHistory: () => h }, async () => {
@@ -14019,12 +14033,16 @@ describe('a mandate and a to-do', () => {
     expect(mockTaskCreate).not.toHaveBeenCalled();
   });
 
-  it('control: a mandate\'s new one-off schedule is created', async () => {
-    mockTaskCreate.mockClear();
+  it.each([
+    ['one-off schedule', { runAt: '2026-11-01T09:00:00Z' }, mockTaskCreate],
+    ['schedule assigned to lynox', { assignee: 'lynox' }, mockTaskCreate],
+    ['recurring schedule', { scheduleCron: '0 9 * * 1' }, mockTaskCreateScheduled],
+  ] as const)('control: a mandate\'s new %s is created', async (_label, fields, created) => {
+    created.mockClear();
     api.setPrincipalResolverForTesting(() => MANDATE);
-    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a run', runAt: '2026-11-01T09:00:00Z' }) });
+    const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'a run', ...fields }) });
     expect(res.status).toBe(201);
-    expect(mockTaskCreate).toHaveBeenCalled();
+    expect(created).toHaveBeenCalled();
   });
 
   it('control: the owner creates a to-do', async () => {

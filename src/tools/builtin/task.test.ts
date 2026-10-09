@@ -615,6 +615,12 @@ describe('Task Tools', () => {
       expect(tm.list({}).some((x) => x.title === 'Mandate to-do')).toBe(false);
     });
 
+    it('control: a mandate\'s task_create assigned to lynox makes a schedule', async () => {
+      const result = await taskCreateTool.handler({ title: 'Mandate run', assignee: 'lynox' }, makeAgent(undefined, mandate));
+      expect(result).toMatch(/^Task created: /);
+      expect(tm.listTriggers({}).some((x) => x.title === 'Mandate run')).toBe(true);
+    });
+
     it('control: the owner\'s task_create makes a to-do', async () => {
       await taskCreateTool.handler({ title: 'Owner to-do' }, makeAgent());
       expect(tm.list({}).some((x) => x.title === 'Owner to-do')).toBe(true);

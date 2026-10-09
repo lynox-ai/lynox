@@ -1793,7 +1793,7 @@ export class LynoxHTTPApi {
    * stamp to drop and records no one who set it up: an actor-trail row would record the
    * act, but nothing on the to-do would carry it, and no stance opens a route without a
    * mark on what it changes. So a mandate may not create, change, complete or delete a
-   * to-do; the task routes and the `task_update` tool refuse it alike. Returns true when it
+   * to-do; the task routes and the `task_create` and `task_update` tools refuse it alike. Returns true when it
    * answered the request itself (a refused to-do, or a bulk trigger, which no request may
    * change).
    */
@@ -7178,15 +7178,17 @@ export class LynoxHTTPApi {
       const runHistory = engine.getRunHistory();
       if (!requireService(res, runHistory, 'History')) return;
       // A mandate may delete the owner's schedules; each delete is recorded (PRD §3.13, N10b).
-      // A to-do is the owner's alone (see `_markMandateEdit`).
-      if (!isOwnerPrincipal(this._principalOf(_req)) && runHistory.getTask(params['id']!) !== undefined) {
+      // A to-do is the owner's alone (see `_markMandateEdit`). The bound is the delete below,
+      // which removes a to-do only for the owner; this check only names the refusal.
+      const byOwner = isOwnerPrincipal(this._principalOf(_req));
+      if (!byOwner && runHistory.getTask(params['id']!) !== undefined) {
         errorResponse(res, 403, 'Only the owner of this instance can delete a to-do.'); return;
       }
       const trail = this._beginRequestTrail(_req, res, 'DELETE /api/tasks/:id', params['id']!);
       if (trail === false) return;
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
-      const deleted = runHistory.deleteTask(params['id']!) || runHistory.deleteTrigger(params['id']!);
+      const deleted = (byOwner && runHistory.deleteTask(params['id']!)) || runHistory.deleteTrigger(params['id']!);
       this._endRequestTrail(trail, deleted ? 'done' : 'refused');
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, { deleted: true });
