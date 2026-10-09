@@ -56,7 +56,7 @@ describe('createInboxNotifier — basic dispatch', () => {
   it('routes a requires_user item via the router with the item id in data', async () => {
     const router = new NotificationRouter();
     const sent: NotificationMessage[] = [];
-    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return true; } });
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
     const notifier = createInboxNotifier({ router });
     const ok = await notifier.notifyNewItem(fakeItem());
     expect(ok).toBe(true);
@@ -68,7 +68,7 @@ describe('createInboxNotifier — basic dispatch', () => {
 
   it('skips non-requires_user items even when called', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     const notifier = createInboxNotifier({ router });
     const ok = await notifier.notifyNewItem(fakeItem({ bucket: 'auto_handled' }));
@@ -79,7 +79,7 @@ describe('createInboxNotifier — basic dispatch', () => {
   it('falls back to fromAddress when fromName is undefined', async () => {
     const router = new NotificationRouter();
     const sent: NotificationMessage[] = [];
-    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return true; } });
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
     const notifier = createInboxNotifier({ router });
     await notifier.notifyNewItem(fakeItem({ fromName: undefined }));
     expect(sent[0]?.body).toBe('sender@acme.example: Hello');
@@ -88,7 +88,7 @@ describe('createInboxNotifier — basic dispatch', () => {
   it('falls back to reasonDe when subject is empty', async () => {
     const router = new NotificationRouter();
     const sent: NotificationMessage[] = [];
-    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return true; } });
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
     const notifier = createInboxNotifier({ router });
     await notifier.notifyNewItem(fakeItem({ subject: '', reasonDe: 'Kunde fragt nach Termin' }));
     expect(sent[0]?.body).toBe('Sender: Kunde fragt nach Termin');
@@ -97,7 +97,7 @@ describe('createInboxNotifier — basic dispatch', () => {
   it('sanitises angle brackets out of subject + sender (no toast injection)', async () => {
     const router = new NotificationRouter();
     const sent: NotificationMessage[] = [];
-    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return true; } });
+    router.register({ name: 'web-push', send: async (m) => { sent.push(m); return 'delivered' as const; } });
     const notifier = createInboxNotifier({ router });
     await notifier.notifyNewItem(fakeItem({ fromName: '<script>', subject: '<b>x</b>' }));
     expect(sent[0]?.body).not.toContain('<');
@@ -108,7 +108,7 @@ describe('createInboxNotifier — basic dispatch', () => {
 describe('createInboxNotifier — throttle', () => {
   it('drops the second push within a minute when perMinute=1 (PRD default)', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     let t = 1_000_000;
     const notifier = createInboxNotifier({ router, perMinute: () => 1, perHour: () => 10, now: () => t });
@@ -123,7 +123,7 @@ describe('createInboxNotifier — throttle', () => {
 
   it('caps at perHour pushes and recovers after the hour passes', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     let t = 1_000_000;
     const notifier = createInboxNotifier({ router, perMinute: () => 100, perHour: () => 3, now: () => t });
@@ -150,13 +150,13 @@ describe('createInboxNotifier — throttle', () => {
     expect(await notifier.notifyNewItem(fakeItem({ id: 'b' }))).toBe(false);
     // Register mid-test; the next call should succeed even though we're
     // still in the same minute as the two no-channel attempts.
-    router.register({ name: 'web-push', send: async () => true });
+    router.register({ name: 'web-push', send: async () => 'delivered' as const });
     expect(await notifier.notifyNewItem(fakeItem({ id: 'c' }))).toBe(true);
   });
 
   it('skips dispatch when isEnabled returns false, without burning the throttle bucket', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     let t = 1_000_000;
     let enabled = false;
@@ -178,7 +178,7 @@ describe('createInboxNotifier — throttle', () => {
     let throws = true;
     router.register({ name: 'web-push', send: async () => {
       if (throws) throw new Error('channel down');
-      return true;
+      return 'delivered' as const;
     } });
     let t = 1_000_000;
     const notifier = createInboxNotifier({ router, perMinute: () => 1, perHour: () => 10, now: () => t });
@@ -233,7 +233,7 @@ describe('isInQuietHours', () => {
 describe('createInboxNotifier — quiet hours / per-account / dynamic throttle', () => {
   it('skips dispatch during quiet hours without burning the throttle', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     let t = new Date('2026-05-14T02:00:00Z').getTime(); // 04:00 Berlin
     let quietEnabled = true;
@@ -254,7 +254,7 @@ describe('createInboxNotifier — quiet hours / per-account / dynamic throttle',
 
   it('mutes a specific accountId without affecting others', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     const muted = new Set(['acct-private']);
     const notifier = createInboxNotifier({
@@ -268,7 +268,7 @@ describe('createInboxNotifier — quiet hours / per-account / dynamic throttle',
 
   it('reads perMinute / perHour thunks on every fire (settings change at runtime)', async () => {
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     let perMinute = 1;
     let t = 1_000_000;

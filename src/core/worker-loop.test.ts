@@ -295,6 +295,93 @@ describe('WorkerLoop', () => {
     expect(analysisSession._recreateAgent).not.toHaveBeenCalled();
   });
 
+  it('executeWatch records on the trigger whether its finding reached anyone', async () => {
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Price changed.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => true), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
+    const engine = {
+      getTaskManager: vi.fn(() => taskManager),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+    mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2', { status: 200 }));
+    // A previous hash makes this a change, not the baseline run — only a change escalates.
+    await fire(makeTask({ id: 't-watch', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: 'old' }) }));
+    expect(engine.escalateToUser).toHaveBeenCalledTimes(1);
+    const opts = vi.mocked(engine.escalateToUser).mock.calls[0]![0] as { onReported?: (d: string) => void };
+    // The start is written before the wakeup leaves; the answer goes against that start.
+    expect(taskManager.startEscalation).toHaveBeenCalledWith('t-watch', expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), false);
+    const startedAt = vi.mocked(taskManager.startEscalation).mock.calls[0]![1];
+    opts.onReported?.('not_delivered');
+    expect(taskManager.recordEscalationOutcome).toHaveBeenCalledWith('t-watch', 'not_delivered', startedAt);
+  });
+
+  describe('the escalation record', () => {
+    async function watchEscalation(taskManager: TaskManager, pinNow?: number): Promise<{ engine: Engine; stderr: string[] }> {
+      vi.useRealTimers();
+      // After useRealTimers, which replaces `Date` and would drop an earlier spy on it.
+      const now = pinNow === undefined ? undefined : vi.spyOn(Date, 'now').mockReturnValue(pinNow);
+      const stderr: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((c: unknown) => { stderr.push(String(c)); return true; });
+      const analysisSession = { run: vi.fn().mockResolvedValue('Price changed.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+      const engine = {
+        getTaskManager: vi.fn(() => taskManager),
+        getUserConfig: vi.fn(() => ({})),
+        createSession: vi.fn(() => analysisSession),
+        escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      } as unknown as Engine;
+      const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+      const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+      const watch = (id: string): TriggerRecord => makeTask({ id, source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: 'old' }) });
+      mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v2', { status: 200 }));
+      await fire(watch('t-a'));
+      mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v3', { status: 200 }));
+      await fire(watch('t-a'));
+      spy.mockRestore();
+      now?.mockRestore();
+      return { engine, stderr };
+    }
+
+    it('escalates even when the start cannot be written, and says so', async () => {
+      const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => { throw new Error('SQLITE_BUSY'); }), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
+      const { engine, stderr } = await watchEscalation(taskManager);
+      expect(engine.escalateToUser).toHaveBeenCalledTimes(2);
+      expect(stderr.some((l) => l.includes('recording an escalation start failed: SQLITE_BUSY'))).toBe(true);
+      // No start landed, and the retry fails too: no answer is written against a start that is not there.
+      (vi.mocked(engine.escalateToUser).mock.calls[0]![0] as { onReported?: (d: string) => void }).onReported?.('delivered');
+      expect(taskManager.recordEscalationOutcome).not.toHaveBeenCalled();
+    });
+
+    // Whether the retried start may land is the store's call (it refuses a start older than the
+    // recorded one — `worker-loop-escalation-delivery.test.ts`); here only that the loop retries.
+    it('retries a start that did not land before writing the answer', async () => {
+      let calls = 0;
+      const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => { calls++; if (calls === 1) throw new Error('SQLITE_BUSY'); return true; }), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
+      const { engine } = await watchEscalation(taskManager);
+      const first = vi.mocked(taskManager.startEscalation).mock.calls[0]![1];
+      expect(vi.mocked(taskManager.startEscalation).mock.calls[0]![2]).toBe(false);
+      (vi.mocked(engine.escalateToUser).mock.calls[0]![0] as { onReported?: (d: string) => void }).onReported?.('not_delivered');
+      const forFirst = vi.mocked(taskManager.startEscalation).mock.calls.filter((c) => c[1] === first);
+      expect(forFirst).toHaveLength(2);
+      // The retry asks the store to land only if no later escalation started meanwhile.
+      expect(forFirst[1]![2]).toBe(true);
+      expect(taskManager.recordEscalationOutcome).toHaveBeenCalledWith('t-a', 'not_delivered', first);
+    });
+
+    it('gives two escalations distinct starts, even within one millisecond', async () => {
+      const pinned = Date.parse('2026-01-01T09:00:00.000Z');
+      const taskManager = { recordTaskRun: vi.fn(), updateWatchConfig: vi.fn(), startEscalation: vi.fn(() => true), recordEscalationOutcome: vi.fn(() => true) } as unknown as TaskManager;
+      await watchEscalation(taskManager, pinned);
+      const [a, b] = vi.mocked(taskManager.startEscalation).mock.calls.map((c) => c[1]);
+      // The clock stood still: both would be the same instant without the bump.
+      expect(a).toBe(new Date(pinned).toISOString());
+      expect(b).toBe(new Date(pinned + 1).toISOString());
+    });
+  });
+
   it('executeStandard runs a trigger at its own tier: the session asks for it and the override is told', async () => {
     const task = makeTask({ model_tier: 'deep' });
     const session = makeSession('Done.');

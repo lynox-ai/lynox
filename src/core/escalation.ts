@@ -1,6 +1,6 @@
 import type { ThreadStore } from './thread-store.js';
 import { isMandateTag } from './request-principal.js';
-import type { NotificationRouter } from './notification-router.js';
+import { summarizeDelivery, type DeliverySummary, type NotificationMessage, type NotificationRouter } from './notification-router.js';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 export interface EscalateOpts {
@@ -12,6 +12,23 @@ export interface EscalateOpts {
   body: string;
   /** Channel passthrough merged into the push (`threadId` is always added). */
   data?: Record<string, string> | undefined;
+  /**
+   * Called once the wakeup's channels have answered, with whether anyone was told. The
+   * consumer records it on the case, so "escalated" can be told apart from "escalated and
+   * reached nobody". It runs after this function has returned; a throw inside it is logged
+   * and dropped, because the escalation itself has already happened.
+   */
+  onReported?: ((delivery: DeliverySummary) => void) | undefined;
+}
+
+/** Sends the wakeup and hands its delivery to `onReported`. Never rejects. */
+function sendWakeup(router: NotificationRouter, msg: NotificationMessage, onReported: EscalateOpts['onReported']): void {
+  void router.notify(msg).then((report) => {
+    onReported?.(summarizeDelivery(report));
+  }).catch((err: unknown) => {
+    const detail = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[escalation] recording the delivery failed: ${detail}\n`);
+  });
 }
 
 /**
@@ -33,7 +50,7 @@ export function escalateToUser(
   opts: EscalateOpts,
 ): { threadId: string } | null {
   if (!threadStore) {
-    void router.notify({ title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) });
+    sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
   const threadId = `escalation-${opts.key}`;
@@ -45,7 +62,7 @@ export function escalateToUser(
   // as without a thread store. `POST /api/sessions` refuses a mandate this id up front; this is
   // the second layer, for a row that got there any other way.
   if (isMandateTag(threadStore.getThread(threadId)?.created_by)) {
-    void router.notify({ title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) });
+    sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
   // Seed the agent's detail as an `assistant` turn, fronted by a user-role
@@ -72,11 +89,11 @@ export function escalateToUser(
   // Re-mark unread + bump updated_at → floats to the top of the thread list.
   threadStore.updateThread(threadId, { is_unread: true });
   // The push is the wakeup that points at the thread (not the payload).
-  void router.notify({
+  sendWakeup(router, {
     title: opts.title,
     body: opts.body.length > 200 ? opts.body.slice(0, 197) + '…' : opts.body,
     priority: 'high',
     data: { ...(opts.data ?? {}), threadId },
-  });
+  }, opts.onReported);
   return { threadId };
 }

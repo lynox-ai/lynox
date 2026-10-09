@@ -19,7 +19,7 @@ import { RunAbortedError } from './agent.js';
 import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
-import type { NotificationRouter, NotificationMessage } from './notification-router.js';
+import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -2338,7 +2338,51 @@ export class WorkerLoop {
         (grantLines.length > 0 ? `Writes:\n${grantLines.map((l) => `• ${l}`).join('\n')}\n\n` : '') +
         `Reply here and I'll help you fix it — I have this run loaded${ref ? ` ${ref}` : ''}.`,
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
+      onReported: this.#recordEscalation(task.id),
     });
+  }
+
+  /**
+   * Writes whether an escalation of this trigger reached anyone onto the trigger, so the case
+   * reads "gemeldet / nicht gemeldet" instead of leaving "escalated" and "escalated to nobody"
+   * looking the same. Called while the escalation's options are built, so the start
+   * (`unconfirmed`) is on the trigger before the wakeup leaves; the answer is written against
+   * that start and cannot overwrite a newer escalation.
+   */
+  #recordEscalation(triggerId: string): (delivery: DeliverySummary) => void {
+    const startedAt = this.#nextEscalationStart();
+    // A record that cannot be written must not stop the escalation it describes: the owner
+    // still gets the thread and the wakeup.
+    const start = (retry: boolean): boolean => {
+      try {
+        return this.engine.getTaskManager()?.startEscalation(triggerId, startedAt, retry) ?? false;
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:worker] recording an escalation start failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        return false;
+      }
+    };
+    const started = start(false);
+    return (delivery) => {
+      // A start that did not land is tried once more, so the answer has a start to match;
+      // otherwise the case would keep the previous escalation's outcome as if it were this one.
+      // The retry lands only if no later escalation has started meanwhile.
+      if (!started && !start(true)) return;
+      this.engine.getTaskManager()?.recordEscalationOutcome(triggerId, delivery, startedAt);
+    };
+  }
+
+  /** The previous escalation start of this loop. */
+  #lastEscalationStart = 0;
+
+  /**
+   * A start time no earlier escalation of this loop has used. The answer is matched to its
+   * escalation by this value, so two starts in one millisecond would let the older answer
+   * land on the newer escalation.
+   */
+  #nextEscalationStart(): string {
+    const ms = Math.max(Date.now(), this.#lastEscalationStart + 1);
+    this.#lastEscalationStart = ms;
+    return new Date(ms).toISOString();
   }
 
   private recordAndNotify(task: TriggerRecord, resultSummary: string, success: boolean): void {
@@ -2522,6 +2566,7 @@ export class WorkerLoop {
         title: `\uD83D\uDD0D ${task.title}`,
         body: `${config.url} changed.\n\n${truncatedAnalysis}`,
         data: { taskId: task.id },
+        onReported: this.#recordEscalation(task.id),
       });
     }
   }

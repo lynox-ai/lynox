@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import type { EngineDb } from './engine-db.js';
 import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus, BulkTriggerEffect } from '../types/pipeline.js';
+import type { DeliverySummary } from './notification-router.js';
 import { normalizeTier, type ModelTier } from '../types/index.js';
 
 /**
@@ -201,6 +202,8 @@ interface TriggerFullDbRow {
   edited_by: string | null;
   confirmed_by: string | null;
   model_tier: string | null;
+  last_escalation_at: string | null;
+  last_escalation_outcome: string | null;
 }
 
 /**
@@ -216,7 +219,8 @@ const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by, model_tier`;
+   confirmed_at, waiting_until, created_untrusted, created_by, edited_by, confirmed_by, model_tier,
+   last_escalation_at, last_escalation_outcome`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -284,7 +288,22 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     // Read through `normalizeTier`, so a value no writer can produce reads as no choice.
     model_tier: normalizeTier(row.model_tier ?? undefined),
     ...(bulkRunId !== undefined ? { bulk_run_id: bulkRunId } : {}),
+    ...escalationOf(row),
   };
+}
+
+/** A value no writer produces reads as no record, so the surface never shows a guess. */
+function escalationOf(row: TriggerFullDbRow): Pick<TriggerRecord, 'last_escalation_at' | 'last_escalation_outcome'> {
+  const outcome = row.last_escalation_outcome;
+  if (row.last_escalation_at === null || !isEscalationOutcome(outcome)) return {};
+  return { last_escalation_at: row.last_escalation_at, last_escalation_outcome: outcome };
+}
+
+/** What `last_escalation_outcome` may hold: an answer, or `unconfirmed` until one arrives. */
+export type EscalationOutcome = DeliverySummary | 'unconfirmed';
+
+function isEscalationOutcome(v: string | null): v is EscalationOutcome {
+  return v === 'delivered' || v === 'not_delivered' || v === 'no_channel' || v === 'unconfirmed';
 }
 
 /**
@@ -831,6 +850,45 @@ export class TriggerStore {
        ORDER BY next_run_at ASC`,
     ).all(now, WAITING, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * Mark that an escalation of this trigger has started: `last_escalation_at` becomes the
+   * start, the outcome `unconfirmed` until the channels answer. Written BEFORE the wakeup is
+   * sent, so a newer escalation that never gets an answer (a stalled push endpoint, a throw
+   * before the send) cannot leave the previous outcome on screen as if it were current.
+   * The case shows the latest escalation, the way `last_run_status` shows the latest run.
+   *
+   * A fresh start always lands: it is the newest escalation by construction, and making it
+   * compare against the stored value would let a stored instant from a clock that was ahead
+   * (before an NTP step, across a restart) refuse every new start until wall time catches up.
+   * `onlyIfLater` is for a start RETRIED after its first write failed — by then a newer
+   * escalation may have begun, and the retry must not take the record back to the older one.
+   * `at` is an ISO-8601 instant from `toISOString`, which compares correctly as text.
+   * False when the trigger is gone, or (`onlyIfLater`) when the recorded start is not older.
+   */
+  startEscalation(id: string, at: string = new Date().toISOString(), onlyIfLater = false): boolean {
+    if (onlyIfLater) {
+      return this.db.prepare(
+        "UPDATE triggers SET last_escalation_at = ?, last_escalation_outcome = 'unconfirmed' WHERE id = ? AND (last_escalation_at IS NULL OR last_escalation_at < ?)",
+      ).run(at, id, at).changes > 0;
+    }
+    return this.db.prepare(
+      "UPDATE triggers SET last_escalation_at = ?, last_escalation_outcome = 'unconfirmed' WHERE id = ?",
+    ).run(at, id).changes > 0;
+  }
+
+  /**
+   * Record the answer for the escalation that started at `startedAt`. Conditional on that
+   * start still being the latest, so an older escalation whose channels answer late cannot
+   * overwrite a newer one. Both columns survive later edits of the trigger (the upsert leaves
+   * them alone), because the record is about its last escalation, not its current shape.
+   * False when the trigger is gone or a newer escalation has started.
+   */
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
+    return this.db.prepare(
+      'UPDATE triggers SET last_escalation_outcome = ? WHERE id = ? AND last_escalation_at = ?',
+    ).run(outcome, id, startedAt).changes > 0;
   }
 
   /**

@@ -6,6 +6,7 @@
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
+	import { escalationNotice } from '../utils/trigger-escalation.js';
 	import { awaitsConfirmation, displaySafe, instructionOf, offersConfirmation, showsInstruction, showsWatchTarget, watchOf } from '../utils/trigger-consent.js';
 
 	// An agent-trigger (cron/watch/pipeline/reminder/backup) — the `triggers`
@@ -33,6 +34,10 @@
 		// Set when a person confirmed the trigger; absent = not confirmed. An agent
 		// run without it is skipped by the scheduler — see `awaitsConfirmation`.
 		confirmed_at?: string;
+		// Whether the last escalation of this trigger (a failed scheduled run, a watch
+		// finding) reached anyone — see `escalationNotice`.
+		last_escalation_at?: string;
+		last_escalation_outcome?: string;
 	}
 
 	let triggers = $state<Trigger[]>([]);
@@ -277,6 +282,10 @@
 								{/if}
 								{#if trigger.last_run_at}
 									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}</span>
+								{/if}
+								{#if escalationNotice(trigger)}
+									{@const notice = escalationNotice(trigger)!}
+									<span class={notice.warn ? 'text-warning' : ''} data-escalation-notice={trigger.last_escalation_outcome}>{t(notice.key)} · {fmtDate(notice.at)}</span>
 								{/if}
 							</div>
 							{#if awaitsConfirmation(trigger)}

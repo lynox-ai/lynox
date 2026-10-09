@@ -70,3 +70,22 @@ describe('WebPushNotificationChannel — msg.data passthrough', () => {
 		expect(Object.keys(payload.data).sort()).toEqual(['priority']);
 	});
 });
+
+describe('WebPushNotificationChannel — outcome', () => {
+	it('reports delivered when a subscription accepted the push', async () => {
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('delivered');
+	});
+
+	it('reports failed with no subscription: nobody was told', async () => {
+		channel.unsubscribe('https://push.example/abc');
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('failed');
+		expect(webPush.sendNotification).not.toHaveBeenCalled();
+	});
+
+	it('reports failed when every subscription refused it', async () => {
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockRejectedValueOnce(Object.assign(new Error('down'), { statusCode: 500 }));
+		expect(await channel.send({ title: 't', body: 'b', priority: 'normal' })).toBe('failed');
+		stderr.mockRestore();
+	});
+});
