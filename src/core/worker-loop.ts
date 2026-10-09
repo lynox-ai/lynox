@@ -10,7 +10,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { isMandateTag, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -285,6 +285,9 @@ export interface ActiveTask {
    * stamp may have changed since the test began.
    */
   handRun: boolean;
+  /** Who started the run by hand, when a request did; absent for a run the schedule fired.
+   *  `POST /api/tasks/:id/stop` reads it: a mandate stops only a run it started (§3.13 E7). */
+  starter?: RequestPrincipal | undefined;
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
@@ -464,6 +467,16 @@ export class WorkerLoop {
    * comment argued against shipping because the abort was process-wide; `session.ts`
    * scoped it since, which is what this route relies on.
    */
+  /**
+   * Who started a running task by hand, as a `principalTag`, or `'owner'` for a run the
+   * schedule fired (the owner's schedule). `undefined` when the task is not running.
+   */
+  runningStarterTag(taskId: string): string | undefined {
+    const active = this.activeTasks.get(taskId);
+    if (active === undefined) return undefined;
+    return principalTag(active.starter ?? OWNER_PRINCIPAL);
+  }
+
   stopTask(taskId: string): StopOutcome {
     const active = this.activeTasks.get(taskId);
     if (active === undefined) return { kind: 'not_running' };
@@ -729,7 +742,9 @@ export class WorkerLoop {
             // test's to move. Outside any run, so this asks the ROW (hand-run-door.ts says
             // why writers inside a run must not). It keeps its own time and runs with the answer once the
             // owner stamps it, while the answer is still held.
-            if (!mandateNeedsOwnerStamp(parked)) {
+            // The question records whether a run by hand asked it: after a restart the row may
+            // have been stamped since the test, and only the question still knows.
+            if (!mandateNeedsOwnerStamp(parked) && answered.hand_run !== 1) {
               this.engine.getRunHistory()?.updateTrigger(parked.id, { nextRunAt: new Date().toISOString() });
             }
             process.stderr.write(
@@ -753,6 +768,9 @@ export class WorkerLoop {
         for (const parked of taskManager.getExpiredWaitingTriggers()) {
           // The same for an expired wait: a live test ends its own wait, as a test.
           if (this.activeTasks.get(parked.id)?.handRun === true) continue;
+          // Read before the expiry below settles it, and from any status: the engine's own
+          // expiry may already have settled the question (register: hand-run question origin).
+          const asked = this.engine.getPromptStore()?.getLatestForTrigger(parked.id);
           try {
             this.engine.getPromptStore()?.expirePendingForTrigger(parked.id);
           } catch (err: unknown) {
@@ -762,7 +780,7 @@ export class WorkerLoop {
           }
           // A proposal's wait came from a test run by hand: it ends back where it was, not
           // `failed`. Outside any run, so this asks the ROW.
-          const proposal = mandateNeedsOwnerStamp(parked);
+          const proposal = mandateNeedsOwnerStamp(parked) || asked?.hand_run === 1;
           if (taskManager.endWait(parked.id, proposal ? 'open' : 'failed')) {
             // Ending the wait is not the whole job, and getting this wrong is a
             // LOOP rather than a stall. `next_run_at` still points at the run that
@@ -1064,7 +1082,7 @@ export class WorkerLoop {
     // that found `undefined` after a shutdown, which recorded the stopped run as
     // `failed` and re-fired it with a backoff. Same rule, same reason as
     // `attachSession`: the entry object outlives its map entry.
-    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline, handRun };
+    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter };
     this.activeTasks.set(task.id, entry);
     const heartbeat = setInterval(() => {
       try {
@@ -1252,14 +1270,18 @@ export class WorkerLoop {
       // notification with it was not.
       // A test run by hand is never retried (`recordTaskRun` leaves its schedule alone),
       // so its failure is reported now or never.
+      // Nor is a run a non-owner started by hand: a retry carries no request and would run
+      // as the owner's schedule with the full tool set (§3.12 point 6, "once per request").
+      const startedByOther = entry.starter !== undefined && !isOwnerPrincipal(entry.starter);
       const willRetry = status !== 'stopped'
         && !isHandRunOf(task.id)
+        && !startedByOther
         && (task.max_retries ?? 0) > 0
         && (task.retry_count ?? 0) < (task.max_retries ?? 0);
 
       const taskManager = this.engine.getTaskManager();
       if (taskManager) {
-        taskManager.recordTaskRun(task.id, errorMsg, status);
+        taskManager.recordTaskRun(task.id, errorMsg, status, ...(startedByOther ? [{ noRetry: true }] : []));
       }
 
       // If the task was parked on a human it was interrupted while waiting.
@@ -1496,7 +1518,7 @@ export class WorkerLoop {
 
   /** Execute a standard or scheduled task via headless Session. */
   /** @param starter Who started this run by hand, when a request did — its tool lock applies. */
-  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, starter?: RequestPrincipal): Promise<void> {
+  private async executeStandard(task: TriggerRecord, capUSD: number | null = null, handStarter?: RequestPrincipal): Promise<void> {
     // §0 A10 — is this run happening BECAUSE a question was answered?
     //
     // The answered row carries both halves the new run needs: the thread the
@@ -1513,6 +1535,12 @@ export class WorkerLoop {
     // objection — that "continuing" would promise a state restoration that does
     // not exist — does not apply to it.
     const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
+    // Who this run is for. A request that started it by hand says so; a run that picks up
+    // an answer after its starter's request is gone reads who asked from the question
+    // (register: hand-run question origin, second half). A mandate's question keeps the
+    // mandate's tool lock across a restart instead of coming back as the owner's run. It
+    // only narrows the tools: nothing that grants a hand run reads it.
+    const starter = handStarter ?? (isMandateTag(answered?.created_by) ? principalFromTag(answered?.created_by) : undefined);
     const triggerTier = admittedTriggerTier(task.model_tier);
     const session = this.engine.createSession({
       autonomy: 'autonomous',
@@ -1601,7 +1629,12 @@ export class WorkerLoop {
         questionWentUnanswered = true;
         return DISMISSED_ANSWER;
       }
-      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id);
+      // Who asked, and whether a run by hand did: what the sweep and the re-arm read after
+      // a restart, when this run is gone (register: hand-run question origin).
+      const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, undefined, undefined, task.id, {
+        createdBy: principalTag(starter ?? OWNER_PRINCIPAL),
+        handRun: active?.handRun === true,
+      });
       // §0 A8/A11 — PARK the trigger. Until now the pairing between this trigger
       // and the question it is waiting on existed only in a notification payload
       // and in this closure's stack frame, neither of which survives the process.
@@ -1952,6 +1985,9 @@ export class WorkerLoop {
         task.id,
         truncatedResult,
         endedByOwner ? 'stopped' : (questionWentUnanswered || budgetCut !== null ? 'failed' : 'success'),
+        // A run a non-owner started (or whose question it asked) gets no retry: the retry
+        // would carry no request and run as the owner's schedule (§3.12 point 6).
+        ...(starter !== undefined && !isOwnerPrincipal(starter) ? [{ noRetry: true }] : []),
       );
     }
 

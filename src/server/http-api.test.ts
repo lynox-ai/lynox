@@ -2098,6 +2098,8 @@ describe('LynoxHTTPApi', () => {
         payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2187,6 +2189,8 @@ describe('LynoxHTTPApi', () => {
         payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2302,6 +2306,8 @@ describe('LynoxHTTPApi', () => {
         payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2761,6 +2767,7 @@ describe('LynoxHTTPApi', () => {
       const db = new Database(':memory:');
       db.exec(`CREATE TABLE active_runs (
         run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+        created_by TEXT,
         status TEXT NOT NULL DEFAULT 'running'
           CHECK(status IN ('running','awaiting_input','done','error','interrupted')),
         started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -2879,6 +2886,8 @@ describe('LynoxHTTPApi', () => {
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -2989,6 +2998,8 @@ describe('LynoxHTTPApi', () => {
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -5299,6 +5310,8 @@ describe('LynoxHTTPApi', () => {
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -13885,16 +13898,33 @@ describe('mandate stance of every route that writes', () => {
   it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {
     const open = writes().filter(r => r.stance !== undefined && r.stance.kind !== 'owner-only').map(r => `${name(r)} ${r.stance!.kind}`).sort();
     expect(open).toEqual([
+      'DELETE /api/runs/stance-probe own',
+      'DELETE /api/sessions/stance-probe own',
       'DELETE /api/tasks/stance-probe mark',
+      'DELETE /api/threads/stance-probe own',
+      'PATCH /api/sessions/stance-probe/model own',
       'PATCH /api/tasks/stance-probe mark',
+      'PATCH /api/threads/stance-probe own',
       'POST /api/llm/test free',
       'POST /api/mail/accounts/test free',
       'POST /api/mail/autodiscover free',
       'POST /api/onboarding/derive-domain free',
+      'POST /api/onboarding/knowledge/start own',
       'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
+      'POST /api/sessions own',
+      'POST /api/sessions/stance-probe/abort own',
+      'POST /api/sessions/stance-probe/changeset/review own',
+      'POST /api/sessions/stance-probe/compact own',
+      'POST /api/sessions/stance-probe/mail-connected own',
+      'POST /api/sessions/stance-probe/reply own',
+      'POST /api/sessions/stance-probe/reply-tabs own',
+      'POST /api/sessions/stance-probe/run own',
+      'POST /api/sessions/stance-probe/secret-saved own',
+      'POST /api/sessions/stance-probe/tab-progress own',
       'POST /api/tasks mark',
       'POST /api/tasks/stance-probe/complete mark',
+      'POST /api/tasks/stance-probe/stop own',
       'POST /api/triggers/stance-probe/run own',
       'POST /api/workflows/stance-probe/grant-preview free',
     ]);

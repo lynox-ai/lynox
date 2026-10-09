@@ -7,6 +7,7 @@ import { RunRegistry } from './run-registry.js';
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
   db.prepare(`CREATE TABLE active_runs (
+    created_by TEXT,
     run_id TEXT PRIMARY KEY,
     thread_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'running'

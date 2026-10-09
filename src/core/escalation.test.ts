@@ -9,6 +9,7 @@ function freshDb(): Database.Database {
   const db = new BetterSqlite3(':memory:');
   db.exec(`
     CREATE TABLE threads (
+      created_by TEXT,
       id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', model_tier TEXT NOT NULL DEFAULT 'balanced', model_tier_source TEXT NOT NULL DEFAULT 'unknown',
       context_id TEXT NOT NULL DEFAULT '', message_count INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0, total_cost_usd REAL NOT NULL DEFAULT 0,

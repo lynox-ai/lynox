@@ -2822,7 +2822,8 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     expect(store.answerUser(row!.id, 'A')).toBe(true);
     await expect(answered).resolves.toBe('A');
     for (let i = 0; i < 200 && (tm.recordTaskRun as ReturnType<typeof vi.fn>).mock.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
-    expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-ask', 'Tested with list A.', 'success');
+    // A run a mandate started by hand is never retried (§3.12 point 6, once per request).
+    expect(tm.recordTaskRun).toHaveBeenCalledWith('hr-ask', 'Tested with list A.', 'success', { noRetry: true });
     expect(session.run).toHaveBeenCalledTimes(1);
   });
 

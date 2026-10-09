@@ -1402,6 +1402,16 @@ const MIGRATIONS: string[] = [
      );
    DROP INDEX IF EXISTS idx_workflow_run_claims_run;
    CREATE UNIQUE INDEX idx_workflow_run_claims_run ON workflow_run_claims(run_id);`,
+  // v57: who created a thread, a prompt and a live run (PRD customer-granted-operator-access
+  // §3.13 E1, E2, E7, B6) — a `principalTag`, i.e. kind and address, never a mandate id.
+  // NULL on every older row, which `ownedBy` reads as the owner's: before this column there
+  // was no one else. `hand_run` marks a question asked by a run started by hand, so the
+  // worker can tell it apart after a restart, when the run that knew is gone.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (57);
+   ALTER TABLE threads ADD COLUMN created_by TEXT;
+   ALTER TABLE pending_prompts ADD COLUMN created_by TEXT;
+   ALTER TABLE pending_prompts ADD COLUMN hand_run INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE active_runs ADD COLUMN created_by TEXT;`,
 ];
 
 export class RunHistory {

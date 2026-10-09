@@ -55,3 +55,25 @@ export function mandateNeedsOwnerStamp(t: { confirmed_at?: string | undefined; c
 export function isMandateTag(tag: string | null | undefined): boolean {
   return typeof tag === 'string' && tag.startsWith(MANDATE_TAG_PREFIX);
 }
+
+/**
+ * Whether a request's principal may act on a row by who created it (PRD
+ * customer-granted-operator-access §3.13 E1, E2, E7, E9, B6: a mandate reaches only what it set
+ * up). The owner reaches every row. A mandate reaches a row only when the row records that very
+ * mandate; a row with no tag, or the tag `owner`, is the owner's, since everything written before
+ * tags existed was. A row that does not exist (`undefined`) belongs to no mandate: a mandate is
+ * refused, so asking about something missing never reads as "its own".
+ */
+export function ownedBy(row: { readonly created_by?: string | null | undefined } | undefined, p: RequestPrincipal): boolean {
+  if (isOwnerPrincipal(p)) return true;
+  return row !== undefined && row.created_by === principalTag(p);
+}
+
+/**
+ * The principal a recorded tag names, for a run that resumes after its request is gone. Only
+ * ever narrows: a mandate tag gives the mandate (whose runs carry the tool lock), anything else
+ * the owner. Never a proof of a hand: nothing that grants a hand run may read it.
+ */
+export function principalFromTag(tag: string | null | undefined): RequestPrincipal {
+  return isMandateTag(tag) ? { kind: 'mandate', email: tag!.slice(MANDATE_TAG_PREFIX.length) } : OWNER_PRINCIPAL;
+}
