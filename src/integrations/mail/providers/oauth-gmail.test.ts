@@ -437,6 +437,7 @@ describe('OAuthGmailProvider — send', () => {
     await expect(provider.fromAddress()).rejects.toBeInstanceOf(MailError);
     await provider.close();
     await expect(provider.fromAddress()).rejects.toThrow('Provider closed');
+    await expect(provider.fromAddress(), 'as a MailError').rejects.toBeInstanceOf(MailError);
   });
 
   it('posts a base64url-encoded RFC2822 message and returns the Gmail id', async () => {
