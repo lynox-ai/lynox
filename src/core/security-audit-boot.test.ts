@@ -40,6 +40,7 @@ vi.mock('./security-audit.js', async (importOriginal) => {
 
 const { Engine } = await import('./engine.js');
 const { reloadConfig } = await import('./config.js');
+const { channels } = await import('./observability.js');
 
 interface EngineInternals { runHistory: unknown; getSecurityAudit(): unknown }
 
@@ -92,6 +93,17 @@ describe('Engine boot — the security audit trail does not depend on run histor
     // The case under test is real: the engine booted without its history.
     expect(engine.runHistory).toBeNull();
     expect(engine.getSecurityAudit()).not.toBeNull();
+  });
+
+  it('closes the audit trail at shutdown: its connection is closed and it hears no further events', async () => {
+    const { engine } = await boot(true);
+    const audit = engine.getSecurityAudit() as { db: { open: boolean }; record(e: unknown): void };
+    expect(audit.db.open).toBe(true);
+    const record = vi.spyOn(audit, 'record');
+    await (engine as unknown as InstanceType<typeof Engine>).shutdown();
+    expect(audit.db.open).toBe(false);
+    channels.securityBlocked.publish({ event_type: 'probe', decision: 'blocked' });
+    expect(record).not.toHaveBeenCalled();
   });
 
   it('says so when the audit trail itself cannot start', async () => {

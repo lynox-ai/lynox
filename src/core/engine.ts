@@ -2825,6 +2825,10 @@ export class Engine {
     if (this.engineDb) {
       try { this.engineDb.close(); } catch { /* ignore */ }
     }
+    if (this.securityAudit) {
+      try { this.securityAudit.close(); } catch { /* ignore */ }
+      this.securityAudit = null;
+    }
     if (this.secretVault) {
       try { this.secretVault.close(); } catch { /* ignore */ }
     }
