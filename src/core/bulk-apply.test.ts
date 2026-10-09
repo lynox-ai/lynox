@@ -553,6 +553,143 @@ describe('a run closed by the other loop', () => {
   });
 });
 
+/**
+ * The owner's stop of a running write, driven through a REAL worker tick: the dispatch that
+ * hands the signal over, `stopTask`, the loop's check between targets and the run record.
+ * The writer holds target `holdAt` open until released, so the stop arrives while that
+ * target is being written — the case the stop must not cut through.
+ */
+async function stopMidWrite(n: number, holdAt: string, opts: { atomic?: boolean; shutdown?: boolean; heldElsewhere?: number } = {}): Promise<{
+  runId: string; state: Map<string, string>; writes: Map<string, number>; writer: TargetWriter;
+  records: Array<[string, string, string]>; notified: number; stopAnswer: unknown;
+}> {
+  const { runId, initial } = recordMemoryRun(n, opts);
+  approve(runId);
+  // A target a loop that died still holds by a fresh claim: this loop passes it over.
+  if (opts.heldElsewhere !== undefined) expect(ledger.claimTarget(runId, opts.heldElsewhere)).toBe(true);
+  const { writer: inner, state } = memory(initial);
+  const { writer: counted, writes } = counting(inner);
+  let entered!: () => void;
+  const inWrite = new Promise<void>((r) => { entered = r; });
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let held = false;
+  const writer: TargetWriter = {
+    read: (k, f) => counted.read(k, f),
+    async write(key, after, sent) {
+      if (key === holdAt && !held) {
+        held = true;
+        entered();
+        await gate;
+      }
+      return counted.write(key, after, sent);
+    },
+  };
+  const triggers = new TriggerStore(engineDb);
+  const records: Array<[string, string, string]> = [];
+  const recordTaskRun = vi.fn((id: string, result: string, status: string) => {
+    records.push([id, result, status]);
+    triggers.updateFields(id, { status: status === 'success' ? 'completed' : status === 'stopped' ? 'completed' : 'failed', nextRunAt: null });
+  });
+  const engine = {
+    getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+      claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+    getBulkLedger: () => ledger,
+    getDataStore: () => store,
+    getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+    getUserConfig: () => ({}),
+  } as unknown as Engine;
+  const notify = vi.fn(async () => {});
+  const mod = await import('./bulk-apply.js');
+  const spy = vi.spyOn(mod, 'bulkWriterFor').mockReturnValue(writer);
+  try {
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
+    await loop.tick();
+    await inWrite;
+    const stopAnswer = opts.shutdown === true ? (loop.stop(), null) : loop.stopTask(`bulk-${runId}`);
+    release();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+    return { runId, state, writes, writer: counted, records, notified: notify.mock.calls.length, stopAnswer };
+  } finally {
+    release();
+    spy.mockRestore();
+  }
+}
+
+describe('the owner stops a running write — between targets, never inside one', () => {
+  it('a stop during the write of target k leaves k written and recorded; k+1 is not written', async () => {
+    const out = await stopMidWrite(10, 'k003');
+    expect(out.stopAnswer).toEqual({ kind: 'requested', via: 'signal' });
+    expect([...out.state.values()]).toEqual(['w0', 'w1', 'w2', 'w3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9']);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.phase, s.applied, s.failed, s.haltReason]).toEqual(['writing', 4, 0, BULK_HALT_REASONS.stoppedByOwner]);
+    // Recorded as the owner's stop — no failure, no retry — and the record names the count.
+    expect(out.records).toHaveLength(1);
+    expect(out.records[0]![2]).toBe('stopped');
+    expect(out.records[0]![1]).toContain('Applied 4,');
+    expect(out.records[0]![1]).toContain(BULK_HALT_REASONS.stoppedByOwner);
+    expect(out.notified, 'the owner asked; nobody is notified of it').toBe(0);
+  });
+
+  it('after the stop, an undo takes back exactly the targets written', async () => {
+    const out = await stopMidWrite(10, 'k003');
+    const undo = ledger.planUndo(out.runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    expect(undo.status.total).toBe(4);
+    approve(undo.status.id);
+    expect((await runBulkEffect(undo.status.id, 'bulk_undo', effectDeps(out.writer))).status).toBe('done');
+    expect([...out.state.values()]).toEqual(['v0', 'v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8', 'v9']);
+  });
+
+  it('a resume after the stop writes the rest, none of them twice', async () => {
+    const out = await stopMidWrite(10, 'k003');
+    expect(ledger.resume(out.runId, { checksum: ledger.computeChecksum(out.runId)! }).ok).toBe(true);
+    expect((await runBulkEffect(out.runId, 'bulk_apply', effectDeps(out.writer))).status).toBe('done');
+    expect([...out.state.values()].every((v) => v.startsWith('w'))).toBe(true);
+    expect([...out.writes.values()].every((c) => c === 1), JSON.stringify([...out.writes])).toBe(true);
+    expect(out.writes.size).toBe(10);
+  });
+
+  it('a stopped atomic run rolls back, with a reason that says it was stopped', async () => {
+    const out = await stopMidWrite(6, 'k002', { atomic: true });
+    expect([...out.state.values()]).toEqual(['v0', 'v1', 'v2', 'v3', 'v4', 'v5']);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.phase, s.haltReason]).toEqual(['aborted', BULK_HALT_REASONS.atomicStoppedRolledBack]);
+    expect(out.records[0]![2]).toBe('stopped');
+    expect(out.records[0]![1]).toContain('stopped and rolled back');
+  });
+
+  it('a stop on the last target this loop can write is not lost to the pending re-arm', async () => {
+    // The rest is held by another loop: the loop ends `pending`, which re-arms the trigger.
+    // Re-armed after a stop, the next tick would write on behind the owner's 202.
+    // The held target comes FIRST, so the stop lands on the loop's last pass: no check
+    // between targets is left to read it, and the loop ends on the pending branch.
+    const out = await stopMidWrite(2, 'k001', { heldElsewhere: 0 });
+    expect(out.stopAnswer).toEqual({ kind: 'requested', via: 'signal' });
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.applied, s.haltReason]).toEqual([1, BULK_HALT_REASONS.stoppedByOwner]);
+    expect(out.records[0]![2]).toBe('stopped');
+    const t = new TriggerStore(engineDb).getById(`bulk-${out.runId}`)!;
+    expect([t.status, t.next_run_at ?? null], 'nothing re-armed').toEqual(['completed', null]);
+  });
+
+  it('a stopped ATOMIC run on its pending branch rolls back, not left half written', async () => {
+    const out = await stopMidWrite(3, 'k002', { atomic: true, heldElsewhere: 0 });
+    expect([out.state.get('k001'), out.state.get('k002')]).toEqual(['v1', 'v2']);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.phase, s.haltReason]).toEqual(['aborted', BULK_HALT_REASONS.atomicStoppedRolledBack]);
+    expect(out.records[0]![2]).toBe('stopped');
+  });
+
+  it('a shutdown during a write is not the owner\'s stop: the run writes on', async () => {
+    const out = await stopMidWrite(6, 'k002', { shutdown: true });
+    expect([...out.state.values()].every((v) => v.startsWith('w'))).toBe(true);
+    const s = ledger.getStatus(out.runId)!;
+    expect([s.phase, s.haltReason]).toEqual(['done', null]);
+    expect(out.records[0]![2]).toBe('success');
+  });
+});
+
 describe('halt thresholds', () => {
   it('halts after three failures in a row', async () => {
     const { runId, initial } = recordMemoryRun(100);

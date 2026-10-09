@@ -31,6 +31,8 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 // are two. `src/core/config.ts` already imports across the same seam, so this
 // is precedented rather than novel.
 import { WallClockBudget } from '../server/wall-clock-budget.js';
+import type { AbortScope } from '../types/config.js';
+import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
@@ -294,9 +296,9 @@ export interface ActiveTask {
    * The run's session, so an owner has something to stop.
    *
    * ⛔ WHY THIS FIELD EXISTS, because the obvious alternative is wrong. Aborting
-   * `controller` ends a WAIT and nothing else: its three readers are the bulk-preview
-   * signal, the dismissed-answer check and `waitForSettled`. A task that is COMPUTING
-   * observes none of them, so a stop route built on the controller alone would answer
+   * `controller` ends a WAIT, and a run whose handler reads it (`readsSignal`); an AGENT
+   * turn is not one of those readers. A task that is COMPUTING in a session observes
+   * none of them, so a stop route built on the controller alone would answer
    * 200 while the run carried on — which is exactly what the register row prescribed
    * before it was refuted. Ending a computing run needs `session.abort()`.
    *
@@ -305,9 +307,8 @@ export interface ActiveTask {
    * which is what this comment said while the measurement two screens down was about
    * the effect it omitted: `createSession` has exactly two call sites in this file
    * (`executeStandard`, `executeWatch`), so **`run_workflow` has no session either**.
-   * `executePipeline` hands `runGuardedSavedWorkflow` the engine and two ids — no
-   * session, no signal — so nothing can interrupt a running saved workflow, and it is
-   * the class the production reading at the NOTE ON REACH is about. `stopHandleOf`
+   * Its handle is the signal instead: `executePipeline` hands the run a stop it reads
+   * before each step and a scope whose step agents the stop aborts. `stopHandleOf`
    * reports that rather than leaving the route to claim a stop it cannot deliver.
    */
   session?: Session | undefined;
@@ -321,6 +322,16 @@ export interface ActiveTask {
    * other direction.
    */
   stopRequested?: boolean | undefined;
+  /**
+   * Aborted by `stopTask` and by nothing else — the owner's stop as a signal of its own.
+   *
+   * ⛔ Why not a listener on `controller`: the execution deadline aborts that controller
+   * too, and an abort event fires ONCE per signal. A run past its deadline had used up the
+   * event before the owner asked, so a listener waiting for the owner's abort never heard
+   * it and the run carried on behind a 202. A signal only the owner aborts has no such
+   * order to lose.
+   */
+  ownerStop: AbortController;
   /** Store id of the prompt this task is parked on; undefined while computing. */
   pendingPromptId?: string | undefined;
   /**
@@ -352,10 +363,10 @@ export interface ActiveTask {
    *
    * ⛔ Set at the HAND-OVER of the signal, never from a list of effect names. The
    * property is "something downstream reads this signal"; the effect name is a
-   * correlate of it, and the two already disagree: `bulk_preview` is handed
-   * `controller.signal` and `runBulkPreview` checks it between targets, while
-   * `bulk_apply`/`bulk_undo` — one case clause away, same word in their name — are
-   * handed nothing.
+   * correlate of it, and the two disagreed for as long as only `bulk_preview` was handed
+   * the signal: `bulk_apply`/`bulk_undo`, one case clause away with the same word in
+   * their name, were handed nothing. Each of the three bulk effects and `run_workflow`
+   * now sets it in its own clause, beside the call that passes the signal on.
    */
   readsSignal?: boolean | undefined;
   /** Stop the execution deadline while parked on a human, and re-arm after.
@@ -394,9 +405,10 @@ export type StopOutcome =
  * claim a stop it cannot deliver. `200 {stopped:true}` for a run nothing can interrupt
  * is fail-open with ceremony — the owner stops watching and the run keeps writing,
  * which for a `bulk_apply` means it keeps writing its targets. Of the seven effects,
- * FIVE never have a handle (`run_workflow`, `bulk_apply`, `bulk_undo`, `backup`,
- * `notify`), one has one only for part of its run (`run_agent`, late on the watch path)
- * and one has one throughout (`bulk_preview`), so the honest answer is a case rather
+ * TWO never have a handle (`backup`, `notify`: short, and each a single external write
+ * that a stop could only cut in half), one has one only for part of its run
+ * (`run_agent`, late on the watch path) and four have one throughout (`bulk_preview`,
+ * `bulk_apply`, `bulk_undo`, `run_workflow`), so the honest answer is a case rather
  * than a flag.
  *
  * Precedence is MOST CERTAIN first, not most powerful:
@@ -409,7 +421,10 @@ export type StopOutcome =
  *    the abort lands and the run ends at the next provider call with `RunAbortedError`;
  *    the handler itself is not cancelled. Either way a REQUEST and not a confirmation,
  *    which is why the route answers 202.
- *  · `signal` — the handler polls the signal and stops between units of work.
+ *  · `signal` — the handler polls the signal and stops between units of work (a bulk
+ *    target, a workflow step). What happens to the unit in flight depends on the effect:
+ *    a bulk write finishes and records it, a preview's read is cut short, and a
+ *    workflow's step agents are aborted at their next provider call.
  */
 export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
   if (active.pendingPromptId !== undefined) return 'wait';
@@ -605,6 +620,7 @@ export class WorkerLoop {
     // reads to decide whether to retry. An honest refusal is cheaper than a wrong word.
     if (via === undefined) return { kind: 'unstoppable', effect: active.effect };
     active.stopRequested = true;
+    active.ownerStop.abort();
     try {
       active.session?.abort();
     } catch (err: unknown) {
@@ -1227,7 +1243,7 @@ export class WorkerLoop {
     // that found `undefined` after a shutdown, which recorded the stopped run as
     // `failed` and re-fired it with a backoff. Same rule, same reason as
     // `attachSession`: the entry object outlives its map entry.
-    const entry: ActiveTask = { controller, effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter };
+    const entry: ActiveTask = { controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter };
     this.activeTasks.set(task.id, entry);
     const heartbeat = setInterval(() => {
       try {
@@ -1281,7 +1297,10 @@ export class WorkerLoop {
             // executePipeline handles a null target_workflow_id (FK ON DELETE SET
             // NULL nulls a deleted workflow's link) as a benign skip — never a
             // fall-through to an autonomous run of the title.
-            await this.executePipeline(task, starter);
+            // The run reads the owner's stop (`ownerStop`) before each step and ends its step
+            // agents on it, so it has a stop handle — set at the hand-over.
+            entry.readsSignal = true;
+            await this.executePipeline(task, starter, entry.ownerStop.signal);
             break;
           case 'run_agent':
             // Consent gate (triggers-consent) — DEFENSE-IN-DEPTH backstop to the
@@ -1315,7 +1334,10 @@ export class WorkerLoop {
             // consent is the approval route that armed this trigger (PRD
             // bulk-changes-reversible §3.4); the handler refuses any run that is not
             // approved, inside its window and matching the approved checksum.
-            await this.executeBulk(task, effect);
+            // `runBulkEffect` reads the signal between targets, so for this effect too the
+            // controller is the stop handle — set at the hand-over, as for `bulk_preview`.
+            entry.readsSignal = true;
+            await this.executeBulk(task, effect, controller.signal, () => entry.stopRequested === true);
             break;
           case 'bulk_preview':
             // Deterministic: reads a planned external run's targets into its ledger and
@@ -1478,9 +1500,10 @@ export class WorkerLoop {
   /**
    * Write a bulk run off its trigger. A run left `pending` (targets another loop holds,
    * or claims of a loop that died) is re-armed shortly; every other outcome ends the
-   * trigger — a halt waits for a human to resume it through the approval route.
+   * trigger — a halt waits for a human to resume it through the approval route, and so
+   * does the owner's stop, which ends the run between two targets.
    */
-  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect): Promise<void> {
+  private async executeBulk(task: TriggerRecord, effect: BulkWriteEffect, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
     const ledger = this.engine.getBulkLedger();
     if (!ledger || task.bulk_run_id === undefined) {
       this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
@@ -1500,7 +1523,15 @@ export class WorkerLoop {
         const method = contract ? writeMethodOf(contract) : null;
         return client && method ? externalWriter(client, { method }) : null;
       }),
+      signal,
+      ownerStopped,
     });
+    if (outcome.status === 'stopped') {
+      // Recorded as the owner's stop, not a failure: no retry, and no notification — the
+      // owner is the one who asked. The summary names how many targets were written.
+      this.#recordRun(this.engine.getTaskManager(), task.id, outcome.summary, 'stopped');
+      return;
+    }
     if (outcome.status === 'pending') {
       this.#recordRun(this.engine.getTaskManager(), task.id, outcome.summary, 'success');
       this.engine.getRunHistory()?.updateTrigger(task.id, {
@@ -2178,7 +2209,25 @@ export class WorkerLoop {
   }
 
   /** Execute a pipeline task — always orchestrated via the DAG engine (D9). */
-  private async executePipeline(task: TriggerRecord, starter?: RequestPrincipal): Promise<void> {
+  private async executePipeline(
+    task: TriggerRecord, starter: RequestPrincipal | undefined, ownerStop: AbortSignal,
+  ): Promise<void> {
+    // What the run is handed for a stop: the OWNER'S signal (`ActiveTask.ownerStop`), not
+    // the task controller. The deadline and the shutdown abort that controller too, and
+    // neither has ever ended a workflow run; handing it on would have made every deploy stop
+    // the scheduled workflows in flight. On the stop, the step agents in the scope are
+    // aborted too, so a step in flight ends at its next provider call.
+    const scope: AbortScope = { members: new Set() };
+    const onStop = (): void => {
+      for (const member of scope.members) {
+        // One throwing member must not keep the rest running.
+        try { member.abort(); } catch { /* the next one still gets its abort */ }
+      }
+    };
+    // Attached before this method's first await, so in the same tick as the dispatch's
+    // `readsSignal = true`: `stopTask` cannot have aborted the signal yet. A stop before the
+    // first step has no agent to abort anyway; the runner reads the signal itself.
+    ownerStop.addEventListener('abort', onStop, { once: true });
     const runHistory = this.engine.getRunHistory();
     if (!runHistory) return;
     if (!task.pipeline_id) {
@@ -2290,7 +2339,21 @@ export class WorkerLoop {
       // Who started it by hand, when a request did: the workflow's steps get only the tools
       // that principal's lock allows (PRD §3.13 E4 — the build site is here, not a session).
       ...(starter ? { principal: starter } : {}),
+      stopSignal: ownerStop,
+      abortScope: scope,
     });
+    ownerStop.removeEventListener('abort', onStop);
+
+    // The owner stopped it: recorded as their stop, not a failure — no retry, no escalation,
+    // no notification (the owner is the one who asked). Keyed on the run's own error, which
+    // only the runner's stop check writes: a stop that arrives after the last step finished
+    // leaves a completed run, and that is what it is recorded as. And on the owner's signal,
+    // so a step whose own error happens to read the same is still recorded as a failure.
+    if (result.ok && result.error === WORKFLOW_STOPPED_ERROR && ownerStop.aborted) {
+      this.#recordRun(this.engine.getTaskManager(), task.id,
+        `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
+      return;
+    }
 
     if (!result.ok) {
       // Surface conversion / validation / not-found / not-template errors as

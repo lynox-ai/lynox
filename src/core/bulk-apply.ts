@@ -89,8 +89,11 @@ function fieldsOf(t: ApplyTarget): readonly string[] | null {
 }
 
 export interface BulkEffectOutcome {
-  /** `pending`: targets are left that another loop holds — try again shortly. */
-  status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending';
+  /** `pending`: targets are left that another loop holds — try again shortly.
+   *  `stopped`: the owner stopped the run between two targets. A non-atomic run is halted
+   *  where it stood (a resume carries on, an undo takes back what was written); an atomic
+   *  one was rolled back, as on a failed target. */
+  status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending' | 'stopped';
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
 }
@@ -120,6 +123,15 @@ export interface BulkEffectDeps {
   /** The writer for the run's target system, or null when it is not available. */
   writerFor: (run: BulkRunForApply) => TargetWriter | null;
   now?: () => number;
+  /** The worker's task signal. Read between targets only, never inside a write. */
+  signal?: AbortSignal | undefined;
+  /**
+   * Whether the abort on `signal` is the OWNER'S stop. Three things abort that controller —
+   * the owner's stop, the execution deadline and the worker's shutdown — and only the first
+   * is an instruction to end the run; the other two leave it writing as before. Without this
+   * the signal is not read at all.
+   */
+  ownerStopped?: (() => boolean) | undefined;
 }
 
 /**
@@ -171,6 +183,11 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     if (!current || current.phase !== 'writing' || current.haltReason !== null) {
       return { status: 'halted', summary: summarize(ledger, runId, 'Bulk run stopped by another loop.') };
     }
+    // The owner's stop lands HERE, between targets and never inside a write: a target whose
+    // write is under way when the stop arrives is finished and recorded first, so the ledger
+    // names every target the host received and an undo or a resume works from it. An atomic
+    // run must not stop half written, so it rolls back as it does on a failed target.
+    if (ownerStopped()) return endStopped();
     // The approval bounds how many different targets receive the verb, not how many writes
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
@@ -227,10 +244,34 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
       ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
     }
+    // The stop that came during the loop's last write, with the rest held by another loop:
+    // no pass between targets is left to read it, and `pending` would re-arm the trigger and
+    // write on behind the owner's stop.
+    //
+    // ⚠ "Another loop" is a DEAD one here, which is what makes the atomic rollback below safe:
+    // a run has one trigger, and its lease (`TriggerStore.claimLease`, renewed by the run's
+    // heartbeat) admits one live loop at a time, so the claim this loop passed over belongs to
+    // a loop whose lease lapsed. A live loop writing the same atomic run would race the
+    // rollback's read of what was applied — that takes two processes on one engine.db.
+    if (ownerStopped()) return endStopped();
     return { status: 'pending', summary: summarize(ledger, runId, 'Bulk run waiting for targets another loop holds.') };
   }
   ledger.finish(run);
   return { status: 'done', summary: summarize(ledger, runId, 'Bulk run done.') };
+
+  function ownerStopped(): boolean {
+    return deps.signal?.aborted === true && deps.ownerStopped?.() === true;
+  }
+
+  /** End the run on the owner's stop: an atomic run rolls back, any other is halted. */
+  async function endStopped(): Promise<BulkEffectOutcome> {
+    if (run!.atomic) {
+      const rolled = await rollBack(ledger, writer!, run!, now, 'stopped');
+      return { ...rolled, status: 'stopped' };
+    }
+    ledger.halt(runId, BULK_HALT_REASONS.stoppedByOwner);
+    return { status: 'stopped', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.stoppedByOwner}.`) };
+  }
 
   /** One claimed target: what to record for it. */
   async function writeOne(w: TargetWriter, t: ApplyTarget):
@@ -262,7 +303,10 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
  * first, each only while it still holds what the run wrote, and end the run `aborted`.
  * Local only — an external target has no transaction to lean on (PRD §3.4).
  */
-async function rollBack(ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number): Promise<BulkEffectOutcome> {
+async function rollBack(
+  ledger: BulkLedger, writer: TargetWriter, run: BulkRunForApply, now: () => number,
+  cause: 'failed' | 'stopped' = 'failed',
+): Promise<BulkEffectOutcome> {
   let complete = true;
   for (const t of ledger.listAppliedDesc(run.id)) {
     try {
@@ -275,12 +319,16 @@ async function rollBack(ledger: BulkLedger, writer: TargetWriter, run: BulkRunFo
       complete = false;
     }
   }
-  ledger.setPhase(run.id, ['writing'], 'aborted',
-    complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
-  return {
-    status: 'aborted',
-    summary: summarize(ledger, run.id, complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.'),
-  };
+  // The reason names the cause: a stopped run that read "could not be written" would tell
+  // the owner a target failed when none did.
+  const reason = cause === 'stopped'
+    ? (complete ? BULK_HALT_REASONS.atomicStoppedRolledBack : BULK_HALT_REASONS.atomicStoppedRollbackIncomplete)
+    : (complete ? BULK_HALT_REASONS.atomicRolledBack : BULK_HALT_REASONS.atomicRollbackIncomplete);
+  ledger.setPhase(run.id, ['writing'], 'aborted', reason);
+  const lead = cause === 'stopped'
+    ? (complete ? 'Atomic bulk run stopped and rolled back.' : 'Atomic bulk run stopped; the rollback did not complete.')
+    : (complete ? 'Atomic bulk run aborted and rolled back.' : 'Atomic bulk run aborted; the rollback did not complete.');
+  return { status: 'aborted', summary: summarize(ledger, run.id, lead) };
 }
 
 // ── Target systems ────────────────────────────────────────────────────────────

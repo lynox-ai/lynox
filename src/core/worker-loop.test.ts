@@ -180,6 +180,10 @@ function makeNotificationRouter(hasChannels = true): NotificationRouter {
  */
 const FIXED_DAY = '2026-06-15';
 
+/** What the dispatch hands `executePipeline` besides the task: no starter, and a stop that
+ *  nobody gives — for the tests that drive the handler directly. */
+const NO_STOP = (): [undefined, AbortSignal] => [undefined, new AbortController().signal];
+
 describe('WorkerLoop', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1699,8 +1703,8 @@ describe('WorkerLoop', () => {
     _resetPipelineStore();
 
     await expect(
-      (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
-        .executePipeline(task),
+      (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+        .executePipeline(task, ...NO_STOP()),
     ).resolves.toBeUndefined();
 
     expect(tm.recordTaskRun).toHaveBeenCalledWith(
@@ -1791,8 +1795,8 @@ describe('WorkerLoop', () => {
     _resetPipelineStore();
 
     await expect(
-      (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
-        .executePipeline(task),
+      (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+        .executePipeline(task, ...NO_STOP()),
     ).rejects.toThrow(/not a saved workflow/i);
   });
 
@@ -1838,7 +1842,7 @@ describe('WorkerLoop', () => {
       id: 'seeded-task', pipeline_id: 'saved-seeded', effect: 'run_workflow', schedule_cron: '0 9 1 * *',
       ...(stored !== undefined ? { created_untrusted: stored } : {}),
     });
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> }).executePipeline(task, ...NO_STOP());
     const runOpts = mockRunManifest.mock.calls[0]?.[2] as { runTaint?: { seeded: string } } | undefined;
     expect(runOpts?.runTaint?.seeded).toBe(seeded);
   });
@@ -1911,8 +1915,8 @@ describe('WorkerLoop', () => {
       schedule_cron: '0 9 1 * *',
     });
 
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
-      .executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP());
 
     // 1. The pipeline executed — success was recorded.
     expect(taskManager.recordTaskRun).toHaveBeenCalledWith(
@@ -2000,11 +2004,11 @@ describe('WorkerLoop', () => {
       schedule_cron: '* * * * *',
     });
 
-    const fire = (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline.bind(loop);
+    const fire = (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> }).executePipeline.bind(loop);
 
-    await fire(task);
-    await fire(task);
-    await fire(task);
+    await fire(task, ...NO_STOP());
+    await fire(task, ...NO_STOP());
+    await fire(task, ...NO_STOP());
 
     // Three ticks -> three successful records -> three runManifest calls.
     expect(mockRunManifest).toHaveBeenCalledTimes(3);
@@ -2069,8 +2073,8 @@ describe('WorkerLoop', () => {
       schedule_cron: '0 9 * * *',
     });
 
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
-      .executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP());
 
     // Orchestrator succeeded the call but the run ended 'failed' →
     // worker-loop records the task as failed (not 'success') and the
@@ -2112,7 +2116,7 @@ describe('WorkerLoop', () => {
     _resetPipelineStore();
     storePipeline(template['id'] as string, JSON.parse(templateJson) as PlannedPipeline);
     const task = makeTask({ pipeline_id: template['id'] as string, effect: 'run_workflow', ...taskOverrides });
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> }).executePipeline(task, ...NO_STOP());
     return taskManager;
   }
 
@@ -2187,7 +2191,7 @@ describe('WorkerLoop', () => {
     storePipeline('b2-wf', JSON.parse(templateJson) as PlannedPipeline);
     const task = makeTask({ id: 't-failrun', pipeline_id: 'b2-wf', effect: 'run_workflow' });
 
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> }).executePipeline(task, ...NO_STOP());
 
     // The failed run opens an escalation thread keyed by the task, with the run context.
     expect(escalateSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -2345,8 +2349,8 @@ describe('WorkerLoop', () => {
     const loop = new WorkerLoop(engine, router, 60_000);
 
     await expect(
-      (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> })
-        .executePipeline(task),
+      (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+        .executePipeline(task, ...NO_STOP()),
     ).rejects.toThrow(/only runs 'autonomous' pipelines/);
   });
 

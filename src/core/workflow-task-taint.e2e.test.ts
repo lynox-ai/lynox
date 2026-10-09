@@ -136,7 +136,7 @@ describe('a workflow task carries its creator\'s untrusted-content state into th
       escalateToUser: () => null,
     } as unknown as Engine;
     const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as never, 60_000);
-    await (loop as unknown as { executePipeline: (t: TriggerRecord) => Promise<void> }).executePipeline(task);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, starter: undefined, ownerStop: AbortSignal) => Promise<void> }).executePipeline(task, undefined, new AbortController().signal);
   }
 
   it('a step\'s durable write is marked untrusted when the creating session had read untrusted content', async () => {

@@ -1231,6 +1231,19 @@ describe('runSavedWorkflow', () => {
     });
   });
 
+  it('the stop seam: hands the owner\'s stop signal and the abort scope through, by identity', async () => {
+    // Deleting either line is a silent fail-open: the worker reports the run stoppable,
+    // and the run never reads the stop it was handed.
+    const id = seedSavedWorkflow();
+    mockRunManifest.mockResolvedValue(makeRunState());
+    const stop = new AbortController();
+    const abortScope = { members: new Set<{ abort: () => void }>() };
+    await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { stopSignal: stop.signal, abortScope });
+    const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(ctx['stopSignal']).toBe(stop.signal);
+    expect(ctx['abortScope']).toBe(abortScope);
+  });
+
   it('does not consume the template — a saved workflow stays re-runnable', async () => {
     const id = seedSavedWorkflow();
     mockRunManifest.mockResolvedValue(makeRunState());
@@ -1671,6 +1684,9 @@ const RUN_CTX_KEYS = [
   'isAcceptedParam',
   // The run's principal: a mandate's steps run under its lock (PRD D1, §3.13 E5).
   'principal',
+  // The owner's stop of a scheduled workflow; dropped, the worker reports a stop the run
+  // never reads (the value witness is the stop-seam test above).
+  'stopSignal',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
