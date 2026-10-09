@@ -819,6 +819,11 @@ export class OAuthGmailProvider implements MailProvider {
     this.gmailIdToUid.clear();
   }
 
+  /** The live profile address `send` puts in From — the same memoised value. */
+  fromAddress(): Promise<string> {
+    return this.resolveFromAddress();
+  }
+
   // ── Internals ────────────────────────────────────────────────────────────
 
   /**

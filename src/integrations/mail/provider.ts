@@ -238,6 +238,14 @@ export interface MailProvider {
   /** The account's mail address, so a tool call can name the account by it. */
   readonly address: string;
 
+  /**
+   * The address `send` will put in From, read from the same source `send` reads.
+   * Only a provider whose sending address can differ from {@link address} implements
+   * it (Gmail sends as the live profile of the connected Google account); the others
+   * send from {@link address}.
+   */
+  fromAddress?(): Promise<string>;
+
   /** Auth/transport flavor of this provider. */
   readonly authType: MailAuthType;
 

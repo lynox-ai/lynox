@@ -397,6 +397,21 @@ describe('OAuthGmailProvider — send', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('fromAddress is the live profile, the same value send puts in From — not the configured address', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'relinked@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    expect(provider.address, 'the configured address').toBe('user@example.org');
+    expect(await provider.fromAddress()).toBe('relinked@example.org');
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 'b' });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const raw = Buffer.from((JSON.parse((sendCall[1] as { body: string }).body) as { raw: string }).raw, 'base64').toString('utf-8');
+    expect(raw).toContain('<relinked@example.org>');
+  });
+
   it('posts a base64url-encoded RFC2822 message and returns the Gmail id', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
       if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));

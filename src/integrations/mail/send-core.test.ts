@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { checkSendAccount, sendMail, parseAddressList, buildSendPreview, previewAddressList, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
+import { checkSendAccount, sendMail, parseAddressList, buildSendPreview, previewAddressList, resolveSendingAddress, MASS_SEND_THRESHOLD, type SendCoreBeforeSendCtx, type SendCoreInput } from './send-core.js';
 import { singleLine } from '../../core/prompt-value.js';
 import type { MailAddress, MailAccountConfig, MailProvider, MailSendResult } from './provider.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
@@ -309,21 +309,65 @@ describe('sendMail — provider errors', () => {
   });
 });
 
+describe('resolveSendingAddress', () => {
+  it('reads the provider\'s own From source when it has one, else the configured address', async () => {
+    const live = { accountId: 'g', address: 'old@example.org', fromAddress: async () => 'new@example.org' } as unknown as MailProvider;
+    expect(await resolveSendingAddress(live)).toBe('new@example.org');
+    expect(await resolveSendingAddress({ accountId: 'i', address: 'cfg@example.org' } as MailProvider)).toBe('cfg@example.org');
+  });
+
+  it('sendMail hands the confirmation the address the mail goes out from', async () => {
+    const provider = Object.assign(fakeProvider(), { address: 'old@example.org', fromAddress: vi.fn(async () => 'new@example.org') });
+    let seen: SendCoreBeforeSendCtx | undefined;
+    await sendMail(fakeRegistry(provider), { to: [RECIPIENT], subject: 's', body: 'b' }, { beforeSend: async (c) => { seen = c; return false; } });
+    expect(seen?.sendingAddress).toBe('new@example.org');
+  });
+
+  it('sendMail stops before the confirmation and the send when the sending address cannot be read', async () => {
+    const provider = Object.assign(fakeProvider(), { address: 'old@example.org', fromAddress: vi.fn(async () => { throw new Error('profile 503'); }) });
+    const beforeSend = vi.fn(async () => true);
+    const result = await sendMail(fakeRegistry(provider), { to: [RECIPIENT], subject: 's', body: 'b' }, { beforeSend });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.status).toBe('provider_error');
+    expect(beforeSend).not.toHaveBeenCalled();
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+});
+
 describe('buildSendPreview', () => {
-  it('shows the sending address next to the account id, once when they are the same', () => {
+  it('shows the sending address first and the account id after it, once when they are the same', () => {
     const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1 };
-    const single = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: { accountId: 'office', address: 'office@example.ch' } as MailProvider }));
-    expect(single).toContain('**From:** office (sends as office@example.ch)');
-    const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: { accountId: 'office', address: 'office@example.ch' } as MailProvider }));
-    expect(mass).toContain('**Account:** office (sends as office@example.ch)');
-    const same = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: { accountId: 'm@example.ch', address: 'm@example.ch' } as MailProvider }));
+    const office = { accountId: 'office', address: 'office@example.ch' } as MailProvider;
+    const single = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: office, sendingAddress: 'office@example.ch' }));
+    expect(single).toContain('**From:** office@example.ch (account office)\n');
+    const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: office, sendingAddress: 'office@example.ch' }));
+    expect(mass).toContain('**Account:** office@example.ch (account office)\n');
+    const same = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: { accountId: 'm@example.ch', address: 'm@example.ch' } as MailProvider, sendingAddress: 'm@example.ch' }));
     expect(same).toContain('**From:** m@example.ch\n');
-    expect(same).not.toContain('sends as');
+    expect(same).not.toContain('(account');
+    const unknown = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: office, sendingAddress: '' }));
+    expect(unknown, 'no address known: the id alone, no empty slot').toContain('**From:** office\n');
+  });
+
+  it('an id written to look like the address suffix cannot push the real address out of first place', () => {
+    const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1 };
+    const lookalike = { accountId: 'boss@corp.ch (sends as boss@corp.ch)', address: 'evil@x.com' } as MailProvider;
+    const single = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: lookalike, sendingAddress: 'evil@x.com' }));
+    expect(single, 'the real address leads the From line').toContain('**From:** evil@x.com (account boss@corp.ch (sends as boss@corp.ch))\n');
+    const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: lookalike, sendingAddress: 'evil@x.com' }));
+    expect(mass, 'and the Account line').toContain('**Account:** evil@x.com (account ');
+  });
+
+  it('shows the address the mail goes out from, not the configured one, when the provider says they differ', () => {
+    const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1, isMassSend: false };
+    const preview = flattenPrompt(buildSendPreview({ ...base, provider: { accountId: 'gmail-old', address: 'old@example.org' } as MailProvider, sendingAddress: 'new@example.org' }));
+    expect(preview).toContain('**From:** new@example.org (account gmail-old)\n');
+    expect(preview).not.toContain('old@example.org');
   });
 
   it('renders the single-send preview with from/to/subject', () => {
     const preview = flattenPrompt(buildSendPreview({
-      provider: { accountId: 'acct-1' } as MailProvider,
+      provider: { accountId: 'acct-1' } as MailProvider, sendingAddress: '',
       accountConfig: null,
       to: [RECIPIENT],
       cc: [],
@@ -347,7 +391,7 @@ describe('buildSendPreview', () => {
   // own labelled line; single-send now matches.
   it('does not leak the persona into the From label (own Persona line instead)', () => {
     const preview = flattenPrompt(buildSendPreview({
-      provider: { accountId: 'gmail-x' } as MailProvider,
+      provider: { accountId: 'gmail-x' } as MailProvider, sendingAddress: '',
       accountConfig: {
         personaPrompt: "Casual, warm, first-person. Sign with the user's first name only.",
         type: 'gmail-oauth',
@@ -367,7 +411,7 @@ describe('buildSendPreview', () => {
 
   it('renders the mass-send warning above the threshold', () => {
     const preview = flattenPrompt(buildSendPreview({
-      provider: { accountId: 'acct-1' } as MailProvider,
+      provider: { accountId: 'acct-1' } as MailProvider, sendingAddress: '',
       accountConfig: null,
       to: Array.from({ length: 6 }, (_, i) => ({ address: `r${String(i)}@x.com` })),
       cc: [],
@@ -383,7 +427,7 @@ describe('buildSendPreview', () => {
 
   function previewFor(body: string, isMassSend = false, subject = 'Subject'): string {
     return flattenPrompt(buildSendPreview({
-      provider: { accountId: 'acct-1' } as MailProvider,
+      provider: { accountId: 'acct-1' } as MailProvider, sendingAddress: '',
       accountConfig: null,
       to: [RECIPIENT],
       cc: [],
