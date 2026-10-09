@@ -136,6 +136,14 @@ const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://
 const mockGoogleExchangeRedirectCode = vi.fn().mockResolvedValue(undefined);
 const mockGoogleRevoke = vi.fn().mockResolvedValue({ revokedAtGoogle: true });
 const mockGoogleDisconnect = vi.fn();
+const mockGoogleHasUserScope = vi.fn().mockReturnValue(true);
+const mockGoogleGetAccessToken = vi.fn().mockResolvedValue('access-token');
+const DRIVE_DELETED = { status: 'deleted', deleted: 3, foldersKept: 2, problems: [] };
+const mockDeleteUploadedBackups = vi.fn().mockResolvedValue(DRIVE_DELETED);
+vi.mock('../core/backup-upload-gdrive.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/backup-upload-gdrive.js')>()),
+  deleteUploadedBackups: (...a: unknown[]) => mockDeleteUploadedBackups(...a),
+}));
 const mockGoogleAuth = {
   isAuthenticated: mockGoogleIsAuthenticated,
   startRedirectAuth: mockGoogleStartRedirectAuth,
@@ -146,6 +154,9 @@ const mockGoogleAuth = {
   getTokenExpiry: vi.fn().mockReturnValue(null),
   revoke: mockGoogleRevoke,
   disconnect: mockGoogleDisconnect,
+  hasUserScope: mockGoogleHasUserScope,
+  getAccessToken: mockGoogleGetAccessToken,
+  hostPolicy: undefined,
 };
 
 /**
@@ -10249,6 +10260,7 @@ describe('LynoxHTTPApi', () => {
     it('clears the local token and issues no revoke request to Google', async () => {
       mockGoogleRevoke.mockClear();
       mockGoogleDisconnect.mockClear();
+      mockDeleteUploadedBackups.mockClear();
 
       const res = await jsonFetch('/api/google/disconnect', { method: 'POST' });
       expect(res.status).toBe(200);
@@ -10257,27 +10269,105 @@ describe('LynoxHTTPApi', () => {
       // on the old trigger (`/revoke`) goes green against an implementation
       // that revokes on the switch-back path anyway.
       expect(mockGoogleRevoke).not.toHaveBeenCalled();
+      // Nor are the Drive backups touched: this is also the broker switch-back,
+      // and a tenant changing brokers keeps its backups.
+      expect(mockDeleteUploadedBackups).not.toHaveBeenCalled();
     });
 
     it('/api/google/revoke still revokes — the control that keeps the line above meaningful', async () => {
       mockGoogleRevoke.mockClear();
       mockGoogleDisconnect.mockClear();
+      mockDeleteUploadedBackups.mockClear();
       // Google did not confirm it (e.g. the network policy refused the call): the
       // route still answers ok — the local grant is gone — and says so in the
-      // field the page reads. One request, so this file's shared rate window
-      // does not grow.
+      // field the page reads.
+      //
+      // No body: a caller written before the route deleted anything. It gets the
+      // revoke and nothing else — the Drive deletion is asked for, never implied.
       mockGoogleRevoke.mockResolvedValueOnce({ revokedAtGoogle: false });
       const res = await jsonFetch('/api/google/revoke', { method: 'POST' });
       expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
       expect(mockGoogleDisconnect).not.toHaveBeenCalled();
-      expect(await res.json()).toEqual({ ok: true, revoked_at_google: false });
+      expect(mockDeleteUploadedBackups).not.toHaveBeenCalled();
+      expect(await res.json()).toEqual({
+        ok: true, revoked_at_google: false,
+        drive_backups: { status: 'skipped', deleted: 0, folders_kept: 0, problems: [] },
+      });
 
-      // And confirmed, so a route that always reports `false` fails too.
-      const confirmed = await jsonFetch('/api/google/revoke', { method: 'POST' });
-      expect(await confirmed.json()).toEqual({ ok: true, revoked_at_google: true });
-      // That second request is paid back: this file shares ONE per-IP window
+      // The same body WITHOUT a content type: the parser reads it as JSON, but it
+      // is a request a foreign page can send without a CORS preflight. Revoke only.
+      const typeless = await fetch(`${baseUrl}/api/google/revoke`, {
+        method: 'POST', headers: authHeaders(),
+        body: new Blob([JSON.stringify({ delete_drive_backups: true })]),
+      });
+      expect((await typeless.json() as { drive_backups: { status: string } }).drive_backups.status).toBe('skipped');
+      expect(mockDeleteUploadedBackups).not.toHaveBeenCalled();
+
+      // Confirmed, and asked for: so a route that always reports `false`, or
+      // that never deletes, fails too. And the upload hold outlasts the revoke
+      // on the path where the deletion SUCCEEDS — the test below throws inside
+      // the deletion, where a release placed after it is never reached.
+      const order: string[] = [];
+      const engineRef = (api as unknown as { engine: { getBackupManager: ReturnType<typeof vi.fn> } }).engine;
+      engineRef.getBackupManager.mockReturnValueOnce({
+        pauseUploads: () => { order.push('pause'); return () => { order.push('release'); }; },
+        uploading: false,
+      });
+      mockGoogleRevoke.mockImplementationOnce(async () => { order.push('revoke'); return { revokedAtGoogle: true }; });
+      const confirmed = await jsonFetch('/api/google/revoke', {
+        method: 'POST', body: JSON.stringify({ delete_drive_backups: true }),
+      });
+      expect(await confirmed.json()).toEqual({
+        ok: true, revoked_at_google: true,
+        drive_backups: { status: 'deleted', deleted: 3, folders_kept: 2, problems: [] },
+      });
+      expect(mockDeleteUploadedBackups).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['pause', 'revoke', 'release']);
+      // The two extra requests are paid back: this file shares ONE per-IP window
       // (every request comes from 127.0.0.1), and a request added here can tip a
       // test thousands of lines away into a 429 that names no cause.
+      const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      for (const entry of window.values()) entry.count = Math.max(0, entry.count - 2);
+    });
+
+    it('/api/google/revoke deletes the Drive backups first, with uploads held and the user\'s grant, and survives a failure', async () => {
+      const order: string[] = [];
+      mockGoogleRevoke.mockClear();
+      mockGoogleHasUserScope.mockClear();
+      // Uploads are held from before the deletion until after the revoke: an
+      // upload in between would leave a copy the deletion never listed.
+      const engineRef = (api as unknown as { engine: { getBackupManager: ReturnType<typeof vi.fn> } }).engine;
+      engineRef.getBackupManager.mockReturnValueOnce({
+        pauseUploads: () => { order.push('pause'); return () => { order.push('release'); }; },
+        uploading: true,
+      });
+      // The deletion needs the token the revoke gives up, so it must run first.
+      mockGoogleRevoke.mockImplementationOnce(async () => { order.push('revoke'); return { revokedAtGoogle: true }; });
+      mockDeleteUploadedBackups.mockImplementationOnce(async (
+        shim: { hasScope(s: string): boolean; getAccessToken(): Promise<string> },
+        isUploading: () => boolean,
+      ) => {
+        order.push('drive');
+        // The shim asks for a USER scope: a service account's Drive is its own,
+        // not where this user's backups were uploaded.
+        shim.hasScope('https://www.googleapis.com/auth/drive.file');
+        expect(await shim.getAccessToken()).toBe('access-token');
+        // An upload already under way is what the hold cannot stop; the
+        // deletion must be able to see it.
+        expect(isUploading()).toBe(true);
+        throw new Error('module exploded');
+      });
+      const res = await jsonFetch('/api/google/revoke', {
+        method: 'POST', body: JSON.stringify({ delete_drive_backups: true }),
+      });
+      expect(order).toEqual(['pause', 'drive', 'revoke', 'release']);
+      expect(mockGoogleHasUserScope).toHaveBeenCalledWith('https://www.googleapis.com/auth/drive.file');
+      // A throw is reported as degraded with its reason, never as nothing to delete,
+      // and the disconnect the user asked for still happens.
+      expect(await res.json()).toEqual({
+        ok: true, revoked_at_google: true,
+        drive_backups: { status: 'degraded', deleted: 0, folders_kept: 0, problems: ['Drive backups were not checked: module exploded'] },
+      });
       const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
       for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);
     });

@@ -243,7 +243,7 @@ GET /api/crm/stats                # CRM statistics
 
 GET    /api/google/status         # Google auth status
 POST   /api/google/auth           # Start device flow
-POST   /api/google/revoke         # Revoke auth
+POST   /api/google/revoke         # Revoke auth; {"delete_drive_backups": true} deletes lynox's Drive backups first
 POST   /api/google/reload         # Reload Google integration
 GET    /api/google/oauth-url      # Get OAuth start URL (managed hosting)
 POST   /api/google/claim-managed  # Claim tokens from control plane (managed hosting)

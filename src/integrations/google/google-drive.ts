@@ -350,6 +350,14 @@ async function handleRead(auth: GoogleAuth, input: DriveInput): Promise<string> 
 
 async function handleUpload(auth: GoogleAuth, input: DriveInput): Promise<string> {
   if (!input.content) return 'Error: "content" is required for action "upload".';
+  // `upload` writes files. A folder made through it would be a folder lynox created, and
+  // disconnecting Google deletes the user's lynox-created files in every lynox-created
+  // folder with a backup-directory name under `lynox-backups` (`deleteUploadedBackups`) —
+  // so documents moved into such a folder made here would be deleted on the next disconnect. The confirm shows
+  // only the name.
+  if (input.mime_type === 'application/vnd.google-apps.folder') {
+    return 'Error: "upload" cannot create folders.';
+  }
 
   const isBase64 = input.content_encoding === 'base64';
   const metadata: Record<string, unknown> = {

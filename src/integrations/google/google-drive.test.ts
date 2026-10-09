@@ -157,6 +157,17 @@ describe('google_drive tool', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
+    it('refuses to create a folder — disconnecting Google empties lynox-made backup folders', async () => {
+      const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
+      const tool = createDriveTool(() => auth);
+      const result = await tool.handler({
+        action: 'upload', file_name: 'lynox-backups', content: 'x',
+        mime_type: 'application/vnd.google-apps.folder',
+      }, createMockAgent('Yes'));
+      expect(result).toBe('Error: "upload" cannot create folders.');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('uploads file with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
       const tool = createDriveTool(() => auth);

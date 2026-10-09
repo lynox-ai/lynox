@@ -111,6 +111,29 @@ export class BackupManager {
    */
   get busy(): boolean { return this._running > 0; }
 
+  private _uploading = 0;
+  private _uploadsPaused = 0;
+
+  /** Whether a Drive upload is in flight right now — not a backup that might reach one later. */
+  get uploading(): boolean { return this._uploading > 0; }
+
+  /**
+   * Hold back Drive uploads until the returned release is called. Disconnecting Google
+   * deletes the uploaded backups and then revokes the token; a backup that uploaded in
+   * between — after its folder was listed, before the token was gone — would leave a copy
+   * the deletion never saw. A backup that reaches the upload step while this is held keeps
+   * its local copy and skips the upload. Counted, so overlapping holds release correctly.
+   */
+  pauseUploads(): () => void {
+    this._uploadsPaused++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this._uploadsPaused--;
+    };
+  }
+
   async createBackup(): Promise<BackupResult> {
     this._running++;
     try {
@@ -284,7 +307,12 @@ export class BackupManager {
       // absolute path. `features/backup.md` says so under "What Drive can see"; it is a property
       // of the design (the remote listing parses that manifest), not an oversight.
       if (this._gdriveUploader) {
-        if (!this._uploadAllowed()) {
+        if (this._uploadsPaused > 0) {
+          process.stderr.write(
+            '[lynox:backup] Google Drive upload skipped — Google is being disconnected. '
+            + 'The local backup is intact.\n',
+          );
+        } else if (!this._uploadAllowed()) {
           // Nothing to say: not opting in is the normal state, and a line here would fire on
           // every backup of every instance that never asked for an upload.
         } else if (!manifest.encrypted) {
@@ -299,6 +327,7 @@ export class BackupManager {
           // come back as `{ success: false, error }`. Discarding it made every genuine upload
           // failure silent while the code claimed its refusals were written, which is the same
           // defect one level up.
+          this._uploading++;
           try {
             const result = await this._gdriveUploader.upload(finalDir, manifest);
             if (!result.success) {
@@ -310,6 +339,8 @@ export class BackupManager {
             // A throw is the unexpected path; the uploader reports refusals by return value.
             const msg = err instanceof Error ? err.message : String(err);
             process.stderr.write(`[lynox:backup] Google Drive upload failed — local backup is intact: ${msg}\n`);
+          } finally {
+            this._uploading--;
           }
         }
       }

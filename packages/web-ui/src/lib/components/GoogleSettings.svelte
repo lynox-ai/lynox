@@ -57,6 +57,21 @@
 	/** The destructive switch-back is parked here until the user confirms it. */
 	let switchConfirmOpen = $state(false);
 
+	/**
+	 * The disconnect is parked too: it revokes at Google, which cannot be undone,
+	 * and before that it deletes the backups lynox put in the user's Drive.
+	 */
+	let disconnectConfirmOpen = $state(false);
+	/** Whether this grant can see Drive at all — only then can there be backups to delete. */
+	const grantSeesDrive = $derived((getGoogleStatus()?.scopes ?? []).some(
+		(s) => s === 'https://www.googleapis.com/auth/drive.file' || s === 'https://www.googleapis.com/auth/drive',
+	));
+
+	async function confirmDisconnect(): Promise<void> {
+		disconnectConfirmOpen = false;
+		await revokeGoogle();
+	}
+
 	async function confirmSwitchToManaged(): Promise<void> {
 		switchConfirmOpen = false;
 		if (await switchToManagedGoogle()) await startManagedGoogleOAuth();
@@ -336,7 +351,7 @@
 				{/if}
 				<div class="flex flex-wrap gap-2">
 					<button
-						onclick={revokeGoogle}
+						onclick={() => { disconnectConfirmOpen = true; }}
 						disabled={isRevoking()}
 						class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/15 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 disabled:opacity-50"
 					>
@@ -351,6 +366,25 @@
 						</button>
 					{/if}
 				</div>
+				{#if disconnectConfirmOpen}
+					<!-- Names what the click destroys: the grant at Google, and the Drive
+					     backups when this grant could have uploaded any. -->
+					<div class="rounded-[var(--radius-md)] border border-danger/20 bg-danger/10 p-5 space-y-3 text-danger">
+						<p class="text-sm font-medium">{t('integrations.google_disconnect_confirm_title')}</p>
+						<p class="text-xs">{t('integrations.google_disconnect_confirm_body')}</p>
+						{#if grantSeesDrive}
+							<p class="text-xs">{t('integrations.google_disconnect_confirm_drive')}</p>
+						{/if}
+						<div class="flex gap-2">
+							<button class="btn-primary text-sm" onclick={confirmDisconnect}>
+								{t('integrations.google_disconnect_confirm_yes')}
+							</button>
+							<button class="btn-ghost text-sm" onclick={() => { disconnectConfirmOpen = false; }}>
+								{t('settings.google.claim_confirm_no')}
+							</button>
+						</div>
+					</div>
+				{/if}
 				{#if switchConfirmOpen}
 					<!-- The confirm IS the safety mechanism, not a courtesy: the pair is
 					     deleted before anything replaces it, and neither the broker
