@@ -19,6 +19,7 @@ import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
+import { MandateEnds } from '../core/mandate-ends.js';
 import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
@@ -1008,7 +1009,71 @@ describe('LynoxHTTPApi', () => {
         const res = await fetch(`${baseUrl}/api/tasks/trg-9`, { method: 'DELETE', headers: { cookie: `lynox_session=${mandate}` } });
         expect(res.status).toBe(200);
       } finally { engineRef['getAuditLog'] = origLog; engineRef['getRunHistory'] = origHistory; engineRef['getTaskManager'] = origTm; }
-      expect(rows[0]?.principal).toEqual({ kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id });
+      expect(rows[0]?.principal).toEqual({
+        kind: 'mandate', email: MANDATE_LOGIN.email, display: MANDATE_LOGIN.display, mandateId: MANDATE_LOGIN.mandate_id,
+        mandateExp: Date.parse(MANDATE_LOGIN.mandate_expires_at) / 1000,
+      });
+    });
+
+    describe('the mandate\'s end, kept for what runs after the session (B9)', () => {
+      const MANDATE_END_S = Date.parse(MANDATE_LOGIN.mandate_expires_at) / 1000;
+      let dir = '';
+      let edb: EngineDb;
+      let ends: MandateEnds;
+      let orig: unknown;
+      const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+      const approve = (token: string): Promise<Response> => fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/approve`, {
+        method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
+      });
+      beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), 'lynox-mandate-end-'));
+        edb = new EngineDb(join(dir, 'engine.db'));
+        ends = new MandateEnds(edb.getDb());
+        orig = engineRef()['getMandateEnds'];
+        engineRef()['getMandateEnds'] = () => ends;
+      });
+      afterEach(() => {
+        engineRef()['getMandateEnds'] = orig;
+        edb.close();
+        rmSync(dir, { recursive: true, force: true });
+      });
+
+      it('keeps the end of the mandate, not of the session, from the Web UI\'s own cookie', async () => {
+        const res = await approve(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+        expect(res.status).toBe(403);
+        expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBe(MANDATE_END_S);
+      });
+
+      it('keeps nothing from a cookie minted before the end was signed, and still lets it in', async () => {
+        const nowS = Math.floor(Date.now() / 1000);
+        const res = await approve(mintPrincipalToken(TEST_SECRET, nowS, mandatePrincipal(nowS + 600)));
+        expect(res.status).toBe(403);
+        expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBeUndefined();
+      });
+
+      it('keeps the end from the latest login: a request of an older session does not move it back', async () => {
+        const nowS = Math.floor(Date.now() / 1000);
+        const signedAt = (iat: number, mandateExp: number): string =>
+          mintPrincipalToken(TEST_SECRET, iat, { ...mandatePrincipal(nowS + 600), mandate_exp: mandateExp });
+        expect((await approve(signedAt(nowS - 100, nowS + 5_000))).status).toBe(403);
+        expect((await approve(signedAt(nowS - 200, nowS + 9_000))).status).toBe(403);
+        expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBe(nowS + 5_000);
+        expect(edb.getDb().prepare('SELECT issued_at FROM mandate_ends').get()).toEqual({ issued_at: nowS - 100 });
+      });
+
+      it('refuses a cookie whose mandate ends before its session does', async () => {
+        const nowS = Math.floor(Date.now() / 1000);
+        const res = await approve(mintPrincipalToken(TEST_SECRET, nowS, { ...mandatePrincipal(nowS + 600), mandate_exp: nowS + 599 }));
+        expect(res.status).toBe(401);
+        expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBeUndefined();
+      });
+
+      it('does not refuse the request when the end cannot be written', async () => {
+        engineRef()['getMandateEnds'] = () => ({ record: (): void => { throw new Error('disk full'); } });
+        const res = await approve(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+      });
     });
 
     it('gives a mandate session the user scope even without an admin secret (D6)', async () => {
