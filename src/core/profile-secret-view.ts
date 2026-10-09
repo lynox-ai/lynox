@@ -107,8 +107,9 @@ export function mandateMayConnect(
  * engine. Asked by the store on every `resolve`, whoever calls it: the owner's turn, a run the
  * mandate stamped, the bulk path. Keyed by the vault name, because a `secret:` reference reaches
  * a token without going through its profile. Without a record of mandate ends (no engine.db)
- * no mandate counts as live. What lifts it is a new consent: the owner connecting the account
- * again records the owner's. Adopting the profile alone keeps the mandate's grant.
+ * no mandate counts as live. What lifts it is the owner's consent: connecting the account again,
+ * or adopting the connection (`api_setup` action `adopt_connection`, which asks the person).
+ * Saving over the profile alone keeps the mandate's grant.
  */
 export function connectionTokenAllowed(
   apiStore: Pick<ApiStore, 'getAll'> | null,
@@ -116,12 +117,18 @@ export function connectionTokenAllowed(
   name: string,
 ): boolean {
   if (apiStore === null) return true;
-  for (const p of apiStore.getAll()) {
-    if (!isMandateConnection(p) || !grantTokenNames(p).has(name)) continue;
-    const mandateId = p.oauth_grant?.connected_mandate_id;
-    if (mandateId === undefined || ends === null || !ends.isLive(mandateId)) return false;
-  }
-  return true;
+  return !apiStore.getAll().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
+}
+
+/**
+ * Whether `profile` holds a connection whose tokens {@link connectionTokenAllowed} refuses: a
+ * mandate consented to it, and that mandate is not live. Such a connection waits for the owner,
+ * who can adopt it or connect again; until then it is of no use to anyone.
+ */
+export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'isLive'> | null): boolean {
+  if (!isMandateConnection(profile)) return false;
+  const mandateId = profile.oauth_grant?.connected_mandate_id;
+  return mandateId === undefined || ends === null || !ends.isLive(mandateId);
 }
 
 /** Whether the view below hides `name` from `profile`: always false for a profile the owner wrote. */

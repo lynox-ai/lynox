@@ -3202,7 +3202,7 @@ describe('api_setup tool', () => {
       const vaultMock = makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'id', SHOPIFY_CLIENT_SECRET: 'secret', SHOPIFY_REFRESH: 'r' }) as { set: (n: string, v: string) => void };
       const set = vaultMock.set;
       vaultMock.set = (n, v) => { written.push(n); set(n, v); };
-      const ungated = { get: (id: string) => (id === profile.id ? profile : undefined) } as unknown as ApiStore;
+      const ungated = { get: (id: string) => (id === profile.id ? profile : undefined), getAll: () => [profile] } as unknown as ApiStore;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'a', refresh_token: 'r2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } }),
       );

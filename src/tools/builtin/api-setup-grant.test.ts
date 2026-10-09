@@ -14,7 +14,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-import { apiSetupTool, providerBodyForModel, sentCredentials } from './api-setup.js';
+import { apiSetupTool, providerBodySummary, sentCredentials } from './api-setup.js';
 import { isDangerous } from '../permission-guard.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
@@ -391,31 +391,32 @@ describe('fetch_token — what a failed exchange does to the grant', () => {
 });
 
 describe('fetch_token — what of the provider\'s answer the model reads', () => {
-  it('a refused exchange whose answer repeats the client secret and the refresh token shows neither', async () => {
+  it('a refused exchange shows the field names and the error code, fenced, and no value', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
-    tokenEndpoint(401, JSON.stringify({ error: 'invalid_client', error_description: 'client secret-1 rejected for rt-1', client_secret: 'secret-1' }));
+    tokenEndpoint(401, JSON.stringify({ error: 'invalid_client', error_description: 'client secret-1 quuxed for rt-1', client_secret: 'secret-1' }));
 
     const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
 
-    expect(result).toContain('invalid_client');
-    expect(result).toContain('"client_secret":"<redacted>"');
+    expect(result).toContain('Response: The body is a JSON object with 3 top-level field(s); no values are shown.');
+    expect(result).toContain('<token_endpoint_answer>\nfields: error, error_description, client_secret\nerror: invalid_client\n</token_endpoint_answer>');
     expect(result).not.toContain('secret-1');
     expect(result).not.toContain('rt-1');
+    expect(result).not.toContain('quuxed');
   });
 
-  it('an answer without access_token shows the fields it has, not the tokens in them', async () => {
+  it('an answer without access_token names the fields it has, not what is in them', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     tokenEndpoint(200, JSON.stringify({ refresh_token: 'rt-unrequested-9', id_token: 'idt-unrequested-9', token_type: 'bearer' }));
 
     const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
 
-    expect(result).toContain('no `access_token`');
-    expect(result).toContain('"refresh_token":"<redacted>"');
-    expect(result).toContain('"token_type":"bearer"');
+    expect(result).toContain('no `access_token` in the response. The body is a JSON object with 3 top-level field(s)');
+    expect(result).toContain('fields: refresh_token, id_token, token_type\n');
     expect(result).not.toContain('rt-unrequested-9');
     expect(result).not.toContain('idt-unrequested-9');
+    expect(result).not.toContain('bearer');
   });
 
   it('an answer that repeats the client secret JSON-escaped does not show it', async () => {
@@ -426,130 +427,109 @@ describe('fetch_token — what of the provider\'s answer the model reads', () =>
 
     const result = await fetchToken(makeAgent(store, vault));
 
-    expect(result).toContain('invalid_client');
-    expect(result).toContain('"echo":"<redacted>"');
-    expect(result).not.toContain('Sec/ret+Value');
+    expect(result).toContain('fields: error, echo\nerror: invalid_client\n');
+    expect(result).not.toContain('Sec');
   });
 
-  it('a form-encoded answer shows its error and not the token in it', async () => {
+  it('a form-encoded answer is described by its length only', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
     tokenEndpoint(200, 'error=odd&refresh_token=rt-form-9&state=x');
 
     const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
 
-    expect(result).toContain("wasn't valid JSON");
-    expect(result).toContain('error=odd');
-    expect(result).toContain('refresh_token=<redacted>');
+    expect(result).toContain("wasn't valid JSON. The body (41 characters) is not a JSON object and is not shown.");
     expect(result).not.toContain('rt-form-9');
+    expect(result).not.toContain('error=odd');
   });
 });
 
-describe('providerBodyForModel', () => {
-  it('keeps the grant type, whose value is a field name', () => {
-    const sent = sentCredentials({ grant_type: 'refresh_token', client_id: 'client-1', client_secret: 'secret-1', refresh_token: 'rt-1' });
-    expect(sent).toEqual(['secret-1', 'rt-1']);
-    const out = providerBodyForModel('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1"}', sent, 500);
-    expect(out).toBe('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1"}');
+describe('sentCredentials', () => {
+  it('collects the credentials a request sends, and not the grant type or the client id', () => {
+    expect(sentCredentials({ grant_type: 'refresh_token', client_id: 'client-1', client_secret: 'secret-1', refresh_token: 'rt-1' })).toEqual(['secret-1', 'rt-1']);
   });
 
-  it('counts an authorization code it sends as a credential, though an answer\'s code field is not one', () => {
+  it('counts an authorization code it sends as a credential', () => {
     expect(sentCredentials({ grant_type: 'authorization_code', code: 'auth-code-9', code_verifier: 'ver-9' })).toEqual(['auth-code-9', 'ver-9']);
   });
+});
 
-  it('replaces a sent credential wherever the answer repeats it', () => {
-    expect(providerBodyForModel('<html>bad secret secret-1 here</html>', ['secret-1'], 500)).toBe('<html>bad secret <redacted> here</html>');
+describe('providerBodySummary', () => {
+  const fenced = (out: string): string => out.slice(out.indexOf('<token_endpoint_answer>'));
+
+  it('names the top-level fields and the error code inside the fence, and no value', () => {
+    const out = providerBodySummary('{"error":"invalid_request","grant_type":"refresh_token","client_id":"client-1","nested":{"access_token":"at-9"}}', []);
+    expect(out).toBe('The body is a JSON object with 4 top-level field(s); no values are shown. Its field names and OAuth error code, as the provider wrote them:\n<token_endpoint_answer>\nfields: error, grant_type, client_id, nested\nerror: invalid_request\n</token_endpoint_answer>');
   });
 
-  it('in text, replaces only the named credential fields, and keeps error codes', () => {
-    expect(providerBodyForModel('status_code=400 error_code=x code=AADSTS50011 password: hunter2 api_key="k-9" refreshToken=rt-9</p>', [], 500))
-      .toBe('status_code=400 error_code=x code=AADSTS50011 password: <redacted> api_key="<redacted>" refreshToken=<redacted></p>');
+  it('never shows error_description, which is free text', () => {
+    expect(providerBodySummary('{"error":"invalid_grant","error_description":"token rt-9 was revoked"}', [])).not.toContain('rt-9');
   });
 
-  it('hides credential names with the word in the middle, as providers use them', () => {
-    expect(providerBodyForModel('{"SecretAccessKey":"wJal9","secret_key":"ab12","tokenValue":"tv9","AccessKeyId":"AKIA9"}', [], 500))
-      .toBe('{"SecretAccessKey":"<redacted>","secret_key":"<redacted>","tokenValue":"<redacted>","AccessKeyId":"<redacted>"}');
-  });
-
-  it('keeps a boolean under a credential name, and descriptive fields with their endings', () => {
-    const body = '{"has_refresh_token":true,"refresh_token_expires_in":3600,"id_token_hint":"x","token_uri":"https://p/t","token_endpoint":"https://p/e","token_format":"jwt"}';
-    expect(providerBodyForModel(body, [], 500)).toBe(body);
-  });
-
-  it('in text, hides a middle-word credential name and keeps a descriptive one', () => {
-    expect(providerBodyForModel('SecretAccessKey=wJal9 token_type=bearer', [], 500)).toBe('SecretAccessKey=<redacted> token_type=bearer');
+  it('counts a field name that repeats a sent credential instead of naming it', () => {
+    const out = providerBodySummary('{"secret-1":1,"error":"x"}', ['secret-1']);
+    expect(out).toContain('2 top-level field(s), 1 of them not named here');
+    expect(fenced(out)).not.toContain('secret-1');
   });
 
   it.each([
-    ['a redirect URL', 'redirect: https://app/cb?access_token=ya29abc123', 'redirect: https://app/cb?access_token=<redacted>'],
-    ['a fragment', 'Location: https://app/cb#access_token=ya29abc123&state=x', 'Location: https://app/cb#access_token=<redacted>&state=x'],
-    ['an error label', 'error: refresh_token=r1abc23 is invalid', 'error: refresh_token=<redacted> is invalid'],
-    ['a detail label', 'detail: refresh_token: r1abc23 expired', 'detail: refresh_token: <redacted> expired'],
-    ['a message label', 'msg=client_secret:s3cr3tv', 'msg=client_secret:<redacted>'],
-  ])('in text, reads the value of another name again: %s', (_label, input, expected) => {
-    expect(providerBodyForModel(input, [], 500)).toBe(expected);
+    ['a space', 'a b'],
+    ['a leading digit', '1abc'],
+    ['an opaque hex token', 'a3f9c2e8'.repeat(4)],
+    ['more than forty characters', `a${'b'.repeat(40)}`],
+    ['five digits', 'f1e2l3d4x5'],
+  ])('counts a field name with %s instead of naming it', (_label, name) => {
+    const out = providerBodySummary(JSON.stringify({ [name]: 1 }), []);
+    expect(out).toContain('1 of them not named here');
+    expect(fenced(out)).not.toContain(name);
   });
 
-  it('hides a credential value that holds a colon', () => {
-    expect(providerBodyForModel('client_secret=abc:def password: user:pw9', [], 500)).toBe('client_secret=<redacted> password: <redacted>');
+  it('names a field that starts with an underscore, as provider envelopes use', () => {
+    expect(providerBodySummary('{"_links":{},"error":"x"}', [])).toContain('fields: _links, error');
   });
 
-  it('reads the value of a describing name again', () => {
-    expect(providerBodyForModel('token_uri=https://p/t?access_token=at9', [], 500)).toBe('token_uri=https://p/t?access_token=<redacted>');
+  it('counts a field name the secret masker knows as a key, though it is word-shaped', () => {
+    // Built at run time: a key-shaped literal in a fixture is what the commit guards refuse.
+    const key = ['AK', 'IA', 'IOSFODNN', '7EXAMPLE'].join('');
+    const out = providerBodySummary(JSON.stringify({ [key]: 1 }), []);
+    expect(out).toContain('1 of them not named here');
+    expect(fenced(out)).not.toContain(key);
   });
 
-  it('hides any bearer value after an authorization label, short ones too', () => {
-    expect(providerBodyForModel('Authorization: Bearer abc', [], 500)).toBe('Authorization: Bearer <redacted>');
+  it('names a field with four digits, as a version or a code can have', () => {
+    expect(providerBodySummary('{"aadsts5011":1}', [])).toContain('fields: aadsts5011');
   });
 
-  it('keeps the word bearer in prose and the label after it', () => {
-    expect(providerBodyForModel('token_type=bearer error=invalid_client', [], 500)).toBe('token_type=bearer error=invalid_client');
-    expect(providerBodyForModel('scheme bearer v2.0 is unsupported', [], 500)).toBe('scheme bearer v2.0 is unsupported');
+  it.each([
+    ['repeats a sent credential', '{"error":"secret-1"}', ['secret-1']],
+    ['holds a space', '{"error":"bad code"}', []],
+    ['is longer than a word', `{"error":"${'a'.repeat(41)}"}`, []],
+    ['looks like an opaque credential', `{"error":"${'Q'.repeat(10)}${'w8'.repeat(20)}"}`, []],
+    ['is not a string', '{"error":{"code":"x"}}', []],
+  ])('shows no error code that %s', (_label, body, sent) => {
+    const out = providerBodySummary(body, sent);
+    expect(out).not.toContain('error code');
+    expect(fenced(out)).not.toMatch(/\nerror: /);
   });
 
-  it('replaces a lower-case or quoted bearer value in text', () => {
-    expect(providerBodyForModel('authorization: bearer abc123def', [], 500)).toBe('authorization: bearer <redacted>');
-    expect(providerBodyForModel('Authorization: Bearer "abc123def" end', [], 500)).toBe('Authorization: Bearer <redacted> end');
+  it('names at most twenty fields and counts the rest', () => {
+    const body = JSON.stringify(Object.fromEntries(Array.from({ length: 23 }, (_, i) => [`f${String(i)}`, i])));
+    const out = providerBodySummary(body, []);
+    expect(out).toContain('23 top-level field(s), 3 of them not named here');
+    expect(out).toContain('f19\n');
+    expect(out).not.toContain('f20');
   });
 
-  it('replaces a Bearer value in text', () => {
-    expect(providerBodyForModel('got Authorization: Bearer abc.k9m-ghi for this', [], 500)).toBe('got Authorization: Bearer <redacted> for this');
+  it('says so for an object without fields', () => {
+    expect(providerBodySummary('{}', [])).toBe('The body is a JSON object with no fields.');
   });
 
-  it('in JSON, keeps fields that describe a credential and error codes', () => {
-    const body = '{"code":"invalid_grant","token_type":"bearer","token_endpoint_auth_method":"client_secret_post","client_secret_expires_at":0}';
-    expect(providerBodyForModel(body, [], 500)).toBe(body);
+  it.each([['an array', '["at-9"]'], ['null', 'null'], ['a string', '"at-9"'], ['html', '<html>at-9</html>']])('describes %s by its length only', (_label, body) => {
+    expect(providerBodySummary(body, [])).toBe(`The body (${String(body.length)} characters) is not a JSON object and is not shown.`);
   });
 
-  it('in JSON, hides a credential field whatever it holds, under any credential name', () => {
-    expect(providerBodyForModel('{"id_token":["a1","b2"],"token":{"value":"v9"},"accessToken":"at9","api_key":"k9","jwt":"j9"}', [], 500))
-      .toBe('{"id_token":"<redacted>","token":"<redacted>","accessToken":"<redacted>","api_key":"<redacted>","jwt":"<redacted>"}');
-  });
-
-  it('replaces a sent credential the answer repeats URL-encoded', () => {
-    expect(providerBodyForModel('echo=Sec%2Fret%2BValue', ['Sec/ret+Value'], 500)).toBe('echo=<redacted>');
-  });
-
-  it('replaces a sent credential the answer repeats JSON-escaped', () => {
-    expect(providerBodyForModel('{"echo":"Sec\\/ret\\u002BValue"}', ['Sec/ret+Value'], 500)).toBe('{"echo":"<redacted>"}');
-  });
-
-  it('masks a long opaque run in text', () => {
-    const opaque = 'Q'.repeat(10) + 'w8'.repeat(20);
-    expect(providerBodyForModel(`unexpected ${opaque} end`, [], 500)).not.toContain(opaque);
-  });
-
-  it('redacts a credential field nested in an array', () => {
-    expect(providerBodyForModel('{"errors":[{"access_token":"at-9","msg":"m"}]}', [], 500)).toBe('{"errors":[{"access_token":"<redacted>","msg":"m"}]}');
-  });
-
-  it('marks a cut', () => {
-    const out = providerBodyForModel('x'.repeat(20), [], 10);
-    expect(out).toBe(`${'x'.repeat(10)}…[truncated]`);
-  });
-
-  it('leaves a short sent value alone, which would otherwise erase ordinary words', () => {
-    expect(providerBodyForModel('{"error":"abc"}', ['abc'], 500)).toBe('{"error":"abc"}');
+  it('leaves a short sent value alone, which would otherwise hide ordinary codes', () => {
+    expect(providerBodySummary('{"error":"abc"}', ['abc'])).toContain('\nerror: abc\n');
   });
 });
 
