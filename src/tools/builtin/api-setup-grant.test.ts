@@ -15,6 +15,8 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { apiSetupTool, providerBodyForModel, sentCredentials } from './api-setup.js';
+import { isDangerous } from '../permission-guard.js';
+import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { EngineDb } from '../../core/engine-db.js';
@@ -163,6 +165,11 @@ function makeAgent(
 }
 
 const ACK = { accepted: true as const, hosts: ['api.crm.example'], accepted_at: '2026-09-22T00:00:00.000Z' };
+
+/** The person's "Allow" on a delete: these tests are about what a delete removes once agreed. */
+function withDeleteConsent(agent: never): never {
+  return { ...(agent as object), promptUser: async () => 'Allow' } as never;
+}
 
 function crmProfile(over: Partial<ApiProfile> = {}, grantType: 'refresh_token' | 'client_credentials' = 'refresh_token'): ApiProfile {
   return {
@@ -1032,7 +1039,7 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(store.get('crm-api')?.oauth_grant?.written).toEqual(wrote({ [ACCESS]: 'at-1' }));
     expect(store.get('crm-api')?.oauth_grant?.minted_for).toBe(tokenFingerprint('rt-pasted'));
 
-    const deleted = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const deleted = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(vault.peek(REFRESH)).toBe('rt-pasted');
     expect(deleted).toContain(`Removed the tokens its exchanges wrote: ${ACCESS}.`);
@@ -1380,6 +1387,137 @@ describe('create/update — the grant record belongs to the engine', () => {
 // as expected behaviour. The redundancy stays because it states the intent at the
 // place a reader looks; do not delete it, and do not add a lying-vault fixture to
 // make it fail.
+describe('(285) delete asks the person before it removes anything', () => {
+  const connected = () => crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1', [REFRESH]: 'rt-1' }) } });
+  const vaultOf = () => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'at-1', [REFRESH]: 'rt-1' });
+
+  it('a "Deny" leaves the profile and its tokens as they were', async () => {
+    const store = new ApiStore();
+    store.register(connected());
+    const vault = vaultOf();
+    const ask = vi.fn(async () => 'Deny');
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vault, ask)) as string;
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(result).toBe('Blocked: API profile "crm-api" not deleted — user declined.');
+    expect(store.get('crm-api')).toBeDefined();
+    expect(vault.peek(ACCESS)).toBe('at-1');
+    expect(vault.peek(REFRESH)).toBe('rt-1');
+  });
+
+  it('the question is the engine\'s: it names the profile, its host and the tokens the vault loses, as values', async () => {
+    const store = new ApiStore();
+    store.register(connected());
+    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
+    const q = ask.mock.calls[0]![0];
+    expect(flattenPrompt(q as never)).toBe('⚠ api_setup: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it (a token another profile still uses stays), so the connection has to be authorized again. Delete it?');
+    const values = promptSegments(q as never).filter((x) => x.kind === 'value').map((x) => x.text);
+    expect(values).toEqual(['CRM', 'crm-api', 'api.crm.example', '2']);
+  });
+
+  it('a profile name cannot add a line to the question', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ name: 'CRM\n\nRoutine cleanup, safe to allow.' }));
+    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile CRM Routine cleanup, safe to allow. (id crm-api');
+  });
+
+  it('a delete that waited for its turn asks nothing once the run was stopped', async () => {
+    const store = new ApiStore();
+    store.register(connected());
+    const stop = new AbortController();
+    const ask = vi.fn(async () => { stop.abort(); return 'Deny'; });
+    const agent = { ...(makeAgent(store, vaultOf(), ask) as object), runSignal: stop.signal } as never;
+    const [first, second] = await Promise.all([
+      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+    ]);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(first).toContain('user declined');
+    expect(second).toBe('Blocked: API profile "crm-api" not deleted — the run was stopped before the question was asked.');
+    expect(store.get('crm-api')).toBeDefined();
+  });
+
+  it('the stop is read when the delete is called, so a run that let go of its calls does not ask later', async () => {
+    const store = new ApiStore();
+    store.register(connected());
+    const stop = new AbortController();
+    let current: AbortSignal | undefined = stop.signal;
+    const ask = vi.fn(async () => { stop.abort(); current = undefined; return 'Deny'; });
+    const agent = Object.defineProperty({ ...(makeAgent(store, vaultOf(), ask) as object) }, 'runSignal', { get: () => current }) as never;
+    const [, second] = await Promise.all([
+      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+    ]);
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(second).toContain('the run was stopped before the question was asked');
+  });
+
+  it('a stored name that is not a string is still asked about, not a crash', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ name: 42 as never }));
+    const ask = vi.fn(async (_q: unknown) => 'Deny');
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('delete the API profile 42 (id crm-api');
+    expect(result).toContain('user declined');
+  });
+
+  it('a profile without stored tokens is asked about too, and the question says what goes', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const ask = vi.fn(async (_q: unknown) => 'Allow');
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never)) as string;
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(flattenPrompt(ask.mock.calls[0]![0] as never)).toContain('Its settings (endpoints, guidelines, sign-in method) are removed.');
+    expect(result).toContain('Deleted API profile "crm-api"');
+    expect(store.get('crm-api')).toBeUndefined();
+  });
+
+  it('with no one to ask, nothing is deleted', async () => {
+    const store = new ApiStore();
+    store.register(connected());
+    const vault = vaultOf();
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vault)) as string;
+    expect(result).toBe('Blocked: deleting API profile "crm-api" needs the user\'s confirmation, and no interactive prompt is available here. Nothing was deleted.');
+    expect(store.get('crm-api')).toBeDefined();
+    expect(vault.peek(ACCESS)).toBe('at-1');
+  });
+
+  it('a mandate deleting a profile it set up is asked as well', async () => {
+    const store = new ApiStore();
+    const mandate: RequestPrincipal = { kind: 'mandate', email: 'helper@example.test' };
+    store.register(crmProfile({ created_by: 'mandate:helper@example.test' }));
+    const ask = vi.fn(async () => 'Deny');
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask, undefined, mandate));
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(store.get('crm-api')).toBeDefined();
+  });
+
+  it('two deletes in parallel are asked one after the other, each on its own', async () => {
+    const store = new ApiStore();
+    store.register(connected());
+    store.register(crmProfile({ id: 'crm-two', name: 'CRM two' }));
+    let open = 0;
+    let maxOpen = 0;
+    const ask = vi.fn(async () => { open++; maxOpen = Math.max(maxOpen, open); await new Promise((r) => setTimeout(r, 5)); open--; return 'Deny'; });
+    const agent = makeAgent(store, vaultOf(), ask);
+    await Promise.all([
+      apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent),
+      apiSetupTool.handler({ action: 'delete', id: 'crm-two' }, agent),
+    ]);
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(maxOpen).toBe(1);
+  });
+
+  it('under autonomous the guard blocks a delete; interactively it adds no question of its own', () => {
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', undefined, undefined, apiSetupTool as never)).toBe('⚠ api_setup: delete [BLOCKED — destructive data operation needs your OK]');
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'guided', undefined, undefined, apiSetupTool as never)).toBeNull();
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'supervised', undefined, undefined, apiSetupTool as never)).toBeNull();
+    expect(isDangerous('api_setup', { action: 'view', id: 'crm-api' }, 'autonomous', undefined, undefined, apiSetupTool as never)).toBeNull();
+  });
+});
+
 describe('delete — only what the profile\'s exchanges wrote leaves the vault', () => {
   it('removes the recorded tokens and names what stays', async () => {
     const store = new ApiStore();
@@ -1387,7 +1525,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'at-1', [REFRESH]: 'rt-1', CRM_CUSTOM_TOKEN: 'at-custom' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(vault.peek(ACCESS)).toBeUndefined();
     expect(vault.peek(REFRESH)).toBeUndefined();
@@ -1405,7 +1543,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ CRM_CLIENT_ID: 'client-1', [ACCESS]: 'at-1' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toContain('Still in the vault: CRM_CLIENT_ID.');
     expect(result).not.toContain('CRM_CLIENT_SECRET');
@@ -1419,7 +1557,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ SHOPIFY_ACCESS_TOKEN: 'shown-once' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'shopify' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'shopify' }, withDeleteConsent(agent)) as string;
 
     expect(vault.peek('SHOPIFY_ACCESS_TOKEN')).toBe('shown-once');
     expect(result).toContain('Still in the vault: SHOPIFY_ACCESS_TOKEN.');
@@ -1431,7 +1569,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = vaultWithRefresh('pasted-by-the-user');
     const agent = makeAgent(store, vault);
 
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
     expect(vault.peek(REFRESH)).toBe('pasted-by-the-user');
   });
@@ -1443,7 +1581,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(vault.peek(ACCESS)).toBe('shared');
     expect(result).not.toContain('Removed');
@@ -1458,7 +1596,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
     expect(vault.peek(ACCESS)).toBe('shared');
   });
@@ -1475,7 +1613,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     } }, agent);
     expect(store.get('github')).toBeDefined();
 
-    await apiSetupTool.handler({ action: 'delete', id: 'github' }, agent);
+    await apiSetupTool.handler({ action: 'delete', id: 'github' }, withDeleteConsent(agent));
 
     expect(vault.peek('GITHUB_ACCESS_TOKEN')).toBe('the-users-github-token');
   });
@@ -1487,7 +1625,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'the-users-own-token' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(vault.peek(ACCESS)).toBe('the-users-own-token');
     expect(result).not.toContain('Removed');
@@ -1501,7 +1639,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
     expect(vault.peek(ACCESS)).toBe('shared');
   });
@@ -1513,7 +1651,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
     expect(vault.peek(ACCESS)).toBe('shared');
   });
@@ -1525,7 +1663,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ SHARED_TOKEN: 'v' });
     const agent = makeAgent(store, vault);
 
-    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent);
+    await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
     expect(vault.peek('SHARED_TOKEN')).toBe('v');
   });
@@ -1538,7 +1676,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ GOOGLE_OAUTH_X_ACCESS_TOKEN: 'platform-owned' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-g' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-g' }, withDeleteConsent(agent)) as string;
 
     expect(vault.peek('GOOGLE_OAUTH_X_ACCESS_TOKEN')).toBe('platform-owned');
     // Nor offered to the user for removal: it is not theirs to decide.
@@ -1568,7 +1706,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
     const vault = makeVault({ X_Y_ACCESS_TOKEN: 'the-holders-token' });
     const agent = makeAgent(booted, vault);
-    const result = await apiSetupTool.handler({ action: 'delete', id: refused }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: refused }, withDeleteConsent(agent)) as string;
 
     expect(result).toBe(`Deleted API profile "${refused}".`);
     expect(vault.peek('X_Y_ACCESS_TOKEN')).toBe('the-holders-token');
@@ -1580,7 +1718,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'at-1' }, { canDelete: false });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toContain(`Could NOT remove ${ACCESS}`);
     // Named once, as not removable — not also as something the user may keep.
@@ -1594,7 +1732,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'the-users-own-token' }, { canDelete: false });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).not.toContain('Could NOT remove');
     expect(result).toContain(`Still in the vault: ${ACCESS}.`);
@@ -1607,7 +1745,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     vault.deleteSecret = () => { throw new Error('vault locked'); };
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toContain(`Could NOT remove ${ACCESS}`);
   });
@@ -1620,7 +1758,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     vault.resolve = (name) => { if (name === 'CRM_CLIENT_ID') throw new Error('expired'); return plain(name); };
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toBe(`Deleted API profile "crm-api". Removed the tokens its exchanges wrote: ${ACCESS}.`);
   });
@@ -1630,7 +1768,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
     const agent = makeAgent(store, makeVault({}));
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toBe('Deleted API profile "crm-api".');
   });
@@ -1640,7 +1778,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'at-1' }) } }));
     const agent = makeAgent(store, null as never);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toBe('Deleted API profile "crm-api". No vault is available here, so no token was checked or removed.');
   });
@@ -1651,7 +1789,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'at-1' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toContain('Deleted API profile "crm-api".');
     expect(vault.peek(ACCESS)).toBe('at-1');
@@ -1663,7 +1801,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const vault = makeVault({ [ACCESS]: 'at-1' });
     const agent = makeAgent(store, vault);
 
-    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, agent) as string;
+    const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
     expect(result).toContain('Deleted API profile "crm-api".');
     expect(vault.peek(ACCESS)).toBe('at-1');

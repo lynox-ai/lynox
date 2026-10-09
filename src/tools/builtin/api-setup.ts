@@ -30,7 +30,8 @@ import { callForStructuredJson, BudgetError, ExtractShapeError, SchemaValueError
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
-import { pv } from '../../core/prompt-value.js';
+import { pv, singleLine } from '../../core/prompt-value.js';
+import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { hiddenFromProfile, secretsForProfile } from '../../core/profile-secret-view.js';
@@ -1492,6 +1493,14 @@ export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | unde
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
   outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
+  // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
+  // raises `[BLOCKED]`, which no pre-approval or contract lifts: refused without a prompt
+  // channel, a generic question with one. Interactively the handler asks its own question,
+  // which names what is lost, so the guard adds none (`null`).
+  destructive: {
+    mode: 'data',
+    check: (input, ctx) => (input.action === 'delete' && ctx?.autonomy === 'autonomous' ? 'delete' : null),
+  },
   // `create` shares `update`'s save path (an existing id is overwritten, `isNew` false),
   // so no action is a pure create. `fetch_token` may run a refresh grant, which rotates
   // the token at the provider — a vault before-image would restore a dead token. The
@@ -2204,6 +2213,44 @@ ${draftJson}
       const existing = apiStore.get(id);
       const foreignDelete = foreignProfileRefusal(agent, existing, id);
       if (foreignDelete) return foreignDelete;
+      // ASKED, every time, before anything is removed. A delete takes a working connection and
+      // the tokens its sign-in stored, and the person notices only when the connection is gone;
+      // in an owner's own session a text the model read (a mail, a page) can ask for it. The
+      // question is the engine's, not the model's: it names the profile, its host and what the
+      // vault loses. With no one to ask, nothing is deleted. Under `autonomous` the permission
+      // guard raises its `[BLOCKED]` signal first (`destructive` on the entry): with no prompt
+      // channel that refuses the call, with one (a worker run) it is a generic question, and
+      // this one follows it.
+      // Not asked: an id with no REGISTERED profile. Either nothing is there, or a stored row the
+      // boot refused, which no call can use, whose tokens this branch leaves alone (below), and
+      // which the boot's own refusal tells the model to delete by its id.
+      if (existing) {
+        if (!agent.promptUser) {
+          return `Blocked: deleting API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;
+        }
+        const promptUser = agent.promptUser;
+        // Read now, not after the wait: a run whose calls were abandoned on abort clears the
+        // field, and a later run sets a live one, so a read after the wait could ask anyway.
+        const runSignal = agent.runSignal;
+        let host = '';
+        try { host = new URL(existing.base_url).hostname; } catch { /* no host to name */ }
+        const tokens = recordedWrites(existing).length;
+        const loses = tokens > 0
+          ? pv` The ${tokens} token(s) its sign-in stored are removed from the vault with it (a token another profile still uses stays), so the connection has to be authorized again.`
+          : pv` Its settings (endpoints, guidelines, sign-in method) are removed.`;
+        // A waiter whose run was stopped asks nothing: the question would outlive the run as a
+        // pending row and block the session's next prompt (the same rule as `http_request`).
+        const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
+          ? Promise.resolve(null)
+          : promptUser(
+            pv`⚠ api_setup: delete the API profile ${singleLine(String(existing.name))} (id ${id}${host ? pv`, host ${host}` : pv``})?${loses} Delete it?`,
+            ['Allow', 'Deny', '\x00'],
+          ));
+        if (answer === null) return `Blocked: API profile "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return `Blocked: API profile "${id}" not deleted — user declined.`;
+        }
+      }
       // Delete from the backing store + memory (S4b: engine.db `connections` when
       // wired, else the flat-JSON directory). The agent sees the deletion
       // immediately; the inbound `triggers.source_connection_id` FK nulls out.
