@@ -6261,6 +6261,14 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     }
   });
 
+  it('records any principal that is not the owner, whatever its kind', async () => {
+    // Only the owner is exempt: a kind added later is recorded, not waved through.
+    const { log, recs } = recorder();
+    const other = { kind: 'delegate', email: 'other@example.invalid' } as unknown as typeof MANDATE;
+    await run(outward('mail_send', () => 'send', vi.fn().mockResolvedValue('sent')), {}, { principal: other, auditLog: log });
+    expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+  });
+
   it('control: the owner\'s outward call runs without any log', async () => {
     const handler = vi.fn().mockResolvedValue('sent');
     await run(outward('mail_send', () => 'send', handler), {}, { auditLog: null });

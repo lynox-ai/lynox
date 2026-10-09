@@ -105,7 +105,7 @@ import { runInCallSlot } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
 import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
 import type { AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -3933,12 +3933,13 @@ export class Agent implements IAgent {
   /**
    * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
    * or `null` when there is nothing to record: the owner's call, or a call that writes
-   * nothing outside. `'refused'` when the row cannot be written — no trail store, or the
+   * nothing outside. Only the owner is exempt, so a principal kind added later is recorded
+   * until someone decides otherwise. `'refused'` when the row cannot be written — no trail store, or the
    * insert threw — and the call must not run. The target is built from the call as the model
    * sent it (`tc.input`), before any secret was resolved into it.
    */
   private _beginOutwardTrail(tc: BetaToolUseBlock, tool: ToolEntry): { correlationId: string; action: string; target: string; ended: boolean } | null | 'refused' {
-    if (this.principal.kind !== 'mandate') return null;
+    if (isOwnerPrincipal(this.principal)) return null;
     const label = tool.outwardWrite ? tool.outwardWrite(tc.input as never) : null;
     if (label === null) return null;
     const input = tc.input as { url?: unknown; action?: unknown };
