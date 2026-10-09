@@ -8,6 +8,7 @@ import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGT
 import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ReviewedGrantStamp, ModelTier } from '../types/index.js';
+import type { DeliverySummary } from './notification-router.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { WIRE_CAPTURE_RETENTION_MS } from './wire-capture.js';
 import { normalizeTier } from '../types/index.js';
@@ -3230,6 +3231,18 @@ export class RunHistory {
    *  {@link TriggerStore.markConsentReminded}. */
   markConsentReminded(id: string): boolean {
     return this._triggerStore?.markConsentReminded(id) ?? false;
+  }
+
+  /** Mark that an escalation of a trigger started — see {@link TriggerStore.startEscalation}.
+   *  False without a trigger store. */
+  startEscalation(id: string, at: string, onlyIfLater = false): boolean {
+    return this._triggerStore?.startEscalation(id, at, onlyIfLater) ?? false;
+  }
+
+  /** Record whether the escalation that started at `startedAt` reached anyone — see
+   *  {@link TriggerStore.recordEscalationOutcome}. False without a trigger store. */
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
+    return this._triggerStore?.recordEscalationOutcome(id, outcome, startedAt) ?? false;
   }
 
   /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The

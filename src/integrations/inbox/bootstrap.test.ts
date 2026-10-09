@@ -294,7 +294,7 @@ describe('bootstrapInbox — push notifier wire', () => {
   it('routes a requires_user classification to the registered router', async () => {
     const { NotificationRouter } = await import('../../core/notification-router.js');
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
 
     const client = makeClient({
@@ -319,7 +319,7 @@ describe('bootstrapInbox — push notifier wire', () => {
   it('respects inbox_push_enabled=false: notifier silently skips even with router wired', async () => {
     const { NotificationRouter } = await import('../../core/notification-router.js');
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     const client = makeClient({
       content: [{ type: 'text', text: JSON.stringify({
@@ -338,7 +338,7 @@ describe('bootstrapInbox — push notifier wire', () => {
   it('respects inbox_push_enabled=true (default): notifier dispatches as usual', async () => {
     const { NotificationRouter } = await import('../../core/notification-router.js');
     const router = new NotificationRouter();
-    const send = vi.fn(async () => true);
+    const send = vi.fn(async () => 'delivered' as const);
     router.register({ name: 'web-push', send });
     const client = makeClient({
       content: [{ type: 'text', text: JSON.stringify({

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { NotificationMessage } from '../../core/notification-router.js';
-import { NotificationRouter } from '../../core/notification-router.js';
+import { NotificationRouter, summarizeDelivery } from '../../core/notification-router.js';
 import type { MailRegistry } from './tools/registry.js';
 
 const sendMail = vi.fn();
@@ -59,12 +59,12 @@ describe('EscalationMailChannel — what reaches the wire', () => {
     const typed = (type: string) => ({ getAccountConfig: () => ({ id: 'acct-1', type }) }) as never;
 
     const refused = new EscalationMailChannel({ registry: reg, accounts: typed('info'), allowedRecipients: [CHEF] });
-    expect(await refused.send(msg({ recipient: CHEF }))).toBe(false);
+    expect(await refused.send(msg({ recipient: CHEF }))).toBe('failed');
     expect(providerSend).not.toHaveBeenCalled();
 
     providerSend.mockResolvedValue({ messageId: '<m@x>', accepted: [CHEF], rejected: [] });
     const allowed = new EscalationMailChannel({ registry: reg, accounts: typed('personal'), allowedRecipients: [CHEF] });
-    expect(await allowed.send(msg({ recipient: CHEF, title: 'Zweite Eskalation' }))).toBe(true);
+    expect(await allowed.send(msg({ recipient: CHEF, title: 'Zweite Eskalation' }))).toBe('delivered');
     expect(providerSend).toHaveBeenCalledTimes(1);
   });
 
@@ -72,7 +72,7 @@ describe('EscalationMailChannel — what reaches the wire', () => {
     expect(await channel().send(msg({
       recipient: CHEF,
       inquiry: { question: 'Rechnung über 4200 freigeben?', options: ['Ja', 'Nein'] },
-    }))).toBe(true);
+    }))).toBe('delivered');
     // toEqual, not toMatchObject: a subset match cannot show that nothing was
     // ADDED. A stray `bcc` survives a subset assert, and this test exists to
     // catch exactly that.
@@ -110,19 +110,19 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   });
 
   it('refuses an address outside the allowlist', async () => {
-    expect(await channel().send(msg({ recipient: 'fremd@anderswo.example' }))).toBe(false);
+    expect(await channel().send(msg({ recipient: 'fremd@anderswo.example' }))).toBe('failed');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
   it('refuses everything when the allowlist is empty', async () => {
     const ch = new EscalationMailChannel({ registry, accounts });
-    expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe('failed');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
   it('matches the allowlist case-insensitively and ignores surrounding space', async () => {
     const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: ['  CHEF@Betrieb.example '] });
-    expect(await ch.send(msg({ recipient: CHEF }))).toBe(true);
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe('delivered');
     expect(sendMail).toHaveBeenCalledTimes(1);
   });
 
@@ -140,18 +140,18 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     ['eine Sub-Adresse des Eintrags', 'x.chef@betrieb.example'],
     ['einen laengeren local part', 'chef2@betrieb.example'],
   ])('refuses %s', async (_label, recipient) => {
-    expect(await channel().send(msg({ recipient }))).toBe(false);
+    expect(await channel().send(msg({ recipient }))).toBe('failed');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
   it('accepts a display-name form and mails the bare address', async () => {
-    expect(await channel().send(msg({ recipient: `Chef <${CHEF}>` }))).toBe(true);
+    expect(await channel().send(msg({ recipient: `Chef <${CHEF}>` }))).toBe('delivered');
     expect(wireInput()['to']).toEqual([{ address: CHEF }]);
   });
 
   it('accepts a display-name form in the ALLOWLIST too', async () => {
     const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: [`Chef <${CHEF}>`] });
-    expect(await ch.send(msg({ recipient: CHEF }))).toBe(true);
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe('delivered');
     expect(wireInput()['to']).toEqual([{ address: CHEF }]);
   });
 
@@ -159,8 +159,8 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     // The same string is refused on the way in, so accepting it in the config
     // would make one direction of the same value stricter than the other.
     const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: [`${CHEF}, zweit@betrieb.example`] });
-    expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
-    expect(await ch.send(msg({ recipient: 'zweit@betrieb.example' }))).toBe(false);
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe('failed');
+    expect(await ch.send(msg({ recipient: 'zweit@betrieb.example' }))).toBe('failed');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
@@ -198,7 +198,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
       spy.mockRestore();
     }
     expect(lines.filter((l) => l.includes('unusable and ignored'))).toHaveLength(1);
-    expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe('failed');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
@@ -239,7 +239,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     // onto the entry, so it passes the check — and must not be what ships,
     // because for a domain a case-fold can be a different IDNA label.
     const ch = new EscalationMailChannel({ registry, accounts, allowedRecipients: ['chef@banker.example'] });
-    expect(await ch.send(msg({ recipient: 'chef@banKer.example' }))).toBe(true);
+    expect(await ch.send(msg({ recipient: 'chef@banKer.example' }))).toBe('delivered');
     expect(wireInput()['to']).toEqual([{ address: 'chef@banker.example' }]);
   });
 });
@@ -253,26 +253,26 @@ describe('EscalationMailChannel — outcomes', () => {
   it('reports an unaddressed message as handled', async () => {
     // The ordinary case under `notify()` fan-out. That this actually keeps the
     // router quiet is a separate claim and is measured in the router block —
-    // this one only pins the boolean.
-    expect(await channel().send(msg())).toBe(true);
+    // this one only pins the outcome.
+    expect(await channel().send(msg())).toBe('skipped');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
   it.each([[''], ['   ']])('reports a blank recipient (%j) instead of calling it handled', async (recipient) => {
     // A blank string is a FAILED attempt to address, not an absent one — a
     // caller whose recipient plumbing ran dry must not be told "handled".
-    expect(await channel().send(msg({ recipient }))).toBe(false);
+    expect(await channel().send(msg({ recipient }))).toBe('failed');
     expect(sendMail).not.toHaveBeenCalled();
   });
 
   it('reports a failed send as false rather than claiming delivery', async () => {
     sendMail.mockResolvedValue({ ok: false, status: 'rate_limit', message: 'too many' });
-    expect(await channel().send(msg({ recipient: CHEF }))).toBe(false);
+    expect(await channel().send(msg({ recipient: CHEF }))).toBe('failed');
   });
 
   it('survives a throwing sendMail — the state of an instance with no mail account', async () => {
     sendMail.mockRejectedValue(new Error('No mail account configured.'));
-    await expect(channel().send(msg({ recipient: CHEF }))).resolves.toBe(false);
+    await expect(channel().send(msg({ recipient: CHEF }))).resolves.toBe('failed');
   });
 });
 
@@ -312,6 +312,24 @@ describe('EscalationMailChannel — through the real router', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('an unaddressed message it only handled does not count as anyone told', async () => {
+    // The witness for the three-valued outcome: this channel used to answer `true` for a
+    // message that was not for it, and a caller counting `true` would have read an
+    // escalation as delivered with nobody reached.
+    const router = new NotificationRouter();
+    router.register(channel());
+    const report = await router.notify(msg());
+    expect(report).toEqual([{ channel: 'escalation-mail', outcome: 'skipped' }]);
+    expect(summarizeDelivery(report)).toBe('not_delivered');
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  it('an addressed message it mailed counts as delivered', async () => {
+    const router = new NotificationRouter();
+    router.register(channel());
+    expect(summarizeDelivery(await router.notify(msg({ recipient: CHEF })))).toBe('delivered');
   });
 
   it('makes the router complain when an addressed message is refused', async () => {

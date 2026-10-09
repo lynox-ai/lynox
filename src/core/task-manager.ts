@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { RunHistory } from './run-history.js';
 import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEffect, TaskStatus, TaskPriority, MemoryScopeRef, PipelineMode, ModelTier } from '../types/index.js';
+import type { DeliverySummary } from './notification-router.js';
 import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
 import { readEnvAlias } from './env.js';
@@ -830,6 +831,16 @@ export class TaskManager {
   /** Claim a trigger's consent reminder; true for exactly one caller per unconfirmed phase. */
   markConsentReminded(id: string): boolean {
     return this.history.markConsentReminded(id);
+  }
+
+  /** Mark that an escalation of a trigger started; its outcome reads `unconfirmed` until recorded. */
+  startEscalation(id: string, at: string, onlyIfLater = false): boolean {
+    return this.history.startEscalation(id, at, onlyIfLater);
+  }
+
+  /** Record whether the escalation that started at `startedAt` reached anyone. */
+  recordEscalationOutcome(id: string, outcome: DeliverySummary, startedAt: string): boolean {
+    return this.history.recordEscalationOutcome(id, outcome, startedAt);
   }
 
   /** Every parked trigger, deadline or not (§0 A10) — the tick's re-arm pass. */

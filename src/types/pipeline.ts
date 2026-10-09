@@ -366,6 +366,13 @@ export interface TriggerRecord {
   edited_by?: string | undefined;
   /** Who stamped `confirmed_at`. Only the owner stamps. */
   confirmed_by?: string | undefined;
+  /** When the last escalation of this trigger started. Set together with
+   *  {@link last_escalation_outcome}; absent when it never escalated. */
+  last_escalation_at?: string | undefined;
+  /** Whether that escalation reached anyone: `delivered` (a channel handed it on),
+   *  `not_delivered` (channels were there, none delivered), `no_channel` (none registered),
+   *  `unconfirmed` (started, no answer from the channels yet — or none will come). */
+  last_escalation_outcome?: 'delivered' | 'not_delivered' | 'no_channel' | 'unconfirmed' | undefined;
   /** The bulk run a `bulk_apply` / `bulk_undo` trigger writes (or a `bulk_preview`
    *  trigger reads), from `condition_json.run_id`. Set only by the bulk approval route
    *  and, for a preview, the external bulk plan. */

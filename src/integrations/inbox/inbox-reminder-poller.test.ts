@@ -18,7 +18,7 @@ beforeEach(() => {
     name: 'test',
     send: async (msg) => {
       captured.push({ title: msg.title, body: msg.body });
-      return true;
+      return 'delivered' as const;
     },
   };
   router.register(channel);

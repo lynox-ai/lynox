@@ -10,6 +10,7 @@ import webPush from 'web-push';
 import Database from 'better-sqlite3';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
 import type {
+  ChannelOutcome,
   NotificationChannel,
   NotificationMessage,
 } from '../../core/notification-router.js';
@@ -189,9 +190,10 @@ export class WebPushNotificationChannel implements NotificationChannel {
     return this.store.count();
   }
 
-  async send(msg: NotificationMessage): Promise<boolean> {
+  /** `failed` with no subscription too: nobody was told, and that is what the caller asks. */
+  async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const result = await this.sendDetailed(msg);
-    return result.sent > 0;
+    return result.sent > 0 ? 'delivered' : 'failed';
   }
 
   async sendDetailed(msg: NotificationMessage): Promise<{ sent: number; failed: number; cleaned: number }> {

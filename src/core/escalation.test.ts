@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { ThreadStore } from './thread-store.js';
-import type { NotificationRouter, NotificationMessage } from './notification-router.js';
+import { NotificationRouter as RealRouter, type ChannelOutcome, type DeliverySummary, type NotificationRouter, type NotificationMessage } from './notification-router.js';
 import { escalateToUser } from './escalation.js';
 
 function freshDb(): Database.Database {
@@ -112,5 +112,61 @@ describe('escalateToUser (the Agent→User escalation primitive, Slice B3)', () 
     // No threadId injected when there's no thread to point at.
     const pushed = notify.mock.calls[0]![0] as NotificationMessage;
     expect(pushed.data?.['threadId']).toBeUndefined();
+  });
+});
+
+describe('escalateToUser reports whether anyone was told', () => {
+  /** Runs one escalation through a real router and resolves with what onReported got. */
+  function reported(
+    outcomes: ChannelOutcome[],
+    run: (router: NotificationRouter, onReported: (d: DeliverySummary) => void) => void,
+  ): Promise<DeliverySummary> {
+    const router = new RealRouter();
+    outcomes.forEach((o, i) => router.register({ name: `ch${String(i)}`, send: async () => o }));
+    return new Promise((resolve) => run(router, resolve));
+  }
+
+  let stderr: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true); });
+  afterEach(() => { stderr.mockRestore(); });
+
+  it('delivered when a channel delivered the wakeup of a thread escalation', async () => {
+    const store = new ThreadStore(freshDb());
+    await expect(reported(['delivered'], (r, cb) => { escalateToUser(store, r, { key: 'k', title: 't', body: 'b', onReported: cb }); }))
+      .resolves.toBe('delivered');
+  });
+
+  it('not_delivered when the only channel merely handled it — a skip is nobody told', async () => {
+    const store = new ThreadStore(freshDb());
+    await expect(reported(['skipped'], (r, cb) => { escalateToUser(store, r, { key: 'k', title: 't', body: 'b', onReported: cb }); }))
+      .resolves.toBe('not_delivered');
+  });
+
+  it('no_channel when nothing is registered', async () => {
+    const store = new ThreadStore(freshDb());
+    await expect(reported([], (r, cb) => { escalateToUser(store, r, { key: 'k', title: 't', body: 'b', onReported: cb }); }))
+      .resolves.toBe('no_channel');
+  });
+
+  it('reports on the bare-push path without a thread store', async () => {
+    await expect(reported(['failed'], (r, cb) => { escalateToUser(null, r, { key: 'k', title: 't', body: 'b', onReported: cb }); }))
+      .resolves.toBe('not_delivered');
+  });
+
+  it('reports on the mandate fallback path', async () => {
+    const store = new ThreadStore(freshDb());
+    store.createThread('escalation-k', { created_by: 'mandate:setup@example.org' });
+    await expect(reported(['delivered'], (r, cb) => { escalateToUser(store, r, { key: 'k', title: 't', body: 'b', onReported: cb }); }))
+      .resolves.toBe('delivered');
+  });
+
+  it('a throwing onReported is logged and does not reject anywhere', async () => {
+    const store = new ThreadStore(freshDb());
+    const router = new RealRouter();
+    router.register({ name: 'push', send: async () => 'delivered' });
+    escalateToUser(store, router, { key: 'k', title: 't', body: 'b', onReported: () => { throw new Error('db gone'); } });
+    await vi.waitFor(() => {
+      expect(stderr.mock.calls.map((c) => String(c[0])).some((l) => l.includes('[escalation] recording the delivery failed: db gone'))).toBe(true);
+    });
   });
 });

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   NotificationRouter,
+  summarizeDelivery,
+  type ChannelOutcome,
   type NotificationChannel,
   type NotificationMessage,
 } from './notification-router.js';
@@ -11,11 +13,11 @@ import {
 
 function makeChannel(
   name: string,
-  sendFn?: (msg: NotificationMessage) => Promise<boolean>,
+  sendFn?: (msg: NotificationMessage) => Promise<ChannelOutcome>,
 ): NotificationChannel {
   return {
     name,
-    send: sendFn ?? vi.fn<(msg: NotificationMessage) => Promise<boolean>>().mockResolvedValue(true),
+    send: sendFn ?? vi.fn<(msg: NotificationMessage) => Promise<ChannelOutcome>>().mockResolvedValue('delivered'),
   };
 }
 
@@ -57,8 +59,8 @@ describe('NotificationRouter', () => {
   });
 
   it('duplicate register replaces the previous channel', async () => {
-    const first = makeChannel('sms', vi.fn<(msg: NotificationMessage) => Promise<boolean>>().mockResolvedValue(false));
-    const second = makeChannel('sms', vi.fn<(msg: NotificationMessage) => Promise<boolean>>().mockResolvedValue(true));
+    const first = makeChannel('sms', vi.fn<(msg: NotificationMessage) => Promise<ChannelOutcome>>().mockResolvedValue('failed'));
+    const second = makeChannel('sms', vi.fn<(msg: NotificationMessage) => Promise<ChannelOutcome>>().mockResolvedValue('delivered'));
 
     router.register(first);
     router.register(second);
@@ -101,7 +103,10 @@ describe('NotificationRouter', () => {
     router.register(failing);
     router.register(healthy);
 
-    await expect(router.notify(MSG)).resolves.toBeUndefined();
+    await expect(router.notify(MSG)).resolves.toEqual([
+      { channel: 'bad', outcome: 'failed' },
+      { channel: 'good', outcome: 'delivered' },
+    ]);
 
     // healthy still received the message
     expect(healthy.send).toHaveBeenCalledWith(MSG);
@@ -114,17 +119,87 @@ describe('NotificationRouter', () => {
     stderrSpy.mockRestore();
   });
 
-  it('notify logs when a channel returns false', async () => {
+  it('notify logs when a channel did not deliver', async () => {
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    const ch = makeChannel('flaky', () => Promise.resolve(false));
+    const ch = makeChannel('flaky', () => Promise.resolve('failed'));
     router.register(ch);
 
     await router.notify(MSG);
 
     expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('channel "flaky" returned false'),
+      expect.stringContaining('channel "flaky" did not deliver'),
     );
 
+    stderrSpy.mockRestore();
+  });
+
+  it('notify does not log a skipped message — it was not for that channel', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    router.register(makeChannel('person', () => Promise.resolve('skipped')));
+
+    await expect(router.notify(MSG)).resolves.toEqual([{ channel: 'person', outcome: 'skipped' }]);
+    const calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    stderrSpy.mockRestore();
+    expect(calls.filter((l) => l.includes('notification-router'))).toEqual([]);
+  });
+
+  // ---- summarizeDelivery: "was anyone told?" ----
+
+  it('a channel that only handled the message does not count as delivered', async () => {
+    // The trap this type exists for: a channel answering "handled, not addressed"
+    // used to answer `true`, the same as a delivery.
+    router.register(makeChannel('person', () => Promise.resolve('skipped')));
+    expect(summarizeDelivery(await router.notify(MSG))).toBe('not_delivered');
+  });
+
+  it('one delivering channel is enough, beside one that skipped and one that failed', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    router.register(makeChannel('person', () => Promise.resolve('skipped')));
+    router.register(makeChannel('down', () => Promise.resolve('failed')));
+    router.register(makeChannel('push', () => Promise.resolve('delivered')));
+    const report = await router.notify(MSG);
+    stderrSpy.mockRestore();
+    expect(summarizeDelivery(report)).toBe('delivered');
+  });
+
+  it('no registered channel reads as no_channel, not as a failed delivery', async () => {
+    expect(summarizeDelivery(await router.notify(MSG))).toBe('no_channel');
+  });
+
+  it('a channel that throws reads as not delivered', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    router.register(makeChannel('bad', () => Promise.reject(new Error('boom'))));
+    const report = await router.notify(MSG);
+    stderrSpy.mockRestore();
+    expect(summarizeDelivery(report)).toBe('not_delivered');
+  });
+
+  it('reads a channel written against the old boolean contract strictly', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    // A JS channel, or one built against an older release, resolves to a boolean.
+    const legacy = (v: unknown): NotificationChannel => ({ name: `legacy-${String(v)}`, send: (async () => v) as unknown as NotificationChannel['send'] });
+    router.register(legacy(true));
+    router.register(legacy(false));
+    router.register(legacy('maybe'));
+    // `true` meant "handled" — delivered OR not for this channel — so it never counts as told.
+    expect(await router.notify(MSG)).toEqual([
+      { channel: 'legacy-true', outcome: 'skipped' },
+      { channel: 'legacy-false', outcome: 'failed' },
+      { channel: 'legacy-maybe', outcome: 'failed' },
+    ]);
+    // `false` must not read as handled — the inbox notifier throttles on this answer.
+    expect(await router.sendTo('legacy-false', MSG)).toBe(false);
+    expect(await router.sendTo('legacy-maybe', MSG)).toBe(false);
+    expect(await router.sendTo('legacy-true', MSG)).toBe(true);
+    stderrSpy.mockRestore();
+  });
+
+  it('sendTo keeps reading a skipped message as handled (true), a failed one as false', async () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    router.register(makeChannel('person', () => Promise.resolve('skipped')));
+    router.register(makeChannel('down', () => Promise.resolve('failed')));
+    expect(await router.sendTo('person', MSG)).toBe(true);
+    expect(await router.sendTo('down', MSG)).toBe(false);
     stderrSpy.mockRestore();
   });
 

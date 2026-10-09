@@ -967,6 +967,16 @@ const MIGRATIONS: string[] = [
   // trigger already waiting is reminded once, the first time the engine sees it due.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (25);
    ALTER TABLE triggers ADD COLUMN consent_reminded_at TEXT;`,
+
+  // v26: whether the last escalation of a trigger reached anyone. An escalation (a failed
+  // scheduled workflow, a watch finding) opens a thread and sends a wakeup; without this the
+  // case could not tell "escalated" from "escalated and nobody was told". `at` is when the
+  // escalation started; `outcome` is `unconfirmed` from then until the channels answer, then one
+  // of `delivered` · `not_delivered` · `no_channel` (`summarizeDelivery`). Additive and nullable:
+  // a trigger that never escalated has neither.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (26);
+   ALTER TABLE triggers ADD COLUMN last_escalation_at TEXT;
+   ALTER TABLE triggers ADD COLUMN last_escalation_outcome TEXT;`,
 ];
 
 /**

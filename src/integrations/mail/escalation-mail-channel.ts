@@ -49,7 +49,7 @@
  * question by shipping it.
  */
 
-import type { NotificationChannel, NotificationMessage } from '../../core/notification-router.js';
+import type { ChannelOutcome, NotificationChannel, NotificationMessage } from '../../core/notification-router.js';
 import type { MailRegistry } from './tools/registry.js';
 import { accountLookupOnly, sendMail, parseAddressList, type MailAccountLookup } from './send-core.js';
 
@@ -138,22 +138,21 @@ export class EscalationMailChannel implements NotificationChannel {
    * `notify()` fans a message out to EVERY registered channel, so the ordinary
    * case here is a message that was never meant for this channel — an inbox
    * summary, a nightly technical error. That is not a failure, and reporting it
-   * as one would put a `channel returned false` line in stderr on every push
-   * until nobody reads them. It returns true: handled, nothing to do.
+   * as one would put a "did not deliver" line in stderr on every push until
+   * nobody reads them. It returns `skipped`: handled, nothing to do.
    *
    * A message that IS addressed but names an address outside the allowlist is
-   * the opposite — it is the case the allowlist exists for, so it is reported.
+   * the opposite — it is the case the allowlist exists for, so it is `failed`.
    *
-   * The `true` for an unaddressed message means HANDLED, not delivered, and
-   * that distinction leaves this class: `NotificationRouter.sendTo()` returns
-   * this boolean to its caller unchanged, and at least one caller throttles on
-   * it (`integrations/inbox/notifier.ts`). Anyone reaching this channel through
-   * `sendTo` rather than `notify` is asking a different question than the one
-   * answered here.
+   * `skipped` is not `delivered`, and the router keeps them apart: whoever asks
+   * whether anyone was told (`summarizeDelivery`) does not count this channel
+   * for an unaddressed message. `NotificationRouter.sendTo()` still folds
+   * `skipped` into `true`, as before, because at least one caller throttles on
+   * it (`integrations/inbox/notifier.ts`).
    */
-  async send(msg: NotificationMessage): Promise<boolean> {
+  async send(msg: NotificationMessage): Promise<ChannelOutcome> {
     const raw = msg.recipient;
-    if (raw === undefined) return true;
+    if (raw === undefined) return 'skipped';
 
     // Parse rather than trust: a bare `{ address: raw }` would hand the whole
     // string to the provider, and a comma-separated or bare-word value is not
@@ -165,7 +164,7 @@ export class EscalationMailChannel implements NotificationChannel {
     const parsed = parseAddressList(raw);
     if (parsed.length !== 1) {
       process.stderr.write(`[escalation-mail] refusing: not exactly one address\n`);
-      return false;
+      return 'failed';
     }
     // Look the entry up and send THE ENTRY, never the message's own string.
     // Checking one value and sending another is the gap this closes: a string
@@ -176,7 +175,7 @@ export class EscalationMailChannel implements NotificationChannel {
     const entry = this.allowed.get(normaliseAddress(parsed[0]!.address));
     if (entry === undefined) {
       process.stderr.write(`[escalation-mail] refusing: recipient not in the allowlist\n`);
-      return false;
+      return 'failed';
     }
     const address = entry;
 
@@ -189,16 +188,16 @@ export class EscalationMailChannel implements NotificationChannel {
       }, {}, this.accounts);
       if (!result.ok) {
         process.stderr.write(`[escalation-mail] send failed (${result.status}): ${result.message}\n`);
-        return false;
+        return 'failed';
       }
-      return true;
+      return 'delivered';
     } catch (err: unknown) {
       // `resolveProvider` throws a MailError when no account is configured,
       // which is the normal state of an instance without mail set up. Without
       // this the documented boolean contract would be a lie on that path.
       const detail = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[escalation-mail] send threw: ${detail}\n`);
-      return false;
+      return 'failed';
     }
   }
 }
