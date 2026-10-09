@@ -408,6 +408,20 @@ describe('the policy reaches every module that threads it', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('core/backup-upload-gdrive.ts — the Drive backup deletion, through the connection it is built from', async () => {
+    // `driveAuthFrom` carries the connection's policy into the deletion; dropping it
+    // would let "disconnect Google" reach Drive under `deny-all`.
+    const { deleteUploadedBackups, driveAuthFrom } = await import('./backup-upload-gdrive.js');
+    const res = await deleteUploadedBackups(driveAuthFrom({
+      getAccessToken: async () => 'access-token',
+      hasUserScope: () => true,
+      hostPolicy: DENY,
+    }));
+    expect(res.status).toBe('degraded');
+    expect(res.problems.join('\n')).toMatch(/network_policy=deny-all/);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('google-auth.ts — the DIRECT refresh branch, which is not the brokered one', async () => {
     // The brokered describe above drives `cpFetch`. This drives the other side
     // of the same ternary: a self-host instance with its own pair and a raw

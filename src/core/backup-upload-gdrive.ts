@@ -460,3 +460,245 @@ export class GDriveBackupUploader {
     return result;
   }
 }
+
+const DRIVE_FULL_SCOPE = 'https://www.googleapis.com/auth/drive';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const DELETE_CALL_TIMEOUT_MS = 30_000;
+/** The whole deletion stops here and says so, rather than holding the disconnect open. */
+const DELETE_DEADLINE_MS = 120_000;
+/** A listing that needs more pages than this stops and says so, rather than looping. */
+const MAX_LISTING_PAGES = 500;
+/**
+ * The name `BackupManager.createBackup` gives a backup directory, which the uploader reuses
+ * for the Drive folder (`basename(backupDir)`): `2026-10-08T19301234Z`, plus `-<n>` when two
+ * backups fall into the same instant.
+ */
+const BACKUP_DIR_NAME = /^\d{4}-\d{2}-\d{2}T\d{8}Z(?:-\d+)?$/;
+
+/** Is this the name `BackupManager.createBackup` gives a backup directory? Exported for the test that derives one. */
+export function isBackupDirName(name: string): boolean {
+  return BACKUP_DIR_NAME.test(name);
+}
+
+interface DriveListingFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  isAppAuthorized?: boolean | undefined;
+  ownedByMe?: boolean | undefined;
+}
+
+interface DriveListingPage {
+  files?: DriveListingFile[] | undefined;
+  nextPageToken?: string | undefined;
+}
+
+export interface DriveBackupDeletion {
+  /**
+   * `unchecked`: this grant cannot list Drive (no `drive.file` and no `drive` scope), so
+   * nothing was looked at. `none`: no backup file lynox uploaded was found. `deleted`: every
+   * one found is gone. `degraded`: at least one may remain — `problems` says which and why.
+   */
+  status: 'unchecked' | 'none' | 'deleted' | 'degraded';
+  deleted: number;
+  /**
+   * Folders left standing: the `lynox-backups` roots and the backup folders inside them that
+   * were walked. Always all of them, on purpose: Google deletes a folder together with every
+   * descendant the user owns, and that includes a copy the user made inside it — which this
+   * app cannot see under `drive.file` and must not destroy.
+   */
+  foldersKept: number;
+  problems: string[];
+}
+
+/**
+ * The credential view the deletion needs, built from a Google connection. It asks for a USER
+ * scope (`hasUserScope`): a service account's Drive is its own, not where a user's backups
+ * were uploaded. Built here rather than at the route so the token is taken in a module that
+ * sends it only through `googleFetch` — a route file that called `getAccessToken()` itself
+ * would join the egress source test's scope with every unrelated `fetch` it makes.
+ */
+export function driveAuthFrom(google: {
+  getAccessToken(): Promise<string>;
+  hasUserScope(scope: string): boolean;
+  readonly hostPolicy?: HostPolicyContext | undefined;
+}): BackupAuthProvider {
+  return {
+    getAccessToken: () => google.getAccessToken(),
+    hasScope: (scope: string) => google.hasUserScope(scope),
+    hostPolicy: google.hostPolicy,
+  };
+}
+
+/**
+ * Delete the backup files lynox uploaded to the user's Drive — the half of "disconnect
+ * Google" that `POST /api/google/revoke` owes before it gives up the token it needs.
+ *
+ * It deletes along the structure `GDriveBackupUploader.upload` builds, and nothing else:
+ * any folder named `lynox-backups` → a folder in it named like a backup directory that lynox
+ * created → the files in that folder that lynox created. "Created by lynox" is
+ * `isAppAuthorized === true` ("created or opened by the requesting app").
+ *
+ * The root itself is not checked: the checks that keep foreign content out are on the level
+ * below. The backup folder must be one lynox created and carry a backup-directory name, and
+ * the agent's Drive tool cannot create folders (`google-drive.ts`, `upload`). And a file is
+ * deleted only when it is the USER's (`ownedByMe`): `isAppAuthorized` is per OAuth app, and the
+ * managed client is one app for every tenant — another tenant's backup in a folder shared in
+ * would pass every other check.
+ *
+ * Why the structure and not "anything of ours under a folder of that name": lynox creates
+ * files in Drive for other reasons too — the agent's Drive, Docs and Sheets tools write under
+ * the same grant — and under the full `drive` scope such a file can be moved anywhere. A walk
+ * that took every app file below any `lynox-backups` folder would destroy those the moment one
+ * ended up there. The uploader never writes deeper than root/backup/file, so nothing deeper,
+ * nothing directly in the root and no folder of another name is touched. A file lynox made
+ * for another reason and then PLACED inside a backup folder (the agent's tools accept a
+ * `folder_id`) is indistinguishable from a backup file and is deleted with it.
+ *
+ * - Never a folder. `files.delete` on a folder removes "all descendants owned by the user",
+ *   and a copy the user made of a backup lands in the same folder.
+ * - Trashed files too: the queries do not exclude the bin, and a backup there is still a copy.
+ *
+ * Every failure is reported, never swallowed into a smaller count. A listing that does not
+ * answer means the files under it were not looked at, and that is `degraded`, not `none` —
+ * the opposite of `list()` above, which may return `[]` on error because nothing destroys
+ * anything on the strength of it.
+ *
+ * Independent of `driveBackupAllowed` and `backup_gdrive` on purpose. Both decide whether
+ * NEW uploads happen; neither says whether OLD ones exist. A user who opted out, or an
+ * instance that uploaded before the tier gate existed, still has copies to remove.
+ */
+export async function deleteUploadedBackups(
+  auth: BackupAuthProvider,
+  isUploading: () => boolean = () => false,
+  now: () => number = Date.now,
+): Promise<DriveBackupDeletion> {
+  const result: DriveBackupDeletion = { status: 'none', deleted: 0, foldersKept: 0, problems: [] };
+  if (!auth.hasScope(DRIVE_FILE_SCOPE) && !auth.hasScope(DRIVE_FULL_SCOPE)) {
+    return { ...result, status: 'unchecked' };
+  }
+  // The caller holds new uploads back for the whole deletion (`BackupManager.pauseUploads`);
+  // what that cannot stop is one already under way.
+  const uploadingAtStart = isUploading();
+  if (uploadingAtStart) {
+    result.problems.push('A backup was being uploaded when the deletion started; files it uploads may remain.');
+  }
+  const deadline = now() + DELETE_DEADLINE_MS;
+  let outOfTime = false;
+  /** False once the deadline has passed — recorded once, and every later step stops. */
+  const inTime = (): boolean => {
+    if (outOfTime) return false;
+    if (now() <= deadline) return true;
+    outOfTime = true;
+    result.problems.push(`Stopped after ${String(DELETE_DEADLINE_MS / 1000)} s; backup files not reached by then remain.`);
+    return false;
+  };
+
+  const call = (url: string, init?: RequestInit) =>
+    driveFetch(auth, url, { ...init, signal: AbortSignal.timeout(DELETE_CALL_TIMEOUT_MS) });
+
+  /** Every page of a query, or null with a problem recorded. */
+  const listAll = async (q: string, what: string): Promise<DriveListingFile[] | null> => {
+    const out: DriveListingFile[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_LISTING_PAGES; page++) {
+      if (!inTime()) return null;
+      const params = new URLSearchParams({
+        q,
+        fields: 'nextPageToken,files(id,name,mimeType,isAppAuthorized,ownedByMe)',
+        pageSize: '1000',
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      let response: Response;
+      try {
+        response = await call(`${DRIVE_BASE}/files?${params.toString()}`);
+      } catch (err: unknown) {
+        result.problems.push(`Could not list ${what}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      if (!response.ok) {
+        result.problems.push(`Could not list ${what}: Google answered ${String(response.status)}`);
+        return null;
+      }
+      let data: DriveListingPage;
+      try {
+        data = await response.json() as DriveListingPage;
+      } catch (err: unknown) {
+        result.problems.push(`Could not read the listing of ${what}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      out.push(...(data.files ?? []));
+      pageToken = data.nextPageToken;
+      if (!pageToken) return out;
+    }
+    result.problems.push(`Stopped listing ${what} after ${String(MAX_LISTING_PAGES)} pages`);
+    return null;
+  };
+
+  /**
+   * Did lynox create this? `false` is the user's own (or another app's): left alone, silently.
+   * ABSENT is not `false`. Google not saying would otherwise read as "nothing of ours here"
+   * and report `none` over files that are still there.
+   */
+  const ours = (f: DriveListingFile, path: string): boolean => {
+    if (f.isAppAuthorized === undefined) {
+      result.problems.push(`Google did not say whether ${path} was created by lynox; left in place`);
+      return false;
+    }
+    return f.isAppAuthorized;
+  };
+
+  const roots = await listAll(
+    `name = '${BACKUP_FOLDER_NAME}' and mimeType = '${FOLDER_MIME}'`,
+    `the ${BACKUP_FOLDER_NAME} folders`,
+  );
+  if (roots === null) return { ...result, status: 'degraded' };
+
+  for (const root of roots) {
+    result.foldersKept++;
+    const backups = await listAll(`'${root.id}' in parents`, `the folder ${root.name}`);
+    if (backups === null) continue;
+    for (const backup of backups) {
+      // Only what the uploader creates here: a folder named like a backup directory.
+      if (backup.mimeType !== FOLDER_MIME || !isBackupDirName(backup.name)) continue;
+      const backupPath = `${root.name}/${backup.name}`;
+      if (!ours(backup, backupPath)) continue;
+      result.foldersKept++;
+      const files = await listAll(`'${backup.id}' in parents`, `the folder ${backupPath}`);
+      if (files === null) continue;
+      for (const file of files) {
+        // The uploader writes nested paths as flat names, so a folder here is not its own.
+        if (file.mimeType === FOLDER_MIME) continue;
+        const path = `${backupPath}/${file.name}`;
+        if (!ours(file, path)) continue;
+        // Someone else's file, even one lynox created for them: theirs, left alone silently.
+        // ABSENT is reported, as for `isAppAuthorized` — not read as "not mine".
+        if (file.ownedByMe === undefined) {
+          result.problems.push(`Google did not say whether ${path} is yours; left in place`);
+          continue;
+        }
+        if (!file.ownedByMe) continue;
+        if (!inTime()) break;
+        let response: Response;
+        try {
+          response = await call(`${DRIVE_BASE}/files/${encodeURIComponent(file.id)}`, { method: 'DELETE' });
+        } catch (err: unknown) {
+          result.problems.push(`Could not delete ${path}: ${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
+        // 404 right after a listing that showed the file: it went in between, which is the
+        // outcome asked for. Counted as deleted, so the count is "no longer there", not
+        // "removed by this call".
+        if (response.ok || response.status === 404) result.deleted++;
+        else result.problems.push(`Could not delete ${path}: Google answered ${String(response.status)}`);
+      }
+    }
+  }
+
+  // Only reachable when the hold above was not taken: a caller that did not pause uploads.
+  if (!uploadingAtStart && isUploading()) {
+    result.problems.push('A backup was being uploaded when the deletion finished; files it uploaded may remain.');
+  }
+  if (result.problems.length > 0) return { ...result, status: 'degraded' };
+  return { ...result, status: result.deleted > 0 ? 'deleted' : 'none' };
+}

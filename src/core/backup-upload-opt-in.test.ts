@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, statSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { BackupManager } from './backup.js';
 import type { BackupManifest } from './backup.js';
-import { driveUploadOptedIn } from './backup-upload-gdrive.js';
+import { driveUploadOptedIn, isBackupDirName } from './backup-upload-gdrive.js';
 import { isEncryptedBackupFile } from './backup-crypto.js';
 import type { GDriveBackupUploader, UploadResult } from './backup-upload-gdrive.js';
 
@@ -410,5 +410,80 @@ describe('createBackup — an unencrypted archive never leaves the machine', () 
     await manager.createBackup();
 
     expect(stderrText()).not.toContain('Google Drive upload skipped');
+  });
+});
+
+describe('pauseUploads — held while Google is being disconnected', () => {
+  let lynoxDir: string;
+  let backupDir: string;
+  let stderr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    lynoxDir = seedLynoxDir();
+    backupDir = join(lynoxDir, 'backups');
+    stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stderr.mockRestore();
+    rmSync(lynoxDir, { recursive: true, force: true });
+  });
+
+  it('skips the upload while held, keeps the local backup, and uploads again once released', async () => {
+    const { calls, uploader } = spyUploader();
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: uploader }, VAULT_KEY,
+    );
+    const release = manager.pauseUploads();
+    const held = await manager.createBackup();
+    expect(held.success).toBe(true);
+    expect(localArchiveIsReadable(held.path)).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(stderr.mock.calls.map(c => String(c[0])).join('')).toContain('Google is being disconnected');
+
+    // A second release is a no-op: overlapping holds must not cancel each other early.
+    const other = manager.pauseUploads();
+    release();
+    release();
+    await manager.createBackup();
+    expect(calls, 'a double release lifted the other hold').toHaveLength(0);
+    other();
+    await manager.createBackup();
+    expect(calls).toHaveLength(1);
+  });
+
+  it('the name a real backup gets is one the Drive deletion recognises', async () => {
+    // Disconnecting Google deletes only inside folders named like a backup directory. The
+    // name is derived here from `createBackup` itself — twice in the same instant, so the
+    // collision suffix is covered too — rather than typed, so a change to the naming
+    // cannot leave every Drive backup unrecognised while the deletion reports `none`.
+    const manager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, undefined);
+    const now = new Date('2026-10-08T19:30:12.345Z');
+    vi.useFakeTimers({ now, toFake: ['Date'] });
+    try {
+      const first = await manager.createBackup();
+      const second = await manager.createBackup();
+      expect(basename(second.path)).toMatch(/-\d+$/);
+      for (const r of [first, second]) expect(isBackupDirName(basename(r.path)), basename(r.path)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports an upload in flight, and only while it is', async () => {
+    let seen: boolean | null = null;
+    const stub = {
+      upload: async (): Promise<UploadResult> => {
+        seen = manager.uploading;
+        return { success: true, folderId: 'f', filesUploaded: 1 };
+      },
+    } as unknown as GDriveBackupUploader;
+    const manager = new BackupManager(
+      lynoxDir, { backupDir, retentionDays: 30, encrypt: true, gdriveUploader: stub }, VAULT_KEY,
+    );
+    expect(manager.uploading).toBe(false);
+    await manager.createBackup();
+    expect(seen).toBe(true);
+    expect(manager.uploading).toBe(false);
   });
 });

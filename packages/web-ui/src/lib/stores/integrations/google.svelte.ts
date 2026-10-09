@@ -12,7 +12,7 @@
 // IntegrationsView.svelte:83-313.
 
 import { getApiBase } from '../../config.svelte.js';
-import { t } from '../../i18n.svelte.js';
+import { t, tf } from '../../i18n.svelte.js';
 import { addToast } from '../toast.svelte.js';
 import {
 	scopeMismatch,
@@ -20,7 +20,7 @@ import {
 	type ScopeMode,
 	type ServerScopeMode,
 } from './google-scope-labels.js';
-import { deleteClientPair, performSwitchToManaged, revokeNotice } from './google-switch.js';
+import { deleteClientPair, driveBackupNotice, performSwitchToManaged, revokeNotice } from './google-switch.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -296,12 +296,24 @@ export async function startGoogleAuth(): Promise<void> {
 export async function revokeGoogle(): Promise<void> {
 	revoking = true;
 	try {
-		const res = await fetch(`${getApiBase()}/google/revoke`, { method: 'POST' });
+		// The deletion of the Drive backups is asked for explicitly: the route
+		// leaves them alone for a caller that does not, and the confirmation the
+		// user just pressed is what names it.
+		const res = await fetch(`${getApiBase()}/google/revoke`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ delete_drive_backups: true }),
+		});
 		if (!res.ok) throw new Error();
 		// The connection is gone either way; say whether Google confirmed it too, so the
 		// page does not report a revocation that did not take place.
-		const notice = revokeNotice(await res.json().catch(() => ({})));
+		const body: unknown = await res.json().catch(() => ({}));
+		const notice = revokeNotice(body);
 		addToast(t(notice.key), notice.type, notice.type === 'info' ? 12000 : undefined);
+		// What happened to the backups lynox put in Drive: a copy that may remain
+		// is said, with where to find it, rather than left for the user to assume.
+		const drive = driveBackupNotice(body);
+		if (drive) addToast(tf(drive.key, { count: String(drive.count) }), drive.type, 15000);
 	} catch {
 		addToast(t('common.save_failed'), 'error');
 	}

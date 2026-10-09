@@ -112,9 +112,45 @@ assume the edit is already in effect.
 
 Set `backup_gdrive` to `false` (or remove the line). New backups are no longer uploaded.
 
-This does **not** remove copies already in Drive. Neither the UI nor the HTTP API has a
-remote-delete control, so delete the `lynox-backups` folder in your Drive yourself if you want them
-gone.
+This does **not** remove copies already in Drive. Turning the setting off only stops new uploads.
+
+### Removing the copies in Drive
+
+**Disconnecting Google** in Settings → Google → Disconnect deletes the backup files this instance
+uploaded through the current connection, and then revokes lynox's access. This works even after
+`backup_gdrive` is off, because it removes old copies rather than stopping new uploads. The
+confirmation names this step. While the disconnect runs, new backups keep their local copy but are
+not uploaded.
+
+Over the HTTP API the deletion is opt-in. Send `POST /api/google/revoke` with
+`Content-Type: application/json` and the body `{"delete_drive_backups": true}`. Without both, the
+route only revokes, and its response says `drive_backups.status: "skipped"`. Switching to the managed Google client never deletes anything.
+That path only drops the local grant and leaves both your Drive and the grant at Google as they are.
+
+What is deleted, and what is not:
+
+- **Deleted:** the files inside the backup folders the uploader creates. Those are folders named
+  like `2026-10-08T19301234Z`, inside a folder called `lynox-backups`. A file is deleted only if
+  Google reports that lynox created both the backup folder and the file itself
+  (`isAppAuthorized`), and that the file is yours. Files in Drive's bin count too. A file lynox made for another reason and then
+  put into one of those backup folders counts as part of the backup and is deleted with it.
+- **Kept:** every folder. Deleting a folder in Drive also deletes everything inside it that you
+  own, including a copy you made there with "Make a copy". So lynox leaves the folders standing,
+  and you can delete them yourself once they are empty.
+- **Kept:** anything lynox did not create, and anything outside those backup folders. That
+  includes your own files inside a `lynox-backups` folder, files lynox's Drive, Docs and Sheets
+  tools created elsewhere, and anything in a shared drive.
+- **Left in place:** backups uploaded through a different Google client. That covers an earlier
+  client pair of your own, and the managed client if you switched. Google marks a file as created
+  by the client that uploaded it. With the default Drive access lynox cannot see those files at
+  all. With full Drive access it sees them, but they do not count as its own. Either way they stay,
+  and the page does not mention them. Delete them in Drive yourself.
+
+If something could not be deleted, the disconnect still happens. That covers Google refusing a
+delete, the network policy blocking a call, an upload already under way, and the deletion running
+past its time limit of about two minutes. The page then says the deletion was incomplete, and the response carries
+`drive_backups.status: "degraded"` with the reasons. This instance has no access afterwards, so
+delete what is left in the `lynox-backups` folder yourself.
 
 ### What Drive can see
 

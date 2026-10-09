@@ -1356,7 +1356,7 @@ export class LynoxHTTPApi {
     if (google.some(g => g.holdsGrant)) {
       return {
         code: 'google_connected',
-        error: 'Google is connected. Disconnect it first (POST /api/google/revoke, then DELETE /api/mail/accounts/<id> for a connected Gmail account), then erase.'
+        error: 'Google is connected. Disconnect it first (POST /api/google/revoke with the JSON body {"delete_drive_backups": true}, which also deletes the backups lynox uploaded to Drive; then DELETE /api/mail/accounts/<id> for a connected Gmail account), then erase.'
           + ' If it still answers this after the revoke, an older connection is held in memory: restarting the instance clears it.',
       };
     }
@@ -8757,14 +8757,65 @@ export class LynoxHTTPApi {
       }
     });
 
-    this.addStatic('user', 'POST /api/google/revoke', async (_req, res) => {
+    this.addStatic('user', 'POST /api/google/revoke', async (req, res, _params, body) => {
       const google = engine.getGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
-      // `ok` is the local disconnect, which always happens; `revoked_at_google`
-      // says whether Google confirmed the revocation, so the page does not
-      // report one that did not take place.
-      const { revokedAtGoogle } = await google.revoke();
-      jsonResponse(res, 200, { ok: true, revoked_at_google: revokedAtGoogle });
+      // The Drive backups lynox uploaded go BEFORE the revoke: deleting them
+      // needs the token the revoke gives up. Here and not in `disconnect()`,
+      // which is also the D12 switch-back — a tenant changing brokers must not
+      // lose its backups. A failure never stops the disconnect the user asked
+      // for; it is reported, naming what may remain, so the page does not say
+      // "deleted" for a copy that is still there.
+      //
+      // Only when the caller asks for it, in a JSON body. The route existed
+      // before it deleted anything, and a caller written against that contract
+      // must not start destroying files without knowing.
+      //
+      // And only with an explicit `Content-Type: application/json`. The body
+      // parser reads JSON from a request with NO content type too, and that is
+      // a "simple" request a foreign page can send without a CORS preflight
+      // (a typeless Blob body). The header is what forces the preflight, which
+      // a foreign origin does not pass — so it is required here, not assumed.
+      const contentType = (req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase();
+      const wantsDeletion = contentType === 'application/json'
+        && typeof body === 'object' && body !== null
+        && (body as { delete_drive_backups?: unknown }).delete_drive_backups === true;
+      let driveBackups: import('../core/backup-upload-gdrive.js').DriveBackupDeletion | null = null;
+      const backups = engine.getBackupManager();
+      // Held until the token is gone: an upload in between would leave a copy
+      // the deletion never listed.
+      const releaseUploads = wantsDeletion ? backups?.pauseUploads() : undefined;
+      try {
+        if (wantsDeletion) {
+          try {
+            const { deleteUploadedBackups, driveAuthFrom } = await import('../core/backup-upload-gdrive.js');
+            driveBackups = await deleteUploadedBackups(driveAuthFrom(google), () => backups?.uploading ?? false);
+          } catch (err: unknown) {
+            driveBackups = {
+              status: 'degraded', deleted: 0, foldersKept: 0,
+              problems: [`Drive backups were not checked: ${err instanceof Error ? err.message : String(err)}`],
+            };
+          }
+        }
+        // `ok` is the local disconnect, which always happens; `revoked_at_google`
+        // says whether Google confirmed the revocation, so the page does not
+        // report one that did not take place.
+        const { revokedAtGoogle } = await google.revoke();
+        jsonResponse(res, 200, {
+          ok: true,
+          revoked_at_google: revokedAtGoogle,
+          drive_backups: driveBackups === null
+            ? { status: 'skipped', deleted: 0, folders_kept: 0, problems: [] }
+            : {
+              status: driveBackups.status,
+              deleted: driveBackups.deleted,
+              folders_kept: driveBackups.foldersKept,
+              problems: driveBackups.problems.map(p => maskForClient(p)),
+            },
+        });
+      } finally {
+        releaseUploads?.();
+      }
     }, ownerOnly('revoke the Google connection'));
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back

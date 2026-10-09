@@ -77,3 +77,26 @@ export function revokeNotice(body: unknown): RevokeNotice {
 		? { key: 'integrations.google_revoked', type: 'success' }
 		: { key: 'integrations.google_revoked_locally_only', type: 'info' };
 }
+
+// === "Revoke Google": what happened to the Drive backups ===
+//
+// The engine deletes the backup files lynox uploaded to Drive before it revokes,
+// and reports how that went. `degraded` must reach the user as "something may be
+// left, and where": the page must not read as if every copy were gone. `none`,
+// `unchecked`, `skipped` and an older engine that sends no field say nothing —
+// there was nothing lynox could see, or was asked, to delete. The folders always stay (a folder delete
+// would take the user's own copies inside it along), so a deletion says that too.
+export type DriveBackupNotice =
+	| { key: 'integrations.google_drive_backups_deleted'; type: 'success'; count: number }
+	| { key: 'integrations.google_drive_backups_degraded'; type: 'error'; count: number };
+
+export function driveBackupNotice(body: unknown): DriveBackupNotice | null {
+	if (typeof body !== 'object' || body === null) return null;
+	const drive = (body as { drive_backups?: unknown }).drive_backups;
+	if (typeof drive !== 'object' || drive === null) return null;
+	const { status, deleted } = drive as { status?: unknown; deleted?: unknown };
+	const count = typeof deleted === 'number' && Number.isFinite(deleted) ? deleted : 0;
+	if (status === 'degraded') return { key: 'integrations.google_drive_backups_degraded', type: 'error', count };
+	if (status === 'deleted' && count > 0) return { key: 'integrations.google_drive_backups_deleted', type: 'success', count };
+	return null;
+}

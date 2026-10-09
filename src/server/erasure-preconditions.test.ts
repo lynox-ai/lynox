@@ -118,13 +118,14 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
     expect(internals().erasureInProgress).toBe(false);
     expect(internals().erasureGeneration).toBe(genBefore);
   }
-  async function expectRefused(code: string): Promise<void> {
+  async function expectRefused(code: string): Promise<string> {
     const gen = seedNothingErased();
     const res = await erase();
     expect(res.status).toBe(409);
     expect(res.body['code']).toBe(code);
     expect(String(res.body['error'])).toContain('Nothing was erased.');
     expectNothingErased(gen);
+    return String(res.body['error']);
   }
 
   const ACCOUNT = { id: 'zz-acc', displayName: 'ZZ', address: 'zz@example.org', type: 'personal' };
@@ -305,7 +306,10 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
 
     await google().setTokens(tokens());
     expect(google().isAuthenticated()).toBe(true);
-    await expectRefused('google_connected');
+    // The instruction names the body that also removes the Drive backups: the
+    // route leaves them alone without it, and an API user following this text
+    // would otherwise erase here and keep copies there.
+    expect(await expectRefused('google_connected')).toContain('{"delete_drive_backups": true}');
     expect((await call('POST', '/api/google/revoke')).status).toBe(200);
     expect(google().isAuthenticated()).toBe(false);
   }, 60_000);
