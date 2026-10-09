@@ -266,6 +266,13 @@ function validateProfile(profile: ApiProfile): string | null {
       if (o.body_format !== undefined && o.body_format !== 'form' && o.body_format !== 'json') {
         return `Invalid auth.oauth.body_format "${o.body_format}": must be "form" or "json"`;
       }
+      // Connect, the start route and a preset refresh split it as text, so a list
+      // saved here only failed later, at the link, with a TypeError. Not quoted back: the
+      // value is the model's own input.
+      const scope: unknown = o.scope;
+      if (scope !== undefined && typeof scope !== 'string') {
+        return 'Invalid auth.oauth.scope: must be text with the scopes separated by spaces, for example "contact_show email", not a list.';
+      }
       // The three `*_key` slots were checked HERE, against a local copy of the
       // vault-key pattern, and nowhere else. That is what made them the shallow
       // end of the function: a form check, with nothing asking whether the name
@@ -1739,8 +1746,11 @@ ${draftJson}
       // The string "2" is read as the number it names. Models send it that way often
       // enough that the refusal below cost a round in a third of the measured runs, and
       // it is stored as the number: the loader treats anything but `=== 2` as v1.
+      // A provenance without the field is read the same way: 2 is the only value the
+      // save accepts, so asking for it back bought nothing, and a measured run got
+      // `"undefined"` quoted at it. A value that is there and wrong is still refused.
       const sentVersion: unknown = profile.provenance?.schema_version;
-      if (profile.provenance && sentVersion === '2') profile.provenance = { ...profile.provenance, schema_version: 2 };
+      if (profile.provenance && (sentVersion === '2' || sentVersion === undefined)) profile.provenance = { ...profile.provenance, schema_version: 2 };
       const error = validateProfile(profile);
       if (error) {
         return `Validation error: ${error}`;

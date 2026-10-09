@@ -313,6 +313,8 @@ describe('the preset fields are checked at the door, not at the derivation', () 
     // Checked at save as well as at connect: stored, it would fail only at the
     // link. A write scope is not in bexio's allowed set.
     ['a scope the provider preset does not allow', { preset_id: 'example-shop', preset_params: { shop: 'acme' }, scope: 'read_orders write_orders' }, 'auth.oauth.scope'],
+    // Every reader splits the scope as text; a list saved here threw at connect.
+    ['a scope given as a list', { preset_id: 'example-shop', preset_params: { shop: 'acme' }, scope: ['read_orders'] }, 'auth.oauth.scope'],
   ])('refuses %s', async (_label, oauth, field) => {
     const result = await createWith(oauth);
 
