@@ -508,6 +508,12 @@ const PHRASE_LITERAL = /[A-Za-z0-9!*+\-/]/;
  * `'text'` for an unstructured header (Subject), `'phrase'` for a display name
  * in an address header. See {@link PHRASE_LITERAL} for why the phrase set is so
  * much narrower — it is an injection boundary, not a formatting preference.
+ *
+ * `fold` joins the encoded-words with CRLF + space instead of a space, so the
+ * value can stand on its own header line. `prefixLength` is what precedes the
+ * value on the first line (`Subject: ` = 9). It must leave room for the largest
+ * piece (12) plus the encoded-word overhead (12), i.e. be at most 52; beyond
+ * that the first line exceeds 76 characters.
  */
 export function encodeMimeHeader(
   value: string,
