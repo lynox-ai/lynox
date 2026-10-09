@@ -3136,6 +3136,30 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  // -- H2c (PRD customer-granted-operator-access §3.13 E1): who opened a thread --
+
+  describe('a new thread records who opened it', () => {
+    it('stamps the principal the session is built for, and leaves an owner session unstamped', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const threadStore = engine.getThreadStore()!;
+      const created = vi.spyOn(threadStore, 'createThread');
+      const byMandate = engine.createSession({ principal: { kind: 'mandate', email: 'setup@example.org' } });
+      expect(created).toHaveBeenLastCalledWith(byMandate.sessionId, expect.objectContaining({ created_by: 'mandate:setup@example.org' }));
+      const byOwner = engine.createSession();
+      expect(created.mock.calls.at(-1)?.[0]).toBe(byOwner.sessionId);
+      expect(created.mock.calls.at(-1)?.[1]).not.toHaveProperty('created_by');
+    });
+
+    it('tells who ran in the session last: the principal it was built for until a run says otherwise', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const mandate = { kind: 'mandate' as const, email: 'setup@example.org' };
+      expect(engine.createSession({ principal: mandate }).lastRunPrincipal).toEqual(mandate);
+      expect(engine.createSession().lastRunPrincipal).toEqual({ kind: 'owner' });
+    });
+  });
+
   // -- Slice B (#86/#80): compact() persists the summary durably to thread.summary --
 
   describe('compact() durable summary persistence', () => {

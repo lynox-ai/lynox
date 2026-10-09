@@ -828,7 +828,13 @@ export class TaskManager {
    * status filter the agent tool offers, and the UI's status map — which is a wider unit
    * than this one and is filed as its own. No migration.
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped'): void {
+  /**
+   * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
+   *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
+   *   per request"). A retry carries no request, so it would run as the owner's schedule with
+   *   the full tool set.
+   */
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped', opts?: { noRetry?: boolean | undefined }): void {
     const task = this.history.getTrigger(id);
     if (!task) {
       throw new Error(`Trigger not found: ${id}`);
@@ -906,6 +912,7 @@ export class TaskManager {
       (status === 'failed' || status === 'timeout')
       && task.max_retries
       && (task.retry_count ?? 0) < task.max_retries
+      && opts?.noRetry !== true
     ) {
       // Retry with exponential backoff if retries remaining
       retryCount = (task.retry_count ?? 0) + 1;

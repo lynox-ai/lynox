@@ -58,6 +58,10 @@ export interface PendingPromptRow {
    *  boundary (`triggers` is in engine.db): no FK, no JOIN, and a dangling value
    *  reads as "no trigger is waiting on this". */
   trigger_id: string | null;
+  /** Who asked (v57): the `principalTag` of the asking run. NULL is the owner's. */
+  created_by: string | null;
+  /** 1 when a run started by hand asked (v57). */
+  hand_run: number;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -208,6 +212,17 @@ export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
   }
 }
 
+/**
+ * Who asked a question (v57, PRD customer-granted-operator-access §3.13 E2): the
+ * `principalTag` of the run that raised it. A mandate answers only questions its own runs
+ * asked; a question without a stamp is the owner's. `handRun` marks a question asked by a run
+ * started by hand, so the worker can tell it apart after a restart (the run that knew is gone).
+ */
+export interface PromptStamp {
+  readonly createdBy: string;
+  readonly handRun?: boolean | undefined;
+}
+
 export class PromptConflictError extends Error {
   constructor(sessionId: string) {
     super(`Session ${sessionId} already has a pending prompt`);
@@ -262,11 +277,13 @@ export class PromptStore {
     /** Set only by the WorkerLoop, when the asking run belongs to a trigger.
      *  Every other caller leaves it undefined. */
     triggerId?: string,
+    stamp?: PromptStamp,
   ): string {
     return this._insert({
       sessionId,
       promptType: 'ask_user',
       triggerId,
+      stamp,
       question,
       optionsJson: options ? JSON.stringify(options) : null,
       questionsJson: null,
@@ -283,10 +300,11 @@ export class PromptStore {
 
   /** Insert a multi-question (tabs) ask_user prompt. All questions are
    * answered in a single reply. Throws PromptConflictError on collision. */
-  insertAskUserTabs(sessionId: string, questions: TabQuestion[], origin?: PromptOrigin): string {
+  insertAskUserTabs(sessionId: string, questions: TabQuestion[], origin?: PromptOrigin, stamp?: PromptStamp): string {
     if (questions.length === 0) throw new Error('insertAskUserTabs: questions must be non-empty');
     return this._insert({
       sessionId,
+      stamp,
       promptType: 'ask_user',
       // question held separately for logging / restoration; canonical data is
       // in questions_json.
@@ -301,9 +319,10 @@ export class PromptStore {
     });
   }
 
-  insertAskSecret(sessionId: string, name: string, prompt: string, keyType?: string, origin?: PromptOrigin): string {
+  insertAskSecret(sessionId: string, name: string, prompt: string, keyType?: string, origin?: PromptOrigin, stamp?: PromptStamp): string {
     return this._insert({
       sessionId,
+      stamp,
       promptType: 'ask_secret',
       question: prompt,
       optionsJson: null,
@@ -320,9 +339,10 @@ export class PromptStore {
    * (JSON `MailConnectPromptData`). The consent step renders it and forwards
    * the account to POST /api/mail/accounts; the password is entered there and
    * never touches this row. Throws PromptConflictError on collision. */
-  insertConnectMail(sessionId: string, question: string, payloadJson: string, origin?: PromptOrigin): string {
+  insertConnectMail(sessionId: string, question: string, payloadJson: string, origin?: PromptOrigin, stamp?: PromptStamp): string {
     return this._insert({
       sessionId,
+      stamp,
       promptType: 'connect_mail',
       question,
       optionsJson: null,
@@ -342,10 +362,11 @@ export class PromptStore {
    * `payload_json` NULL, so it can never be promoted to `user_asserted` via the
    * onboarding path — only a prompt this method inserted qualifies. `keys` maps each
    * answer slot to its catalog key. Throws PromptConflictError on collision. */
-  insertOnboardingBasics(sessionId: string, questions: TabQuestion[], keys: string[]): string {
+  insertOnboardingBasics(sessionId: string, questions: TabQuestion[], keys: string[], stamp?: PromptStamp): string {
     if (questions.length === 0) throw new Error('insertOnboardingBasics: questions must be non-empty');
     return this._insert({
       sessionId,
+      stamp,
       promptType: 'ask_user',
       question: questions[0]!.question,
       optionsJson: null,
@@ -374,6 +395,7 @@ export class PromptStore {
      *  that window is exactly when a concurrent boot expiry must be able to tell
      *  a parked question apart from an ordinary one. */
     triggerId?: string | undefined;
+    stamp?: PromptStamp | undefined;
   }, retry = false): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
@@ -396,6 +418,8 @@ export class PromptStore {
         args.payloadJson,
         args.origin ? JSON.stringify(args.origin) : null,
         args.triggerId ?? null,
+        args.stamp?.createdBy ?? null,
+        args.stamp?.handRun === true ? 1 : 0,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -668,6 +692,20 @@ export class PromptStore {
    *
    * `trigger_id` plus `status = 'pending'` is the thing itself.
    */
+  /**
+   * The newest question a trigger's run asked, whatever became of it (v57; PRD
+   * customer-granted-operator-access, register: hand-run question origin). The expiry sweep
+   * and the answer re-arm read who asked and whether a run by hand did — after a restart the
+   * run that knew is gone, and the trigger row may have been stamped since. Any status, on
+   * purpose: the engine's own expiry (`expireOld`) may have settled the row before the sweep
+   * reads it, and a reader that saw only `pending` would then fall back to the trigger row.
+   */
+  getLatestForTrigger(triggerId: string): PendingPromptRow | undefined {
+    return this.db
+      .prepare(`SELECT * FROM pending_prompts WHERE trigger_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(triggerId) as PendingPromptRow | undefined;
+  }
+
   getPendingForTrigger(triggerId: string): PendingPromptRow | undefined {
     return this.db
       .prepare(
@@ -787,8 +825,8 @@ export class PromptStore {
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
          secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select,
-         payload_json, origin_json, trigger_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         payload_json, origin_json, trigger_id, created_by, hand_run)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

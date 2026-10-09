@@ -2410,6 +2410,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
         CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
+        -- and active_runs (created v33); v57 ALTERs it (created_by). Minimal stub.
+        CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
         INSERT INTO tasks (id, title, assignee, priority, due_date) VALUES ('m-todo','Pay invoice','user','high','2026-07-01');
         INSERT INTO tasks (id, title) VALUES ('m-todo-null','Loose note');
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('m-cron','Digest','lynox','scheduled','0 9 * * *','2020-01-01T00:00:00.000Z');
@@ -2488,6 +2490,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
         CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
+        -- and active_runs (created v33); v57 ALTERs it (created_by). Minimal stub.
+        CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
         -- a TRIGGER parent (scheduled) + a kept-TODO child pointing at it (cross-table)
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('par-trig','Weekly job','lynox','scheduled','0 9 * * 1','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-trig','Subtask','user','par-trig');
@@ -2573,6 +2577,8 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- and run_tool_calls (created v1); v54 ALTERs it (connection stamp). Minimal stub.
         CREATE TABLE IF NOT EXISTS run_tool_calls (id TEXT PRIMARY KEY);
+        -- and active_runs (created v33); v57 ALTERs it (created_by). Minimal stub.
+        CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
       `);

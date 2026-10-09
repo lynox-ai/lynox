@@ -27,6 +27,9 @@ export interface ThreadRecord {
    *  a different DB → no FK). NULL = un-anchored. Drives the default subject_id on
    *  this thread's memory writes (Slice B) + the retrieval walk-up weight (Slice C). */
   primary_subject_id: string | null;
+  /** Who created the thread (v57): a `principalTag`. NULL on every thread from before the
+   *  column and on threads the engine itself opens, and NULL is the owner's (`ownedBy`). */
+  created_by: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -86,19 +89,23 @@ export class ThreadStore {
      *  `'unknown'` (a programmatic creator that did not observe the origin). */
     model_tier_source?: string | undefined;
     context_id?: string | undefined;
+    /** Who opens it: a `principalTag`. Like the provenance, only a NEW thread takes it —
+     *  a resume never changes who created a thread. */
+    created_by?: string | undefined;
   }): void {
     // OR IGNORE: on a resume the thread already exists, so this INSERT is a
     // no-op — the provenance stamped here only takes effect for a genuinely NEW
     // thread; a resumed thread keeps its original `model_tier_source`.
     this.db.prepare(`
-      INSERT OR IGNORE INTO threads (id, title, model_tier, model_tier_source, context_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO threads (id, title, model_tier, model_tier_source, context_id, created_by)
+      VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       id,
       opts?.title ?? '',
       opts?.model_tier ?? 'balanced',
       opts?.model_tier_source ?? 'unknown',
       opts?.context_id ?? '',
+      opts?.created_by ?? null,
     );
   }
 

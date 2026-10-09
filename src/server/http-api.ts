@@ -55,6 +55,7 @@ import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } fro
 import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
+import type { Session } from '../core/session.js';
 import { RunAbortedError, TOOL_AUDIT_INPUT_MAX_CHARS } from '../core/agent.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
@@ -65,14 +66,14 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
@@ -1786,6 +1787,65 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * The 403 a mandate gets on something it did not set up itself (PRD
+   * customer-granted-operator-access §3.13 E1, E2, E7, E9, B6) — the check behind every `own`
+   * stance. `rows` lists what must be the request's own (`ownedBy`): a missing row is refused, so
+   * an id that names nothing never reads as the mandate's. The owner passes without the rows
+   * being read at all — a function, so the owner's requests touch nothing they did before.
+   */
+  private _refuseUnlessOwns(
+    req: IncomingMessage,
+    res: ServerResponse,
+    what: string,
+    rows: () => ReadonlyArray<{ readonly created_by?: string | null | undefined } | undefined>,
+  ): boolean {
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal) || rows().every((row) => ownedBy(row, principal))) return false;
+    errorResponse(res, 403, `Only the owner of this instance, or the person who started it, can ${what}.`);
+    return true;
+  }
+
+  /**
+   * E2 (§3.13): a mandate answers only a question its own run asked. Every question the route
+   * could answer is checked — the one named by id and the one pending on the session, which the
+   * route falls back to — so no fallback reaches a question the check did not see. The question
+   * of a scheduled run carries the owner, so it is never a mandate's (N1). With no question
+   * at all the route answers its own 404.
+   */
+  private _refuseUnlessOwnsPrompt(
+    req: IncomingMessage,
+    res: ServerResponse,
+    ps: PromptStore,
+    sessionId: string,
+    promptId: string | undefined,
+  ): boolean {
+    if (isOwnerPrincipal(this._principalOf(req))) return false;
+    const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
+      .filter((row): row is PendingPromptRow => row !== undefined);
+    if (candidates.length === 0) return false;
+    return this._refuseUnlessOwns(req, res, 'answer this question', () => candidates);
+  }
+
+  /** The run an E7 check reads: the one in flight on the session, or the last one. */
+  private _lastRunRow(session: Session): { readonly created_by: string } {
+    return { created_by: principalTag(session.lastRunPrincipal) };
+  }
+
+  /** The run an E7 check reads on a conversation that may have no live session: the live
+   *  session's last run, else the registry's row for the thread, else nothing to check. */
+  private _liveRunRows(sessionId: string): ReadonlyArray<{ readonly created_by: string | null }> {
+    const live = this.sessionStore.get(sessionId);
+    if (live) return [this._lastRunRow(live)];
+    const row = this.engine?.getRunRegistry()?.getByThread(sessionId);
+    return row ? [row] : [];
+  }
+
+  /** The thread row an `own` check reads for a session id (session id = thread id). */
+  private _threadRow(id: string): { readonly created_by: string | null } | undefined {
+    return this.engine?.getThreadStore()?.getThread(id);
+  }
+
+  /**
    * Before a mandate's request changes a trigger, record it and drop the stamp (PRD
    * customer-granted-operator-access §3.12 point 3): every kind of change — fields,
    * schedule, the enabled switch, completion — not only the instruction. The owner's
@@ -3083,8 +3143,23 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // A mandate reaches only a conversation it started (PRD customer-granted-operator-access
+      // §3.13 E1, N2). It names no id for a thread that does not exist yet (`ownedBy` refuses a
+      // missing row): a new conversation gets an id drawn here, so a mandate cannot claim an id
+      // the engine will open later — an agent escalation opens `escalation-<task id>` itself,
+      // and the owner's next escalation would have landed in a thread the mandate held. An
+      // escalation thread is the owner's whatever its row says.
+      const principal = this._principalOf(_req);
+      if (threadId !== undefined && !isOwnerPrincipal(principal)) {
+        if (ESCALATION_ID_REGEX.test(threadId)) {
+          errorResponse(res, 403, 'Only the owner of this instance, or the person who started it, can continue this conversation.');
+          return;
+        }
+        if (this._refuseUnlessOwns(_req, res, 'continue this conversation', () => [this._threadRow(threadId)])) return;
+      }
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
+        principal,
         model: typeof opts['model'] === 'string' ? normalizeTier(opts['model']) : undefined,
         // Provenance: the picker declares 'user' vs 'default'.
         // Only stamped for a genuinely NEW thread (createThread is OR IGNORE on
@@ -3130,11 +3205,14 @@ export class LynoxHTTPApi {
         threadId: sessionId,
         resumed: !!threadId && !!thread,
       });
-    }, ownerOnly('start a conversation'));
+    }, OWN);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/sessions/:id', async (_req, res, params) => {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      // Ending a session stops its run (§3.13 B6, E7): the conversation and the run must
+      // both be the request's own.
+      if (this._refuseUnlessOwns(_req, res, 'end this session', () => [this._threadRow(params['id']!), this._lastRunRow(session)])) return;
       session.abort();
       // A parked run ignores abort() and would keep both the slot and its
       // run-executor reservation after the Session is dropped below — with no
@@ -3142,13 +3220,16 @@ export class LynoxHTTPApi {
       this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('end a session')));
+    }, OWN));
 
     // ── Runs (SSE) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/run', async (req, res, params, body) => {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      // A mandate runs only in a conversation it started (§3.13 E1, N2). Read on the thread
+      // row, not on the session object: the session's principal is whoever ran last.
+      if (this._refuseUnlessOwns(req, res, 'run this conversation', () => [this._threadRow(sessionId)])) return;
       // Which erasure this request started under; see `erasureGeneration`.
       const erasureGenAtEntry = this.erasureGeneration;
       const erasedSinceEntry = (): boolean => this.erasureGeneration !== erasureGenAtEntry;
@@ -3173,6 +3254,9 @@ export class LynoxHTTPApi {
         const hasPrompt = !!promptStoreEarly?.getPending(sessionId);
         const stale = Date.now() - existingSlot.lastEventAt > STALE_RUN_SILENCE_MS;
         if (hasPrompt || stale) {
+          // Taking over ends the parked run and lets its question lapse: only that run's
+          // principal (or the owner) may, even in the mandate's own conversation (§3.13 E7).
+          if (this._refuseUnlessOwns(req, res, 'take over a run of this conversation', () => [this._lastRunRow(session)])) return;
           existingSlot.takeover();
           // Wait for the previous handler's `finally` to clear the slot.
           // Realistic drain after takeover() is sub-100 ms (one tick to
@@ -3320,6 +3404,10 @@ export class LynoxHTTPApi {
         // to get its tools back (PRD customer-granted-operator-access D1, §3.13 E1).
         principal: this._principalOf(req),
       };
+      // Every question this run asks carries who runs it (§3.13 E2): taken from the request
+      // that started the run, never read later from the session, whose principal moves on
+      // with the next run.
+      const askStamp = { createdBy: principalTag(this._principalOf(req)) };
 
       // User's IANA timezone for the per-turn `[Now: …]` marker. The client
       // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
@@ -3662,7 +3750,7 @@ export class LynoxHTTPApi {
         const segments = promptSegments(rawQuestion);
         const question = flattenPrompt(rawQuestion);
         const origin = promptOriginOf(meta);
-        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments, origin);
+        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments, origin, undefined, askStamp);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
@@ -3703,7 +3791,7 @@ export class LynoxHTTPApi {
         session.promptTabs = async (questions, meta?: PromptMeta): Promise<string[]> => {
           // Same rule as `promptUser` above: an empty answer list would be answers nobody gave.
           if (!promptStore) throw new InputRequiredError(questions.map(q => q.question).join(' / '));
-          const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta));
+          const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta), askStamp);
           const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
           hasActivePendingPrompt = true;
           pauseWallClock(); // parked on a human — don't spend the compute budget
@@ -3773,7 +3861,7 @@ export class LynoxHTTPApi {
           return 'managed_blocked';
         }
 
-        const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta));
+        const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta), askStamp);
         const releaseWithdraw = withdrawPromptOnAbort(promptStore, promptId, meta?.signal);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
@@ -3815,6 +3903,7 @@ export class LynoxHTTPApi {
           `Connect mailbox ${data.address}`,
           JSON.stringify(data),
           promptOriginOf(meta),
+          askStamp,
         );
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
@@ -3977,7 +4066,7 @@ export class LynoxHTTPApi {
         // Register the run as live (replaces any prior/interrupted row for this
         // thread). A crash before the finally leaves this row 'running' → the
         // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
-        runRegistry?.start(sessionId, runId);
+        runRegistry?.start(sessionId, runId, askStamp.createdBy);
         const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
@@ -4044,7 +4133,7 @@ export class LynoxHTTPApi {
         // persists regardless).
         this.engine?.getRunBufferManager()?.remove(runId);
       }
-    }, ownerOnly('run a conversation')));
+    }, OWN));
 
     // GET /runs/active — client-queryable live-run state for the nav indicator.
     // Returns every registry row (running + interrupted; done/error are already
@@ -4088,6 +4177,9 @@ export class LynoxHTTPApi {
       // as the session unwinds). Not live but present in the registry → it's an
       // interrupted row the client is acking; remove it so the nav dot + banner
       // clear. Neither → 404 (no existence oracle).
+      // A mandate stops or dismisses only a run it started (§3.13 E7). A run id the registry
+      // does not hold is refused with the same 403 as a foreign one, so it is no oracle either.
+      if (this._refuseUnlessOwns(_req, res, 'stop or dismiss this run', () => [registry?.getByRunId(runId)])) return;
       const wasLive = executor?.abort(runId) ?? false;
       if (wasLive) { jsonResponse(res, 200, { aborted: true, runId }); return; }
       // Not live → only an INTERRUPTED row may be acked/removed. A 'running' row
@@ -4101,7 +4193,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 404, { error: 'run not found' });
-    }, ownerOnly('stop or dismiss a run')));
+    }, OWN));
 
     // GET /runs/:runId/stream?since=<seq> — resumable SSE re-attach (Tier 2).
     // Replays buffered events newer than `since`, then live-tails new appends,
@@ -4236,6 +4328,7 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      if (this._refuseUnlessOwnsPrompt(_req, res, ps, params['id']!, promptId)) return;
       const answer = b && typeof b['answer'] === 'string' ? b['answer'] : '';
       if (!answer && !promptId) { errorResponse(res, 400, 'Missing answer'); return; }
 
@@ -4260,7 +4353,7 @@ export class LynoxHTTPApi {
       }
 
       errorResponse(res, 404, 'No pending prompt');
-    }, ownerOnly('answer a question of a run')));
+    }, OWN));
 
     // POST /sessions/:id/reply-tabs — one-shot reply for multi-question tabs prompts.
     // Body: { promptId: string, answers: string[] }. Each answer corresponds
@@ -4271,6 +4364,7 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : '';
+      if (this._refuseUnlessOwnsPrompt(_req, res, ps, params['id']!, (promptId || undefined))) return;
       const answers = b && Array.isArray(b['answers']) ? b['answers'] : undefined;
       if (!promptId) { errorResponse(res, 400, 'Missing promptId'); return; }
       if (!answers || !answers.every((a): a is string => typeof a === 'string')) {
@@ -4296,7 +4390,7 @@ export class LynoxHTTPApi {
 
       if (ps.answerUserTabs(promptId, answers)) { jsonResponse(res, 200, { ok: true }); return; }
       errorResponse(res, 404, 'No pending prompt');
-    }, ownerOnly('answer a question of a run')));
+    }, OWN));
 
     // POST /sessions/:id/tab-progress — persist partial answers (optional).
     // Called by the client as the user answers individual tabs so a mid-batch
@@ -4307,6 +4401,7 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : '';
+      if (this._refuseUnlessOwnsPrompt(_req, res, ps, params['id']!, (promptId || undefined))) return;
       const partial = b && Array.isArray(b['partial']) ? b['partial'] : undefined;
       if (!promptId || !partial) { errorResponse(res, 400, 'Missing promptId or partial'); return; }
       if (!partial.every((a) => typeof a === 'string' || a === null)) {
@@ -4320,7 +4415,7 @@ export class LynoxHTTPApi {
 
       ps.setPartialAnswers(promptId, partial as (string | null)[]);
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('answer a question of a run')));
+    }, OWN));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/secret-saved', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
@@ -4328,6 +4423,7 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      if (this._refuseUnlessOwnsPrompt(_req, res, ps, params['id']!, promptId)) return;
 
       // Prefer the v29 `status` field — it distinguishes managed_blocked /
       // vault_error from a real user cancel. Fall back to legacy `saved`
@@ -4373,7 +4469,7 @@ export class LynoxHTTPApi {
       }
       if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('answer a question of a run')));
+    }, OWN));
 
     // POST /sessions/:id/mail-connected — settle a connect_mail prompt after the
     // in-chat consent step has POSTed the account to /api/mail/accounts. Body:
@@ -4385,6 +4481,7 @@ export class LynoxHTTPApi {
 
       const b = body as Record<string, unknown> | null;
       const promptId = b && typeof b['promptId'] === 'string' ? b['promptId'] : undefined;
+      if (this._refuseUnlessOwnsPrompt(_req, res, ps, params['id']!, promptId)) return;
       const rawStatus = b && typeof b['status'] === 'string' ? b['status'] : undefined;
       // Default to 'canceled' when the status is missing/unknown: a connect_mail
       // dismissal is benign (the agent just acknowledges), unlike ask_secret
@@ -4414,7 +4511,7 @@ export class LynoxHTTPApi {
       }
       if (!answered) { errorResponse(res, 404, 'No pending mail prompt'); return; }
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('answer a question of a run')));
+    }, OWN));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
       const sessionId = params['id']!;
@@ -4426,12 +4523,16 @@ export class LynoxHTTPApi {
       // save that had not yet POSTed /secret-saved finds the prompt gone. That is
       // the intended reading of the button — before this, stop left the flow
       // running (dogfood 2026-08-24: a parked run held its thread for 15 h).
+      // A mandate stops only its own run in its own conversation (§3.13 E7), asked before
+      // anything is reclaimed: the live session's last run, else the registry's row for the
+      // thread, when there is one.
+      if (this._refuseUnlessOwns(_req, res, 'stop this run', () => [this._threadRow(sessionId), ...this._liveRunRows(sessionId)])) return;
       this.reclaimRunSlot(sessionId);
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('stop a run')));
+    }, OWN));
 
     // ── Changeset review ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/changeset', async (_req, res, params) => {
@@ -4459,6 +4560,10 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      // The changeset is the last run's work and outlives it: only that run's principal (or
+      // the owner) accepts or rolls it back, even in the mandate's own conversation (§3.13 E7).
+      // The next run replaces it, whoever starts it, as it always has.
+      if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), this._lastRunRow(session)])) return;
       const csm = session.getChangesetManager();
       if (!csm || !csm.hasChanges()) {
         errorResponse(res, 400, 'No changeset to review');
@@ -4504,13 +4609,18 @@ export class LynoxHTTPApi {
 
       csm.cleanup();
       jsonResponse(res, 200, { ok: true, accepted, rolledBack });
-    }, ownerOnly('review the changes of a run')));
+    }, OWN));
 
     // ── Compact (context management) ──
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/compact', async (_req, res, params, body) => {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      // Compacting rewrites the conversation the last run left: the conversation and that
+      // run must be the request's own (§3.13 E7). While the owner's run is the last one in a
+      // mandate's conversation, the mandate cannot compact it; after a run of its own it can,
+      // the owner's earlier turns included — they are in its own conversation, which it reads.
+      if (this._refuseUnlessOwns(_req, res, 'compact this conversation', () => [this._threadRow(sessionId), this._lastRunRow(session)])) return;
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'Cannot compact while a run is in progress');
         return;
@@ -4527,7 +4637,7 @@ export class LynoxHTTPApi {
         ...(result.occupancyBefore !== undefined ? { occupancyBefore: result.occupancyBefore } : {}),
         ...(result.occupancyAfter !== undefined ? { occupancyAfter: result.occupancyAfter } : {}),
       });
-    }, ownerOnly('compact a conversation')));
+    }, OWN));
 
     // Mid-thread model re-pick (§5.1b) — the "continue a
     // historical chat on another model" half of the ask. Resolves an EXISTING
@@ -4542,6 +4652,7 @@ export class LynoxHTTPApi {
       const sessionId = params['id']!;
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (this._refuseUnlessOwns(_req, res, 'change this conversation\'s model', () => [this._threadRow(sessionId)])) return;
       if (this.runningSessions.has(sessionId)) {
         errorResponse(res, 409, 'Cannot change the model while a run is in progress');
         return;
@@ -4566,7 +4677,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 200, { ok: true, model: result.tier, modelId: result.modelId });
-    }, ownerOnly('change a conversation\'s model')));
+    }, OWN));
 
     // ── Threads ──
     this.addStatic('user', 'GET /api/threads', async (req, res) => {
@@ -4598,6 +4709,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      if (this._refuseUnlessOwns(_req, res, 'change this conversation', () => [thread])) return;
       const b = body as Record<string, unknown> | null;
       const skipExtraction = typeof b?.['skip_extraction'] === 'boolean' ? b['skip_extraction'] : undefined;
       threadStore.updateThread(params['id']!, {
@@ -4635,13 +4747,16 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('change a conversation')));
+    }, OWN));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
+      // Deleting reclaims a run still on the conversation: the run must be the request's own
+      // too (§3.13 B6, E7) — the live session's, else the registry's row for the thread.
+      if (this._refuseUnlessOwns(_req, res, 'delete this conversation', () => [thread, ...this._liveRunRows(params['id']!)])) return;
       // Also clean up in-memory session. Reclaim first: this route drops the
       // Session outright, so a run still holding the slot (parked on a prompt,
       // which abort() does not reach) would keep both the slot and its
@@ -4658,7 +4773,7 @@ export class LynoxHTTPApi {
       // snapshots outlive their deleted thread with no other prune path.
       engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('delete a conversation')));
+    }, OWN));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id/messages', async (req, res, params) => {
       const threadStore = engine.getThreadStore();
@@ -5313,6 +5428,9 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const sessionId = typeof b?.['sessionId'] === 'string' ? b['sessionId'] : '';
       if (!sessionId) { errorResponse(res, 400, 'Missing sessionId'); return; }
+      // Only on a conversation the request started (§3.13 E9): a session id that names no
+      // thread is refused for a mandate, never taken as its own.
+      if (this._refuseUnlessOwns(_req, res, 'start the onboarding questions here', () => [this._threadRow(sessionId)])) return;
       const lang = b?.['lang'] === 'de' ? 'de' : 'en';
       const questions: TabQuestion[] = ONBOARDING_BASICS.map(basic => ({
         question: onboardingBasicQuestion(basic, lang),
@@ -5320,7 +5438,7 @@ export class LynoxHTTPApi {
       }));
       const keys = ONBOARDING_BASICS.map(basic => basic.key);
       try {
-        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys);
+        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys, { createdBy: principalTag(this._principalOf(_req)) });
         void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
           ts: Date.now(), event: 'onboarding_started', thread: sessionId,
           model: undefined, untrusted: false, step: 0,
@@ -5330,7 +5448,7 @@ export class LynoxHTTPApi {
         // PromptConflictError — this session already has a pending prompt.
         errorResponse(res, 409, err instanceof Error ? err.message : 'Could not start onboarding');
       }
-    }, ownerOnly('start the onboarding questions'));
+    }, OWN);
 
     // Promote the answered Step-0 prompt. Reads the VERBATIM answers from the settled
     // PromptStore row (NOT the request body → AC-1.3a) and runs the §6.1 promotion
@@ -7259,6 +7377,12 @@ export class LynoxHTTPApi {
       }
       const trigger = history?.getTrigger(params['id']!);
       const id = trigger?.id ?? params['id']!;
+      // A mandate stops only a run it started by hand (§3.13 E7); a run the schedule fired is
+      // the owner's, and a task that is not running gives a mandate the same 403.
+      if (this._refuseUnlessOwns(_req, res, 'stop this task', () => {
+        const starter = loop.runningStarterTag(id);
+        return [starter === undefined ? undefined : { created_by: starter }];
+      })) return;
       const outcome = loop.stopTask(id);
       if (outcome.kind === 'not_running') {
         // Only here does the row matter — and a store that is DOWN cannot support "no
@@ -7293,7 +7417,7 @@ export class LynoxHTTPApi {
             ? 'The read stops before its next target and the bulk run is halted, unless its last target was already being read and it finishes. To continue, resume the bulk run.'
             : 'The stop was requested. A model call in flight is aborted; a tool handler already running is not interrupted, and a run between steps may still finish on its own unless it asks a question first.',
       });
-    }, ownerOnly('stop a running task')));
+    }, OWN));
 
     // Triggers-consent: a human confirms an agent-scheduled `run_agent` trigger for
     // unattended execution — stamps `confirmed_at` so it becomes due + dispatches

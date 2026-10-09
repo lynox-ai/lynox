@@ -675,6 +675,15 @@ describe('TaskManager', () => {
       expect(after!.last_run_status).toBe('failed');
     });
 
+    it('a run a non-owner started by hand gets no retry, whatever the trigger\'s retries say (§3.12 point 6)', () => {
+      const task = tm.create({ title: 'Flaky task', assignee: 'lynox', maxRetries: 3 });
+      tm.recordTaskRun(task.id, 'transient error', 'failed', { noRetry: true });
+      const after = tm.getTrigger(task.id);
+      expect(after!.retry_count).toBe(0);
+      expect(after!.status).toBe('failed');
+      expect(after!.next_run_at).toBeFalsy();
+    });
+
     it('a recurring cron task that fails surfaces status=failed but keeps a future next_run_at', () => {
       // New semantic (replaces the pre-2026-05-23 "stays open"):
       //   - status='failed' so the UI can show the cron task is unhealthy

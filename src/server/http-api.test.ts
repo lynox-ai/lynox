@@ -2098,6 +2098,8 @@ describe('LynoxHTTPApi', () => {
         payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2187,6 +2189,8 @@ describe('LynoxHTTPApi', () => {
         payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2302,6 +2306,8 @@ describe('LynoxHTTPApi', () => {
         payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2761,6 +2767,7 @@ describe('LynoxHTTPApi', () => {
       const db = new Database(':memory:');
       db.exec(`CREATE TABLE active_runs (
         run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+        created_by TEXT,
         status TEXT NOT NULL DEFAULT 'running'
           CHECK(status IN ('running','awaiting_input','done','error','interrupted')),
         started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -2879,6 +2886,8 @@ describe('LynoxHTTPApi', () => {
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -2989,6 +2998,8 @@ describe('LynoxHTTPApi', () => {
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -5299,6 +5310,8 @@ describe('LynoxHTTPApi', () => {
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
         trigger_id TEXT,
+        created_by TEXT,
+        hand_run INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -13885,16 +13898,33 @@ describe('mandate stance of every route that writes', () => {
   it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {
     const open = writes().filter(r => r.stance !== undefined && r.stance.kind !== 'owner-only').map(r => `${name(r)} ${r.stance!.kind}`).sort();
     expect(open).toEqual([
+      'DELETE /api/runs/stance-probe own',
+      'DELETE /api/sessions/stance-probe own',
       'DELETE /api/tasks/stance-probe mark',
+      'DELETE /api/threads/stance-probe own',
+      'PATCH /api/sessions/stance-probe/model own',
       'PATCH /api/tasks/stance-probe mark',
+      'PATCH /api/threads/stance-probe own',
       'POST /api/llm/test free',
       'POST /api/mail/accounts/test free',
       'POST /api/mail/autodiscover free',
       'POST /api/onboarding/derive-domain free',
+      'POST /api/onboarding/knowledge/start own',
       'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
+      'POST /api/sessions own',
+      'POST /api/sessions/stance-probe/abort own',
+      'POST /api/sessions/stance-probe/changeset/review own',
+      'POST /api/sessions/stance-probe/compact own',
+      'POST /api/sessions/stance-probe/mail-connected own',
+      'POST /api/sessions/stance-probe/reply own',
+      'POST /api/sessions/stance-probe/reply-tabs own',
+      'POST /api/sessions/stance-probe/run own',
+      'POST /api/sessions/stance-probe/secret-saved own',
+      'POST /api/sessions/stance-probe/tab-progress own',
       'POST /api/tasks mark',
       'POST /api/tasks/stance-probe/complete mark',
+      'POST /api/tasks/stance-probe/stop own',
       'POST /api/triggers/stance-probe/run own',
       'POST /api/workflows/stance-probe/grant-preview free',
     ]);
@@ -14059,5 +14089,314 @@ describe('a mandate and a to-do', () => {
     const res = await jsonFetch('/api/tasks/todo-1', { method: 'PATCH', body: JSON.stringify({ title: 'changed' }) });
     expect(res.status).toBe(200);
     expect(mockTaskUpdate).toHaveBeenCalled();
+  });
+});
+
+describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9, B6)', () => {
+  // Real stores over a real history.db (every migration, v57 included); only the session
+  // objects are mocks, each told who ran in it last.
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid' };
+  const M = 'mandate:recipient@example.invalid';
+  const OWN = '11111111-1111-4111-8111-111111111111';
+  const FOREIGN = '22222222-2222-4222-8222-222222222222';
+  const NOWHERE = '33333333-3333-4333-8333-333333333333';
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  let history: RunHistory;
+  let threads: import('../core/thread-store.js').ThreadStore;
+  let prompts: import('../core/prompt-store.js').PromptStore;
+  let registry: import('../core/run-registry.js').RunRegistry;
+  let restore: Array<() => void> = [];
+  const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+  const swap = (key: string, value: unknown): void => {
+    const ref = engineRef(); const orig = ref[key]; ref[key] = value; restore.push(() => { ref[key] = orig; });
+  };
+  const sessionRanBy = (p: RequestPrincipal, extra: Record<string, unknown> = {}): Record<string, unknown> => {
+    const s = { ...mockSessionInstance, lastRunPrincipal: p, abort: vi.fn(), ...extra };
+    mockSessionGet.mockReturnValue(s);
+    return s;
+  };
+  const asMandate = (): void => api.setPrincipalResolverForTesting(() => MANDATE);
+  const refusal = async (res: Response): Promise<string> => {
+    expect(res.status).toBe(403);
+    return ((await res.json()) as { error: string }).error;
+  };
+
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  beforeEach(async () => {
+    history = new RunHistory(':memory:');
+    const { ThreadStore } = await import('../core/thread-store.js');
+    const { PromptStore } = await import('../core/prompt-store.js');
+    const { RunRegistry } = await import('../core/run-registry.js');
+    threads = new ThreadStore(history.getDb());
+    prompts = new PromptStore(history.getDb());
+    registry = new RunRegistry(history.getDb());
+    threads.createThread(OWN, { created_by: M });
+    threads.createThread(FOREIGN, { created_by: 'owner' });
+    swap('getThreadStore', () => threads);
+    swap('getPromptStore', () => prompts);
+    swap('getRunRegistry', () => registry);
+    mockGetOrCreate.mockClear();
+  });
+  afterEach(() => {
+    for (const r of restore.reverse()) r();
+    restore = [];
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    mockSessionGet.mockReturnValue(mockSessionInstance);
+    (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions.clear();
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+    history.close();
+  });
+
+  describe('POST /api/sessions', () => {
+    it('refuses a mandate an escalation id, so the owner\'s next escalation cannot land in a thread it holds', async () => {
+      asMandate();
+      const err = await refusal(await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: 'escalation-task-9' }) }));
+      expect(err).toContain('continue this conversation');
+      expect(mockGetOrCreate).not.toHaveBeenCalled();
+      expect(threads.getThread('escalation-task-9')).toBeUndefined();
+    });
+
+    it('refuses a mandate an escalation thread even where its row names the mandate', async () => {
+      threads.createThread('escalation-task-8', { created_by: M });
+      asMandate();
+      await refusal(await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: 'escalation-task-8' }) }));
+      expect(mockGetOrCreate).not.toHaveBeenCalled();
+    });
+
+    it('refuses a mandate an id that names no thread yet — a new conversation gets an id drawn by the server', async () => {
+      asMandate();
+      await refusal(await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: NOWHERE }) }));
+      expect(mockGetOrCreate).not.toHaveBeenCalled();
+    });
+
+    it('refuses a mandate the owner\'s conversation, and continues its own', async () => {
+      asMandate();
+      await refusal(await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: FOREIGN }) }));
+      expect(mockGetOrCreate).not.toHaveBeenCalled();
+      const res = await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: OWN }) });
+      expect(res.status).toBe(201);
+      expect(mockGetOrCreate).toHaveBeenCalledWith(OWN, expect.anything(), expect.objectContaining({ principal: MANDATE }));
+    });
+
+    it('opens a new conversation for a mandate under the mandate', async () => {
+      asMandate();
+      const res = await jsonFetch('/api/sessions', { method: 'POST', body: '{}' });
+      expect(res.status).toBe(201);
+      expect(mockGetOrCreate).toHaveBeenCalledWith(expect.any(String), expect.anything(), expect.objectContaining({ principal: MANDATE }));
+    });
+
+    it('control: the owner names any id', async () => {
+      expect((await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: NOWHERE }) })).status).toBe(201);
+      expect((await jsonFetch('/api/sessions', { method: 'POST', body: JSON.stringify({ threadId: 'escalation-task-9' }) })).status).toBe(201);
+    });
+  });
+
+  describe('POST /api/sessions/:id/run', () => {
+    it('stamps the run and the question it asks with the request\'s principal', async () => {
+      mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      mockSessionRun.mockImplementationOnce(async () => {
+        const promptUser = mockSessionInstance.promptUser as (q: string, o?: string[]) => Promise<string>;
+        void promptUser('Which list?', ['A', 'B']);
+        await gate;
+        return 'done';
+      });
+      asMandate();
+      const res = await jsonFetch(`/api/sessions/${OWN}/run`, { method: 'POST', body: JSON.stringify({ task: 'hi', protocol: 1 }) });
+      expect(res.status).toBe(200);
+      let asked = prompts.getPending(OWN);
+      for (let i = 0; i < 200 && !asked; i++) { await new Promise((r) => setTimeout(r, 5)); asked = prompts.getPending(OWN); }
+      expect(asked?.created_by).toBe(M);
+      expect(registry.getByThread(OWN)?.created_by).toBe(M);
+      release();
+      await res.text();
+    });
+
+    it('decides on the thread, not on who ran in the session last', async () => {
+      // The session's last run was the mandate's — the conversation is still the owner's.
+      sessionRanBy(MANDATE);
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${FOREIGN}/run`, { method: 'POST', body: JSON.stringify({ task: 'hi' }) }));
+    });
+
+    it('refuses a mandate the takeover of the owner\'s parked run in its own conversation', async () => {
+      sessionRanBy(OWNER_PRINCIPAL);
+      const takeover = vi.fn();
+      (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions.set(OWN, { streamAlive: false, lastEventAt: 0, takeover });
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/run`, { method: 'POST', body: JSON.stringify({ task: 'hi' }) }));
+      expect(takeover).not.toHaveBeenCalled();
+    });
+
+    it('control: a mandate takes over its own parked run', async () => {
+      sessionRanBy(MANDATE);
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+      const takeover = vi.fn(() => { slots.delete(OWN); });
+      slots.set(OWN, { streamAlive: false, lastEventAt: 0, takeover });
+      asMandate();
+      const res = await jsonFetch(`/api/sessions/${OWN}/run`, { method: 'POST', body: JSON.stringify({ task: 'hi' }) });
+      await res.text();
+      expect(takeover).toHaveBeenCalled();
+      expect(res.status).not.toBe(403);
+    });
+  });
+
+  describe('answering a question (E2)', () => {
+    it('refuses a mandate the owner\'s question, by id and through the session fallback, and leaves it open', async () => {
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { createdBy: 'owner' });
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) }));
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ answer: 'A' }) }));
+      for (const [route, body] of [
+        ['reply-tabs', { promptId: id, answers: ['A'] }],
+        ['tab-progress', { promptId: id, partial: ['A'] }],
+        ['secret-saved', { promptId: id, status: 'saved' }],
+        ['mail-connected', { promptId: id, status: 'connected' }],
+      ] as const) {
+        await refusal(await jsonFetch(`/api/sessions/${OWN}/${route}`, { method: 'POST', body: JSON.stringify(body) }));
+      }
+      expect(prompts.getById(id)!.status).toBe('pending');
+    });
+
+    it('refuses a mandate the owner\'s question named by id while its own question is the newest open one', async () => {
+      const foreign = prompts.insertAskUser(OWN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { createdBy: 'owner' });
+      history.getDb().prepare(`UPDATE pending_prompts SET created_at = datetime('now','-1 hour') WHERE id = ?`).run(foreign);
+      history.getDb().prepare(`DROP INDEX IF EXISTS idx_pending_prompts_session_unique`).run();
+      const own = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { createdBy: M });
+      expect(prompts.getPending(OWN)!.id).toBe(own);
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: foreign, answer: 'A' }) }));
+      expect(prompts.getById(foreign)!.status).toBe('pending');
+    });
+
+    it('control: a mandate answers its own run\'s question', async () => {
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { createdBy: M });
+      asMandate();
+      expect((await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) })).status).toBe(200);
+      expect(prompts.getById(id)!.status).toBe('answered');
+    });
+  });
+
+  describe('stopping, reviewing and compacting a run (E7, G3)', () => {
+    it.each([
+      ['POST', 'abort', undefined],
+      ['POST', 'changeset/review', { action: 'accept' }],
+      ['POST', 'compact', {}],
+    ] as const)('%s %s: refuses a mandate the owner\'s last run in the mandate\'s own conversation', async (method, path, body) => {
+      const session = sessionRanBy(OWNER_PRINCIPAL, { compact: vi.fn(), getChangesetManager: vi.fn(() => ({ hasChanges: () => true })) });
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/${path}`, { method, ...(body ? { body: JSON.stringify(body) } : {}) }));
+      expect(session['abort']).not.toHaveBeenCalled();
+      expect(session['compact']).not.toHaveBeenCalled();
+    });
+
+    it('control: a mandate stops its own run', async () => {
+      const session = sessionRanBy(MANDATE);
+      asMandate();
+      expect((await jsonFetch(`/api/sessions/${OWN}/abort`, { method: 'POST' })).status).toBe(200);
+      expect(session['abort']).toHaveBeenCalled();
+    });
+
+    it('refuses a mandate the owner\'s conversation even when the mandate ran in it last', async () => {
+      sessionRanBy(MANDATE);
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${FOREIGN}/abort`, { method: 'POST' }));
+    });
+
+    it('refuses a mandate ending its own session or deleting its own conversation while the owner\'s run is the last one', async () => {
+      sessionRanBy(OWNER_PRINCIPAL);
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${OWN}`, { method: 'DELETE' }));
+      await refusal(await jsonFetch(`/api/threads/${OWN}`, { method: 'DELETE' }));
+      expect(threads.getThread(OWN)).toBeDefined();
+    });
+
+    it('with no live session, reads the run from the registry: the owner\'s live run in the mandate\'s conversation is refused', async () => {
+      mockSessionGet.mockReturnValue(undefined);
+      registry.start(OWN, 'run-owner-live', 'owner');
+      asMandate();
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/abort`, { method: 'POST' }));
+      await refusal(await jsonFetch(`/api/threads/${OWN}`, { method: 'DELETE' }));
+      expect(threads.getThread(OWN)).toBeDefined();
+      expect(registry.getByRunId('run-owner-live')).toBeDefined();
+    });
+
+    it('control: with no live session, a mandate deletes its own conversation when the registry\'s run is its own', async () => {
+      mockSessionGet.mockReturnValue(undefined);
+      registry.start(OWN, 'run-mine-live', M);
+      asMandate();
+      expect((await jsonFetch(`/api/threads/${OWN}`, { method: 'DELETE' })).status).toBe(200);
+    });
+
+    it('DELETE /api/runs/:runId: a mandate stops or dismisses only a run it started', async () => {
+      registry.start(OWN, 'run-owner', 'owner');
+      registry.start(FOREIGN, 'run-mine', M);
+      registry.sweepInterrupted();
+      asMandate();
+      await refusal(await jsonFetch('/api/runs/run-owner', { method: 'DELETE' }));
+      expect(registry.getByRunId('run-owner')).toBeDefined();
+      await refusal(await jsonFetch('/api/runs/run-nowhere', { method: 'DELETE' }));
+      expect((await jsonFetch('/api/runs/run-mine', { method: 'DELETE' })).status).toBe(200);
+      expect(registry.getByRunId('run-mine')).toBeUndefined();
+    });
+
+    it('POST /api/tasks/:id/stop: a mandate stops only a run it started by hand', async () => {
+      let starter = 'owner';
+      const stopTask = vi.fn(() => ({ kind: 'requested', via: 'session' }));
+      swap('getWorkerLoop', () => ({ runningStarterTag: () => starter, stopTask }));
+      swap('getRunHistory', () => ({ isAmbiguousTriggerId: () => false, getTrigger: () => ({ id: 'trg-1' }) }));
+      asMandate();
+      await refusal(await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' }));
+      expect(stopTask).not.toHaveBeenCalled();
+      starter = M;
+      expect((await jsonFetch('/api/tasks/trg-1/stop', { method: 'POST' })).status).toBe(202);
+      expect(stopTask).toHaveBeenCalledWith('trg-1');
+    });
+  });
+
+  describe('the conversation itself (B6)', () => {
+    it('refuses a mandate renaming, deleting or ending the owner\'s conversation', async () => {
+      sessionRanBy(MANDATE);
+      asMandate();
+      await refusal(await jsonFetch(`/api/threads/${FOREIGN}`, { method: 'PATCH', body: JSON.stringify({ title: 'x' }) }));
+      await refusal(await jsonFetch(`/api/threads/${FOREIGN}`, { method: 'DELETE' }));
+      await refusal(await jsonFetch(`/api/sessions/${FOREIGN}`, { method: 'DELETE' }));
+      await refusal(await jsonFetch(`/api/sessions/${FOREIGN}/model`, { method: 'PATCH', body: JSON.stringify({ tier: 'fast' }) }));
+      expect(threads.getThread(FOREIGN)!.title).toBe('');
+      expect(threads.getThread(FOREIGN)).toBeDefined();
+    });
+
+    it('control: a mandate renames its own conversation; the owner renames the mandate\'s', async () => {
+      asMandate();
+      expect((await jsonFetch(`/api/threads/${OWN}`, { method: 'PATCH', body: JSON.stringify({ title: 'mine' }) })).status).toBe(200);
+      api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+      expect((await jsonFetch(`/api/threads/${OWN}`, { method: 'PATCH', body: JSON.stringify({ title: 'owner' }) })).status).toBe(200);
+      expect(threads.getThread(OWN)!.title).toBe('owner');
+    });
+
+    it('control: a mandate changes the model of its own conversation', async () => {
+      sessionRanBy(MANDATE, { repickModel: vi.fn(() => ({ ok: true, tier: 'fast', modelId: 'm' })) });
+      asMandate();
+      expect((await jsonFetch(`/api/sessions/${OWN}/model`, { method: 'PATCH', body: JSON.stringify({ tier: 'fast' }) })).status).toBe(200);
+    });
+  });
+
+  describe('POST /api/onboarding/knowledge/start (E9)', () => {
+    it('refuses a mandate on the owner\'s conversation and on an id that names none', async () => {
+      asMandate();
+      await refusal(await jsonFetch('/api/onboarding/knowledge/start', { method: 'POST', body: JSON.stringify({ sessionId: FOREIGN }) }));
+      await refusal(await jsonFetch('/api/onboarding/knowledge/start', { method: 'POST', body: JSON.stringify({ sessionId: NOWHERE }) }));
+      expect(prompts.getPending(FOREIGN)).toBeUndefined();
+    });
+
+    it('control: on its own conversation the questions are the mandate\'s', async () => {
+      asMandate();
+      const res = await jsonFetch('/api/onboarding/knowledge/start', { method: 'POST', body: JSON.stringify({ sessionId: OWN }) });
+      expect(res.status).toBe(200);
+      expect(prompts.getPending(OWN)!.created_by).toBe(M);
+    });
   });
 });

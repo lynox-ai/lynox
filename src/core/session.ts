@@ -83,7 +83,7 @@ import type { DataStore } from './data-store.js';
 import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, principalTag } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
 
 /** Context-usage % at which auto-compaction fires as a LAST-RESORT safety net.
@@ -350,6 +350,13 @@ export class Session {
    * such a rebuild. The next run that names a principal replaces it.
    */
   private _principal: RequestPrincipal = OWNER_PRINCIPAL;
+
+  /** Who ran here last — the run in flight, or the one before it (PRD
+   *  customer-granted-operator-access §3.13 E7). Stopping, reviewing or compacting a session
+   *  acts on that run's work, so only that run's principal (or the owner) may. */
+  get lastRunPrincipal(): RequestPrincipal {
+    return this._principal;
+  }
   /** Per-run hook fired right after each eager-persist checkpoint so the HTTP
    *  layer can record the run buffer's high-water seq as `last_persisted_seq`
    *  (Tier-2 resumable re-attach uses it as the replay `?since=`). Stashed for
@@ -600,6 +607,10 @@ export class Session {
           // → 'unknown'. OR IGNORE means a resume never re-stamps this.
           model_tier_source: opts?.source ?? 'unknown',
           context_id: engine.getContext()?.id ?? '',
+          // Who opens it (PRD customer-granted-operator-access §3.13 E1): the principal the
+          // session is built for. A resume keeps the creator (OR IGNORE). If this write fails,
+          // the thread has no row, and a mandate is refused on it — never handed it.
+          ...(opts?.principal ? { created_by: principalTag(opts.principal) } : {}),
         });
       } catch { /* best-effort */ }
     }
