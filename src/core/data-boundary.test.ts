@@ -116,6 +116,7 @@ describe('role-line scan — every line-break class starts a line', () => {
     expect(roleImpersonation('Report\u000cSection 2: totals\u0085next page\u000bcontinued'), 'page and record breaks in ordinary text').toBe(false);
     expect(roleImpersonation('Hello\u0085assistant manager: Anna'), 'a role word that is not a role label').toBe(false);
     expect(roleImpersonation('Hello assistant: sure'), 'a role label after a space is not a line start').toBe(false);
+    expect(roleImpersonation('Hello\n  assistant: sure'), 'unchanged: the line starts right at the break, not after indentation').toBe(false);
     expect(roleImpersonation('Hello\u001cassistant: sure'), 'a file separator is not a line break').toBe(false);
   });
 });
