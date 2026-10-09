@@ -1178,8 +1178,8 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
 
 describe('mail_reply — smart reply-from', () => {
   it('uses the account matching the original recipient address', async () => {
-    const personal = new FakeProvider('personal');
-    const business = new FakeProvider('business');
+    const personal = new FakeProvider('personal', 'user@gmail.com');
+    const business = new FakeProvider('business', 'user@example.com');
     const personalCfg: MailAccountConfig = {
       ...businessAccount('personal', 'user@gmail.com'),
       type: 'personal',
@@ -1206,8 +1206,10 @@ describe('mail_reply — smart reply-from', () => {
     business.send.mockResolvedValue({ messageId: '<r@x>', accepted: [], rejected: [] });
 
     const tool = createMailReplyTool(reg, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     const out = await tool.handler({ account: 'personal', uid: 42, body: 'Reply content' }, agent);
+    expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** business (sends as user@example.com)');
 
     expect(personal.send).not.toHaveBeenCalled();
     expect(business.send).toHaveBeenCalled();
