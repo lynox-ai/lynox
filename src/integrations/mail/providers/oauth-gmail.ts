@@ -819,18 +819,29 @@ export class OAuthGmailProvider implements MailProvider {
     this.gmailIdToUid.clear();
   }
 
+  /** The live profile address `send` puts in From — the same memoised value. */
+  fromAddress(): Promise<string> {
+    if (this.closed) return Promise.reject(new MailError('connection_failed', 'Provider closed'));
+    return this.resolveFromAddress();
+  }
+
   // ── Internals ────────────────────────────────────────────────────────────
 
   /**
    * Resolve the user's email address via the Gmail profile endpoint. Memoised
-   * on the GoogleAuth token data lifecycle — we still re-fetch on cache miss.
+   * per access token: reconnecting Google as another account yields a new token,
+   * so the next call reads the new profile instead of the old address (a token
+   * refresh costs one profile read).
    */
-  private cachedFromAddress: string | undefined;
+  private cachedFrom: { token: string; address: string } | undefined;
   private async resolveFromAddress(): Promise<string> {
-    if (this.cachedFromAddress) return this.cachedFromAddress;
+    const token = await this.googleAuth.getAccessToken();
+    if (this.cachedFrom?.token === token) return this.cachedFrom.address;
     const profile = await this.gmailGet<GmailProfile>('profile');
-    this.cachedFromAddress = profile.emailAddress;
-    return profile.emailAddress;
+    const address = typeof profile.emailAddress === 'string' ? profile.emailAddress.trim() : '';
+    if (address === '') throw new MailError('connection_failed', 'Gmail profile returned no address');
+    this.cachedFrom = { token, address };
+    return address;
   }
 
   private async envelopesFor(refs: ReadonlyArray<{ id: string; threadId: string }>, folder: string): Promise<MailEnvelope[]> {

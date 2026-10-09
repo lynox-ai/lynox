@@ -151,6 +151,8 @@ export interface SendCoreBeforeSendCtx {
   body: string;
   isMassSend: boolean;
   uniqueRecipientCount: number;
+  /** The address the mail goes out from, from {@link resolveSendingAddress}. */
+  sendingAddress: string;
 }
 
 export type SendCoreResult =
@@ -221,6 +223,13 @@ export async function sendMail(
   const isMassSend = uniqueRecipients.size > MASS_SEND_THRESHOLD;
 
   if (opts.beforeSend) {
+    let sendingAddress: string;
+    try {
+      sendingAddress = await resolveSendingAddress(provider);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, status: 'provider_error', message: `could not read the sending address: ${msg}`, errorCode: err instanceof MailError ? err.code : undefined };
+    }
     const approved = await opts.beforeSend({
       provider,
       accountConfig,
@@ -231,6 +240,7 @@ export async function sendMail(
       body: input.body,
       isMassSend,
       uniqueRecipientCount: uniqueRecipients.size,
+      sendingAddress,
     });
     if (!approved) return { ok: false, status: 'cancelled', message: 'send cancelled' };
   }
@@ -386,14 +396,23 @@ export function previewAddressList(addrs: ReadonlyArray<MailAddress>): string {
 }
 
 /**
- * The sending account as the user should see it before approving: its id, and the address
- * the mail goes out from. An id is free text and can look like an address it is not, so the
- * address is shown whenever it differs.
+ * The address a mail from this provider goes out from: what `send` puts in From, which for
+ * Gmail is the live profile of the connected Google account rather than the configured one.
  */
-export function previewSendingAccount(provider: MailProvider): string {
+export async function resolveSendingAddress(provider: MailProvider): Promise<string> {
+  return provider.fromAddress ? await provider.fromAddress() : provider.address;
+}
+
+/**
+ * The sending account as the user should see it before approving: the address the mail goes
+ * out from first, then the account id when it differs. An id is free text, so it comes after
+ * the address, where it cannot pass itself off as the address.
+ */
+export function previewSendingAccount(provider: MailProvider, sendingAddress: string): string {
   const id = singleLine(provider.accountId);
-  const address = typeof provider.address === 'string' ? singleLine(provider.address) : '';
-  return address !== '' && address !== id ? `${id} (sends as ${address})` : id;
+  const address = singleLine(sendingAddress);
+  if (address === '') return id;
+  return address !== id ? `${address} (account ${id})` : address;
 }
 
 /**
@@ -409,7 +428,7 @@ export function buildSendPreview(ctx: SendCoreBeforeSendCtx): PromptText {
   if (ctx.isMassSend) {
     return pv`⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients
 
-**Account:** ${previewSendingAccount(ctx.provider)}${personaLine ? pv`
+**Account:** ${previewSendingAccount(ctx.provider, ctx.sendingAddress)}${personaLine ? pv`
 **Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
 **Recipients:**
 ${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}
@@ -423,7 +442,7 @@ ${bodyPreview}`;
 **Cc:** ${previewAddressList(ctx.cc)}` : ''}${ctx.bcc.length > 0 ? pv`
 **Bcc:** ${previewAddressList(ctx.bcc)}` : ''}
 **Subject:** ${singleLine(ctx.subject)}
-**From:** ${previewSendingAccount(ctx.provider)}${personaLine ? pv`
+**From:** ${previewSendingAccount(ctx.provider, ctx.sendingAddress)}${personaLine ? pv`
 **Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
 
 ${bodyPreview}`;

@@ -151,7 +151,7 @@ describe('the account parameter takes an id or an address', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
     await createMailSendTool(registry).handler({ account: 'office@example.ch', to: 'a@x.com', subject: 's', body: 'b' }, agent);
-    expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** office@example.ch (sends as someone-else@example.org)');
+    expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** someone-else@example.org (account office@example.ch)');
     expect(lookalike.send, 'declined, so nothing went out').not.toHaveBeenCalled();
   });
 
@@ -629,7 +629,22 @@ describe('mail_reply tool', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await createMailReplyTool(registry).handler({ uid: 78, body: 'Thanks.' }, agent);
-    expect(prompt).toContain('**From:** rafael-gmail (sends as rafael-gmail@example.com)');
+    expect(prompt).toContain('**From:** rafael-gmail@example.com (account rafael-gmail)');
+  });
+
+  it('the reply confirmation shows the provider\'s live From address, and a failed lookup sends nothing', async () => {
+    provider.fetch.mockResolvedValue(makeMessage(envelope(79, { messageId: '<o79@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
+    Object.assign(provider, { fromAddress: vi.fn(async () => 'relinked@example.com') });
+    await createMailReplyTool(registry).handler({ uid: 79, body: 'Thanks.' }, agent);
+    expect(prompt).toContain('**From:** relinked@example.com (account rafael-gmail)\n');
+    prompt = '';
+    Object.assign(provider, { fromAddress: vi.fn(async () => { throw new Error('profile 503'); }) });
+    const out = await createMailReplyTool(registry).handler({ uid: 79, body: 'Thanks.' }, agent);
+    expect(out).toContain('could not read the sending address');
+    expect(prompt, 'no confirmation was shown').toBe('');
+    expect(provider.send).not.toHaveBeenCalled();
   });
 
   it('keeps a remote sender newline in the subject from swallowing the prompt', async () => {
@@ -1271,7 +1286,7 @@ describe('mail_reply — smart reply-from', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     const out = await tool.handler({ account: 'personal', uid: 42, body: 'Reply content' }, agent);
-    expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** business (sends as user@example.com)');
+    expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** user@example.com (account business)');
 
     expect(personal.send).not.toHaveBeenCalled();
     expect(business.send).toHaveBeenCalled();

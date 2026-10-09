@@ -15,7 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, resolveSendingAddress } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -209,12 +209,19 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // prompt (see singleLine's doc).
         const bodyPreview = buildBodyBlock(input.body);
 
+        let sendingAddress: string;
+        try {
+          sendingAddress = await resolveSendingAddress(sendProvider);
+        } catch (err) {
+          return `mail_reply error: could not read the sending address: ${err instanceof Error ? err.message : String(err)}`;
+        }
+
         const preview = pv`**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**
 
 **To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
 **Cc:** ${previewAddressList(ccAddrs)}` : ''}
 **Subject:** ${singleLine(subject)}
-**From:** ${previewSendingAccount(sendProvider)}${smartNote}${personaNote}
+**From:** ${previewSendingAccount(sendProvider, sendingAddress)}${smartNote}${personaNote}
 
 ${bodyPreview}`;
 
