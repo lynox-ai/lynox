@@ -123,6 +123,9 @@ export function createMailSendTool(registry: MailRegistry, ctx?: MailContext): T
             return `mail_send blocked: ${result.message}. ` +
               `Compliance (abuse/privacy/security/legal) and bulk (info/newsletter/notifications) mailboxes cannot send mail. ` +
               `Pick a different account via the "account" parameter.`;
+          case 'account_not_configured':
+            return `mail_send blocked: ${result.message}. ` +
+              `The account is not set up for sending. Reconnect it in the mail settings, or pick another account via the "account" parameter.`;
           case 'dedup_window':
             return result.message;
           case 'secret_in_body': {
