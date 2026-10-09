@@ -7,6 +7,7 @@ import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDeri
 import { vaultKeyForAccount } from '../integrations/mail/auth/app-password.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { containsUntrustedMarker } from './data-boundary.js';
+import { OAUTH_PRESETS } from './oauth-presets.js';
 import type { ApiProfile } from './api-store.js';
 import { SUGGESTED_API_CATALOG } from './suggested-apis.js';
 
@@ -557,6 +558,20 @@ describe('ApiStore', () => {
       const out = store.formatProfile(store.get('oauth-render')!);
       expect(out).toContain('OAuth2');
       expect(out).toContain('GOOGLE_REFRESH_TOKEN');
+    });
+
+    it('lists the scopes a built-in preset requires among those it allows', () => {
+      // The register's own entry, so the case follows the provider rather than a copy of it.
+      const preset = OAUTH_PRESETS.get('bexio');
+      expect(preset?.requiredScopes.length).toBeGreaterThan(0);
+      store.register({
+        ...SAMPLE_PROFILE,
+        id: 'preset-render',
+        auth: { type: 'oauth2', oauth: { client_id_key: 'BX_ID', client_secret_key: 'BX_SECRET', preset_id: 'bexio' } },
+      });
+      const out = store.formatProfile(store.get('preset-render')!);
+      const allows = out.split('\n').find((l) => l.startsWith('OAuth scopes the "bexio" preset allows: ')) ?? '';
+      for (const scope of preset!.requiredScopes) expect(allows.split(/[\s.]+/)).toContain(scope);
     });
 
     it('renders auth.type "none" as the explicit public-API label', () => {
