@@ -48,13 +48,14 @@ function makeStubContext(accounts: ReadonlyArray<MailAccountConfig>): MailContex
 
 class FakeProvider implements MailProvider {
   readonly accountId: string;
+  readonly address: string;
   list = vi.fn(async (_opts?: MailListOptions): Promise<ReadonlyArray<MailEnvelope>> => []);
   fetch = vi.fn(async (_opts: MailFetchOptions): Promise<MailMessage> => { throw new Error('not configured'); });
   search = vi.fn(async (_q: MailSearchQuery, _o?: MailSearchOptions): Promise<ReadonlyArray<MailEnvelope>> => []);
   send = vi.fn(async (_input: MailSendInput): Promise<MailSendResult> => ({ messageId: '<sent@x>', accepted: [], rejected: [] }));
   watch = vi.fn(async (): Promise<MailWatchHandle> => ({ stop: async () => {} }));
   close = vi.fn(async () => {});
-  constructor(id: string) { this.accountId = id; }
+  constructor(id: string, address = `${id}@example.com`) { this.accountId = id; this.address = address; }
 }
 
 function envelope(uid: number, opts: { messageId: string; from?: string; subject?: string; flags?: string[]; date?: string; snippet?: string } = { messageId: `<${String(uid)}@x>` }): MailEnvelope {
@@ -107,6 +108,61 @@ beforeEach(() => {
   // Mail rate limit + dedup state is module-level; reset between tests so
   // ordering doesn't matter and the dedup map can't leak across cases.
   resetMailRateLimits();
+});
+
+// ── account named by its address ───────────────────────────────────────────
+
+// A user names a mailbox by its address; the tools must reach the same account they reach
+// through its id. Two accounts, so a lookup that fell back to the default or to the first
+// account would hit the wrong one.
+describe('the account parameter takes an id or an address', () => {
+  let office: FakeProvider;
+  beforeEach(() => {
+    office = new FakeProvider('office', 'office@example.ch');
+    registry.add(office);
+  });
+
+  for (const [how, account] of [['address', ' Office@Example.CH '], ['id', 'office']] as const) {
+    it(`mail_triage reaches the account by its ${how}`, async () => {
+      await createMailTriageTool(registry).handler({ account }, noPromptAgent);
+      expect(office.list, 'the named account was listed').toHaveBeenCalledTimes(1);
+      expect(provider.list, 'the other account was not').not.toHaveBeenCalled();
+    });
+
+    it(`mail_search reaches the account by its ${how}`, async () => {
+      await createMailSearchTool(registry).handler({ account, subject: 'x' }, noPromptAgent);
+      expect(office.search, 'the named account was searched').toHaveBeenCalledTimes(1);
+      expect(provider.search, 'the other account was not').not.toHaveBeenCalled();
+    });
+
+    it(`mail_read reaches the account by its ${how}`, async () => {
+      office.fetch.mockResolvedValue(makeMessage(envelope(7, { messageId: '<o-7@x>' }), 'Body.'));
+      const out = await createMailReadTool(registry).handler({ uid: 7, account }, noPromptAgent);
+      expect(office.fetch, 'the named account was read').toHaveBeenCalledTimes(1);
+      expect(provider.fetch, 'the other account was not').not.toHaveBeenCalled();
+      expect(out).toContain('Body.');
+    });
+  }
+
+  it('an id that looks like another account\'s address wins, and the confirmation shows where the mail really goes out from', async () => {
+    const lookalike = new FakeProvider('office@example.ch', 'someone-else@example.org');
+    registry.add(lookalike);
+    lookalike.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
+    await createMailSendTool(registry).handler({ account: 'office@example.ch', to: 'a@x.com', subject: 's', body: 'b' }, agent);
+    expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** office@example.ch (sends as someone-else@example.org)');
+    expect(lookalike.send, 'declined, so nothing went out').not.toHaveBeenCalled();
+  });
+
+  it('an address two accounts share names neither, and the error lists both by id', async () => {
+    registry.add(new FakeProvider('office-imap', 'office@example.ch'));
+    const out = await createMailReadTool(registry).handler({ uid: 7, account: 'office@example.ch' }, noPromptAgent);
+    expect(office.fetch).not.toHaveBeenCalled();
+    expect(out).toContain('More than one mail account has the address');
+    expect(out).toContain('office (office@example.ch)');
+    expect(out).toContain('office-imap (office@example.ch)');
+  });
 });
 
 // ── mail_search ────────────────────────────────────────────────────────────
@@ -564,6 +620,15 @@ describe('mail_reply tool', () => {
   // is markdown-rendered in the web UI. A newline there opens a block-level
   // HTML comment that swallows the recipients, the body quote and the oversize
   // warning, leaving a blank prompt to approve. The subject must stay one line.
+  it('the reply confirmation shows the address the reply goes out from', async () => {
+    provider.fetch.mockResolvedValue(makeMessage(envelope(78, { messageId: '<o78@x>', from: 'alice@example.com', subject: 'Hi' }), 'Original.'));
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    await createMailReplyTool(registry).handler({ uid: 78, body: 'Thanks.' }, agent);
+    expect(prompt).toContain('**From:** rafael-gmail (sends as rafael-gmail@example.com)');
+  });
+
   it('keeps a remote sender newline in the subject from swallowing the prompt', async () => {
     const orig = envelope(78, {
       messageId: '<orig@x>',
@@ -1113,8 +1178,8 @@ describe('mail_send + mail_reply — receive-only hard block', () => {
 
 describe('mail_reply — smart reply-from', () => {
   it('uses the account matching the original recipient address', async () => {
-    const personal = new FakeProvider('personal');
-    const business = new FakeProvider('business');
+    const personal = new FakeProvider('personal', 'user@gmail.com');
+    const business = new FakeProvider('business', 'user@example.com');
     const personalCfg: MailAccountConfig = {
       ...businessAccount('personal', 'user@gmail.com'),
       type: 'personal',
@@ -1141,8 +1206,10 @@ describe('mail_reply — smart reply-from', () => {
     business.send.mockResolvedValue({ messageId: '<r@x>', accepted: [], rejected: [] });
 
     const tool = createMailReplyTool(reg, ctx);
-    const agent: IAgent = { promptUser: async () => 'Yes' } as unknown as IAgent;
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     const out = await tool.handler({ account: 'personal', uid: 42, body: 'Reply content' }, agent);
+    expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** business (sends as user@example.com)');
 
     expect(personal.send).not.toHaveBeenCalled();
     expect(business.send).toHaveBeenCalled();

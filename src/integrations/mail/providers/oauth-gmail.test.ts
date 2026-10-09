@@ -126,6 +126,12 @@ function respondText(text: string, status: number): Response {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 describe('OAuthGmailProvider — list', () => {
+  it('exposes the account id and address, so a tool call can name the account either way', () => {
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    expect(provider.accountId).toBe('gmail-rafael');
+    expect(provider.address).toBe('user@example.org');
+  });
+
   it('returns envelopes built from messages.list + per-id metadata fetch', async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url.includes('?labelIds=INBOX')) {

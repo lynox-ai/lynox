@@ -29,7 +29,8 @@ export interface MutableMailRegistry extends MailRegistry {
 /**
  * Resolve one or more providers for a tool call.
  *
- * - If `requested` is set, return just that one provider.
+ * - If `requested` is set, return just that one provider, found by account id or
+ *   by address (see `findRequested`).
  * - If `requested` is unset and multiple accounts are registered, return all
  *   of them (fan-out). Tools are expected to iterate and merge results.
  * - If exactly one account is registered, return just that one.
@@ -40,13 +41,7 @@ export interface MutableMailRegistry extends MailRegistry {
  * account (send/reply).
  */
 export function resolveProviders(registry: MailRegistry, requested: string | undefined): ReadonlyArray<MailProvider> {
-  if (requested) {
-    const provider = registry.get(requested);
-    if (!provider) {
-      throw new MailError('not_found', `No mail account "${requested}" configured. Available: ${registry.list().join(', ') || '(none)'}`);
-    }
-    return [provider];
-  }
+  if (requested) return [findRequested(registry, requested)];
 
   const ids = registry.list();
   if (ids.length === 0) {
@@ -61,13 +56,7 @@ export function resolveProviders(registry: MailRegistry, requested: string | und
  * "no mail account configured" message.
  */
 export function resolveProvider(registry: MailRegistry, requested: string | undefined): MailProvider {
-  if (requested) {
-    const provider = registry.get(requested);
-    if (!provider) {
-      throw new MailError('not_found', `No mail account "${requested}" configured. Available: ${registry.list().join(', ') || '(none)'}`);
-    }
-    return provider;
-  }
+  if (requested) return findRequested(registry, requested);
 
   const fallback = registry.default();
   if (!fallback) {
@@ -78,6 +67,39 @@ export function resolveProvider(registry: MailRegistry, requested: string | unde
     throw new MailError('not_found', `Default mail account "${fallback}" is registered but its provider is missing — possible engine init bug.`);
   }
   return provider;
+}
+
+/**
+ * Find the account a tool call names, by id or by address.
+ *
+ * A user names a mailbox by its address, while the registry is keyed by account id, so an
+ * exact id is tried first and then the address, ignoring case and surrounding spaces. Two
+ * accounts can share an address (the same mailbox connected twice); then the address names
+ * neither, and the error lists both so the caller can pick by id.
+ *
+ * An id can be any string, including another account's address; the id still wins. Which
+ * account that is stays visible where it matters: the send and reply previews show the
+ * address the mail goes out from, not only the account id.
+ */
+function findRequested(registry: MailRegistry, requested: string): MailProvider {
+  const byId = registry.get(requested);
+  if (byId) return byId;
+
+  const providers = registry.list()
+    .map(id => registry.get(id))
+    .filter((p): p is MailProvider => p !== null);
+  const wanted = requested.trim().toLowerCase();
+  const byAddress = providers.filter(p => typeof p.address === 'string' && p.address.trim().toLowerCase() === wanted);
+  if (byAddress.length === 1) return byAddress[0]!;
+
+  if (byAddress.length > 1) {
+    throw new MailError('not_found', `More than one mail account has the address "${requested}": ${byAddress.map(describeAccount).join(', ')}. Name the account by its id.`);
+  }
+  throw new MailError('not_found', `No mail account "${requested}" configured. Available: ${providers.map(describeAccount).join(', ') || '(none)'}`);
+}
+
+function describeAccount(p: MailProvider): string {
+  return typeof p.address === 'string' && p.address !== '' ? `${p.accountId} (${p.address})` : p.accountId;
 }
 
 export class InMemoryMailRegistry implements MutableMailRegistry {

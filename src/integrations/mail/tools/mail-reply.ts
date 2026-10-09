@@ -15,7 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -54,7 +54,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
       input_schema: {
         type: 'object' as const,
         properties: {
-          account: { type: 'string', description: 'Account id. Omit to use the default account.' },
+          account: { type: 'string', description: 'Account id or its mail address. Omit to use the default account.' },
           uid: { type: 'number', description: 'IMAP UID of the message to reply to. Required.' },
           body: { type: 'string', description: 'Plain-text reply body. Required.' },
           to: { type: 'string', description: 'Override recipient(s), comma-separated. Defaults to original sender.' },
@@ -214,7 +214,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
 **To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
 **Cc:** ${previewAddressList(ccAddrs)}` : ''}
 **Subject:** ${singleLine(subject)}
-**From:** ${sendProvider.accountId}${smartNote}${personaNote}
+**From:** ${previewSendingAccount(sendProvider)}${smartNote}${personaNote}
 
 ${bodyPreview}`;
 

@@ -149,6 +149,12 @@ async function* asyncIterFrom<T>(items: T[]): AsyncIterableIterator<T> {
 }
 
 describe('ImapSmtpProvider — connection', () => {
+  it('exposes the account id and address, so a tool call can name the account either way', () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    expect(provider.accountId).toBe(ACCOUNT.id);
+    expect(provider.address).toBe('user@example.com');
+  });
+
   it('connects with TLS options derived from account config', async () => {
     probe.search.mockResolvedValue([]);
 

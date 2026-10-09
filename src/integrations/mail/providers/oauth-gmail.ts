@@ -632,6 +632,7 @@ function wrapGmailError(err: unknown, fallback: string): MailError {
 
 export class OAuthGmailProvider implements MailProvider {
   readonly accountId: string;
+  readonly address: string;
   readonly authType: MailAuthType = 'oauth_google';
 
   /**
@@ -664,6 +665,7 @@ export class OAuthGmailProvider implements MailProvider {
 
   constructor(account: MailAccountConfig, googleAuth: GoogleAuth) {
     this.accountId = account.id;
+    this.address = account.address;
     this.account = account;
     this.googleAuth = googleAuth;
   }
