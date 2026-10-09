@@ -796,6 +796,32 @@ describe('mail_reply tool', () => {
     expect(ccAddrs).not.toContain('user@example.com');
   });
 
+  // An explicit cc next to reply_all: the given recipients are kept, the original To and Cc are
+  // added once each, the person the reply goes to is not copied again, and a copied recipient
+  // keeps its display name and spelling.
+  it('reply_all with an explicit cc keeps it, adds the original recipients once, and keeps their names', async () => {
+    provider.fetch.mockResolvedValue({
+      envelope: {
+        ...envelope(9, { messageId: '<o9@x>', from: 'alice@example.com', subject: 'Plan' }),
+        to: [{ address: 'colleague@example.com' }, { address: 'ALICE@example.com' }],
+        cc: [{ name: 'The Manager', address: 'Manager@Example.com' }, { address: 'Colleague@example.com' }],
+      },
+      text: '', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: 'x', accepted: [], rejected: [] });
+
+    await createMailReplyTool(registry).handler({ uid: 9, body: 'reply', reply_all: true, cc: 'Extra Person <extra@example.org>' }, yesAgent);
+
+    const sent = provider.send.mock.calls[0]![0];
+    expect(sent.to?.map(a => a.address), 'the reply goes to the sender').toEqual(['alice@example.com']);
+    const cc = sent.cc ?? [];
+    const keys = cc.map(a => a.address.toLowerCase());
+    expect(keys, 'the explicit cc is kept').toContain('extra@example.org');
+    expect(keys.filter(k => k === 'colleague@example.com'), 'a recipient in both To and Cc is copied once').toHaveLength(1);
+    expect(keys, 'the person the reply goes to is not copied again').not.toContain('alice@example.com');
+    expect(cc, 'a copied recipient keeps its display name and spelling').toContainEqual({ name: 'The Manager', address: 'Manager@Example.com' });
+  });
+
   it('rejects when the original has no sender and no override is given', async () => {
     const orig: MailEnvelope = { ...envelope(1, { messageId: '<o@x>' }), from: [], replyTo: [] };
     provider.fetch.mockResolvedValue({
