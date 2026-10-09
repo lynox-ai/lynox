@@ -313,23 +313,46 @@ export class GDriveBackupUploader {
     return folder.id;
   }
 
-  /** Find the root 'lynox-backups' folder (returns null if not found). */
+  /**
+   * Find the root 'lynox-backups' folder this app created and the user owns (null if none).
+   *
+   * A name alone does not identify it: under the full `drive` scope a listing by name also
+   * returns folders other accounts shared with the user (under `drive.file` alone, those the app
+   * has opened) and folders the user made by hand. Only one the user owns (the query) and this
+   * app is authorized for (the check below) counts — owned alone admits a hand-made folder,
+   * authorized alone admits a folder another account of the same app shared in. Without a match
+   * the caller creates its own. Authorization belongs to the app that created the folder, so
+   * after the instance moves to a different Google app the earlier root no longer matches and a
+   * new one is created beside it.
+   */
   private async findRootFolder(): Promise<string | null> {
     if (this.rootFolderId) return this.rootFolderId;
 
-    const params = new URLSearchParams({
-      q: `name = '${BACKUP_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-      fields: 'files(id)',
-      pageSize: '1',
-    });
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_LISTING_PAGES; page++) {
+      const params = new URLSearchParams({
+        q: `name = '${BACKUP_FOLDER_NAME}' and mimeType = '${FOLDER_MIME}' and 'me' in owners and trashed = false`,
+        fields: 'nextPageToken,files(id,isAppAuthorized)',
+        pageSize: '100',
+      });
+      if (pageToken) params.set('pageToken', pageToken);
 
-    const response = await driveFetch(this.auth, `${DRIVE_BASE}/files?${params.toString()}`);
-    if (!response.ok) return null;
+      const response = await driveFetch(this.auth, `${DRIVE_BASE}/files?${params.toString()}`);
+      if (!response.ok) return null;
 
-    const data = await response.json() as DriveFileList;
-    const id = data.files?.[0]?.id ?? null;
-    if (id) this.rootFolderId = id;
-    return id;
+      const data = await response.json() as {
+        nextPageToken?: string | undefined;
+        files?: Array<{ id: string; isAppAuthorized?: boolean | undefined }> | undefined;
+      };
+      const own = data.files?.find(f => f.isAppAuthorized === true);
+      if (own) {
+        this.rootFolderId = own.id;
+        return own.id;
+      }
+      pageToken = data.nextPageToken;
+      if (!pageToken) return null;
+    }
+    return null;
   }
 
   /** Create a subfolder inside a parent folder. */
@@ -466,7 +489,10 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const DELETE_CALL_TIMEOUT_MS = 30_000;
 /** The whole deletion stops here and says so, rather than holding the disconnect open. */
 const DELETE_DEADLINE_MS = 120_000;
-/** A listing that needs more pages than this stops and says so, rather than looping. */
+/**
+ * A listing that needs more pages than this stops rather than looping. The deletion says so in
+ * its result; the root lookup treats it as no match, and a new root is created.
+ */
 const MAX_LISTING_PAGES = 500;
 /**
  * The name `BackupManager.createBackup` gives a backup directory, which the uploader reuses
