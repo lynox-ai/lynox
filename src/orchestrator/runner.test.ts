@@ -1859,8 +1859,6 @@ describe('workflowBoundExceeded', () => {
     httpRequests: 0,
     writeBytes: 0,
     costUSD: 0,
-    approvedOutboundDomains: new Set<string>(),
-    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
 
   it('returns null when no limits are set (unbounded run)', () => {

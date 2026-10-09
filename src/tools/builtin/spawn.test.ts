@@ -274,8 +274,6 @@ describe('spawn_agent tool', () => {
       httpRequests: 0,
       writeBytes: 0,
       costUSD: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     resetSessionSpawnCost(testCounters);
   });
@@ -1708,6 +1706,28 @@ describe('spawn_agent tool', () => {
     await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
     expect(parentRestore).toHaveBeenCalled();
     expect(parentNote).not.toHaveBeenCalled();
+  });
+
+  it('(270, 18b) a tainted child hands the parent new content for its write approvals; a clean child does not', async () => {
+    const parentForeign = vi.fn();
+    const agent = makeAgent({
+      memory: {} as IAgent['memory'],
+      noteUntrustedData: vi.fn(),
+      restoreConversationTaint: vi.fn(),
+      noteForeignContent: parentForeign,
+    } as Partial<IAgent>);
+    // The child's taint is set by the stub with no read of its own: with shared counters a
+    // read would have moved the epoch already, and the hand-back would be untestable.
+    mockSend.mockImplementationOnce(async function (this: { conversationSawUntrusted?: boolean }) {
+      this.conversationSawUntrusted = true;
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    expect(parentForeign).toHaveBeenCalledTimes(1);
+
+    parentForeign.mockClear();
+    await spawnAgentTool.handler({ agents: [{ name: 'c2', task: 'do work' }] }, agent);
+    expect(parentForeign).not.toHaveBeenCalled();
   });
 
   it('S8 fallback: a parent WITHOUT restoreConversationTaint still receives the hand-off via noteUntrustedData', async () => {

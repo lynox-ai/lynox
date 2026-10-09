@@ -16,7 +16,9 @@ export function isPermissionPrompt(p) {
 
 /**
  * The HTTP tool's own prompts come in two shapes (src/tools/builtin/http.ts): the
- * outbound-consent prompt `⚠ http_request: <METHOD> to <host> — Allow outbound data?`,
+ * outbound-consent prompt `⚠ http_request: <METHOD> to <host> — Allow outbound data?` (an
+ * engine since row 270 adds the path and the body's field names after the host, and may add
+ * a note after the question; the host is still the first word after `to`),
  * and the GET exfiltration warning `⚠ http_request: <… possible data exfiltration)> —
  * Allow?`. Only the first can be allowed, and only for a fixture host; a prompt of another
  * tool that merely MENTIONS a fixture host (a shell command with a URL in it, say) is not
@@ -25,7 +27,7 @@ export function isPermissionPrompt(p) {
  * guessed at. (The permission guard's autonomous-mode write prompt has that prefix too,
  * but cannot occur here: probe sessions never run autonomous.)
  */
-const OUTBOUND = /^⚠ http_request: [A-Z]+ to (\S+) — Allow outbound data\?$/;
+const OUTBOUND = /^⚠ http_request: [A-Z]+ to (\S+)(?: [^]*)? — Allow outbound data\?(?: [^]*)?$/;
 const EXFIL_WARNING = /^⚠ http_request: .*possible data exfiltration\) — Allow\?$/;
 
 /** What the probe answers a question from the model that is not about the task's gate. */

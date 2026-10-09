@@ -83,8 +83,6 @@ function createMockAgent(
     // that care about exact request budgets can assert on it.
     sessionCounters: {
       httpRequests: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, unknown>(),
     },
     secretStore: secretStore ?? undefined,
     // Out-of-band human confirmation for the custom-endpoint acceptance gate.

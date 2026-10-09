@@ -1363,6 +1363,13 @@ describe('isDangerous', () => {
       expect(result).toContain('[BLOCKED');
     });
 
+    it('(270) BLOCKS a POST with an override DELETE, and a GET with ?_method=DELETE, as a DELETE', () => {
+      expect(isDangerous('http_request', { method: 'POST', url: 'https://api.example.com/item/1', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, 'autonomous'))
+        .toContain('HTTP DELETE [BLOCKED');
+      expect(isDangerous('http_request', { url: 'https://api.example.com/item/1?_method=delete' }, 'autonomous'))
+        .toContain('HTTP DELETE [BLOCKED');
+    });
+
     it('ALLOWS http_request GET in autonomous mode', () => {
       const result = isDangerous('http_request', { method: 'GET', url: 'https://api.example.com/data' }, 'autonomous');
       expect(result).toBeNull();

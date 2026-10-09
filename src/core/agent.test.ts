@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
+import { noteAnsweredBy, noteNetworkContact } from './call-connection.js';
+import { approvalKey, currentEpoch, isApproved, recordApproval } from './untrusted-epoch.js';
 
 // === Mocks ===
 
@@ -6039,6 +6041,148 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], promptUser });
     await expect(agent.send('Process')).resolves.toBe('Approved and done');
     expect(promptUser).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('untrusted epoch for write approvals', () => {
+  const H = 'api.example.test';
+  const POST_H = approvalKey('POST', H);
+  const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+  /** An `http_request` stand-in: wraps its answer like the real tool and, unless told not
+   *  to, reports the host that answered. */
+  function answerFrom(host: string | undefined, ms = 0): ToolEntry {
+    return makeTool('http_request', vi.fn(async () => {
+      await delay(ms);
+      if (host !== undefined) noteAnsweredBy(host);
+      return `HTTP 200\n${wrapUntrustedData(`page ${Math.random()}`, 'http_response')}`;
+    }));
+  }
+
+  async function runBatch(tools: ToolEntry[], approveBefore = true): Promise<Agent> {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse(tools.map((t, i) => ({ id: `t${i}`, name: t.definition.name, input: { i } }))))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools });
+    if (approveBefore) recordApproval(agent.sessionCounters, POST_H, currentEpoch(agent.sessionCounters));
+    await agent.send('go');
+    return agent;
+  }
+
+  const holds = (agent: Agent) => isApproved(agent.sessionCounters, POST_H, currentEpoch(agent.sessionCounters));
+
+  it('keeps an approval when only the approved host answered', async () => {
+    const agent = await runBatch([answerFrom(H)]);
+    expect(currentEpoch(agent.sessionCounters), 'the answer was counted').toBe(1);
+    expect(holds(agent)).toBe(true);
+  });
+
+  it('voids it when the answer did not report its host', async () => {
+    expect(holds(await runBatch([answerFrom(undefined)]))).toBe(false);
+  });
+
+  it('voids it when a tool that returns unwrapped content ran', async () => {
+    const agent = await runBatch([makeTool('bash', vi.fn(async () => 'plain text from somewhere'))]);
+    expect(currentEpoch(agent.sessionCounters)).toBe(1);
+    expect(holds(agent)).toBe(false);
+  });
+
+  it('voids it when foreign content shares the batch, whichever result arrives first', async () => {
+    for (const [hostMs, otherMs] of [[0, 30], [30, 0]] as const) {
+      // Not an external-content tool by name: only the marker in its result can count it.
+      const other = makeTool('custom_reader', vi.fn(async () => { await delay(otherMs); return wrapUntrustedData('a mail', 'mail:body'); }));
+      expect(holds(await runBatch([answerFrom(H, hostMs), other])), `host after ${hostMs} ms`).toBe(false);
+    }
+  });
+
+  it('keeps an approval given during the batch when only the approved host answered', async () => {
+    let agentRef: Agent | undefined;
+    const writer = makeTool('http_request', vi.fn(async () => {
+      recordApproval(agentRef!.sessionCounters, POST_H, agentRef!.approvalEpoch());
+      noteAnsweredBy(H);
+      return wrapUntrustedData('created', 'http_response');
+    }));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'http_request', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [writer] });
+    await agentRef.send('go');
+    expect(holds(agentRef)).toBe(true);
+  });
+
+  it('checks and stores approvals against the epoch the batch started in, even after a sibling moved it', async () => {
+    let agentRef: Agent | undefined;
+    let seen: number | undefined;
+    // A sub-agent sharing the counters moves the epoch mid-batch; a sibling call that asks
+    // for its approval epoch afterwards still gets the batch's start.
+    const child = makeTool('custom_child', vi.fn(async () => { agentRef!.sessionCounters.untrustedEpoch = 7; return 'ok'; }));
+    const writer = makeTool('custom_writer', vi.fn(async () => { await delay(20); seen = agentRef!.approvalEpoch(); return 'ok'; }));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'custom_child', input: {} }, { id: 't1', name: 'custom_writer', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [child, writer] });
+    await agentRef.send('go');
+    expect(seen).toBe(0);
+  });
+
+  it('voids it when the user turn itself carries untrusted content', async () => {
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [] });
+    recordApproval(agent.sessionCounters, POST_H, 0);
+    await agent.send([{ type: 'text', text: wrapUntrustedData('[File: a.pdf]\nterms', 'file_upload') }]);
+    expect(currentEpoch(agent.sessionCounters)).toBe(1);
+    expect(holds(agent)).toBe(false);
+  });
+
+  it('moves the epoch at once for content outside a batch', () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [] });
+    agent.noteForeignContent();
+    expect(currentEpoch(agent.sessionCounters)).toBe(1);
+  });
+
+  it('(F1) voids it when http_request reached the network and failed, with or without a host report', async () => {
+    // A thrown error, and a soft failure (`Blocked:` text): both may carry a server's status
+    // text or a redirect target, and neither is wrapped.
+    const thrown = makeTool('http_request', vi.fn(async () => { noteNetworkContact(); noteAnsweredBy(H); throw new Error('timed out after 200 Z-controlled text'); }));
+    expect(holds(await runBatch([thrown]))).toBe(false);
+    const soft = makeTool('http_request', vi.fn(async () => { noteNetworkContact(); throw new ToolSoftFailure('Blocked: 200 Z-controlled text', 'Blocked: 200 Z-controlled text'); }));
+    expect(holds(await runBatch([soft]))).toBe(false);
+  });
+
+  it('(F1) keeps it when http_request was refused before it reached the network', async () => {
+    const refused = makeTool('http_request', vi.fn(async () => { throw new ToolSoftFailure('Blocked: denied by user.', 'Blocked: denied by user.'); }));
+    const agent = await runBatch([refused]);
+    expect(currentEpoch(agent.sessionCounters)).toBe(0);
+    expect(holds(agent)).toBe(true);
+  });
+
+  it('(17b) voids it when stored data was read back, which may come from a foreign source', async () => {
+    const agent = await runBatch([makeTool('data_store_query', vi.fn(async () => 'rows'))]);
+    expect(holds(agent)).toBe(false);
+  });
+
+  it('(16, 18) a taint handed down or restored after a rebuild does not move the epoch', () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [] });
+    agent.noteUntrustedData();
+    agent.restoreConversationTaint();
+    expect(currentEpoch(agent.sessionCounters)).toBe(0);
+  });
+
+  it('names each batch by its own identity, and none outside one', async () => {
+    let agentRef: Agent | undefined;
+    const seen: (object | undefined)[] = [];
+    const probe = makeTool('custom_probe', vi.fn(async () => { seen.push(agentRef!.approvalBatch()); return 'ok'; }));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't0', name: 'custom_probe', input: {} }]))
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'custom_probe', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    agentRef = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [probe] });
+    await agentRef.send('go');
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBeDefined();
+    expect(seen[1]).toBeDefined();
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(agentRef.approvalBatch()).toBeUndefined();
   });
 });
 

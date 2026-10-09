@@ -1,4 +1,5 @@
 import { realpathSync, existsSync } from 'node:fs';
+import { effectiveWriteMethod } from '../core/outbound-write.js';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
 import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -1086,8 +1087,15 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   }
 
   // http_request write methods — block DELETE in autonomous mode
-  if (toolName === 'http_request' && input && typeof input === 'object' && 'method' in input) {
-    const method = String((input as { method: unknown }).method).toUpperCase();
+  if (toolName === 'http_request' && input && typeof input === 'object') {
+    // The EFFECTIVE method (`core/outbound-write.ts`): a POST with an override DELETE, or a GET
+    // with `?_method=DELETE`, is held to what a server that honours the override does. An
+    // override that is not a method is refused by the tool itself; here it counts as a write.
+    const req = input as { method?: unknown; headers?: unknown; url?: unknown };
+    const headers = req.headers !== null && typeof req.headers === 'object'
+      ? Object.fromEntries(Object.entries(req.headers as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+      : {};
+    const method = effectiveWriteMethod(String(req.method ?? 'GET'), headers, String(req.url ?? '')) ?? 'OVERRIDE';
     if (method === 'DELETE') {
       if (autonomy === 'autonomous') {
         return `⚠ ${toolName}: HTTP DELETE [BLOCKED — destructive operation]`;

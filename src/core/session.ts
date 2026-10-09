@@ -412,8 +412,6 @@ export class Session {
     httpRequests: 0,
     writeBytes: 0,
     costUSD: 0,
-    approvedOutboundDomains: new Set<string>(),
-    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
   private _userTimezone: string | null = null;
   /**

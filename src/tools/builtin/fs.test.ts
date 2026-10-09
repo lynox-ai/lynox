@@ -21,8 +21,6 @@ beforeEach(() => {
   testCounters = {
     httpRequests: 0,
     writeBytes: 0,
-    approvedOutboundDomains: new Set<string>(),
-    pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
   };
 });
 

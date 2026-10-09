@@ -17,6 +17,7 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
+import { isOutboundEffectWrite } from './outbound-write.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -309,6 +310,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // this would halt as `contract`, which names the wrong reason.
     if (isMailProviderTarget(url)) return { kind: 'blocked' };
     if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
+    // A path that sends to a third party or issues something bindingly is asked on its own,
+    // every time (`outbound-write.ts`); a bulk run has no one to ask, so no grant covers it.
+    if (isOutboundEffectWrite(url, method)) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);

@@ -102,6 +102,8 @@ import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
 import { runInCallSlot } from './call-connection.js';
+import { inSessionPromptChain } from './prompt-chain.js';
+import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -806,6 +808,44 @@ export class Agent implements IAgent {
   private _conversationSawUntrusted = false;
   /** The taint state when the current tool batch started; read by the secret gate. */
   private _taintBeforeBatch: boolean | undefined;
+  /** The untrusted-content epoch when the current tool batch started, and the sources of
+   *  content that arrived during it; decided at the batch's end (`untrusted-epoch.ts`). */
+  private _epochBeforeBatch: number | undefined;
+  private _batchSources: BatchSources | undefined;
+  /** The epoch a write approval is checked against and stored with: the one the current
+   *  batch started in, or the current one outside a batch. */
+  approvalEpoch(): number {
+    return this._epochBeforeBatch ?? currentEpoch(this.sessionCounters);
+  }
+  /** The current tool batch as an identity (undefined outside one): a write refused in a
+   *  batch stays refused for the calls of the same batch that waited on the question. */
+  approvalBatch(): object | undefined {
+    return this._batchSources;
+  }
+  /**
+   * Content the engine did not write entered the conversation: in a batch it is counted
+   * when the batch ends, outside one it moves the epoch now. Called for new content only —
+   * not for a taint handed down to a sub-agent or restored after a rebuild, which brings
+   * nothing the conversation had not already seen.
+   */
+  noteForeignContent(): void {
+    if (this._batchSources) this._batchSources.add(FOREIGN);
+    else bumpNow(this.sessionCounters);
+  }
+  /**
+   * The source an `http_request` result adds to the epoch (`untrusted-epoch.ts`). Its dispatch
+   * adds none, so this is the only place it is counted, and the polarity is foreign by default:
+   * an answer counts for the host that gave it only when it carries the untrusted marker AND
+   * the tool reported that one host for THIS call. Any other result of a call that reached
+   * the network — an error, a refusal after a redirect, a timeout message with the server's
+   * status text — is foreign. A call that never reached it (refused before sending) adds nothing.
+   */
+  private _noteHttpRequestSource(callSlot: CallSlot, marked: boolean): void {
+    if (!marked && !callSlot.contactedNetwork) return;
+    const host = marked ? callSlot.answeredBy : undefined;
+    if (typeof host === 'string' && this._batchSources) this._batchSources.add({ kind: 'host', host });
+    else this.noteForeignContent();
+  }
   /** Whether this CONVERSATION has ingested untrusted content (sticky; see field doc). */
   get conversationSawUntrusted(): boolean { return this._conversationSawUntrusted; }
   /**
@@ -1239,8 +1279,6 @@ export class Agent implements IAgent {
       httpRequests: 0,
       writeBytes: 0,
       costUSD: 0,
-      approvedOutboundDomains: new Set<string>(),
-      pendingOutboundPrompts: new Map<string, Promise<boolean>>(),
     };
     this.toolResultBlobStore = config.toolResultBlobStore;
     this.toolCallTracker = config.toolCallTracker;
@@ -2179,6 +2217,7 @@ export class Agent implements IAgent {
     if (Agent._contentHoldsUntrustedMarker(content)) {
       this._sawUntrustedData = true;
       this._conversationSawUntrusted = true;
+      this.noteForeignContent();
     }
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
@@ -3536,13 +3575,7 @@ export class Agent implements IAgent {
     const input = (tc.input ?? {}) as Record<string, unknown>;
     const counters = this.sessionCounters;
     // One prompt at a time per Session; each waiter re-reads the approvals once it is its turn.
-    const oneAtATime = async <T>(fn: () => Promise<T>): Promise<T> => {
-      const prev = counters.secretPromptChain ?? Promise.resolve();
-      let release!: () => void;
-      counters.secretPromptChain = new Promise<void>((r) => { release = r; });
-      await prev.catch(() => {});
-      try { return await fn(); } finally { release(); }
-    };
+    const oneAtATime = <T>(fn: () => Promise<T>): Promise<T> => inSessionPromptChain(counters, fn);
     // A call that waited in the queue must not raise a prompt once the run is aborted: the
     // prompt would outlive the run as a pending row and block the Session's next prompt.
     const runSignal = this.abortController?.signal;
@@ -3678,6 +3711,10 @@ export class Agent implements IAgent {
     // each arms the latch for its own tool as it starts, so a per-call read would count a
     // sibling's dispatch as content already taken in (the secret gate asks about the past).
     this._taintBeforeBatch = this._sawUntrustedData || this._conversationSawUntrusted;
+    const batchSources = new BatchSources();
+    const epochBeforeBatch = currentEpoch(this.sessionCounters);
+    this._batchSources = batchSources;
+    this._epochBeforeBatch = epochBeforeBatch;
 
     // Enforce fan-out limit: execute first N in parallel, truncate excess
     const limit = Agent.MAX_PARALLEL_TOOL_CALLS;
@@ -3698,6 +3735,9 @@ export class Agent implements IAgent {
       toExecute.map(tc => (raceSignal ? raceRunAbort(this._executeOne(tc), raceSignal) : this._executeOne(tc))),
     );
     this._taintBeforeBatch = undefined;
+    this._batchSources = undefined;
+    this._epochBeforeBatch = undefined;
+    batchSources.resolve(this.sessionCounters, epochBeforeBatch);
 
     // A call that needs a person and cannot reach one ends the run — after the batch has
     // settled, so the calls beside it finish rather than being cut off mid-flight.
@@ -3923,6 +3963,10 @@ export class Agent implements IAgent {
     // deferred `remember` on a later clean turn is still routed to pending_review.
     if (Agent.EXTERNAL_CONTENT_TOOLS.has(tc.name)) {
       this._conversationSawUntrusted = true;
+      // Several of these tools return what they read without wrapping it, so the marker
+      // below never sees it. `http_request` always wraps and reports which host answered,
+      // so its content is counted from its result instead.
+      if (tc.name !== 'http_request') this.noteForeignContent();
     }
 
     const tool = this.tools.find(t => t.definition.name === tc.name);
@@ -4227,9 +4271,10 @@ export class Agent implements IAgent {
       // DK.1 F5: arm the sticky conversation latch too (this marker stays in context
       // across turns, so a later clean-latch `remember` could still be executing an
       // injected instruction that rode in with it).
-      if (containsUntrustedMarker(scanned)) {
-        this._conversationSawUntrusted = true;
-      }
+      const marked = containsUntrustedMarker(scanned);
+      if (marked) this._conversationSawUntrusted = true;
+      if (tc.name === 'http_request') this._noteHttpRequestSource(callSlot, marked);
+      else if (marked) this.noteForeignContent();
 
       // Shadow mode: observe tool-call sequences for anomaly patterns.
       // Channel publishes happen inside checkAnomaly; we intentionally discard
@@ -4334,6 +4379,9 @@ export class Agent implements IAgent {
       // covered only the soft path and claimed the threat closed — found in the
       // delta round, 2026-08-24.
       const ledgerMessage = this._ledgerReason(message);
+      // An `http_request` error after the network was reached may carry server text (a status
+      // line, a redirect target): foreign content, whatever the host.
+      if (tc.name === 'http_request') this._noteHttpRequestSource(callSlot, false);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, TOOL_AUDIT_INPUT_MAX_CHARS);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
