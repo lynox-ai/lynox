@@ -389,9 +389,11 @@ export interface OAuthGrantRecord {
   connected_by?: string | undefined;
   /**
    * The mandate whose consent this is, when {@link connected_by} names one. The tokens are not
-   * resolved once that mandate has ended, by anyone, until the owner connects the account
-   * again and so records the owner's consent. Adopting the profile does not: its save keeps the
-   * grant as it is. A later mandate for the same address is another grant and does not revive it.
+   * resolved once that mandate has ended, by anyone, until the owner gives their own consent:
+   * by connecting the account again, or by adopting the connection (`api_setup` action
+   * `adopt_connection`, which asks the person and then records the owner here). Saving over
+   * the profile does not: its save keeps the grant as it is. A later mandate for the same
+   * address is another grant and does not revive it.
    */
   connected_mandate_id?: string | undefined;
 }

@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, isMandateAuthored, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
@@ -34,7 +34,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { hiddenFromProfile, mandateMayConnect, mayServeAsClientId, secretsForProfile } from '../../core/profile-secret-view.js';
+import { connectionWaits, hiddenFromProfile, mandateMayConnect, mayServeAsClientId, secretsForProfile } from '../../core/profile-secret-view.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -57,7 +57,7 @@ const DOCS_FETCH_TIMEOUT_MS = 15_000;
  */
 const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
-type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect';
+type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect' | 'adopt_connection';
 
 interface RefinePatch {
   addGuidelines?: string[] | undefined;
@@ -1361,15 +1361,10 @@ function deletedMeanwhile(
 }
 
 /**
- * Field names whose values a token endpoint's answer must not carry into a sentence: any name
- * that CONTAINS a credential word (`access_token`, `accessToken`, `SecretAccessKey`,
- * `secret_key`, `tokenValue`, `api_key`, `jwt`), plus `authorization`, `key` and
- * `code_verifier`. Matching the middle too keeps provider shapes like AWS's `SecretAccessKey`
- * hidden; what that would also hide, a field that only DESCRIBES a credential (`token_type`,
- * `token_endpoint_auth_method`, `client_secret_expires_at`, `refresh_token_expires_in`), is
- * named by its ending in `DESCRIPTIVE_FIELD` and stays readable. `code` is not among them,
- * because error bodies use it for the error code; the authorization code this engine sends is
- * replaced as a sent value instead.
+ * Parameter names of a token request that carry a credential: any name that CONTAINS a
+ * credential word (`client_secret`, `refresh_token`, `assertion`), plus `authorization`, `key`
+ * and `code_verifier`; a name that only DESCRIBES one (`token_type`, `*_expires_in`) does not,
+ * by its ending in `DESCRIPTIVE_FIELD`. Their values are what `sentCredentials` collects.
  */
 const CREDENTIAL_WORD = /token|secret|password|assertion|api_?key|access_?key|jwt|^key$|^authorization$|^code_verifier$/i;
 const DESCRIPTIVE_FIELD = /(?:_?type|_?expires_?(?:at|in)|_?auth_?method|_?endpoint|_?ur[il]|_?hint|_?format)$/i;
@@ -1377,79 +1372,91 @@ const isCredentialField = (name: string): boolean => CREDENTIAL_WORD.test(name) 
 /** What this engine SENDS that counts as a credential: the fields above, and the authorization code. */
 const isSentCredential = (name: string): boolean => isCredentialField(name) || name === 'code';
 
-function redactCredentialFields(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactCredentialFields);
-  if (value === null || typeof value !== 'object') return value;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    // Whatever shape a credential field holds — a string, a list of them, an object — none of
-    // it is shown. A boolean (`has_refresh_token: true`) carries no credential and stays.
-    out[k] = isCredentialField(k) && v !== null && typeof v !== 'boolean' ? '<redacted>' : redactCredentialFields(v);
-  }
-  return out;
-}
-
 /**
- * A token endpoint's answer as the model may read it: enough to diagnose (error codes,
- * descriptions, field names), never a credential. Providers answer a failed exchange with
- * bodies that repeat what was sent, a client secret included, and a body without
- * `access_token` can still hold a `refresh_token` or `id_token`. So:
- * - every credential this exchange sent (`sentCredentials`) is replaced wherever it appears, as
- *   sent and URL-encoded, and once more after a JSON body is parsed and written back, because
- *   parsing undoes an escaped echo (`\/`, `\u002B`) that the first pass could not see;
- * - a JSON body has the values of credential-named fields replaced, at any depth;
- * - any other body has `name=value` / `name: value` pairs of those names replaced, and a
- *   `Bearer` value;
- * - long opaque runs are masked as the error reporter masks them.
- * Then it is cut to `max`, with a marker.
+ * The credentials this exchange SENDS (`isSentCredential`), so that a summary of the answer can
+ * leave out anything that repeats one.
  */
 export function sentCredentials(params: Readonly<Record<string, string>>): string[] {
   return Object.entries(params).filter(([k]) => isSentCredential(k)).map(([, v]) => v);
 }
 
-function withoutSent(text: string, sent: readonly string[]): string {
-  let body = text;
-  for (const value of sent) {
-    if (value.length < 4) continue;
-    for (const form of new Set([value, encodeURIComponent(value)])) body = body.split(form).join('<redacted>');
-  }
-  return body;
+/**
+ * A field name or OAuth error code as the summary below may name it: word-shaped. It starts
+ * with a letter or `_`, is at most 40 characters of `[A-Za-z0-9_.-]`, and holds at most four
+ * digits; every RFC 6749 §5.2 code meets that. It is a filter, not a proof: a long hex token
+ * usually fails it by its digits, but a short hex or base64 one can pass, and so can a key the provider spells like a
+ * word. Hence the secret masker on top, which drops known key shapes, and the fence the names
+ * travel in, which marks them as the provider's text.
+ */
+const BODY_WORD = /^[A-Za-z_][A-Za-z0-9_.-]{0,39}$/;
+
+function nameable(word: string, sent: readonly string[]): boolean {
+  if (!BODY_WORD.test(word) || (word.match(/[0-9]/g)?.length ?? 0) > 4) return false;
+  if (sent.some((v) => v.length >= 4 && word.includes(v))) return false;
+  return maskSecretPatterns(word, { includeGeneric: true }) === word;
 }
 
 /**
- * `name=value` / `name: value` pairs in a text body whose name carries a credential word. Only
- * such names are matched, so a label in front (`detail:`, `redirect:`, `msg=`) consumes nothing
- * and the pair behind it is matched on its own. A credential name loses its whole value, colons
- * included. A name that only describes a credential (`token_uri`) keeps its value, but the
- * value is read again, because a URL can hold a pair of its own; the value is strictly shorter
- * than the match, so the recursion ends.
+ * A token endpoint's answer as the model may read it: its shape, never a value. Providers answer
+ * a failed exchange with bodies that repeat what was sent, a client secret included, and a body
+ * without `access_token` can still hold a `refresh_token` or `id_token`; no filter over the text
+ * can know every way a provider spells a credential, so no value goes through. What does: the
+ * top-level field names of a JSON object and, when it holds one, the OAuth error code
+ * (`error`, without `error_description`, which is free text). A name or code that is not a
+ * plain word, or that repeats a sent credential, is counted, not named. The names are the
+ * provider's words, so they go inside a fence. A body that is not a JSON object is described by
+ * its length only.
+ *
+ * What the engine DECIDES from the answer (revoked, client problem, refused scope) reads the
+ * raw text (`classifyRefreshFailure`, `isScopeRejection`), not this.
  */
-function redactTextPairs(text: string): string {
-  return text.replace(/\b([A-Za-z_]*(?:token|secret|password|assertion|api_?key|access_?key|jwt)[A-Za-z_]*|key|authorization|code_verifier)\b(["']?\s*[=:]\s*["']?)(?!Bearer\b)([^\s&"',}<]+)/gi,
-    (_whole, name: string, sep: string, value: string) => `${name}${sep}${isCredentialField(name) ? '<redacted>' : redactTextPairs(value)}`);
-}
-
-export function providerBodyForModel(text: string, sent: readonly string[], max: number): string {
-  let body = withoutSent(text, sent);
+export function providerBodySummary(text: string, sent: readonly string[]): string {
   let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { parsed = undefined; }
-  if (parsed !== null && typeof parsed === 'object') {
-    body = withoutSent(JSON.stringify(redactCredentialFields(parsed)), sent);
-  } else {
-    // The scheme word first, so `Authorization: Bearer x` loses `x` and keeps `Bearer`; the
-    // field pass then skips the scheme word instead of taking it for the value. A bearer value
-    // is token-shaped (eight characters or more, with a digit or punctuation), so the word in
-    // prose — `token_type=bearer error=…` — does not take the next label with it.
-    // After an `Authorization` label any bearer value goes, whatever its shape.
-    body = body.replace(/\b(authorization["']?\s*[=:]\s*["']?bearer)\s+"?[^\s"',}&<]+"?/gi, '$1 <redacted>');
-    body = redactTextPairs(body.replace(/\b(Bearer)\s+"?(?=[A-Za-z0-9._~+/-]*[0-9._~+/-])[A-Za-z0-9._~+/-]{8,}=*"?/gi, '$1 <redacted>'));
+  try { parsed = JSON.parse(text); } catch { parsed = undefined; }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return `The body (${String(text.length)} characters) is not a JSON object and is not shown.`;
   }
-  body = maskSecretPatterns(body, { includeGeneric: true });
-  return body.length > max ? `${body.slice(0, max)}…[truncated]` : body;
+  const keys = Object.keys(parsed);
+  if (keys.length === 0) return 'The body is a JSON object with no fields.';
+  const shown = keys.filter((k) => nameable(k, sent)).slice(0, 20);
+  const unnamed = keys.length - shown.length;
+  const error: unknown = (parsed as Record<string, unknown>)['error'];
+  const code = typeof error === 'string' && nameable(error, sent) ? error : undefined;
+  const lines = [
+    `fields: ${shown.length > 0 ? shown.join(', ') : '(none nameable)'}`,
+    ...(code !== undefined ? [`error: ${code}`] : []),
+  ];
+  return compose([
+    engineText(`The body is a JSON object with ${String(keys.length)} top-level field(s)${unnamed > 0 ? `, ${String(unnamed)} of them not named here` : ''}; no values are shown. Its field names${code !== undefined ? ' and OAuth error code' : ''}, as the provider wrote them:`),
+    renderFence('token_endpoint_answer', lines.join('\n')),
+  ], '\n');
 }
 
 function hostOf(profile: ApiProfile): string | undefined {
   try { return new URL(profile.base_url).hostname; } catch { return undefined; }
+}
+
+/**
+ * Every host an adopted profile sends a credential to, shaped for a sentence: its `base_url`,
+ * and the token endpoint, where the refresh token and the client secret go. For a preset this
+ * engine knows that is the endpoint `fetch_token` derives from the profile's `preset_params`
+ * (the profile picks the host within the preset's pattern); otherwise the profile's `token_url`.
+ */
+function adoptionHosts(profile: ApiProfile): string[] {
+  const urls = [profile.base_url];
+  const oauth = profile.auth?.type === 'oauth2' ? profile.auth.oauth : undefined;
+  const preset = oauth?.preset_id ? OAUTH_PRESETS.get(oauth.preset_id) : undefined;
+  if (preset) {
+    const derived = derivePresetEndpoints(preset.id, oauth?.preset_params);
+    if (!('kind' in derived)) urls.push(derived.tokenUrl);
+  } else if (oauth?.token_url) {
+    urls.push(oauth.token_url);
+  }
+  const hosts = new Set<string>();
+  for (const u of urls) {
+    try { hosts.add(shapedForLog(new URL(u).hostname, HOSTNAME_SHAPE, 255)); } catch { /* not a URL: nothing to name */ }
+  }
+  return [...hosts];
 }
 
 /**
@@ -1503,7 +1510,7 @@ export function foreignProfileRefusal(agent: IAgent, existing: ApiProfile | unde
 
 // ── Tool definition ───────────────────────────────────────────────────────────
 
-export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
   outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
@@ -1526,13 +1533,13 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   },
   definition: {
     name: 'api_setup',
-    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',
+    description: 'Manage API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create / update: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.\n- adopt_connection: pass `id`.',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect'],
+          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect', 'adopt_connection'],
           description: 'Action to perform',
         },
         profile: {
@@ -2551,7 +2558,7 @@ ${draftJson}
       if (!exchanged.responseOk) {
         // Trim verbose HTML error pages — keep the first ~500 chars so the
         // agent can diagnose without flooding context.
-        const responseBody = `Response body:\n${providerBodyForModel(respText, sentCredentials(params), 500)}`;
+        const responseBody = `Response: ${providerBodySummary(respText, sentCredentials(params))}`;
         const notOurs = 'This is the external provider\'s answer — NOT a lynox tool limitation. Do NOT recommend self-host or tier changes for this kind of failure.';
         // Which of three things failed decides what happens to the grant: a
         // revocation ends it, a client problem leaves it intact, and anything
@@ -2637,11 +2644,11 @@ ${draftJson}
       try {
         parsed = JSON.parse(respText) as typeof parsed;
       } catch {
-        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. Its start:\n${providerBodyForModel(respText, sentCredentials(params), 500)}`;
+        return `Token exchange returned HTTP ${exchanged.status} but the body wasn't valid JSON. ${providerBodySummary(respText, sentCredentials(params))}`;
       }
       const accessToken = parsed.access_token;
       if (!accessToken || typeof accessToken !== 'string') {
-        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. Parsed body: ${providerBodyForModel(respText, sentCredentials(params), 300)}.`;
+        return `Token exchange returned HTTP ${exchanged.status} but no \`access_token\` in the response. ${providerBodySummary(respText, sentCredentials(params))}`;
       }
       // A refresh token counts as new only if it differs from the one this exchange
       // sent. A provider that does not rotate can answer with the very token it was
@@ -2727,6 +2734,110 @@ ${draftJson}
       return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as ${attachedAs} for any http_request that maps to api_profile "${input.id}" — do NOT pass the ${slot} header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
     }
 
-    return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", or "fetch_token".';
+    if (input.action === 'adopt_connection') {
+      if (!input.id) return 'Error: "id" is required for adopt_connection action.';
+      const id = input.id;
+      if (!isOwnerPrincipal(agent.principal)) {
+        return `Error: only the owner can adopt a connection. Nothing was changed.`;
+      }
+      const apiStore = agent.toolContext?.apiStore;
+      if (!apiStore) return 'Error: API store unavailable — cannot adopt the connection. Restart the engine and retry.';
+      const asked = apiStore.get(id);
+      if (!asked) return `Error: API profile "${id}" not found.`;
+      if (!isMandateConnection(asked)) {
+        return `API profile "${id}" holds no connection that was authorized in a mandate's session, so there is nothing to adopt. Nothing was changed.`;
+      }
+      // Only a connection that waits. While its mandate is active the connection is in use, and
+      // the profile, once the owner's, would read the vault unfiltered for every turn that
+      // reaches its host, that mandate's included.
+      if (!connectionWaits(asked, agent.toolContext?.mandateEnds ?? null)) {
+        return `API profile "${id}" was connected in a mandate's session that is still active, so its connection is in use and cannot be adopted now. Nothing was changed.`;
+      }
+      // ASKED, every time. Adopting turns tokens someone else authorized at the provider into the
+      // owner's, and makes the profile the owner's: from then on the engine reads every vault
+      // name it names without the view a mandate's profile gets, values from the environment
+      // included, and sends them to its hosts for every request and run of the owner's. In the
+      // owner's own session a text the model read (a mail, a page) can ask for it. So the
+      // question is the engine's and names all of that before the yes, not after: the hosts, the
+      // names, and whose session authorized it. With no one to ask, nothing changes.
+      if (!agent.promptUser) {
+        return `Blocked: adopting the connection of API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was changed.`;
+      }
+      const promptUser = agent.promptUser;
+      // Read now, not after the wait (the same rule as `delete`).
+      const runSignal = agent.runSignal;
+      // A copy, not the reference: the store's object could be changed in place while the
+      // question is open, and a comparison with itself would always pass.
+      const askedState = JSON.stringify(asked);
+      const by = singleLine(String(asked.oauth_grant?.connected_by));
+      const hosts = adoptionHosts(asked);
+      // Each name as it is written, on one line and quoted on its own: the question shows values
+      // as values, so the name a reader has to recognise is not replaced by a placeholder, and a
+      // stored name holding a comma cannot pass for two entries of the list.
+      const names = collectVaultKeys(asked).map((k) => { const one = singleLine(k); return JSON.stringify(one.length > 80 ? `${one.slice(0, 80)}…` : one); });
+      const ends = agent.toolContext?.mandateEnds ?? null;
+      const known = asked.oauth_grant?.connected_mandate_id !== undefined && ends !== null;
+      const shownNames = names.slice(0, 30).join(', ') + (names.length > 30 ? ` and ${String(names.length - 30)} more` : '');
+      const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
+        ? Promise.resolve(null)
+        : promptUser(
+          pv`⚠ api_setup: adopt the connection of API profile ${singleLine(String(asked.name))} (id ${id})? It was authorized at the provider in the session of ${by}, ${known ? 'which is not active' : 'and this engine cannot tell whether that mandate is still active'}. Once adopted, the profile is yours. The engine then sends to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}, for your requests and runs, the connection's tokens and the vault names this profile names, read like any of your profiles, values from the environment included: ${shownNames.length > 0 ? shownNames : 'none'}. Adopt it?`,
+          ['Allow', 'Deny', '\x00'],
+        ));
+      if (answer === null) return `Blocked: the connection of API profile "${id}" was not adopted — the run was stopped before the question was asked.`;
+      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+        return `Blocked: the connection of API profile "${id}" was not adopted — user declined.`;
+      }
+      // What the person agreed to is the profile as the question named it. Any change while they
+      // read it (a save, a delete, a new connection, a token exchange) makes it another act, so
+      // it is asked again; there is no await between this check and the save.
+      const current = apiStore.get(id);
+      if (!current) return `API profile "${id}" was deleted while the question was open. Nothing was adopted.`;
+      if (JSON.stringify(current) !== askedState) {
+        return `API profile "${id}" changed while the question was open, so the answer no longer covers it. Nothing was adopted; ask again if it is still wanted.`;
+      }
+      // A lapsed mandate is live again after its next login once it was extended, and that can
+      // happen while the question is open.
+      if (!connectionWaits(current, ends)) {
+        return `The mandate whose session connected API profile "${id}" became active again while the question was open, so its connection is in use. Nothing was adopted.`;
+      }
+      const grant: OAuthGrantRecord = { ...current.oauth_grant, connected_by: 'owner' };
+      delete grant.connected_mandate_id;
+      const next: ApiProfile = { ...current, oauth_grant: grant };
+      delete next.created_by;
+      const saved = apiStore.save(next, apisDir);
+      if (!saved.ok) return `Error: the connection of API profile "${id}" was not adopted: ${saved.reason}`;
+      const lead = `Adopted: the connection of API profile "${id}" is yours now, and the engine uses its tokens for your requests and runs again.`;
+      return isMandateAuthored(current) ? `${lead} ${adoptionNote(current, next)}` : lead;
+    }
+
+    return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", "connect", "fetch_token", or "adopt_connection".';
   },
 };
+
+/**
+ * Every answer to the owner names the connections that wait for them (PRD §3.13): a connection a
+ * mandate authorized is of no use to anyone once that mandate is no longer active, and this is
+ * where the owner learns it is there. A mandate's turn is told nothing: the connections are not
+ * its to keep.
+ */
+export const apiSetupTool: ToolEntry<ApiSetupInput> = {
+  ...apiSetupEntry,
+  handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> =>
+    `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}`,
+};
+
+/** The note {@link apiSetupTool} appends: empty unless the owner asks and a connection waits. */
+export function waitingConnectionsNote(agent: IAgent): string {
+  if (!isOwnerPrincipal(agent.principal)) return '';
+  const apiStore = agent.toolContext?.apiStore;
+  if (!apiStore) return '';
+  const ends = agent.toolContext?.mandateEnds ?? null;
+  // A registered profile's id has passed the id pattern, so it is safe to name as it is.
+  const ids = apiStore.getAll().filter((p) => connectionWaits(p, ends)).map((p) => p.id);
+  if (ids.length === 0) return '';
+  const shown = ids.slice(0, 10).map((id) => `"${id}"`).join(', ');
+  const more = ids.length > 10 ? ` and ${String(ids.length - 10)} more` : '';
+  const one = ids.length === 1;
+  return `\n\nWaiting for the owner: the connection of ${shown}${more} ${one ? 'was' : 'were'} authorized in a mandate's session that is no longer active, so ${one ? 'its tokens are' : 'their tokens are'} not used for anything. Tell the user. To keep one, call api_setup with action "adopt_connection" and its id (the user is asked first); otherwise it can be deleted.`;
+}

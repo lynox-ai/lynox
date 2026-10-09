@@ -79,6 +79,10 @@ export interface ToolContext {
    *  Null when engine.db is unavailable — a mandate then writes nothing outside the
    *  instance, because nothing it would write could be recorded. */
   auditLog: import('./audit-log.js').AuditLog | null;
+  /** The end of each mandate (`mandate-ends.ts`), the same record the vault's resolve guard
+   *  asks. `api_setup` reads it to tell the owner which connections wait for them. Null when
+   *  engine.db is unavailable; then no mandate counts as live, as in the guard. */
+  mandateEnds: Pick<import('./mandate-ends.js').MandateEnds, 'isLive'> | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -129,6 +133,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     enforceHttps: false,
     apiStore: null,
     auditLog: null,
+    mandateEnds: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

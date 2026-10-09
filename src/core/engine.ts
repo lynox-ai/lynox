@@ -1134,6 +1134,7 @@ export class Engine {
     this._toolContext.auditLog = this.engineDb ? new AuditLog(this.engineDb.getDb()) : null;
     // And the end of each mandate (v24), which a later reader checks without a request.
     this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
+    this._toolContext.mandateEnds = this._mandateEnds;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
