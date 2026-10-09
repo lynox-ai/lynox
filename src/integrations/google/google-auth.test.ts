@@ -2401,6 +2401,26 @@ describe('refresh through the control plane (the client secret stays there)', ()
       expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
     });
 
+    // A control plane that predates the revoke route answers 404 (or 501 where
+    // the broker is not configured). That must read as "not confirmed" and take
+    // the direct path — never as a confirmation, never as an error.
+    it.each([
+      ['404 from a control plane without the route', 404, 'Not Found'],
+      ['501 from a control plane without a broker', 501, '{"error":"Google OAuth is not configured on this control plane"}'],
+    ])('treats %s as unconfirmed and revokes directly', async (_name, status, text) => {
+      setEnv(true);
+      const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+      mockFetch
+        .mockResolvedValueOnce({ ok: false, status, json: async () => JSON.parse(text.startsWith('{') ? text : '{"revoked":true}') as unknown, text: async () => text })
+        .mockResolvedValueOnce({ ok: false, status: 400 });
+
+      const result = await authWith(vault).revoke();
+
+      expect(result.revokedAtGoogle).toBe(false);
+      expect(urls()).toEqual([REVOKE, GOOGLE_REVOKE]);
+      expect(vault.delete, 'the local grant is dropped').toHaveBeenCalled();
+    });
+
     it('falls back to Google directly when the control plane cannot be reached', async () => {
       setEnv(true);
       const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
