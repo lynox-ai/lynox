@@ -15,7 +15,7 @@
  * SDK-type-free by design: callers extract plain strings/arrays, so this module has
  * no Anthropic-SDK dependency and is reusable by the eval's wire-replay consumer.
  */
-import { existsSync, mkdirSync, writeFileSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
@@ -338,6 +338,75 @@ function warnSinkRefused(reason: string): void {
 }
 
 /**
+ * How long a captured snapshot is kept — on disk (both sinks) and in `wire_snapshots`.
+ *
+ * Captured content is redacted but personal (the raw sink is not redacted at all), and without
+ * a bound it piles up. A week covers the case capture exists for — a bug report filed shortly
+ * after the turn it is about. A corpus collected for an eval has to be copied out of the sink
+ * within that window. The settings copy (`privacy.wire_capture_subtitle`) names the window.
+ *
+ * The prune does NOT ride on a capture. The engine runs it at boot and hourly
+ * (`Engine._pruneWireCaptures`), whatever the capture setting says: the intended use is to
+ * switch capture on, file one report and switch it off again, and after that no capture would
+ * ever come along to trigger a prune.
+ */
+export const WIRE_CAPTURE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Exactly the names `writeWireSnapshot` / `writeRawWireBody` produce, and nothing else. */
+const SINK_FILE_RE = { wire: /^wire-[A-Za-z0-9_-]+-t\d+-\d+\.json$/, raw: /^raw-[A-Za-z0-9_-]+-t\d+-\d+\.json$/ } as const;
+
+/**
+ * Delete this sink's own files older than the retention window. Returns how many were removed.
+ *
+ * Only regular files whose name matches the sink's own pattern are touched: the directory can be
+ * pointed anywhere by env, and a prune that deleted by age alone would take whatever else lives
+ * there. Age is the file's mtime, read with `lstat`, so a symlink is skipped rather than followed.
+ */
+export function pruneWireSinkDir(
+  dir: string,
+  kind: keyof typeof SINK_FILE_RE,
+  now: number = Date.now(),
+  retentionMs: number = WIRE_CAPTURE_RETENTION_MS,
+): number {
+  const pattern = SINK_FILE_RE[kind];
+  let removed = 0;
+  for (const name of readdirSync(dir)) {
+    if (!pattern.test(name)) continue;
+    const path = join(dir, name);
+    const st = lstatSync(path, { throwIfNoEntry: false });
+    if (!st?.isFile()) continue;
+    if (now - st.mtimeMs <= retentionMs) continue;
+    unlinkSync(path);
+    removed++;
+  }
+  return removed;
+}
+
+/**
+ * Prune both sinks, for the engine's boot and hourly sweep. Never throws.
+ *
+ * A sink directory is pruned only if it would pass `prepareSinkDir` as it stands: it exists, is
+ * a real directory and not a symlink, and is mode 700. A directory the write path would refuse
+ * is not ours to clean either. Nothing is created — a sink that was never armed has no directory.
+ * A failure is said once per directory: the sweep is best-effort, but a prune that fails quietly
+ * is an unbounded sink that looks bounded.
+ */
+export function pruneWireSinks(env: NodeJS.ProcessEnv = process.env, now: number = Date.now()): void {
+  for (const [dir, kind] of [[wireSinkDir(env), 'wire'], [rawWireSinkDir(env), 'raw']] as const) {
+    try {
+      const st = lstatSync(dir, { throwIfNoEntry: false });
+      if (!st || st.isSymbolicLink() || !st.isDirectory() || (st.mode & 0o777) !== 0o700) continue;
+      pruneWireSinkDir(dir, kind, now);
+    } catch (err) {
+      const key = `prune:${dir}`;
+      if (sinkWarnings.has(key)) continue;
+      sinkWarnings.add(key);
+      process.stderr.write(`[lynox] wire capture sink: prune of ${dir} failed (${err instanceof Error ? err.message : String(err)}) — old captures are NOT being removed\n`);
+    }
+  }
+}
+
+/**
  * Best-effort write of a snapshot to the dev sink dir at 0600 (dir created 0700). NEVER
  * throws into the hot path — a sink failure must not affect a real turn.
  */
@@ -345,7 +414,7 @@ export function writeWireSnapshot(snapshot: WireSnapshot, env: NodeJS.ProcessEnv
   try {
     const dir = prepareSinkDir(wireSinkDir(env));
     if (dir === null) return;
-    const safeRun = (snapshot.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
+    const safeRun = (snapshot.runId || 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `wire-${safeRun}-t${snapshot.turnIndex}-${snapshot.capturedAt}.json`);
     writeFileSync(file, JSON.stringify(snapshot, null, 2), { mode: 0o600 });
   } catch {
@@ -424,7 +493,7 @@ export function writeRawWireBody(body: RawWireBody, env: NodeJS.ProcessEnv = pro
   try {
     const dir = prepareSinkDir(rawWireSinkDir(env));
     if (dir === null) return;
-    const safeRun = (body.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
+    const safeRun = (body.runId || 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `raw-${safeRun}-t${body.turnIndex}-${body.capturedAt}.json`);
     writeFileSync(file, JSON.stringify(body, null, 2), { mode: 0o600 });
   } catch {

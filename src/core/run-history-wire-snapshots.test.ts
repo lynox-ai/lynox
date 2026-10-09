@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory } from './run-history.js';
 import type { WireSnapshot } from './wire-capture.js';
+import { WIRE_CAPTURE_RETENTION_MS } from './wire-capture.js';
 
 /**
  * Extended debug capture (operator surface) — persistence tests for the
@@ -32,7 +33,9 @@ describe('RunHistory wire_snapshots', () => {
       maxTokens: 8192,
       ephemeralTailPresent: true,
       ephemeralTailChars: 3050,
-      capturedAt: 1_700_000_000_000,
+      // Current, not a fixed 2023 stamp: an insert prunes rows past the retention window,
+      // and a fixture from 2023 would be pruned by its own insert.
+      capturedAt: Date.now(),
       ...overrides,
     };
   }
@@ -199,4 +202,26 @@ describe('RunHistory wire_snapshots', () => {
     expect(h2.getWireSnapshotsForRun('run-1')[0]!.user_message).toBe('sensitive assembled request');
     h2.close();
   });
+  it('pruneExpiredWireSnapshots cuts at the boundary and reports the count', () => {
+    const dir = freshDir();
+    const h = new RunHistory(join(dir, 'wire.db'));
+    const now = Date.now();
+    h.insertWireSnapshot(mkSnapshot({ runId: 'r-in', capturedAt: now - WIRE_CAPTURE_RETENTION_MS + 60_000 }));
+    h.insertWireSnapshot(mkSnapshot({ runId: 'r-out', capturedAt: now - WIRE_CAPTURE_RETENTION_MS - 60_000 }));
+    expect(h.pruneExpiredWireSnapshots(now)).toBe(1);
+    expect(h.getWireSnapshotsForRun('r-in')).toHaveLength(1);
+    expect(h.getWireSnapshotsForRun('r-out')).toHaveLength(0);
+    h.close();
+  });
+
+  it('keeps a row captured exactly at the retention age and drops it one millisecond later', () => {
+    const dir = freshDir();
+    const h = new RunHistory(join(dir, 'wire.db'));
+    const capturedAt = Date.now() - 1000;
+    h.insertWireSnapshot(mkSnapshot({ runId: 'r-edge', capturedAt }));
+    expect(h.pruneExpiredWireSnapshots(capturedAt + WIRE_CAPTURE_RETENTION_MS)).toBe(0);
+    expect(h.pruneExpiredWireSnapshots(capturedAt + WIRE_CAPTURE_RETENTION_MS + 1)).toBe(1);
+    h.close();
+  });
+
 });

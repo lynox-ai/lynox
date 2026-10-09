@@ -636,7 +636,8 @@ export interface LynoxUserConfig {
    * names/count, tool_choice/temperature/max_tokens) — to `history.db`, and the debug
    * chat export bundles it per run. Surfaces "what the model actually SAW" so a
    * behaves-differently-than-expected report becomes a read, not an instrumentation
-   * dig (see pro `docs/internal/prd/extended-debug-capture.md`). Default false =
+   * dig (see pro `docs/internal/prd/extended-debug-capture.md`). Snapshots are kept
+   * for `WIRE_CAPTURE_RETENTION_MS`; the engine prunes them at boot and hourly. Default false =
    * capture off, byte-identical hot path. THIS is the owner-consent gate for the
    * operator path (the DEV file-sink of Step 1 is a separate, DEV-only switch).
    * Owner-scoped, per-instance: the instance owner can write it with consent (it is

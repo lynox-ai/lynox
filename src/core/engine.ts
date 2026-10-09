@@ -21,6 +21,7 @@ import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
+import { pruneWireSinks } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
@@ -365,6 +366,8 @@ export class Engine {
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
+  private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
@@ -1098,6 +1101,14 @@ export class Engine {
       process.stderr.write(`[lynox] RunHistory init failed: ${err instanceof Error ? err.message : String(err)} — history, threads, and tasks will be unavailable\n`);
       this.runHistory = null;
     }
+
+    // Debug-capture retention: once now and then hourly, whatever the capture setting says.
+    // Capture is switched on for one report and off again, so a prune that waited for the next
+    // capture would never come. Not tied to the PromptStore timer below, which only exists when
+    // that store initialises.
+    this._pruneWireCaptures();
+    this._wireRetentionTimer = setInterval(() => this._pruneWireCaptures(), 60 * 60_000);
+    this._wireRetentionTimer.unref();
 
     // Foundation Rework v2: open the consolidated engine.db store alongside the
     // legacy DBs. A failure here must not break engine BOOT (chat/browse still
@@ -2726,6 +2737,20 @@ export class Engine {
 
   // ── Shutdown ──
 
+  /**
+   * Remove debug captures older than `WIRE_CAPTURE_RETENTION_MS` from `wire_snapshots` and from
+   * both file sinks. Best-effort: a cleanup must not stop the engine from starting, and a failed
+   * DB prune is reported rather than swallowed (the sink half reports its own).
+   */
+  private _pruneWireCaptures(): void {
+    try {
+      this.runHistory?.pruneExpiredWireSnapshots();
+    } catch (err) {
+      process.stderr.write(`[lynox] wire snapshot prune failed (${err instanceof Error ? err.message : String(err)}) — old captures are NOT being removed\n`);
+    }
+    pruneWireSinks();
+  }
+
   async shutdown(): Promise<void> {
     // Stop worker loop first — prevents new task executions during shutdown
     if (this._workerLoop) {
@@ -2760,6 +2785,10 @@ export class Engine {
     if (this._promptCleanupTimer) {
       clearInterval(this._promptCleanupTimer);
       this._promptCleanupTimer = null;
+    }
+    if (this._wireRetentionTimer) {
+      clearInterval(this._wireRetentionTimer);
+      this._wireRetentionTimer = null;
     }
 
     // Save file manifest for next session's diff
