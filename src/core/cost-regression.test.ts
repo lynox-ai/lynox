@@ -472,7 +472,13 @@ function measureStaticPrefixTokens(): number {
 // a preset for — then offered a full-access token instead. Two texts changed in the same edit
 // are not part of this prefix, and editing each left the measurement unchanged: the
 // suggested-API catalogue and `connect`'s line in `detailedGuidance`.
-const STATIC_PREFIX_BUDGET = 23994;
+// 2026-10-09: +58 (23993 → 24051, both measured the same run, the base with api-setup.ts of
+// 2ff539fb, which is the only file that differs) — `api_setup` gains `release_secret` and
+// `withdraw_release`, the owner's answer to a profile set up in a mandate's session that asks
+// for a vault name of the owner's, and the `secret_name` field they take. The description must
+// name every action of the enum (api-setup-connect.test.ts), so they share one line with
+// `adopt_connection`, and the field's text is one short phrase.
+const STATIC_PREFIX_BUDGET = 24051;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a

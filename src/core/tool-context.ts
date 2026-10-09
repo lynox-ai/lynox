@@ -83,6 +83,9 @@ export interface ToolContext {
    *  asks. `api_setup` reads it to tell the owner which connections wait for them. Null when
    *  engine.db is unavailable; then no mandate counts as live, as in the guard. */
   mandateEnds: Pick<import('./mandate-ends.js').MandateEnds, 'isLive'> | null;
+  /** Which of the owner's vault names a profile a mandate wrote may read (`secret-releases.ts`).
+   *  Null when engine.db is unavailable; then no release exists and such a profile reads none. */
+  secretReleases: import('./secret-releases.js').SecretReleases | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -134,6 +137,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     apiStore: null,
     auditLog: null,
     mandateEnds: null,
+    secretReleases: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

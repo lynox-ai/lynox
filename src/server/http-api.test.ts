@@ -217,6 +217,9 @@ vi.mock('../core/engine.js', () => ({
     this.createSession = vi.fn().mockReturnValue(mockSessionInstance);
     this.getMailStateDb = vi.fn().mockReturnValue(null);
     this.forgetProjectManifest = vi.fn();
+    // No engine.db: no mandate is live and no release exists (tests that need either swap them).
+    this.getMandateEnds = vi.fn().mockReturnValue(null);
+    this.getSecretReleases = vi.fn().mockReturnValue(null);
     // Read by the erasure's precondition; null/false = nothing live that would refuse it.
     this.getMailContext = vi.fn().mockReturnValue(null);
     this.getInboxRuntime = vi.fn().mockReturnValue(null);
@@ -3399,7 +3402,7 @@ describe('LynoxHTTPApi', () => {
 
     async function connect(
       author: string | undefined, asMandate: boolean, id = 'books',
-      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[] } = {},
+      opts: { clientIdKey?: string; others?: import('../core/api-store.js').ApiProfile[]; unreleased?: boolean } = {},
     ): Promise<{ status: number; text: string; state: string | null; location: string }> {
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();
@@ -3416,6 +3419,20 @@ describe('LynoxHTTPApi', () => {
       mockDerivePresetEndpoints.mockImplementation((pid: string, params: Record<string, unknown> | undefined) => presets.derivePresetEndpoints(pid, params));
       const priorSecret = process.env['LYNOX_HTTP_SECRET'];
       process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+      // The owner released the client pair to the mandate's profile, for the grant this session
+      // logs in with: these tests are about who may connect, not about the release.
+      const eng = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const priorEnds = eng['getMandateEnds'];
+      const priorReleases = eng['getSecretReleases'];
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      eng['getMandateEnds'] = () => ({ isLive: (mid: string) => mid === 'TEST-MANDATE-1' });
+      eng['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, _author: string, name: string) => {
+          const p = store.get(pid);
+          const binding = !opts.unreleased && p && ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'].includes(name) ? releaseBinding(p, name) : null;
+          return binding === null || binding === undefined ? undefined : { binding, mandateId: 'TEST-MANDATE-1' };
+        },
+      });
       try {
         const token = asMandate ? webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token : webUiLoginSession(TEST_SECRET, null)!.token;
         const res = await fetch(`${baseUrl}/api/oauth/connect/${id}`, {
@@ -3426,6 +3443,8 @@ describe('LynoxHTTPApi', () => {
         const state = set === undefined ? null : decodeURIComponent(set.split(';')[0]!.slice('lynox_profile_oauth_state='.length));
         return { status: res.status, text: await res.text(), state, location: res.headers.get('location') ?? '' };
       } finally {
+        eng['getMandateEnds'] = priorEnds;
+        eng['getSecretReleases'] = priorReleases;
         mockDerivePresetEndpoints.mockReset();
         if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
         else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
@@ -3457,6 +3476,14 @@ describe('LynoxHTTPApi', () => {
       expect(r.status).toBe(302);
       expect(verifyProfileOAuthState(r.state ?? '', TEST_SECRET, Math.floor(Date.now() / 1000))?.by)
         .toEqual({ tag: TAG, mandateId: 'TEST-MANDATE-1' });
+    });
+
+    // H2i-2a-R: the client id is the owner's; a mandate's profile reads it only once released.
+    it('gives a mandate\'s session no link while the owner has not released the client id, and says so', async () => {
+      const r = await connect(TAG, true, 'books', { unreleased: true });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('has not released the client id');
+      expect(r.state).toBeNull();
     });
 
     it('control: the owner\'s session starts on a mandate\'s profile, signed as the owner', async () => {
@@ -13187,15 +13214,34 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
     let live = true;
     let orig: unknown;
+    let origReleases: unknown;
+    let released = true;
+    let releaseBindingOf: (p: import('../core/api-store.js').ApiProfile, name: string) => string = () => '';
+    beforeAll(async () => {
+      const { releaseBinding } = await import('../core/profile-secret-view.js');
+      releaseBindingOf = (p, name) => releaseBinding(p, name) ?? '';
+    });
     const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
     const complete = (cookie: string): Promise<Response> =>
       fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
     beforeEach(() => {
       live = true;
+      released = true;
       orig = engineRef()['getMandateEnds'];
       engineRef()['getMandateEnds'] = () => ({ isLive: (id: string) => live && id === MID });
+      // The owner released the client pair to the profile for the grant MID: these tests are
+      // about whose consent the tokens record, not about the release.
+      origReleases = engineRef()['getSecretReleases'];
+      engineRef()['getSecretReleases'] = () => ({
+        releaseOf: (pid: string, author: string, name: string) => {
+          const p = mockGetApiStore() as { get(id: string): import('../core/api-store.js').ApiProfile | undefined } | null;
+          const current = p?.get(pid);
+          if (!released || !current || current.created_by !== author || !['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET'].includes(name)) return undefined;
+          return { binding: releaseBindingOf(current, name), mandateId: MID };
+        },
+      });
     });
-    afterEach(() => { engineRef()['getMandateEnds'] = orig; });
+    afterEach(() => { engineRef()['getMandateEnds'] = orig; engineRef()['getSecretReleases'] = origReleases; });
 
     it('stamps a mandate\'s consent with the mandate and its id', async () => {
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
@@ -13234,6 +13280,17 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
       store.register({ ...store.get(PROFILE)!, created_by: TAG });
       expect((await complete(cookie)).status).toBe(200);
+    });
+
+    // H2i-2a-R: the client pair is the owner's; the callback reads it only once released.
+    it('stores nothing while the owner has not released the client pair, and says so', async () => {
+      released = false;
+      const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+      store.register({ ...store.get(PROFILE)!, created_by: TAG });
+      const res = await complete(cookie);
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('has not released the credentials');
+      expect(mockSecretSet).not.toHaveBeenCalled();
     });
 
     it('stores nothing when another author\'s profile reads the slot the token would go to', async () => {

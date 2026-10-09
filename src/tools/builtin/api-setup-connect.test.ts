@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { apiSetupTool } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
+import { releaseBinding } from '../../core/profile-secret-view.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 
 let mockLynoxDir: string;
@@ -1190,11 +1191,25 @@ describe('connect refuses before the link what the route would refuse', () => {
   const TAG = 'mandate:setup@example.org';
   const mandateAgent = (store: ApiStore): never => {
     const secrets: Record<string, string> = { SHOP_CLIENT_ID: CLIENT_ID_VALUE, SHOP_CLIENT_SECRET: CLIENT_SECRET_VALUE };
-    const base = agentWith(store, secrets) as unknown as { secretStore: Record<string, unknown> };
+    const base = agentWith(store, secrets) as unknown as { secretStore: Record<string, unknown>; toolContext: Record<string, unknown> };
     return {
       ...base,
       principal: { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' },
       secretStore: { ...base.secretStore, resolve: (n: string) => secrets[n] ?? null, isEnvironmentSecret: () => false },
+      // The owner released the client pair to this profile, for this grant: these tests are about
+      // the token slots, not about the release (that has witnesses of its own).
+      toolContext: {
+        ...base.toolContext,
+        mandateEnds: { isLive: (id: string) => id === 'M-1' },
+        secretReleases: {
+          releaseOf: (id: string, _author: string, name: string) => {
+            const p = store.get(id);
+            const binding = p && ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'].includes(name) ? releaseBinding(p, name) : null;
+            return binding === null || binding === undefined ? undefined : { binding, mandateId: 'M-1' };
+          },
+          pendingReleases: () => [],
+        },
+      },
     } as never;
   };
   const scoped = (over: Partial<ApiProfile> = {}): ApiProfile => {

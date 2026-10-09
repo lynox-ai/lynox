@@ -13,7 +13,7 @@ import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { secretsForProfile } from '../../core/profile-secret-view.js';
+import { requestMatchesBase, secretsForProfile, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -1533,7 +1533,15 @@ async function attachEngineManagedAuth(
   if (!auth) return {};
   // Every read below, the renewal's included, goes through the profile's view: a profile a
   // mandate wrote does not get the environment's values or a preset account's credentials.
-  const secretStore = secretsForProfile(vault, profile, apiStore);
+  // A release of the owner's name to such a profile counts for the grant it was given to: the
+  // reader is the run's principal. And only for a request to the base it was given for: the
+  // profile is found by hostname, so another port of the host reaches it too.
+  const readCtx = {
+    principal: agent.principal,
+    ends: toolContext?.mandateEnds ?? null,
+    releases: requestMatchesBase(profile, url) ? toolContext?.secretReleases ?? null : null,
+  };
+  const secretStore = secretsForProfile(vault, profile, apiStore, readCtx);
 
   /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
   const put = (name: string, value: string): AttachedAuth => {
@@ -1717,6 +1725,8 @@ async function attachEngineManagedAuth(
     // `Basic base64("ck:")` — a half-credential that reads as an auth failure
     // rather than as a missing secret.
     if (!user || !pass) {
+      const withheld = withheldFrom(vault, profile, apiStore, [userKey, passKey], readCtx);
+      if (withheld.length > 0) return { refusal: `Error: api_profile "${profile.id}": ${withheldText(withheld)}` };
       const missing = [user ? null : userKey, pass ? null : passKey]
         .filter((k): k is string => typeof k === 'string')
         .map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80))
@@ -1763,6 +1773,9 @@ async function attachEngineManagedAuth(
     // Truthiness, not a null check — an empty value would ship a bare `Bearer `,
     // which reads on the wire as a bad token rather than as a missing one.
     if (!token) {
+      if (withheldFrom(vault, profile, apiStore, [tokenKey], readCtx).length > 0) {
+        return { hint: () => `api_profile "${profile.id}": ${withheldText([tokenKey])}` };
+      }
       // `tokenKey` is `auth.vault_keys[0]` or a named slot — profile-controlled,
       // and this hint is appended outside the untrusted-data wrap. The comment
       // further down once claimed the filter went on "everything this file
@@ -3021,13 +3034,21 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
 export async function attachStoredCredential(
   url: string,
   headers: Record<string, string>,
-  stores: { apiStore: NonNullable<ToolContext['apiStore']>; secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']> },
+  stores: {
+    apiStore: NonNullable<ToolContext['apiStore']>;
+    secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']>;
+    /** Who the run is: a profile a mandate wrote reads a released name only for this reader
+     *  (`profile-secret-view.ts`). Required, because the agent below is built by hand. */
+    principal: import('../../core/request-principal.js').RequestPrincipal;
+    mandateEnds: ToolContext['mandateEnds'];
+    secretReleases: ToolContext['secretReleases'];
+  },
 ): Promise<boolean> {
   const auth = await attachEngineManagedAuth(
     url,
     headers,
-    { apiStore: stores.apiStore } as Pick<ToolContext, 'apiStore'> as ToolContext,
-    { secretStore: stores.secretStore } as Pick<import('../../types/index.js').IAgent, 'secretStore'> as import('../../types/index.js').IAgent,
+    { apiStore: stores.apiStore, mandateEnds: stores.mandateEnds, secretReleases: stores.secretReleases } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases'> as ToolContext,
+    { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
   );
   return auth.slot !== undefined && auth.refusal === undefined;
 }
