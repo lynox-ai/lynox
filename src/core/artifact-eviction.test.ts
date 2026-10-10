@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
-import { evictSavedArtifactBodies, isSuccessfulSaveResult, EVICTION_MIN_CHARS } from './artifact-eviction.js';
+import { evictSavedArtifactBodies, restoreEvictedBodies, containsEvictionMarker, isSuccessfulSaveResult, EVICTION_MIN_CHARS, EVICTION_NOTE } from './artifact-eviction.js';
 
 const BIG = 'x'.repeat(EVICTION_MIN_CHARS + 1);
 
@@ -30,18 +30,28 @@ function saveTurn(opts?: {
 }
 
 function inputContentOf(messages: BetaMessageParam[], index = 1): string {
-  const msg = messages[index]!;
-  const block = (msg.content as Array<{ type: string; input?: { content?: string } }>).find(b => b.type === 'tool_use')!;
-  return block.input!.content!;
+  return inputOf(messages, index)['content'] as string;
 }
 
+function inputOf(messages: BetaMessageParam[], index = 1): Record<string, unknown> {
+  const msg = messages[index]!;
+  const block = (msg.content as Array<{ type: string; input?: Record<string, unknown> }>).find(b => b.type === 'tool_use')!;
+  return block.input!;
+}
+
+function resultOf(messages: BetaMessageParam[], index = 2): unknown {
+  return (messages[index]!.content as Array<{ content?: unknown }>)[0]!.content;
+}
+
+// The in-field reference eviction wrote into `content` until 2026-10-10.
+const IN_FIELD = '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]';
+
 describe('evictSavedArtifactBodies', () => {
-  it('replaces a successfully saved big body with a reference naming the size', () => {
-    const out = evictSavedArtifactBodies(saveTurn());
-    const content = inputContentOf(out);
-    expect(content).toContain('[evicted after successful save');
-    expect(content).toContain(String(BIG.length));
-    expect(content.length).toBeLessThan(300);
+  it('removes the content field of a successfully saved big body and appends the note to its result', () => {
+    const msgs = saveTurn();
+    const out = evictSavedArtifactBodies(msgs);
+    expect(inputOf(out)).not.toHaveProperty('content');
+    expect(resultOf(out)).toBe(`${resultOf(msgs) as string}${EVICTION_NOTE}`);
   });
 
   it('keeps the other input fields (title stays visible to the model)', () => {
@@ -84,7 +94,7 @@ describe('evictSavedArtifactBodies', () => {
     const atLimit = saveTurn({ content: 'z'.repeat(EVICTION_MIN_CHARS) });
     expect(evictSavedArtifactBodies(atLimit)).toBe(atLimit);
     const overLimit = evictSavedArtifactBodies(saveTurn({ content: 'z'.repeat(EVICTION_MIN_CHARS + 1) }));
-    expect(inputContentOf(overLimit)).toContain('[evicted after successful save');
+    expect(inputOf(overLimit)).not.toHaveProperty('content');
   });
 
   it('does NOT evict when the tool_result is missing (unpaired / in-flight)', () => {
@@ -107,7 +117,7 @@ describe('evictSavedArtifactBodies', () => {
 
   it('handles an Updated (overwrite) result too', () => {
     const out = evictSavedArtifactBodies(saveTurn({ result: 'Updated artifact "Report" (id: ab12cd, v2).' }));
-    expect(inputContentOf(out)).toContain('[evicted after successful save');
+    expect(inputOf(out)).not.toHaveProperty('content');
   });
 
   it('is idempotent: a second pass returns the SAME array identity', () => {
@@ -116,11 +126,9 @@ describe('evictSavedArtifactBodies', () => {
     expect(twice).toBe(once);
   });
 
-  it('the replacement stays far below the threshold — idempotence rests on this', () => {
-    // If the replacement ever grew past EVICTION_MIN_CHARS, a second pass
-    // would try to evict the eviction notice itself.
-    const replacement = inputContentOf(evictSavedArtifactBodies(saveTurn()));
-    expect(replacement.length).toBeLessThan(EVICTION_MIN_CHARS / 4);
+  it('a second pass appends no second note', () => {
+    const twice = evictSavedArtifactBodies(evictSavedArtifactBodies(saveTurn()));
+    expect((resultOf(twice) as string).split(EVICTION_NOTE.trim()).length - 1).toBe(1);
   });
 
   it('preserves identity of unchanged messages when another one is evicted', () => {
@@ -139,7 +147,100 @@ describe('evictSavedArtifactBodies', () => {
       { type: 'tool_result', tool_use_id: 'tu_1', content: [{ type: 'text', text: 'Saved artifact "Report" (id: ab12cd, v1).' }] },
     ];
     const out = evictSavedArtifactBodies(msgs);
-    expect(inputContentOf(out)).toContain('[evicted after successful save');
+    expect(inputOf(out)).not.toHaveProperty('content');
+    expect(resultOf(out)).toEqual([
+      { type: 'text', text: 'Saved artifact "Report" (id: ab12cd, v1).' },
+      { type: 'text', text: EVICTION_NOTE.trimStart() },
+    ]);
+  });
+
+  it('an error-marked result before the success result gets no note — the success result does', () => {
+    const msgs = saveTurn();
+    (msgs[2]!.content as unknown[]).unshift({ type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact "Report" (id: e, v1).', is_error: true });
+    const out = evictSavedArtifactBodies(msgs);
+    const results = (out[2]!.content as Array<{ content: string }>).map(r => r.content);
+    expect(results[0]).toBe('Saved artifact "Report" (id: e, v1).');
+    expect(results[1]).toMatch(/removed from the conversation/);
+  });
+
+  it('the note goes to the first non-error result only, the one the success check read', () => {
+    const msgs = saveTurn();
+    (msgs[2]!.content as unknown[]).push({ type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact "Report" (id: zz, v1).' });
+    const out = evictSavedArtifactBodies(msgs);
+    const results = (out[2]!.content as Array<{ content: string }>).map(r => r.content);
+    expect(results[0]).toMatch(/removed from the conversation/);
+    expect(results[1]).toBe('Saved artifact "Report" (id: zz, v1).');
+  });
+
+  // Threads persisted before 2026-10-10 can hold the old in-field reference as a call's
+  // `content`: a model-made save of it, or the persist bug of 2026-08-14. Left there, the model
+  // keeps seeing a copyable reference as a field value, so it is evicted at any size.
+  it('the old in-field reference on a successful save is evicted at any size, original kept', () => {
+    const seen: Array<[string, string]> = [];
+    const out = evictSavedArtifactBodies(saveTurn({ content: IN_FIELD }), (id, body) => seen.push([id, body]));
+    expect(IN_FIELD.length).toBeLessThan(EVICTION_MIN_CHARS);
+    expect(inputOf(out)).not.toHaveProperty('content');
+    expect(seen).toEqual([['tu_1', IN_FIELD]]);
+  });
+
+  it('the old in-field reference on a FAILED save stays — that call is no evidence of a saved document', () => {
+    const msgs = saveTurn({ content: IN_FIELD, result: 'Artifact store not available.' });
+    expect(evictSavedArtifactBodies(msgs)).toBe(msgs);
+  });
+
+  it('a short body that merely mentions the old reference later on is not evicted', () => {
+    const msgs = saveTurn({ content: `# Notes\n\nquoted: ${IN_FIELD}` });
+    expect(evictSavedArtifactBodies(msgs)).toBe(msgs);
+  });
+});
+
+describe('restoreEvictedBodies', () => {
+  function evictWithOriginals(msgs: BetaMessageParam[]): { out: BetaMessageParam[]; originals: Map<string, string> } {
+    const originals = new Map<string, string>();
+    const out = evictSavedArtifactBodies(msgs, (id, body) => originals.set(id, body));
+    return { out, originals };
+  }
+
+  it('undoes eviction exactly: the body is back and the note is gone (string result)', () => {
+    const msgs = saveTurn();
+    const { out, originals } = evictWithOriginals(structuredClone(msgs));
+    expect(restoreEvictedBodies(out, originals)).toEqual(msgs);
+  });
+
+  it('undoes eviction exactly for an array-form result', () => {
+    const msgs = saveTurn();
+    (msgs[2]! as { content: unknown }).content = [
+      { type: 'tool_result', tool_use_id: 'tu_1', content: [{ type: 'text', text: 'Saved artifact "Report" (id: ab12cd, v1).' }] },
+    ];
+    const { out, originals } = evictWithOriginals(structuredClone(msgs));
+    expect(restoreEvictedBodies(out, originals)).toEqual(msgs);
+  });
+
+  it('undoes the eviction of an old in-field reference to that reference, as it was on disk', () => {
+    const msgs = saveTurn({ content: IN_FIELD });
+    const { out, originals } = evictWithOriginals(structuredClone(msgs));
+    expect(restoreEvictedBodies(out, originals)).toEqual(msgs);
+  });
+
+  // The persisted mark can fall between a call and its result: each half is restored alone.
+  it('restores a result whose call is already persisted, and a call whose result is not in the slice', () => {
+    const msgs = saveTurn();
+    const { out, originals } = evictWithOriginals(structuredClone(msgs));
+    expect(restoreEvictedBodies(out.slice(2), originals)).toEqual(msgs.slice(2));
+    expect(restoreEvictedBodies(out.slice(0, 2), originals)).toEqual(msgs.slice(0, 2));
+  });
+
+  it('touches nothing it holds no original for', () => {
+    const { out } = evictWithOriginals(saveTurn());
+    expect(restoreEvictedBodies(out, new Map([['other', 'x']]))).toBe(out);
+  });
+});
+
+describe('containsEvictionMarker', () => {
+  it('finds the note and the old in-field reference, anywhere in the text', () => {
+    expect(containsEvictionMarker(`# Pitch\n\n${EVICTION_NOTE.trim()}`)).toBe(true);
+    expect(containsEvictionMarker(`intro ${IN_FIELD}`)).toBe(true);
+    expect(containsEvictionMarker('# Pitch\n\nThe body was removed from the page.')).toBe(false);
   });
 });
 

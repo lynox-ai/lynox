@@ -47,8 +47,9 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     // placeholder would overwrite the real document.
     if (containsEvictionMarker(input.content)) {
       throw new Error(
-        'artifact_save refused: `content` contains "[evicted after successful save …]". That is the ' +
-        'placeholder the engine puts in your context in place of a document it already saved — it is ' +
+        'artifact_save refused: `content` contains the engine\'s placeholder for a saved document ' +
+        '("[evicted after successful save …]" or "[The body of this document was removed …]"). The ' +
+        'engine puts it in your context where a document it already saved used to be — it is ' +
         'not a document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
         'artifact, read_file its path and apply edit_file. To create one, write the full document ' +
         'into `content`. If read_file returns this placeholder too, the file itself holds it: ' +

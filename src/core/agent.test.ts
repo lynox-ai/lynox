@@ -5415,7 +5415,7 @@ describe('F5: artifact-body eviction (next-turn, D4)', () => {
 		await agent.send('what next?');
 		const after = JSON.stringify(agent.getMessages());
 		expect(after).not.toContain(BIGBODY);
-		expect(after).toContain('[evicted after successful save');
+		expect(after).toContain('removed from the conversation');
 	});
 
 	it('a FAILED save keeps its body across turns (it is the only copy left)', async () => {
@@ -5441,7 +5441,7 @@ describe('F5: artifact-body eviction (next-turn, D4)', () => {
 		]);
 		const loaded = JSON.stringify(agent.getMessages());
 		expect(loaded).not.toContain(BIGBODY);
-		expect(loaded).toContain('[evicted after successful save');
+		expect(loaded).toContain('removed from the conversation');
 	});
 });
 
