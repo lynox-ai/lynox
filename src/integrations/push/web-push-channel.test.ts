@@ -177,12 +177,15 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(ch.addedBy('https://push.example/m0-0')).toBeUndefined();
 	});
 
-	it('when the instance is full, the owner makes room from the owner\'s own oldest first', () => {
+	it('when the instance is full, the owner makes room from the owner\'s own oldest first, even with a mandate\'s older', () => {
+		// The mandate's subscription is the oldest of all, so "the oldest of all" and "the owner's own
+		// oldest" name different rows here.
+		ch.unsubscribe('https://push.example/abc');
 		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
-		for (let i = 2; i < 50; i++) ch.subscribe(`https://push.example/owner-${i}`, 'k', 'a', OWNER_PRINCIPAL);
+		for (let i = 1; i < 50; i++) ch.subscribe(`https://push.example/owner-${i}`, 'k', 'a', OWNER_PRINCIPAL);
 		expect(ch.subscriptionCount()).toBe(50);
 		expect(ch.subscribe('https://push.example/owner-new', 'k', 'a', OWNER_PRINCIPAL)).toBe('ok');
-		expect(ch.addedBy('https://push.example/abc')).toBeUndefined();
+		expect(ch.addedBy('https://push.example/owner-1')).toBeUndefined();
 		expect(ch.addedBy('https://push.example/eva')).toEqual({ created_by: 'mandate:eva@example.invalid' });
 	});
 
