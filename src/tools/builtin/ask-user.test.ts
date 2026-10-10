@@ -78,8 +78,8 @@ function expectClosedResult(result: string): void {
   expect(result).not.toContain('__dismissed__');
   expect(result).toMatch(/This question got no answer/);
   expect(result).toMatch(/Do not act on any of the options/);
-  // Asking again is for a conversation; a background run waits.
-  expect(result).toMatch(/If the user is in the conversation, ask briefly what they want; otherwise stop and wait/);
+  // A choice between asking and waiting, never an order to ask again (a flow may say move on).
+  expect(result).toMatch(/Ask briefly what they want, or wait for their next message\./);
 }
 
 describe('askUserTool', () => {
@@ -109,7 +109,7 @@ describe('askUserTool', () => {
       expect(lines[1]).toBe('Second?: (no answer)');
       expect(lines).toHaveLength(3);
       expect(lines[2]).toMatch(/Do not act on an assumed answer/);
-      expect(lines[2]).toMatch(/otherwise stop and wait/);
+      expect(lines[2]).toMatch(/Ask briefly what they want, or wait for their next message\./);
       expect(result).not.toContain('__dismissed__');
     });
 

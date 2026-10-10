@@ -37,23 +37,23 @@ function findHint(options: AskUserOption[] | undefined, selectedLabel: string): 
  *  value, so it is translated for the model only (here and in `plan_task`) and stays unchanged
  *  everywhere else. */
 export const DISMISSED = '__dismissed__';
-/** What to do after an unanswered question. A background run has no one to ask right away, and a
- *  new question there parks it again for a day, so asking again is only for a conversation. */
-const AFTER_NO_ANSWER =
-  'If the user is in the conversation, ask briefly what they want; otherwise stop and wait for their next message.';
+/** What to do after an unanswered question: a choice, not an order to ask again. A flow may have
+ *  told the model to move on without re-asking (onboarding does), and a background run that asks
+ *  again parks for another day. */
+const AFTER_NO_ANSWER = 'Ask briefly what they want, or wait for their next message.';
 /** Bare, the marker reads as an answer, and a model that reads "go ahead" into it acts on a choice
  *  the user did not make. The result says what happened and what not to do. */
 const DISMISSED_RESULT =
-  'This question got no answer: the user closed it, or it expired. Do not act on any of the options '
+  'This question got no answer: the user closed it, it expired, or it could not be asked. Do not act on any of the options '
   + `or on an assumed answer. ${AFTER_NO_ANSWER}`;
 /** One question of a batch that got no answer; the batch result ends with the instruction once. */
 const DISMISSED_IN_BATCH = '(no answer)';
 const DISMISSED_BATCH_NOTE =
-  'The questions marked "(no answer)" were closed or expired without an answer. Do not act on an '
+  'The questions marked "(no answer)" got no answer. Do not act on an '
   + `assumed answer to those. ${AFTER_NO_ANSWER}`;
 /** The same for a plan put to the user for approval (`plan_task`). */
 export const PLAN_NOT_ANSWERED =
-  'The plan got no answer: the user closed the question, or it expired. Nothing is approved; do not '
+  'The plan got no answer: the user closed the question, it expired, or it could not be asked. Nothing is approved; do not '
   + `carry out the plan or any part of it. ${AFTER_NO_ANSWER}`;
 
 /** The batch result: one line per question, a closed one marked, and the note when any was closed. */

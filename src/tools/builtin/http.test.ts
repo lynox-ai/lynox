@@ -5746,6 +5746,16 @@ describe('write approvals per method and host (270)', () => {
     expect(second).not.toContain('denied earlier in this batch');
   });
 
+  it('a real Deny stands for the batch even when the call timed out as it came in', async () => {
+    const batch = {};
+    const first: CallSlot = { abort: new AbortController() };
+    const { agent, prompt } = agent270({ batch, answer: async () => { first.abort!.abort(); return 'Deny'; } });
+    await runInCallSlot(first, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent));
+    const second = await runInCallSlot({ abort: new AbortController() }, () => visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(second).toContain('was not asked: a POST to this host was denied earlier in this batch');
+  });
+
   it('a deny holds for the calls of the same batch that waited on it, and they say they were not asked', async () => {
     const batch = {};
     const { agent, prompt } = agent270({ batch, answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Deny'; } });

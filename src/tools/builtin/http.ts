@@ -2645,7 +2645,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             if (remembers && allowed) recordApproval(counters, key, epoch);
             // A question withdrawn because this call timed out was answered by no one: it does not
             // stand as the user's denial for the rest of the batch.
-            const withdrawn = currentCallSignal()?.aborted === true;
+            const withdrawn = answer === '__dismissed__' && currentCallSignal()?.aborted === true;
             if (remembers && !allowed && !withdrawn && batch !== undefined) {
               let denied = deniedInBatch.get(batch);
               if (!denied) { denied = new Set(); deniedInBatch.set(batch, denied); }
