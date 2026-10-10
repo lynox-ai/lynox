@@ -53,8 +53,17 @@ const EXPECTED: Record<string, string[]> = {
     'askUserPrompt: parent.parentAskUserPrompt',
     'return await parent.parentAskUserPrompt!(q, opts, { ...meta, ...m });',
     "return name === 'ask_user' && parent?.parentAskUserPrompt !== undefined;",
-    'askUserPrompt: promptCallbacks.askUserPrompt,',
-    'askUserPrompt: promptCallbacks.askUserPrompt,',
+    'askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),',
+    'askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),',
+  ],
+  // A scheduled workflow run: the worker hands the run its channel, and `runSavedWorkflow`
+  // passes it on alone, as `parentAskUserPrompt`, never as `parentPromptUser`.
+  'core/worker-loop.ts': [
+    'parentPrompt: { parentAskUserPrompt: questions.channel.ask },',
+  ],
+  'tools/builtin/pipeline.ts': [
+    'const asksItsOwner = runtime?.parentPrompt?.parentAskUserPrompt !== undefined && asksOnlyViaAskUser(planned.steps);',
+    'parentPrompt: asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : undefined,',
   ],
   'types/agent.ts': ['askUserPrompt?: PromptUserFn | undefined;'],
   'types/config.ts': ['askUserPrompt?:   PromptUserFn | undefined;'],

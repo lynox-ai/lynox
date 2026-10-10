@@ -24,7 +24,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
 });
 
 import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx } from './runner.js';
-import { WORKFLOW_STOPPED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR } from './workflow-stop.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
@@ -2081,6 +2081,93 @@ describe('runManifest — the owner\'s stop', () => {
     const opts = buildRunCtx({ autonomy: 'autonomous', stopSignal: stop.signal, abortScope: scope });
     expect(opts.stopSignal).toBe(stop.signal);
     expect(opts.abortScope).toBe(scope);
+  });
+});
+
+describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)', () => {
+  /** A question channel's state the test sets by hand. */
+  const waitState = (): { unanswered: boolean; paused: number; pausedMs: () => number } => {
+    const w = { unanswered: false, paused: 0, pausedMs: () => w.paused };
+    return w;
+  };
+
+  it('halts the run before the next step, with its own error, and the next step does not run', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const wait = waitState();
+    const state = await runManifest(MANIFEST, CONFIG, {
+      mockResponses, questionWait: wait,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') wait.unanswered = true; } },
+    });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_QUESTION_UNANSWERED_ERROR);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('a step that fails once its question went unanswered ends the run, even under on_failure: continue', async () => {
+    const manifest: Manifest = {
+      ...MANIFEST, on_failure: 'continue',
+      agents: [
+        { id: 'only', agent: 'only', runtime: 'inline', task: 't' },
+      ],
+    };
+    const wait = waitState();
+    mockSpawnInline.mockImplementationOnce(async () => { wait.unanswered = true; throw new Error('nobody answered'); });
+    const state = await runManifest(manifest, CONFIG, { parentTools: [], questionWait: wait });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_QUESTION_UNANSWERED_ERROR);
+  });
+
+  it('the owner\'s stop wins over an unanswered question, at both checks', async () => {
+    const stop = new AbortController();
+    const wait = waitState();
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const atHead = await runManifest(MANIFEST, CONFIG, {
+      mockResponses, stopSignal: stop.signal, questionWait: wait,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') { wait.unanswered = true; stop.abort(); } } },
+    });
+    expect(atHead.error).toBe(WORKFLOW_STOPPED_ERROR);
+
+    const stop2 = new AbortController();
+    const wait2 = waitState();
+    mockSpawnInline.mockImplementationOnce(async () => { wait2.unanswered = true; stop2.abort(); throw new Error('aborted'); });
+    const inCatch = await runManifest({ ...MANIFEST, on_failure: 'continue', agents: [{ id: 'only', agent: 'only', runtime: 'inline', task: 't' }] },
+      CONFIG, { parentTools: [], stopSignal: stop2.signal, questionWait: wait2 });
+    expect(inCatch.error).toBe(WORKFLOW_STOPPED_ERROR);
+  });
+
+  it('the wall clock leaves out the time spent waiting for an answer', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-11T09:00:00.000Z') });
+    try {
+      const manifest: Manifest = {
+        ...MANIFEST,
+        agents: [
+          { id: 'asks', agent: 'asks', runtime: 'inline', task: 't' },
+          { id: 'after', agent: 'agent-b', runtime: 'mock' },
+        ],
+      };
+      // The asking step takes ten minutes, all of them waiting for its answer.
+      const run = async (paused: number): Promise<RunState> => {
+        const wait = waitState();
+        mockSpawnInline.mockImplementationOnce(async () => {
+          vi.setSystemTime(Date.now() + 600_000);
+          wait.paused = paused;
+          return { result: 'answered', tokensIn: 1, tokensOut: 1, durationMs: 1 };
+        });
+        return runManifest(manifest, CONFIG, { parentTools: [], questionWait: wait, limits: { maxWallClockMs: 60_000 } });
+      };
+      expect((await run(600_000)).status).toBe('completed');
+      // Control: the same ten minutes not spent waiting exceed the one-minute clock.
+      const control = await run(0);
+      expect(control.status).toBe('failed');
+      expect(control.error).toContain('wall-clock limit');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('buildRunCtx carries the question channel\'s state', () => {
+    const wait = waitState();
+    expect(buildRunCtx({ autonomy: 'autonomous', questionWait: wait }).questionWait).toBe(wait);
   });
 });
 

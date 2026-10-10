@@ -2302,7 +2302,13 @@ describe('WorkerLoop', () => {
   // An interactive pipeline that somehow got onto a schedule (legacy data,
   // sync from another instance) must be rejected at the boundary so it
   // can't hang waiting for a non-existent live session.
-  it('executePipeline refuses an interactive PlannedPipeline', async () => {
+  // PRD 3b-2 §4.3: an interactive workflow whose only question tool is `ask_user` may run on a
+  // schedule; one that may ask for a secret (or ask a human any other way) stays refused.
+  it.each([
+    ['ask_secret', 'ask_secret for the API key'],
+    ['ask_user and ask_secret', 'ask_user which option, then ask_secret for the key'],
+    ['ask_human', 'ask_human to sign off'],
+  ])('executePipeline refuses an interactive PlannedPipeline that uses %s', async (_label, stepTask) => {
     // Doubles as the ORDER guard, and that is load-bearing: the fixture below
     // carries NO `confirmedAt`, so both guards in executePipeline are armed and
     // only their order decides the outcome. The mode guard throws; the consent
@@ -2320,7 +2326,7 @@ describe('WorkerLoop', () => {
       id: 'pipeline-interactive',
       name: 'asks-user',
       goal: 'pick a tagline',
-      steps: [{ id: 'q', task: 'ask_user which option' }],
+      steps: [{ id: 'q', task: stepTask }],
       reasoning: 'interactive',
       estimatedCost: 0,
       createdAt: '2026-01-01T00:00:00.000Z',
@@ -2352,6 +2358,34 @@ describe('WorkerLoop', () => {
       (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
         .executePipeline(task, ...NO_STOP()),
     ).rejects.toThrow(/only runs 'autonomous' pipelines/);
+  });
+
+  it('executePipeline lets an interactive PlannedPipeline that asks only through ask_user past the mode gate', async () => {
+    // The same fixture without `confirmedAt`: past the mode gate, the consent gate takes it and
+    // switches the schedule off, which is what shows the mode gate let it through.
+    vi.useRealTimers();
+    const task = makeTask({ id: 'pipe-asks', pipeline_id: 'pipeline-asks', effect: 'run_workflow' });
+    const planned = JSON.stringify({
+      id: 'pipeline-asks', name: 'asks-user', goal: 'pick a tagline',
+      steps: [{ id: 'q', task: 'ask_user which option' }],
+      reasoning: 'interactive', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+    });
+    const tm = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null), getContext: vi.fn(() => null), getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })), getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-asks', manifest_json: planned })),
+        getPipelineRunManifest: vi.fn(() => null),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP());
+    expect(tm.setEnabled).toHaveBeenCalledWith('pipe-asks', false);
   });
 
   // ---- effect: 'notify' branch (Phase-4 standalone reminders) ----
