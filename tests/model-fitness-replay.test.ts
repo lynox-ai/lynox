@@ -154,10 +154,22 @@ describe('CANDIDATES stay in lockstep with the model registry', () => {
     const { CANDIDATES } = await import('../scripts/model-fitness/replay.js');
     const { MODEL_CAPABILITIES } = await import('../src/types/models.js');
     const fireworks = CANDIDATES.filter((c) => c.keyName === 'fireworks');
-    // The 2026-08-09 picker wave (core #1162) must be measurable here — 7 entries.
-    expect(fireworks.length).toBeGreaterThanOrEqual(7);
     for (const c of fireworks) {
       expect(MODEL_CAPABILITIES[c.modelId], `${c.label}: ${c.modelId} must be registered`).toBeDefined();
     }
+  });
+
+  it('every Fireworks model a preset pins is a replay candidate', async () => {
+    // This used to be a count (`>= 7`, the size of the 2026-08-09 picker wave). A count
+    // holds a list at its size, so when the provider withdrew five of those models the
+    // only way to keep it green was to keep the dead ids — which made every replay of
+    // them a 404. What the replay has to cover is the set a preset can actually route
+    // to, so that is what this asserts.
+    const { CANDIDATES } = await import('../scripts/model-fitness/replay.js');
+    const { pinnedSlots, FIREWORKS_HOST } = await import('./online/preset-slots.js');
+    const replayIds = new Set(CANDIDATES.filter((c) => c.keyName === 'fireworks').map((c) => c.modelId));
+    const pinned = pinnedSlots().filter((s) => s.baseUrl.includes(FIREWORKS_HOST)).map((s) => s.modelId);
+    expect(pinned.length, 'the presets pin no Fireworks slot — this check would pass vacuously').toBeGreaterThan(0);
+    expect(pinned.filter((id) => !replayIds.has(id))).toEqual([]);
   });
 });

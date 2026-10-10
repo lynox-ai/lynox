@@ -134,9 +134,10 @@ export const FLEET: readonly Candidate[] = [
     prefilter: 'shipped Mistral fast tier; 262k ctx' },
   // Mistral Medium 3.5 (2604) — a balanced/deep candidate (rafael 2026-07-19).
   // 256k ctx (clears the floor, unlike the old medium-2508's 128k). WATCH cost:
-  // ~$0.40 in / $2 OUT — the pricey output matters for the high-volume balanced.
+  // $1.50 in / $7.50 OUT (registry, page-verified) — the pricey output matters for
+  // the high-volume balanced. The grid prices it from MODEL_CAPABILITIES, not from here.
   { id: 'mistral-medium-2604', label: 'Mistral Medium 3.5', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
-    prefilter: 'new Mistral Medium; balanced/deep candidate; 256k ctx; ~$0.40/$2 (output pricey — verify)' },
+    prefilter: 'new Mistral Medium; balanced/deep candidate; 256k ctx; $1.50/$7.50 (output pricey)' },
 ];
 
 /** Opt-in comparators — candidates we might QUALIFY into the fleet. This is
@@ -145,22 +146,22 @@ export const FLEET: readonly Candidate[] = [
  *  WITH a public-leaderboard reason before spending budget scoring it.
  *  `tierHint: null` = judge it for EVERY tier (where could it slot in?). */
 export const COMPARATORS: readonly Candidate[] = [
-  // Older, weaker Mistral — no vision (rejects images), weaker tool-use, and a
-  // 128k context window (< the 200k floor). Unfit on THREE independent axes
-  // (vision ✗, multi-turn ask→draft ✗, context ✗) — the cleanest demonstration
-  // that the harness discriminates structurally, not just on behaviour.
-  { id: 'open-mistral-nemo', label: 'Mistral Nemo', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
-    prefilter: 'older/weaker Mistral; low public agentic scores; probes: no vision (400), 128k context (< 200k floor)' },
+  // `open-mistral-nemo` used to sit here as the weak comparator. It is gone because
+  // Mistral now answers that id with a different model: a call for it comes back with
+  // `model: ministral-8b-2512` (measured 2026-10-10). A comparator that is silently
+  // another model scores that model under Nemo's name, so the row was removed rather
+  // than kept as a mislabelled control.
   // The cheapest gen-3 — could it serve an even cheaper fast slot than 8B?
   { id: 'ministral-3b-2512', label: 'Ministral 3B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
     prefilter: 'cheapest gen-3 Mistral; candidate for a cheaper fast slot' },
-  // GLM 5.2 (Fireworks) — a cheaper Opus REPLACEMENT for deep (rafael 2026-07-19).
-  // 1M ctx, ~10× under Opus, and a family no other candidate shares at the time
-  // it was added. NOTE: GLM is a CANDIDATE, so it can no longer be the JUDGE —
-  // judge.ts moved off it to keep the judge ∉ candidate families invariant.
+  // GLM (Fireworks) — a cheaper Opus REPLACEMENT for deep (rafael 2026-07-19).
+  // 1M ctx, ~4-6× under Opus ($1.40/$4.40 vs $5/$25). NOTE: GLM is a CANDIDATE, so it can no longer be the
+  // JUDGE — judge.ts moved off it to keep the judge ∉ candidate families invariant.
   // Data-residency caveat: Zhipu (CN) — for an EU-sovereign tenant that matters.
-  { id: 'accounts/fireworks/models/glm-5p2', label: 'GLM 5.2', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
-    prefilter: 'cheaper Opus replacement for deep; 1M ctx; own model family; ~$0.55/$2.19 (verify)' },
+  // GLM 5.3, not 5.2: the provider withdrew 5.2 (404 since late September), and 5.3 is
+  // the model the balanced preset's main slot pins.
+  { id: 'accounts/fireworks/models/glm-5p3', label: 'GLM 5.3', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
+    prefilter: 'cheaper Opus replacement for deep; 1M ctx; own model family; $1.40/$4.40; thinking-only' },
   // OpenRouter roster (rafael 2026-07-19). The LMArena/BFCL leaderboards name
   // Gemini 3 Pro (vision leader + big ctx), GPT-5.x (frontier), DeepSeek (cheap
   // 1M reasoner) as the interesting untested candidates.
@@ -172,10 +173,9 @@ export const COMPARATORS: readonly Candidate[] = [
     prefilter: 'cheap 1M text reasoner ($0.43/$0.87 — cheaper than GLM); deep/big-context candidate' },
   { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek v4 Flash', provider: 'openai', apiBaseURL: OPENROUTER_BASE, keyEnv: 'OPENROUTER_API_KEY', tierHint: null,
     prefilter: 'ULTRA-cheap 1M text ($0.10/$0.20); efficient-preset deep candidate' },
-  // Same DeepSeek v4 Pro but via FIREWORKS (valid key) — testable now without
-  // the OpenRouter key. The cheap 1M-text deep alternative to GLM.
-  { id: 'accounts/fireworks/models/deepseek-v4-pro', label: 'DeepSeek v4 (FW)', provider: 'openai', apiBaseURL: FIREWORKS_BASE, keyEnv: 'FIREWORKS_API_KEY', tierHint: 'deep',
-    prefilter: 'DeepSeek v4 Pro via Fireworks; cheap 1M text reasoner; deep/big-context candidate' },
+  // The Fireworks copy of DeepSeek v4 Pro used to sit here as the keyed alternative
+  // to the OpenRouter row above. The provider withdrew it (404 since late September),
+  // so only the OpenRouter row remains, and it runs only with OPENROUTER_API_KEY.
 ];
 
 export const ALL_CANDIDATES: readonly Candidate[] = [...FLEET, ...COMPARATORS];
