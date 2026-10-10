@@ -738,9 +738,9 @@ export class KnowledgeStore {
 
   /**
    * One-time: record the seeds of `profile` lines written before seeds were recorded. Those
-   * lines came from the onboarding promotion, which seeds only from `user_asserted` entries on
-   * the `user` channel, so a line equal to such an entry's text is taken as seeded by the
-   * earliest one. Text equality once, here, instead of on every removal.
+   * lines came from the onboarding promotion, which seeds only from `user_asserted` entries, so
+   * a line equal to such an entry's text is taken as seeded by the earliest one. Text equality
+   * once, here, instead of on every removal.
    */
   private _backfillProfileSeeds(): void {
     const marker = this.db.prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined;
@@ -749,7 +749,7 @@ export class KnowledgeStore {
     const open = new Set(content.split('\n').map(l => l.trim()).filter(l => l.length > 0));
     if (open.size > 0) {
       const rows = this.db.prepare(
-        "SELECT id, text FROM knowledge_entries WHERE source_type = 'user_asserted' AND source_channel = 'user' ORDER BY created_at, rowid",
+        "SELECT id, text FROM knowledge_entries WHERE source_type = 'user_asserted' ORDER BY created_at, rowid",
       ).all() as Array<{ id: string; text: string }>;
       for (const r of rows) {
         const line = collapseToSingleLine(this.engine.dec(r.text));
