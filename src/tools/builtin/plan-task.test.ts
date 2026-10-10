@@ -87,6 +87,16 @@ describe('planTaskTool', () => {
     }
   });
 
+  it('a plan question that got no answer approves nothing and says so, not the bare marker', async () => {
+    const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+    const result = await planTaskTool.handler({ summary: 'Test', steps: ['Step'] }, agent);
+    const parsed = JSON.parse(result) as { approved: boolean; feedback: string };
+    expect(parsed.approved).toBe(false);
+    expect(result).not.toContain('__dismissed__');
+    expect(parsed.feedback).toMatch(/The plan got no answer/);
+    expect(parsed.feedback).toMatch(/do not carry out the plan or any part of it/);
+  });
+
   it('should return rejected on Cancel', async () => {
     const promptUser = vi.fn().mockResolvedValue('Cancel');
     const agent = makeAgent({ promptUser });

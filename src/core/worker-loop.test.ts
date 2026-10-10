@@ -3105,6 +3105,44 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     expect(second).toBe('__dismissed__');
   });
 
+  // A question's own signal (the tool call that asks, `Agent._promptSignal`) withdraws it on this
+  // transport too: the engine stopped waiting for the call (its tool timeout), so the row is
+  // drained and the slot freed while the run itself goes on. Already aborted, nothing is raised.
+  it('withdraws a parked question when its own signal aborts, and raises none on an aborted one', async () => {
+    let parked: string | undefined;
+    let late: string | undefined;
+    let pendingWhileParked: unknown;
+    const store = makeRealStore();
+    const call = new AbortController();
+    const session = {
+      sessionId: SESSION_ID,
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[], m?: { signal?: AbortSignal }) => Promise<string>) | undefined,
+      run: vi.fn(async () => {
+        const asked = session.promptUser!('Allow?', ['Yes', 'No'], { signal: call.signal });
+        await new Promise((r) => setTimeout(r, 60)); // let the row land
+        pendingWhileParked = store.getPending(SESSION_ID);
+        call.abort();
+        parked = await asked;
+        late = await session.promptUser!('Again?', ['Yes', 'No'], { signal: call.signal });
+        return 'Done.';
+      }),
+    };
+    const engine = makeEngine({
+      taskManager: makeTaskManager([makeTask()]),
+      session: session as unknown as Session,
+      promptStore: store,
+    });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    closers.unshift(() => { loop.stop(); });
+    await loop.tick();
+    await settle(() => late !== undefined);
+    expect(pendingWhileParked).toBeDefined();
+    expect(parked).toBe('__dismissed__');
+    expect(late).toBe('__dismissed__');
+    expect(store.getPending(SESSION_ID)).toBeUndefined();
+  });
+
   // 11 — a run that FAILS while a question is outstanding must release it.
   // Deleting the abort in the failure path left every test green.
   it('releases a parked question when the run fails', async () => {

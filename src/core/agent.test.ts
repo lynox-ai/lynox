@@ -1341,6 +1341,29 @@ describe('Agent', () => {
       }
     });
 
+    // A call that asked, got its answer and then hung is not waiting on anyone at the timeout:
+    // it keeps the "may still have run" text, which a question already answered makes true.
+    it('a call that got its answer before it hung keeps the ordinary timeout text', async () => {
+      vi.useFakeTimers();
+      try {
+        const promptUser = vi.fn().mockResolvedValue('Yes');
+        const tool = makeTool('asks_then_hangs', async (_i, a) => {
+          await (a as Agent).promptUser!('Go ahead?', ['Yes', 'No']);
+          return new Promise<string>(() => { /* never resolves */ });
+        });
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_hang2', name: 'asks_then_hangs', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
+        await p;
+        expect(toolResultFor(agent, 'tu_hang2').content).toMatch(/^Tool "asks_then_hangs" timed out after 900s, but it may still have run to completion\. /);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // The withdrawal is the tool timeout's, and an exempt tool has none: a question that waits
     // on a person by design (24 h expiry, or a scheduled workflow's wait) must outlive the cap.
     it.each(['ask_user', 'plan_task'])('an exempt tool\'s question survives the tool timeout: %s', async (name) => {

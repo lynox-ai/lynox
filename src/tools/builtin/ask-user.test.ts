@@ -76,8 +76,10 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
  *  says not to act on an assumed answer. */
 function expectClosedResult(result: string): void {
   expect(result).not.toContain('__dismissed__');
-  expect(result).toMatch(/closed this question without answering/);
+  expect(result).toMatch(/This question got no answer/);
   expect(result).toMatch(/Do not act on any of the options/);
+  // Asking again is for a conversation; a background run waits.
+  expect(result).toMatch(/If the user is in the conversation, ask briefly what they want; otherwise stop and wait/);
 }
 
 describe('askUserTool', () => {
@@ -104,9 +106,10 @@ describe('askUserTool', () => {
       const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
       const lines = result.split('\n');
       expect(lines[0]).toBe('First?: A');
-      expect(lines[1]).toBe('Second?: (closed without an answer)');
+      expect(lines[1]).toBe('Second?: (no answer)');
       expect(lines).toHaveLength(3);
       expect(lines[2]).toMatch(/Do not act on an assumed answer/);
+      expect(lines[2]).toMatch(/otherwise stop and wait/);
       expect(result).not.toContain('__dismissed__');
     });
 
@@ -114,7 +117,7 @@ describe('askUserTool', () => {
       const promptTabs = vi.fn().mockResolvedValue(['__dismissed__', 'B']);
       const agent = makeAgent({ promptUser: vi.fn(), promptTabs });
       const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
-      expect(result.split('\n').slice(0, 2)).toEqual(['First?: (closed without an answer)', 'Second?: B']);
+      expect(result.split('\n').slice(0, 2)).toEqual(['First?: (no answer)', 'Second?: B']);
       expect(result).toMatch(/Do not act on an assumed answer/);
       expect(result).not.toContain('__dismissed__');
     });

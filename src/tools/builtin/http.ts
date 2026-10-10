@@ -36,7 +36,7 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
-import { noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
+import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
@@ -2626,6 +2626,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             if (agent.runSignal?.aborted) {
               blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the run was stopped.`);
             }
+            // The same for this call alone: the engine stopped waiting for it (its tool timeout),
+            // so its question would be withdrawn at birth and read as a denial for the batch.
+            if (currentCallSignal()?.aborted) {
+              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the call timed out.`);
+            }
             // Why this write is asked although the host may hold an approval. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
             const note = remembers ? pv``
@@ -2638,7 +2643,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
             if (remembers && allowed) recordApproval(counters, key, epoch);
-            if (remembers && !allowed && batch !== undefined) {
+            // A question withdrawn because this call timed out was answered by no one: it does not
+            // stand as the user's denial for the rest of the batch.
+            const withdrawn = currentCallSignal()?.aborted === true;
+            if (remembers && !allowed && !withdrawn && batch !== undefined) {
               let denied = deniedInBatch.get(batch);
               if (!denied) { denied = new Set(); deniedInBatch.set(batch, denied); }
               denied.add(key);

@@ -32,20 +32,29 @@ function findHint(options: AskUserOption[] | undefined, selectedLabel: string): 
   return undefined;
 }
 
-/** What the prompt layer hands back for a question the user closed without answering. Other
- *  readers of a prompt answer treat it as a control value, so it is translated here, for the
- *  model only, and stays unchanged everywhere else. */
-const DISMISSED = '__dismissed__';
+/** What the prompt layer hands back for a question that got no answer: the user closed it, it
+ *  expired, or its run or call was stopped. Other readers of a prompt answer treat it as a control
+ *  value, so it is translated for the model only (here and in `plan_task`) and stays unchanged
+ *  everywhere else. */
+export const DISMISSED = '__dismissed__';
+/** What to do after an unanswered question. A background run has no one to ask right away, and a
+ *  new question there parks it again for a day, so asking again is only for a conversation. */
+const AFTER_NO_ANSWER =
+  'If the user is in the conversation, ask briefly what they want; otherwise stop and wait for their next message.';
 /** Bare, the marker reads as an answer, and a model that reads "go ahead" into it acts on a choice
- *  the user refused to make. The result says what happened and what not to do. */
+ *  the user did not make. The result says what happened and what not to do. */
 const DISMISSED_RESULT =
-  'The user closed this question without answering. Do not act on any of the options or on an '
-  + 'assumed answer. Ask briefly what they want instead, or wait for their next message.';
-/** One question of a batch that the user closed; the batch result ends with the instruction once. */
-const DISMISSED_IN_BATCH = '(closed without an answer)';
+  'This question got no answer: the user closed it, or it expired. Do not act on any of the options '
+  + `or on an assumed answer. ${AFTER_NO_ANSWER}`;
+/** One question of a batch that got no answer; the batch result ends with the instruction once. */
+const DISMISSED_IN_BATCH = '(no answer)';
 const DISMISSED_BATCH_NOTE =
-  'The user closed the questions marked as closed without answering them. Do not act on an assumed '
-  + 'answer to those; ask briefly what they want instead, or wait for their next message.';
+  'The questions marked "(no answer)" were closed or expired without an answer. Do not act on an '
+  + `assumed answer to those. ${AFTER_NO_ANSWER}`;
+/** The same for a plan put to the user for approval (`plan_task`). */
+export const PLAN_NOT_ANSWERED =
+  'The plan got no answer: the user closed the question, or it expired. Nothing is approved; do not '
+  + `carry out the plan or any part of it. ${AFTER_NO_ANSWER}`;
 
 /** The batch result: one line per question, a closed one marked, and the note when any was closed. */
 function batchResult(questions: ReadonlyArray<{ question: string }>, answers: readonly string[]): string {
