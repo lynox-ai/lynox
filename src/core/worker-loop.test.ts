@@ -3747,6 +3747,17 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.stringContaining('provider down'), 'failed');
   });
 
+  it('names the effect of the run in flight, and none once it ended (what a delete decides on)', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, session } = setup(task);
+    let during: string | undefined;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { during = loop.runningEffect('hr-lock'); return 'Ran.'; });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(during).toBe('run_agent');
+    expect(loop.runningEffect('hr-lock')).toBeUndefined();
+  });
+
   it.each(['throws', 'returns'] as const)('a mandate\'s run that %s after a shutdown cleared the running tasks is still not retried', async (end) => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
