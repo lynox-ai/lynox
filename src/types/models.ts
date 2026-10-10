@@ -527,6 +527,39 @@ export interface ModelCapability {
    */
   thinkingOnly?: { readonly emptyAtOrBelow: number } | undefined;
 
+  /**
+   * Cache-READ price as a multiple of `pricing.input`, where the provider departs from
+   * the TTL-independent {@link CACHE_READ_MULTIPLIER}. Absent = that default. It exists
+   * so the pricing-vs-TTL contract can hold a model to ITS read rate instead of either
+   * failing on a correct price or forcing a wrong one: Opus 5.5 and Sonnet 5.5 read at 0.05×
+   * (Anthropic pricing page, footnote 2: "Cache hits and refreshes on Claude Opus 5.5 and
+   * Claude Sonnet 5.5 are priced at 0.05x the base input price").
+   */
+  cacheReadMultiplier?: number | undefined;
+
+  /**
+   * Request fields this model REJECTS with a 400, which `shapeRequestForModel`
+   * (core/llm-wire-rules.ts) rewrites at the client boundary so no caller has to know.
+   * Set a rule only where the provider documents the rejection; each entry cites it.
+   */
+  wireRules?: ModelWireRules | undefined;
+
+}
+
+/**
+ * What a model refuses on the wire, and what the client boundary sends instead.
+ * Every field is a documented 400, not a preference.
+ */
+export interface ModelWireRules {
+  /** `tool_choice` of type `tool` or `any` is a 400; the boundary sends `auto` and
+   *  checks the reply for the call. */
+  readonly forcedToolChoice?: 'rejected' | undefined;
+  /** `thinking: {type: 'disabled'}` is a 400. `'omit'` drops the field (the model then
+   *  runs its default adaptive thinking); `'between_tools'` sends the model's documented
+   *  lowest setting instead. */
+  readonly thinkingDisabled?: 'omit' | 'between_tools' | undefined;
+  /** Non-default `temperature` / `top_p` / `top_k` is a 400; the boundary drops them. */
+  readonly samplingParams?: 'rejected' | undefined;
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -623,6 +656,31 @@ export const CACHE_TTL_WRITE_MULTIPLIER: Record<string, number> = { '5m': 1.25, 
 export const CACHE_READ_MULTIPLIER = 0.1;
 
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
+  // Claude Opus 5.5 — candidate for the deep slot (not wired to any preset or tier
+  // here; this is the entry the switch needs so it is priced and shaped, not the
+  // switch). Anthropic pricing page (read 2026-10-10): $4 input, $8 1h cache write,
+  // "$0.20 / MTok" cache hits at "0.05x the base input price", $20 output — hence
+  // cacheWrite = 4×2 = 8 under the 1h TTL and the 0.05 read multiplier.
+  // Same tokenizer as Opus 5 (no charsPerToken override, as there).
+  'claude-opus-5-5': {
+    id: 'claude-opus-5-5',
+    provider: 'anthropic',
+    tier: 'deep',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 4, output: 20, cacheWrite: 8, cacheRead: 0.20 },
+    uiLabel: 'Claude Opus 5.5',
+    provenance: 'US',
+    cacheReadMultiplier: 0.05,
+    // Migration guide, Opus 5.5 — "thinking is always on: `{\"type\": \"disabled\"}` …
+    // return[s] a 400"; "`tool_choice: {\"type\": \"any\"}` and `{\"type\": \"tool\", …}`
+    // return a 400 `invalid_request_error`"; sampling params carry over from Opus 5
+    // ("Everything else in the Claude Opus 5 request surface carries over").
+    wireRules: { forcedToolChoice: 'rejected', thinkingDisabled: 'omit', samplingParams: 'rejected' },
+  },
   // === Anthropic Claude (direct + custom proxy) ===
   // Claude Opus 5 — the new flagship deep model (GA 2026-07; Opus 4.8 is now
   // Legacy). Additive OPT-IN only: MODEL_MAP.deep stays opus-4-6, and the
@@ -650,6 +708,10 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 5',
     provenance: 'US',
+    // Sampling params are still rejected on Opus 5 (migration guide, Opus 5: "sampling
+    // parameters (`temperature`, `top_p`, `top_k`) are still rejected"). `disabled`
+    // thinking stays legal here at effort high or below, so no thinking rule.
+    wireRules: { samplingParams: 'rejected' },
   },
   // Claude Opus 4.8 — the max-quality preset's deep model (model-presets P1).
   // Additive: MODEL_MAP.deep stays opus-4-6 (re-pointing it is a deliberate
@@ -668,6 +730,9 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.8',
     provenance: 'US',
+    // Non-default temperature/top_p/top_k is a 400 (Anthropic migration guide, Opus 4.7:
+    // "The `temperature`, `top_p`, and `top_k` parameters are no longer accepted").
+    wireRules: { samplingParams: 'rejected' },
   },
   'claude-opus-4-7': {
     id: 'claude-opus-4-7',
@@ -680,6 +745,9 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.7',
+    // Non-default temperature/top_p/top_k is a 400 (Anthropic migration guide, Opus 4.7:
+    // "The `temperature`, `top_p`, and `top_k` parameters are no longer accepted").
+    wireRules: { samplingParams: 'rejected' },
   },
   'claude-opus-4-6': {
     id: 'claude-opus-4-6',
@@ -705,6 +773,11 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 10, output: 50, cacheWrite: 20, cacheRead: 1.00 },
     uiLabel: 'Claude Fable 5',
     provenance: 'US',
+    // Migration guide, Fable 5.1 ("all match Claude Fable 5"): "no `thinking` config
+    // other than `{type: \"adaptive\"}` (`disabled` and `budget_tokens` both 400) …
+    // no non-default sampling parameters". Forced tool_choice is accepted on Fable 5
+    // (it 400s only from 5.1), so no tool rule.
+    wireRules: { thinkingDisabled: 'omit', samplingParams: 'rejected' },
   },
   'claude-sonnet-4-6': {
     id: 'claude-sonnet-4-6',
@@ -717,6 +790,32 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
     uiLabel: 'Claude Sonnet 4.6',
+  },
+  // Claude Sonnet 5.5 — candidate for the balanced slot (entry only, not wired).
+  // Anthropic pricing page (read 2026-10-10): $2 input, $4 1h cache write, "$0.10 / MTok"
+  // cache hits, $10 output, footnote 2: "Cache hits and refreshes on Claude Opus 5.5 and
+  // Claude Sonnet 5.5 are priced at 0.05x the base input price." The migration guide's
+  // "cache reads $0.20" for this model disagrees with the pricing page; the page wins.
+  // "Same tokenizer as Claude Sonnet 5" (migration guide) — hence Sonnet 5's charsPerToken.
+  'claude-sonnet-5-5': {
+    id: 'claude-sonnet-5-5',
+    provider: 'anthropic',
+    tier: 'balanced',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 2, output: 10, cacheWrite: 4, cacheRead: 0.10 },
+    uiLabel: 'Claude Sonnet 5.5',
+    charsPerToken: 2.7,
+    provenance: 'US',
+    cacheReadMultiplier: 0.05,
+    // Migration guide, Sonnet 5.5 — "`{\"type\": \"disabled\"}` returns a 400" and
+    // "`thinking: {\"type\": \"between_tools\"}` is the lowest thinking setting on this
+    // model"; forced `tool_choice` "return[s] a 400 `invalid_request_error`"; sampling
+    // params as on Sonnet 5, whose request surface this one keeps.
+    wireRules: { forcedToolChoice: 'rejected', thinkingDisabled: 'between_tools', samplingParams: 'rejected' },
   },
   // Claude Sonnet 5 — additive opt-in (4.6 stays the balanced default). 1M
   // context NATIVELY (no `context-1m` beta header, unlike the 4.6[1m] variant),
@@ -745,6 +844,35 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Claude Sonnet 5',
     charsPerToken: 2.7,
     provenance: 'US',
+    // Migration guide, Sonnet 5: "non-default sampling parameters are rejected".
+    wireRules: { samplingParams: 'rejected' },
+  },
+  // Claude Haiku 5.5 — candidate for the fast slot (entry only, not wired).
+  // Migration guide, Haiku 5.5: "$0.10 / $0.50 per MTok input / output when the prompt is
+  // 100K tokens or fewer, and $0.50 / $2.50 when it is longer; cache reads are 0.1x the
+  // input rate, 5-minute cache writes 1.25x, and 1-hour cache writes 2x".
+  // ⚠ ONLY THE SHORT-PROMPT CARD IS HERE. `getPricing(model)` takes no prompt length, and
+  // the cost guard sums tokens across turns, so a prompt over 100K is counted at a fifth
+  // of what it costs. Pointing any tier or preset at this entry needs that fixed first.
+  // "the same text counts as about 30% more tokens" — hence the Sonnet 5 charsPerToken.
+  'claude-haiku-5-5': {
+    id: 'claude-haiku-5-5',
+    provider: 'anthropic',
+    tier: 'fast',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 8_192,
+    maxContinuations: 5,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 0.10, output: 0.50, cacheWrite: 0.20, cacheRead: 0.01 },
+    uiLabel: 'Claude Haiku 5.5',
+    charsPerToken: 2.7,
+    provenance: 'US',
+    // Migration guide, Haiku 5.5 — "`temperature` must be `1` … any other value of either
+    // returns a 400 … and so does any `top_k` value". Forced tool_choice is ACCEPTED ("Claude
+    // Haiku 5.5 accepts a forced `tool_choice`"), and `disabled` thinking "works at effort
+    // `low`, `medium`, and `high`", so neither gets a rule.
+    wireRules: { samplingParams: 'rejected' },
   },
   'claude-haiku-4-5-20251001': {
     id: 'claude-haiku-4-5-20251001',
@@ -791,6 +919,9 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.7 (1M)',
+    // Non-default temperature/top_p/top_k is a 400 (Anthropic migration guide, Opus 4.7:
+    // "The `temperature`, `top_p`, and `top_k` parameters are no longer accepted").
+    wireRules: { samplingParams: 'rejected' },
   },
   'claude-opus-4-6[1m]': {
     id: 'claude-opus-4-6[1m]',

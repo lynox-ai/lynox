@@ -51,6 +51,7 @@ import { Agent } from './agent.js';
 import { suggestFollowUpsTool } from '../tools/builtin/suggest-follow-ups.js';
 import { FOLLOW_UP_EXCERPT_CHARS, FOLLOW_UP_MAX_TASK_CHARS } from './follow-up-fallback.js';
 import type { StreamEvent } from '../types/index.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
 
 interface Internals {
   _recoverFollowUps(text: string): Promise<void>;
@@ -398,5 +399,30 @@ describe('follow-up recovery — failure never damages the turn', () => {
     await inner._recoverFollowUps(ANSWER);
     expect(inner.messages.length).toBe(before);
     expect(events.find((e) => e.type === 'tool_call')).toBeUndefined();
+  });
+});
+
+describe('follow-up recovery — a model that lost the forced call', () => {
+  // On a model that rejects a forced `tool_choice`, the client boundary sends `auto` and
+  // turns a reply without the call into ForcedToolNotCalledError (llm-wire-rules.ts). The
+  // tokens of that reply were spent: they must be booked exactly once, and the miss must
+  // be counted by name — not swallowed by the catch as if the provider had failed.
+  it('books the reply once, says what happened, and shows no chips', async () => {
+    const missReply = { content: [{ type: 'text', text: 'Vorschläge: …' }], usage: USAGE };
+    const reply = vi.fn().mockRejectedValue(
+      new ForcedToolNotCalledError('claude-opus-5-5', { type: 'tool', name: 'suggest_follow_ups' }, missReply));
+    const { inner, events } = makeAgent({ reply });
+    const recordExternalCost = vi.fn().mockReturnValue(false);
+    inner.costGuard = { recordTurn: vi.fn().mockReturnValue(false), recordExternalCost };
+    mockDebit.mockClear();
+    const before = forcedToolMissCounts()['agent.follow_up'] ?? 0;
+
+    await inner._recoverFollowUps(ANSWER);
+
+    expect(mockDebit, 'booked once: not lost with the exception, not twice').toHaveBeenCalledTimes(1);
+    expect(mockDebit.mock.calls[0]![2]).toBeGreaterThan(0);
+    expect(recordExternalCost).toHaveBeenCalledTimes(1);
+    expect(forcedToolMissCounts()['agent.follow_up'], 'the miss is counted by name').toBe(before + 1);
+    expect(events.filter(e => (e as { type?: string }).type === 'follow_ups')).toHaveLength(0);
   });
 });

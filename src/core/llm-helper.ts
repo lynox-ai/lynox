@@ -19,6 +19,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
 import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
+import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -359,6 +360,7 @@ function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: str
  *  - Model emitted text-only (no tool call): throws with a clear message.
  *  - Model emitted tool_use but invalid JSON shape: throws via validateAgainstSchema.
  *  - Network / API errors: propagate from the SDK.
+ *  The two shape failures come after a paid reply; {@link extractionSpendOf} reads what it cost.
  */
 export async function callForStructuredJson<T = unknown>(
   opts: CallForStructuredJsonOptions,
@@ -413,7 +415,7 @@ export async function callForStructuredJson<T = unknown>(
         }
       : {},
   );
-  const response = await client.messages.create({
+  const { message: response, missed } = await settleForcedTool(client.messages.create({
     model,
     max_tokens: maxOutputTokens,
     // Explicit thinking-OFF for the forced-tool extraction. Omitting `thinking`
@@ -432,8 +434,48 @@ export async function callForStructuredJson<T = unknown>(
       input_schema: schema as unknown as Anthropic.Tool.InputSchema,
     }],
     tool_choice: { type: 'tool', name: 'extract' },
-  });
+  }));
+  reportForcedToolMiss('llm-helper', missed);
 
+  const inputTokens = response.usage.input_tokens;
+  const outputTokens = response.usage.output_tokens;
+  const spend: ExtractionSpend = {
+    costUsd: computeCostUsd(inputTokens, outputTokens, model),
+    tier: modelCapability(model)?.tier ?? 'balanced',
+  };
+  try {
+    return { ...readExtraction<T>(response, schema), inputTokens, outputTokens, ...spend, model };
+  } catch (err) {
+    // The reply is paid for whether or not it parses. Hand the spend to the caller with the
+    // error, so a refused extraction is booked like an accepted one.
+    attachExtractionSpend(err, spend);
+    throw err;
+  }
+}
+
+/** What a reply cost, for a caller that books it. */
+export interface ExtractionSpend {
+  costUsd: number;
+  tier: ModelTier;
+}
+
+const spendByFailedExtraction = new WeakMap<Error, ExtractionSpend>();
+
+/**
+ * The spend behind a failed {@link callForStructuredJson}, when the failure came after the
+ * model answered (no tool call, or a value the schema refused). Undefined when nothing was
+ * spent: a budget refusal, or a transport error.
+ */
+export function extractionSpendOf(err: unknown): ExtractionSpend | undefined {
+  return err instanceof Error ? spendByFailedExtraction.get(err) : undefined;
+}
+
+/** Record that `err` ended a call whose reply cost `spend`. Kept off the error object itself. */
+export function attachExtractionSpend(err: unknown, spend: ExtractionSpend): void {
+  if (err instanceof Error) spendByFailedExtraction.set(err, spend);
+}
+
+function readExtraction<T>(response: Anthropic.Message, schema: ExtractSchema): { data: T } {
   const toolUseBlock = response.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'extract',
   );
@@ -447,17 +489,7 @@ export async function callForStructuredJson<T = unknown>(
   }
 
   validateAgainstSchema(toolUseBlock.input, schema);
-
-  const inputTokens = response.usage.input_tokens;
-  const outputTokens = response.usage.output_tokens;
-  return {
-    data: toolUseBlock.input as T,
-    inputTokens,
-    outputTokens,
-    costUsd: computeCostUsd(inputTokens, outputTokens, model),
-    model,
-    tier: modelCapability(model)?.tier ?? 'balanced',
-  };
+  return { data: toolUseBlock.input as T };
 }
 
 /**

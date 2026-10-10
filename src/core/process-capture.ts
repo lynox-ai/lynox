@@ -9,6 +9,7 @@ import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 import type { HookHost } from './metered-request.js';
 import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter, SessionCounters } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
+import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
 
 /** Tools that are internal bookkeeping — excluded from process capture */
 const INTERNAL_TOOLS = new Set([
@@ -410,7 +411,7 @@ export async function captureProcess(
     openaiAuth: options.openaiAuth,
   });
   const modelId = options.modelId ?? getModelId('fast', provider);
-  const response = await client.beta.messages.create({
+  const { message: response, missed } = await settleForcedTool(client.beta.messages.create({
     model: modelId,
     max_tokens: 4096,
     ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
@@ -423,7 +424,7 @@ export async function captureProcess(
     ],
     tools: [EXTRACT_TOOL],
     tool_choice: { type: 'tool', name: 'extract_process' },
-  });
+  }));
 
   // The annotation call spent the pool key on a separate stream inside the
   // (already gated) save_workflow tool run — account its spend to the local
@@ -438,6 +439,8 @@ export async function captureProcess(
     });
     debitInRunHelperCost(options.meteredHost ?? null, options.sessionCounters, cost, 'fast');
   }
+
+  reportForcedToolMiss('process-capture', missed);
 
   // Extract annotations + parameters from the tool use response.
   const annotations: StepAnnotation[] = [];

@@ -8,10 +8,12 @@ import {
   BudgetError,
   SchemaValueError,
   ExtractShapeError,
+  extractionSpendOf,
   type ExtractSchema,
 } from './llm-helper.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 import { MODEL_MAP, modelCapability } from '../types/models.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
 
 const SCHEMA: ExtractSchema = {
   type: 'object',
@@ -647,5 +649,51 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
           expect(r.tier).toBe('balanced');
         });
     });
+  });
+});
+
+describe('callForStructuredJson — a reply that lost the forced call', () => {
+  it('ends in the extractor\'s own ExtractShapeError and is counted by name', async () => {
+    // The boundary relaxes the forced `extract` choice on models that reject it and turns
+    // a reply without the call into ForcedToolNotCalledError. Here that becomes the same
+    // ExtractShapeError a schema-less reply has always raised, so callers keep one path.
+    const client = {
+      messages: {
+        create: async () => { throw new ForcedToolNotCalledError(
+          'claude-opus-5-5', { type: 'tool', name: 'extract' },
+          { content: [{ type: 'text', text: '{"name":"a"}' }], usage: { input_tokens: 100, output_tokens: 50 } }); },
+      },
+    } as unknown as Anthropic;
+    const before = forcedToolMissCounts()['llm-helper'] ?? 0;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client, model: 'claude-opus-5-5' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExtractShapeError);
+    expect(forcedToolMissCounts()['llm-helper']).toBe(before + 1);
+    // The paid reply travels with the error, priced at the model's rate: 100 in at $4/M, 50 out at $20/M.
+    expect(extractionSpendOf(err)).toEqual({ costUsd: expect.closeTo(0.0014, 9) as number, tier: 'deep' });
+  });
+});
+
+describe('callForStructuredJson — the spend behind a failed extraction', () => {
+  it('rides with a schema refusal of a reply that did call the tool', async () => {
+    const client = {
+      messages: {
+        create: async () => ({
+          content: [{ type: 'tool_use', id: 't', name: 'extract', input: { wrong: true } }],
+          usage: { input_tokens: 1000, output_tokens: 100 },
+        }),
+      },
+    } as unknown as Anthropic;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client, model: 'claude-sonnet-4-6' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
+  });
+
+  it('is absent when the call never reached the model', async () => {
+    const client = { messages: { create: async () => { throw new Error('connect ECONNREFUSED'); } } } as unknown as Anthropic;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client })
+      .catch((e: unknown) => e);
+    expect(extractionSpendOf(err)).toBeUndefined();
   });
 });

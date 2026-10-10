@@ -351,13 +351,14 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         openaiModelId: planProv?.openaiModelId ?? planConfig.openai_model_id,
         maxSteps: 10,
         projectContext: input.context?.summary,
-      });
-      if (plan) {
         // The DAG planning call spent the pool key on a separate stream inside
         // this (already gated) tool run — account it to the local session cap +
-        // the tenant balance. No-op on self-host / BYOK.
-        debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, plan.actualCostUsd, 'fast');
-      }
+        // the tenant balance. No-op on self-host / BYOK. Booked from the reply,
+        // not the plan: a reply that yields no plan was paid for too.
+        onSpend: (costUsd) => {
+          debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
+        },
+      });
       if (plan && plan.steps.length > 0) {
         // Carry the planner's declared tier + tools through — this mapping used
         // to drop `model`, so planDAG's per-step tier choice (its prompt REQUIRES
