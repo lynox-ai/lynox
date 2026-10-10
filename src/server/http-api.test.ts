@@ -2156,6 +2156,17 @@ describe('LynoxHTTPApi', () => {
         expect(goneBody.error).toContain('engine restarted');
         expect(goneBody.error).toContain('Start it again');
 
+        // The two other answer routes give the same answer for a question the restart closed.
+        const tabs = store.insertAskUserTabs('s-tabs', [{ question: 'Which list?' }]);
+        const mail = store.insertConnectMail('s-mail', 'Connect the office mailbox?', '{}');
+        store.expireUnparked();
+        const tabsRes = await jsonFetch('/api/sessions/s-tabs/reply-tabs', { method: 'POST', body: JSON.stringify({ promptId: tabs, answers: ['B'] }) });
+        expect(tabsRes.status).toBe(410);
+        expect((await tabsRes.json() as { code?: string }).code).toBe('process_restarted');
+        const mailRes = await jsonFetch('/api/sessions/s-mail/mail-connected', { method: 'POST', body: JSON.stringify({ promptId: mail, status: 'connected' }) });
+        expect(mailRes.status).toBe(410);
+        expect((await mailRes.json() as { code?: string }).code).toBe('process_restarted');
+
         const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
         expect(expired.status).toBe(410);
         const expiredBody = await expired.json() as { error: string; code?: string };

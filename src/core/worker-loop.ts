@@ -816,11 +816,13 @@ export class WorkerLoop {
   /** `already_running`, with the time its lease runs out when the store can say: the earliest a
    *  run can be started again. After a deploy the lease of the lost run holds until its TTL, and
    *  without the time the owner can only retry blindly. A live holder renews the lease, so it is a
-   *  lower bound. */
+   *  lower bound. A time already past is left out: a run of this process whose renewals failed
+   *  still refuses a second start, and "again at <a past time>" would contradict the refusal. */
   #alreadyRunning(triggerId: string): RunTriggerNowOutcome {
     let leaseUntil: string | null = null;
     try { leaseUntil = this.engine.getTaskManager()?.leaseUntil(triggerId) ?? null; } catch { /* the refusal stands without the time */ }
-    return leaseUntil === null ? { ok: false, reason: 'already_running' } : { ok: false, reason: 'already_running', leaseUntil };
+    const ahead = leaseUntil !== null && Date.parse(leaseUntil) > Date.now();
+    return ahead ? { ok: false, reason: 'already_running', leaseUntil: leaseUntil! } : { ok: false, reason: 'already_running' };
   }
 
   /**
