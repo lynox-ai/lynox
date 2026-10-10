@@ -48,6 +48,11 @@ import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import { ToolSoftFailure } from '../core/tool-soft-failure.js';
 import type { ManifestStep } from '../types/orchestration.js';
 import { acceptedValueMatcher } from '../core/workflow-grant.js';
+import { createToolContext, applyNetworkPolicy } from '../core/tool-context.js';
+import type { ToolContext } from '../core/tool-context.js';
+import { httpRequestTool } from '../tools/builtin/http.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
+import { setPinnedTransportForTests } from '../core/network-guard.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
 
@@ -2292,5 +2297,70 @@ describe('spawnViaAgent — tool_gates reach the tools the agent runs', () => {
     order.length = 0;
     await tools.find((t) => t.definition.name === 'read_file')!.handler({}, {} as never);
     expect(order).toEqual([]);
+  });
+});
+
+describe('step runtimes get the engine ToolContext', () => {
+  // The egress policy, the guard audit, metering and API profiles live on the ToolContext.
+  // Built without the engine's, an Agent makes an empty one (agent.ts), whose unset policy
+  // the egress check treats as allow-all.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  const denyAll = (): ToolContext => {
+    const ctx = createToolContext({} as LynoxUserConfig);
+    applyNetworkPolicy(ctx, 'deny-all', undefined);
+    return ctx;
+  };
+  const givenToLastAgent = (): ToolContext | undefined =>
+    (vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as { toolContext?: ToolContext }).toolContext;
+
+  it('a named-agent step gets the engine context', async () => {
+    const engineCtx = denyAll();
+    const step: ManifestStep = { id: 'n', agent: 'n', runtime: 'agent', task: 'fetch it' };
+    const agentDef: AgentDef = { name: 'n', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(
+      step, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, engineCtx,
+    );
+    expect(givenToLastAgent()).toBe(engineCtx);
+  });
+
+  it('an inline step inside a nested pipeline cannot send a request under deny-all', async () => {
+    // The nested steps inherit the caller's tools, http_request among them. This drives that
+    // tool against the context the nested step agent was given, falling back the way the
+    // Agent constructor does when it was given none.
+    const engineCtx = denyAll();
+    const parentTools: ToolEntry[] = [httpRequestTool as unknown as ToolEntry];
+    const step: ManifestStep = {
+      id: 'outer', agent: 'outer', runtime: 'pipeline',
+      pipeline: [{ id: 'inner', task: 'fetch the page', tools: ['http_request'] }],
+    } as ManifestStep;
+    await spawnPipeline(
+      step, {}, mockConfig, parentTools, 0,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, engineCtx,
+    );
+    const inner = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as { name: string; tools: ToolEntry[] };
+    expect(inner.tools.map((t) => t.definition.name)).toContain('http_request');
+    const stepAgent = {
+      toolContext: givenToLastAgent() ?? createToolContext({} as LynoxUserConfig),
+      sessionCounters: { httpRequests: 0, writeBytes: 0 },
+      principal: OWNER_PRINCIPAL,
+      governingContract: () => ({ contract: undefined, withheld: 'none' }),
+    } as never;
+    // Answers any request that gets past the policy, so a missing context shows as a
+    // response here instead of a real network call.
+    const restore = setPinnedTransportForTests(async () => new Response('ok'));
+    try {
+      const outcome = await httpRequestTool.handler({ url: 'https://203.0.113.10/' }, stepAgent)
+        .then((r) => `answered: ${r.slice(0, 40)}`, (e: unknown) => (e as Error).message);
+      expect(outcome).toBe('Network access is disabled for this tool in the current security mode.');
+    } finally {
+      restore();
+    }
   });
 });

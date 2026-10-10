@@ -1047,6 +1047,39 @@ describe('runManifest — inline runtime', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('threads options.parentToolContext into the named-agent spawner', async () => {
+    // The engine's ToolContext carries the egress policy; spawnViaAgent takes it as its
+    // 18th positional argument (index 17), and without it the step agent builds an empty one.
+    const dir = mkdtempSync(join(tmpdir(), 'runner-ctx-'));
+    try {
+      mkdirSync(join(dir, 'named'), { recursive: true });
+      writeFileSync(join(dir, 'named', 'index.js'), 'export default { name: "named", description: "", tools: [] };\n');
+      const manifest: Manifest = { ...MANIFEST, agents: [{ id: 'n1', agent: 'named' }] };
+      const parentToolContext = { networkPolicy: 'deny-all' } as unknown as import('../types/index.js').ToolContext;
+      mockSpawnViaAgent.mockClear();
+      await runManifest(manifest, CONFIG, { agentsDir: dir, parentToolContext });
+      expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
+      expect(mockSpawnViaAgent.mock.calls[0]![17]).toBe(parentToolContext);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('threads options.parentToolContext into a nested pipeline', async () => {
+    // spawnPipeline takes it as its 20th positional argument (index 19) and hands it to the
+    // nested run; the nested inline step lands on the spawnInline stub with it at index 6.
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }],
+    };
+    const parentToolContext = { networkPolicy: 'deny-all' } as unknown as import('../types/index.js').ToolContext;
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    mockSpawnInline.mockClear();
+    await runManifest(manifest, CONFIG, { parentTools: tools, parentToolContext });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    expect(mockSpawnInline.mock.calls[0]![6]).toBe(parentToolContext);
+  });
 });
 
 // --- retryManifest tests ---
