@@ -663,7 +663,8 @@ describe('TaskManager', () => {
         assignee: 'lynox',
         maxRetries: 3,
       });
-      tm.recordTaskRun(task.id, 'transient error', 'failed');
+      // The return value is what the worker reads to decide whether to report the failure.
+      expect(tm.recordTaskRun(task.id, 'transient error', 'failed')).toBe(true);
 
       const after = tm.getTrigger(task.id);
       expect(after!.status).toBe('open');           // not failed yet
@@ -675,9 +676,20 @@ describe('TaskManager', () => {
       expect(after!.last_run_status).toBe('failed');
     });
 
+    it.each([
+      ['completed', (id: string) => { tm.complete(id); }],
+      ['disabled', (id: string) => { tm.setEnabled(id, false); }],
+      ['parked', (id: string) => { history.updateTrigger(id, { status: 'waiting' }); }],
+      ['marked failed', (id: string) => { history.updateTrigger(id, { status: 'failed' }); }],
+    ] as const)('a one-shot with retries left that was %s during its run reports no retry, since it is not due', (_how, change) => {
+      const task = tm.create({ title: 'Flaky task', assignee: 'lynox', maxRetries: 3 });
+      change(task.id);
+      expect(tm.recordTaskRun(task.id, 'transient error', 'failed')).toBe(false);
+    });
+
     it('a run a non-owner started by hand gets no retry, whatever the trigger\'s retries say (§3.12 point 6)', () => {
       const task = tm.create({ title: 'Flaky task', assignee: 'lynox', maxRetries: 3 });
-      tm.recordTaskRun(task.id, 'transient error', 'failed', { noRetry: true });
+      expect(tm.recordTaskRun(task.id, 'transient error', 'failed', { noRetry: true })).toBe(false);
       const after = tm.getTrigger(task.id);
       expect(after!.retry_count).toBe(0);
       expect(after!.status).toBe('failed');

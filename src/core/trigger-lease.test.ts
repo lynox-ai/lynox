@@ -54,6 +54,9 @@ interface Proc {
   dispatches: () => number;
   /** Finish this process's in-flight agent turn. */
   finish: (result?: string) => void;
+  /** End this process's in-flight agent turn with an error. */
+  fail: (error: Error) => void;
+  router: { hasChannels: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
 }
 
 /** One engine process on `dir`. Its agent turns hang until `finish` — a run in progress. */
@@ -71,7 +74,8 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
   const realRelease = manager.releaseLease.bind(manager);
   manager.releaseLease = (...a) => { realRelease(...a); released++; };
   const pending: Array<(r: string) => void> = [];
-  const run = vi.fn(() => new Promise<string>((resolve) => { pending.push(resolve); }));
+  const failing: Array<(e: Error) => void> = [];
+  const run = vi.fn(() => new Promise<string>((resolve, reject) => { pending.push(resolve); failing.push(reject); }));
   releases.push(() => { for (const r of pending.splice(0)) r('released'); });
   settles.push(async () => { await vi.waitFor(() => expect(released).toBeGreaterThanOrEqual(run.mock.calls.length), { timeout: 5_000 }); });
   // getLastRunStop: the real Session always has it and executeStandard reads the run's
@@ -88,13 +92,16 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
   } as unknown as Engine;
-  const router = { hasChannels: () => false, notify: vi.fn().mockResolvedValue(undefined) } as unknown as NotificationRouter;
+  const routerDouble = { hasChannels: vi.fn(() => false), notify: vi.fn().mockResolvedValue(undefined) };
+  const router = routerDouble as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000, undefined, lease);
   closers.push(() => loop.stop());
   return {
     loop, manager, history, engineDb,
     dispatches: () => run.mock.calls.length,
-    finish: (result = 'done') => { for (const r of pending.splice(0)) r(result); },
+    finish: (result = 'done') => { failing.splice(0); for (const r of pending.splice(0)) r(result); },
+    fail: (error) => { pending.splice(0); for (const r of failing.splice(0)) r(error); },
+    router: routerDouble,
   };
 }
 
@@ -332,5 +339,92 @@ describe('the heartbeat', () => {
 
     a.finish();
     await vi.waitFor(() => expect(leaseRow(a).lease_holder).toBeNull());
+  });
+});
+
+describe('a schedule deleted while its run is in flight', () => {
+  // The delete route removes the row and leaves the run going; the run ends later and
+  // records its result against a row that no longer exists. MUTATION: put the throw back
+  // in TaskManager.recordTaskRun (`if (!task) throw …`) → the first test sees the rejection.
+  it('ends without an unhandled rejection', async () => {
+    const dir = newDir();
+    const a = boot(dir);
+    seedCron(a);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => { rejections.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await a.loop.tick();
+      await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+      expect(a.history.deleteTrigger('trg-1')).toBe(true);
+
+      a.finish();
+      // Two macrotask turns: the run's settle chain and Node's rejection report.
+      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setImmediate(r));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
+  // MUTATION: `willRetry` recomputed from the snapshot's counters instead of read back
+  // from `recordTaskRun` → the run counts on a retry its deleted row can no longer give,
+  // and no failure is reported. Same mutant, next test: a cron is never retried.
+  it('reports a failure that its deleted schedule can no longer retry', async () => {
+    const dir = newDir();
+    const a = boot(dir);
+    a.history.insertTrigger({
+      id: 'trg-1', title: 'One-off report', source: 'cron', effect: 'run_agent',
+      nextRunAt: '2026-01-01T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z', maxRetries: 2,
+    });
+    a.router.hasChannels.mockReturnValue(true);
+    await a.loop.tick();
+    await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+    a.history.deleteTrigger('trg-1');
+    a.fail(new Error('provider down'));
+    await vi.waitFor(() => expect(a.router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '\u2717 One-off report' })));
+  });
+
+  it('reports the failure of a cron with retries set, which is never retried', async () => {
+    const dir = newDir();
+    const a = boot(dir);
+    a.history.insertTrigger({
+      id: 'trg-1', title: 'Daily report', source: 'cron', effect: 'run_agent',
+      scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z', maxRetries: 2,
+    });
+    a.router.hasChannels.mockReturnValue(true);
+    await a.loop.tick();
+    await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+    a.fail(new Error('provider down'));
+    await vi.waitFor(() => expect(a.router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '\u2717 Daily report' })));
+    // …and the schedule moved to its next occurrence (09:00) rather than a backoff.
+    expect(leaseRow(a).next_run_at).toMatch(/T09:00:00\.000Z$/);
+    expect(Date.parse(leaseRow(a).next_run_at!)).toBeGreaterThan(Date.now());
+  });
+
+  it('is reported by the heartbeat as deleted, not as a lease lost to another process', async () => {
+    const dir = newDir();
+    const a = boot(dir, { heartbeatMs: 20, ttlMs: 60 });
+    seedCron(a);
+    const lines: string[] = [];
+    const realWrite = process.stderr.write.bind(process.stderr);
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      if (typeof chunk === 'string' && chunk.includes('[lynox:worker]')) { lines.push(chunk); return true; }
+      return (realWrite as (c: string | Uint8Array, ...r: unknown[]) => boolean)(chunk, ...rest);
+    }) as typeof process.stderr.write);
+    try {
+      await a.loop.tick();
+      await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+      a.history.deleteTrigger('trg-1');
+      // Several heartbeat intervals pass with the row gone.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(lines.filter((l) => l.includes('lost its run lease'))).toEqual([]);
+      expect(lines.filter((l) => l.includes('was deleted'))).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      a.finish();
+    }
   });
 });

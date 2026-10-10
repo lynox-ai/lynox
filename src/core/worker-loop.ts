@@ -594,10 +594,10 @@ export class WorkerLoop {
     result: string,
     status: 'success' | 'failed' | 'timeout' | 'stopped',
     run?: RunStarterSlot | null,
-  ): void {
+  ): boolean {
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
-    tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : []));
+    return tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : [])) ?? false;
   }
 
   /**
@@ -1245,11 +1245,22 @@ export class WorkerLoop {
     // `attachSession`: the entry object outlives its map entry.
     const entry: ActiveTask = { controller, ownerStop: new AbortController(), effect: task.effect, pauseDeadline, resumeDeadline, handRun, starter };
     this.activeTasks.set(task.id, entry);
+    // A renewal fails for two reasons, and only one is another process: the row can also
+    // be gone, because the schedule was deleted while the run went on. That is said once,
+    // since every later interval would only repeat it.
+    let scheduleGone = false;
     const heartbeat = setInterval(() => {
+      if (scheduleGone) return;
       try {
+        const tm = this.engine.getTaskManager();
         const until = new Date(Date.now() + this.lease.ttlMs).toISOString();
-        if (this.engine.getTaskManager()?.renewLease(task.id, this.leaseHolder, until) === false) {
-          process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) lost its run lease to another engine process\n`);
+        if (tm?.renewLease(task.id, this.leaseHolder, until) === false) {
+          if (!tm.getTrigger(task.id)) {
+            scheduleGone = true;
+            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was deleted while it ran; the run continues and its end is not recorded on the schedule\n`);
+          } else {
+            process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) lost its run lease to another engine process\n`);
+          }
         }
       } catch { /* best-effort: a missed renewal only shortens the lease */ }
     }, this.lease.heartbeatMs);
@@ -1428,7 +1439,12 @@ export class WorkerLoop {
         ? 'stopped' as const
         : (isTimeout ? 'timeout' as const : 'failed' as const);
 
-      // Check if task will be retried BEFORE recording (retry_count not yet incremented)
+      // Whether the run will be retried is what recording it decided — read back from
+      // `recordTaskRun`, not recomputed here. A copy of its conditions stood here and
+      // drifted: it counted a retry for a cron or a watch with retries set, which is never
+      // retried, and for a schedule deleted while it ran, which has no row to retry from;
+      // either failure was then reported by nothing. What the copy guarded still holds,
+      // because `recordTaskRun` decides it the same way:
       //
       // ⛔ Derived from the STATUS, not from the counters alone. `recordTaskRun` sends
       // only `failed` and `timeout` into the backoff, so after a stop the counters still
@@ -1441,14 +1457,8 @@ export class WorkerLoop {
       // so its failure is reported now or never.
       // Nor is a run a non-owner started by hand: a retry carries no request and would run
       // as the owner's schedule with the full tool set (§3.12 point 6, "once per request").
-      const willRetry = status !== 'stopped'
-        && !isHandRunOf(task.id)
-        && !startedByOther(entry)
-        && (task.max_retries ?? 0) > 0
-        && (task.retry_count ?? 0) < (task.max_retries ?? 0);
-
       const taskManager = this.engine.getTaskManager();
-      this.#recordRun(taskManager, task.id, errorMsg, status, entry);
+      const willRetry = this.#recordRun(taskManager, task.id, errorMsg, status, entry);
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
@@ -1459,8 +1469,9 @@ export class WorkerLoop {
       entry.pauseDeadline();
       entry.controller.abort();
 
-      // Only notify on FINAL failure (all retries exhausted) — or on a stop, which does
-      // not retry and so has no later attempt to report. ⚠ NOT "final": a stopped CRON
+      // Only notify when no retry comes (`willRetry` above) — or on a stop, which does
+      // not retry and so has no later attempt to report. A cron or a watch is never
+      // retried, so each of its failed runs reports. ⚠ A stop is not "final" either: a stopped CRON
       // keeps its schedule and a stopped watch its interval (`recordTaskRun` computes
       // both), so what ends here is the RUN, not necessarily the trigger. The word and
       // the follow-ups differ because the reader's next move does: "Explain why this
