@@ -11632,7 +11632,15 @@ describe('push routes and a mandate\'s session', () => {
     pushMock.subscribe.mockImplementation(() => 'no_grant');
     const noGrant = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/eva')) });
     expect(noGrant.status).toBe(403);
-    expect(((await noGrant.json()) as { error: string }).error).toBe('This session names no access grant, so notifications cannot be tied to its end. Sign in again.');
+    expect(((await noGrant.json()) as { error: string }).error).toBe('This session\'s access grant is not known to be live, so notifications cannot be tied to its end. Sign in again.');
+  });
+
+  it('answers 409 when the browser already receives someone else\'s notifications', async () => {
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    pushMock.subscribe.mockImplementation(() => 'taken');
+    const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/shared')) });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe('This browser already receives notifications for someone else on this instance.');
   });
 
   it('lets a mandate remove only a subscription it added, and refuses a missing one', async () => {

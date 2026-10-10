@@ -119,11 +119,47 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(ch.addedBy('https://push.example/abc')).toEqual({ created_by: null });
 	});
 
-	it('counts a mandate with no store of ends as ended', async () => {
+	it('counts a mandate with no store of ends as ended: nothing is stored for it', async () => {
 		const blind = new WebPushNotificationChannel(dataDir);
-		expect(blind.subscribe('https://push.example/eva', 'k', 'a', EVA)).toBe('ok');
-		expect(blind.subscriptionCount()).toBe(1);
+		expect(blind.subscribe('https://push.example/eva', 'k', 'a', EVA)).toBe('no_grant');
 		expect(blind.addedBy('https://push.example/eva')).toBeUndefined();
+		expect(blind.subscriptionCount()).toBe(1);
+	});
+
+	it('refuses a mandate whose grant has already ended, or whose end was never recorded', () => {
+		live.delete('TEST-MANDATE-1');
+		expect(ch.subscribe('https://push.example/eva', 'k', 'a', EVA)).toBe('no_grant');
+		expect(ch.addedBy('https://push.example/eva')).toBeUndefined();
+	});
+
+	it('does not let a mandate take over a subscription someone else added in the same browser', async () => {
+		// The owner's browser already holds this endpoint; a mandate turning notifications on there gets it back.
+		expect(ch.subscribe('https://push.example/abc', 'k2', 'a2', EVA)).toBe('taken');
+		expect(ch.addedBy('https://push.example/abc')).toEqual({ created_by: null });
+		ch.subscribe('https://push.example/max', 'k', 'a', mandate('max@example.invalid', 'TEST-MANDATE-2'));
+		expect(ch.subscribe('https://push.example/max', 'k', 'a', EVA)).toBe('taken');
+		expect(ch.addedBy('https://push.example/max')).toEqual({ created_by: 'mandate:max@example.invalid' });
+		// Its own endpoint again is fine.
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(ch.subscribe('https://push.example/eva', 'k3', 'a3', EVA)).toBe('ok');
+	});
+
+	it('clears ended grants before it counts the room a mandate may take', () => {
+		live.add('TEST-MANDATE-OLD');
+		for (let i = 1; i < 50; i++) ch.subscribe(`https://push.example/old-${i}`, 'k', 'a', i <= 5 ? mandate(`old${i}@example.invalid`, 'TEST-MANDATE-OLD') : OWNER_PRINCIPAL);
+		expect(ch.subscriptionCount()).toBe(50);
+		live.delete('TEST-MANDATE-OLD');
+		expect(ch.subscribe('https://push.example/eva', 'k', 'a', EVA)).toBe('ok');
+		expect(ch.addedBy('https://push.example/old-1')).toBeUndefined();
+	});
+
+	it('keeps telling the owner when a grant lookup fails, and drops only that mandate\'s', async () => {
+		const failing = new WebPushNotificationChannel(dataDir, { isMandateLive: (id) => { if (id === 'TEST-MANDATE-2') throw new Error('engine.db busy'); return live.has(id); } });
+		failing.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		const max = mandate('max@example.invalid', 'TEST-MANDATE-2');
+		expect(failing.subscribe('https://push.example/max', 'k', 'a', max)).toBe('no_grant');
+		await failing.send({ title: 't', body: 'b', priority: 'normal' });
+		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva']);
 	});
 
 	it('refuses a mandate whose session names no grant', () => {
