@@ -142,7 +142,7 @@ describe('LLM_CATALOG', () => {
     // Canonical pricing (mirrors MODEL_CAPABILITIES — the pre-existing Opus
     // 15/75 + Haiku 0.80/4 drift was corrected in the Sonnet 5 pass).
     expect(byId['claude-sonnet-4-6']?.pricing).toEqual({ input: 3, output: 15 });
-    expect(byId['claude-sonnet-5']?.pricing).toEqual({ input: 3, output: 15 });
+    expect(byId['claude-sonnet-5']?.pricing).toEqual({ input: 2, output: 10 });
     expect(byId['claude-sonnet-5']?.context_window).toBe(1_000_000);
     expect(byId['claude-opus-4-6']?.pricing).toEqual({ input: 5, output: 25 });
     expect(byId['claude-haiku-4-5-20251001']?.pricing).toEqual({ input: 1, output: 5 });

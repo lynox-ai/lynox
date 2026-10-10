@@ -206,10 +206,10 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
     tier: 'balanced',
     label: 'Sonnet 5',
     context_window: 1_000_000,
-    pricing: { input: 3, output: 15 },
+    pricing: { input: 2, output: 10 },
     capabilities: ['vision', 'tool_use', 'extended_thinking'],
     residency: 'US (Anthropic; DPA + GDPR)',
-    notes: 'Newest balanced model — 1M native context, near-Opus capability, same $3/$15 rate as Sonnet 4.6 (intro $2/$10 through 2026-08-31). Opt-in via balanced_model.',
+    notes: 'Newest balanced model — 1M native context, near-Opus capability, $2/$10 per 1M (below Sonnet 4.6\'s $3/$15; its new tokenizer counts about 30% more tokens for the same text). Opt-in via balanced_model.',
   },
   {
     id: 'claude-opus-4-6',

@@ -720,12 +720,14 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   },
   // Claude Sonnet 5 — additive opt-in (4.6 stays the balanced default). 1M
   // context NATIVELY (no `context-1m` beta header, unlike the 4.6[1m] variant),
-  // mirroring the Opus base entries' shape. Pricing is $3/$15 STICKER: Anthropic
-  // lists an intro $2/$10 through 2026-08-31, then reverts to $3/$15 on Sep 1 —
-  // we bill sticker so the customer-facing rate is stable across that cutover
-  // (no 2026-09 re-deploy; the intro window is temporary extra margin). The
-  // pricing-vs-TTL contract (models.test.ts) requires cacheWrite = input×2 (1h
-  // TTL) and cacheRead = input×0.1, so 6 and 0.30 are the only valid values.
+  // mirroring the Opus base entries' shape. Pricing is $2/$10: Anthropic launched it
+  // as an introductory rate through 2026-08-31 with a step to $3/$15 announced for
+  // Sep 1, and then kept $2/$10 as the standard price (pricing page, footnote 3,
+  // read 2026-10-10: "The previously scheduled increase … will not occur"). This
+  // entry carried the $3/$15 sticker until then, in anticipation of that step.
+  // The pricing-vs-TTL contract (models.test.ts) requires cacheWrite = input×2 (1h
+  // TTL) and cacheRead = input×0.1, so 4 and 0.20 are the only valid values — and
+  // they are also the 1h-write and cache-hit prices the pricing page lists.
   // charsPerToken 2.7 (≈ 3.5 / 1.3): Sonnet 5's new tokenizer emits ~30% more
   // tokens/text (documented Anthropic fact) — a conservative baseline pending
   // live count_tokens measurement (measure-first). Same per-token RATE as 4.6;
@@ -739,7 +741,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     maxContinuations: 10,
     betaHeaders: [],
     features: CLAUDE_FEATURES,
-    pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
+    pricing: { input: 2, output: 10, cacheWrite: 4, cacheRead: 0.20 },
     uiLabel: 'Claude Sonnet 5',
     charsPerToken: 2.7,
     provenance: 'US',

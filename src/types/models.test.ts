@@ -591,7 +591,7 @@ describe('ModelCapability registry', () => {
     expect(MODEL_CAPABILITIES['claude-sonnet-4-6']!.betaHeaders).toEqual([]);
   });
 
-  it('registers claude-sonnet-5 as native-1M, sticker-priced, no beta header', async () => {
+  it('registers claude-sonnet-5 as native-1M, at its standard price, no beta header', async () => {
     const { MODEL_CAPABILITIES } = await import('./models.js');
     const cap = MODEL_CAPABILITIES['claude-sonnet-5'];
     expect(cap).toBeDefined();
@@ -600,8 +600,10 @@ describe('ModelCapability registry', () => {
     // 1M NATIVELY — no context-1m beta header (unlike the 4.6[1m] variant).
     expect(cap!.contextWindow).toBe(1_000_000);
     expect(cap!.betaHeaders).toEqual([]);
-    // Sticker $3/$15; cacheWrite=input×2 (1h TTL), cacheRead=input×0.1.
-    expect(cap!.pricing).toEqual({ input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 });
+    // $2/$10 — Anthropic kept the launch rate as the standard price instead of the
+    // announced step to $3/$15 (pricing page, footnote 3, read 2026-10-10).
+    // cacheWrite=input×2 (1h TTL), cacheRead=input×0.1 — both also listed on that page.
+    expect(cap!.pricing).toEqual({ input: 2, output: 10, cacheWrite: 4, cacheRead: 0.20 });
     expect(cap!.defaultMaxOutput).toBe(16_000);
     // New-tokenizer baseline (~+30% tokens/text → lower chars-per-token).
     expect(cap!.charsPerToken).toBe(2.7);
