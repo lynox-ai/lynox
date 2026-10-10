@@ -226,9 +226,9 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
 
 /**
  * What a bash call may not do without being asked, in EVERY mode: send data out, run code it
- * carries inline, or write into the lynox data dir. In autonomous mode these are the only rules
- * besides CRITICAL_BASH, and a hit there is a question (the warning carries no BLOCKED marker),
- * the same consent `http_request` asks for a write. Without this, an unattended run could send
+ * carries inline, or write into the lynox data dir. In autonomous mode a hit here is a question
+ * (the warning carries no BLOCKED marker), like the DANGEROUS_BASH rules marked `ask`, and the
+ * same consent `http_request` asks for a write. Without this, an unattended run could send
  * with a one-line interpreter what `http_request` would have asked about.
  *
  * A list of commands, so it is never complete: a script written first and run afterwards, or a
@@ -275,117 +275,158 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: new RegExp(String.raw`\b(?:cd|pushd)\s+['"]?[^\s;&|]*${LYNOX_OUTSIDE_WORKSPACE}`, 'i'), label: 'write into the lynox data dir' },
 ];
 
-const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /\brm\s/i,                     label: 'remove files' },
-  { pattern: /\bsudo\b/i,                   label: 'elevated privileges' },
-  { pattern: /\bkill\b/i,                   label: 'kill process' },
-  { pattern: /\bchmod\b/i,                  label: 'change permissions' },
-  { pattern: /\bchown\b/i,                  label: 'change ownership' },
-  { pattern: /\bgit\s+push\s+.*--force/i,   label: 'force push' },
-  { pattern: /\bgit\s+push\b/i,             label: 'git push (requires explicit user request)' },
-  { pattern: /\bgit\s+reset\s+--hard/i,     label: 'hard reset' },
-  { pattern: /\bgit\s+add\s+(-A|--all|\.)\s*(?:$|[|;&])/im, label: 'stage all files (review before committing)' },
-  { pattern: /\bgit\s+commit\b(?!-graph)/i, label: 'git commit (requires explicit user request)' },
-  { pattern: /\bgit\s+merge\b(?!-(?:base|tree)\b)/i, label: 'git merge' },
-  { pattern: /\bgit\s+rebase\b/i,           label: 'git rebase' },
-  { pattern: /\bgit\s+cherry-pick\b/i,      label: 'git cherry-pick' },
-  { pattern: /\bgit\s+revert\b/i,           label: 'git revert' },
-  { pattern: /\bgit\s+clean\b/i,            label: 'git clean (deletes untracked files)' },
-  { pattern: /\bgit\s+checkout\s+(--\s|\.)/i, label: 'discard uncommitted changes' },
-  { pattern: /\bgit\s+restore\b/i,          label: 'git restore (discard changes)' },
-  { pattern: /\bgit\s+branch\s+(-[dD]|--delete)\b/i, label: 'delete branch' },
-  { pattern: /\bgit\s+stash\s+(drop|clear)\b/i,      label: 'discard stashed changes' },
-  { pattern: /\bdd\b/i,                     label: 'disk dump' },
-  { pattern: /\bmkfs\b/i,                   label: 'format disk' },
-  { pattern: /\b(shutdown|reboot|halt)\b/i, label: 'system control' },
-  { pattern: />\s*\/dev\/(?!null\b)/i,      label: 'write to device' },
-  { pattern: /\bcurl\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell' },
-  { pattern: /\b(npm|pnpm|yarn)\s+(publish|unpublish)\b/i, label: 'package publish' },
-  { pattern: /\bdocker\s+push\b/i,          label: 'docker push' },
-  { pattern: /\bdocker\s+(rm|rmi|prune)/i,  label: 'docker cleanup' },
-  { pattern: /\bdocker[\s-]compose\b/i,     label: 'docker compose' },
+/**
+ * What a rule from DANGEROUS_BASH does in an unattended (autonomous) run. In a chat every rule
+ * here is asked about; this field decides only what happens when no one is watching, and it is
+ * required, so a new rule cannot be added without that decision.
+ *
+ * Most rules match a program's name wherever it stands in the command, so a path or a search term
+ * that spells it (`cat terraform/main.tf`) matches too. Under `block` that is a block; under
+ * `ask`, a run with no one to ask refuses it unless `pre_approve` or a contract lifts it.
+ *
+ * - `block`: every command the rule matches also matches CRITICAL_BASH, so it is `[BLOCKED]`.
+ *   A block cannot be lifted by `pre_approve` or a capability contract. Where the run has a
+ *   question channel, it is put to a person; without one it is refused.
+ * - `ask`: the command talks to another system (a remote host, a cloud account, a cluster, a
+ *   database, mail, a payment or messaging service), runs code fetched or decoded on the spot,
+ *   reads other processes, or changes the host's services, schedule, firewall or users. A
+ *   question, the same consent SENDS_OR_KEEPS_BASH asks for; `pre_approve` or a contract can
+ *   lift it. The docker cleanup rule is here because the Docker daemon belongs to the host, not
+ *   to the instance. A database CLI is asked about on a local file too: the rule cannot tell a
+ *   file from a server.
+ * - `sends`: SENDS_OR_KEEPS_BASH decides. It matches every command of this rule that sends, in
+ *   its own, stricter spelling, so the rule here would add nothing an unattended run should be
+ *   asked about.
+ * - `allow`: the command acts on the instance itself: its files, processes and permissions, or a
+ *   read whose output stays in the conversation. That is not a containment. It holds outside the
+ *   workspace too, bash reaches paths that `write_file` refuses, and the rule judges the command,
+ *   not what the file it writes is for. The limit is the instance's own container. These run
+ *   unattended because asking would refuse every saved workflow that cleans up after itself: a
+ *   headless run has no one to ask.
+ */
+type DangerousBashRule = { pattern: RegExp; label: string; unattended: 'block' | 'ask' | 'sends' | 'allow' };
+
+export const DANGEROUS_BASH: readonly DangerousBashRule[] = [
+  { pattern: /\brm\s/i,                     label: 'remove files', unattended: 'allow' },
+  { pattern: /\bsudo\b/i,                   label: 'elevated privileges', unattended: 'block' },
+  { pattern: /\bkill\b/i,                   label: 'kill process', unattended: 'allow' },
+  { pattern: /\bchmod\b/i,                  label: 'change permissions', unattended: 'allow' },
+  { pattern: /\bchown\b/i,                  label: 'change ownership', unattended: 'allow' },
+  { pattern: /\bgit\s+push\s+.*--force/i,   label: 'force push', unattended: 'block' },
+  { pattern: /\bgit\s+push\b/i,             label: 'git push (requires explicit user request)', unattended: 'block' },
+  { pattern: /\bgit\s+reset\s+--hard/i,     label: 'hard reset', unattended: 'allow' },
+  { pattern: /\bgit\s+add\s+(-A|--all|\.)\s*(?:$|[|;&])/im, label: 'stage all files (review before committing)', unattended: 'allow' },
+  { pattern: /\bgit\s+commit\b(?!-graph)/i, label: 'git commit (requires explicit user request)', unattended: 'block' },
+  { pattern: /\bgit\s+merge\b(?!-(?:base|tree)\b)/i, label: 'git merge', unattended: 'block' },
+  { pattern: /\bgit\s+rebase\b/i,           label: 'git rebase', unattended: 'block' },
+  { pattern: /\bgit\s+cherry-pick\b/i,      label: 'git cherry-pick', unattended: 'block' },
+  { pattern: /\bgit\s+revert\b/i,           label: 'git revert', unattended: 'block' },
+  { pattern: /\bgit\s+clean\b/i,            label: 'git clean (deletes untracked files)', unattended: 'allow' },
+  { pattern: /\bgit\s+checkout\s+(--\s|\.)/i, label: 'discard uncommitted changes', unattended: 'allow' },
+  { pattern: /\bgit\s+restore\b/i,          label: 'git restore (discard changes)', unattended: 'allow' },
+  { pattern: /\bgit\s+branch\s+(-[dD]|--delete)\b/i, label: 'delete branch', unattended: 'allow' },
+  { pattern: /\bgit\s+stash\s+(drop|clear)\b/i,      label: 'discard stashed changes', unattended: 'allow' },
+  { pattern: /\bdd\b/i,                     label: 'disk dump', unattended: 'allow' },
+  { pattern: /\bmkfs\b/i,                   label: 'format disk', unattended: 'block' },
+  { pattern: /\b(shutdown|reboot|halt)\b/i, label: 'system control', unattended: 'block' },
+  { pattern: />\s*\/dev\/(?!null\b)/i,      label: 'write to device', unattended: 'block' },
+  { pattern: /\bcurl\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell', unattended: 'ask' },
+  { pattern: /\b(npm|pnpm|yarn)\s+(publish|unpublish)\b/i, label: 'package publish', unattended: 'ask' },
+  { pattern: /\bdocker\s+push\b/i,          label: 'docker push', unattended: 'block' },
+  { pattern: /\bdocker\s+(rm|rmi|prune)/i,  label: 'docker cleanup', unattended: 'ask' },
+  { pattern: /\bdocker[\s-]compose\b/i,     label: 'docker compose', unattended: 'block' },
   // Deploy platforms & infrastructure
-  { pattern: /\b(wrangler|vercel|netlify|flyctl|railway|firebase|heroku)\b/i, label: 'deploy platform CLI' },
-  { pattern: /\bkubectl\b/i,                label: 'kubectl (Kubernetes)' },
-  { pattern: /\b(terraform|tofu)\b/i,       label: 'terraform/tofu (infrastructure)' },
-  { pattern: /\bpulumi\b/i,                 label: 'pulumi (infrastructure)' },
-  { pattern: /\b(ansible|ansible-playbook)\b/i, label: 'ansible (remote configuration)' },
-  { pattern: /\bhelm\b/i,                   label: 'helm (Kubernetes packages)' },
-  { pattern: /\baws\s/i,                    label: 'AWS CLI' },
-  { pattern: /\bgcloud\s/i,                 label: 'Google Cloud CLI' },
-  { pattern: /\baz\s/i,                     label: 'Azure CLI' },
-  { pattern: /\bsystemctl\b/i,              label: 'service management' },
-  { pattern: /\blaunchctl\b/i,              label: 'service management (macOS)' },
+  { pattern: /\b(wrangler|vercel|netlify|flyctl|railway|firebase|heroku)\b/i, label: 'deploy platform CLI', unattended: 'block' },
+  { pattern: /\bkubectl\b/i,                label: 'kubectl (Kubernetes)', unattended: 'ask' },
+  { pattern: /\b(terraform|tofu)\b/i,       label: 'terraform/tofu (infrastructure)', unattended: 'ask' },
+  { pattern: /\bpulumi\b/i,                 label: 'pulumi (infrastructure)', unattended: 'ask' },
+  { pattern: /\b(ansible|ansible-playbook)\b/i, label: 'ansible (remote configuration)', unattended: 'block' },
+  { pattern: /\bhelm\b/i,                   label: 'helm (Kubernetes packages)', unattended: 'ask' },
+  { pattern: /\baws\s/i,                    label: 'AWS CLI', unattended: 'ask' },
+  { pattern: /\bgcloud\s/i,                 label: 'Google Cloud CLI', unattended: 'ask' },
+  { pattern: /\baz\s/i,                     label: 'Azure CLI', unattended: 'ask' },
+  { pattern: /\bsystemctl\b/i,              label: 'service management', unattended: 'ask' },
+  { pattern: /\blaunchctl\b/i,              label: 'service management (macOS)', unattended: 'block' },
   // Remote access
-  { pattern: /\bssh\s/i,                    label: 'remote shell access' },
-  { pattern: /\bscp\s/i,                    label: 'remote file copy' },
-  { pattern: /\brsync\s/i,                  label: 'remote sync' },
-  { pattern: /\bsftp\s/i,                   label: 'remote file transfer' },
+  { pattern: /\bssh\s/i,                    label: 'remote shell access', unattended: 'ask' },
+  { pattern: /\bscp\s/i,                    label: 'remote file copy', unattended: 'ask' },
+  { pattern: /\brsync\s/i,                  label: 'remote sync', unattended: 'ask' },
+  { pattern: /\bsftp\s/i,                   label: 'remote file transfer', unattended: 'ask' },
   // Broad process killing
-  { pattern: /\bpkill\b/i,                  label: 'kill processes by name' },
-  { pattern: /\bkillall\b/i,                label: 'kill all processes by name' },
+  { pattern: /\bpkill\b/i,                  label: 'kill processes by name', unattended: 'allow' },
+  { pattern: /\bkillall\b/i,                label: 'kill all processes by name', unattended: 'allow' },
   // Package execution/installation (arbitrary code)
-  { pattern: /\bnpx\s/i,                    label: 'execute npm package (arbitrary code)' },
-  { pattern: /\bpip3?\s+install\b/i,        label: 'install Python package' },
-  { pattern: /\bgem\s+install\b/i,          label: 'install Ruby gem' },
-  { pattern: /\bcargo\s+install\b/i,        label: 'install Rust crate' },
-  { pattern: /\bgo\s+install\b/i,           label: 'install Go package' },
-  { pattern: /\bprintenv\b/i,               label: 'print environment (secrets)' },
-  { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)' },
-  { pattern: /\bwget\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell' },
-  { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection' },
-  { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem' },
-  { pattern: /\b(cat|less|more|head|tail)\b.*\.env\b/i, label: 'read secrets file' },
-  ...LYNOX_SECRET_BASH,
-  { pattern: /\bln\s+(-[a-zA-Z]*s|-[a-zA-Z]*\s+-[a-zA-Z]*s|--symbolic)\b/i, label: 'create symlink' },
-  { pattern: /\bpython[23]?\s+-c\b/i,       label: 'python code execution' },
-  { pattern: /\bnode\s+-e\b/i,              label: 'node code execution' },
-  { pattern: /\bperl\s+-e\b/i,              label: 'perl code execution' },
-  { pattern: /\bruby\s+-e\b/i,              label: 'ruby code execution' },
-  { pattern: /\bcrontab\b/i,                label: 'modify cron jobs' },
-  { pattern: /\biptables\b/i,               label: 'modify firewall rules' },
-  { pattern: /\buseradd\b|\busermod\b|\bgroupadd\b/i, label: 'modify users/groups' },
-  { pattern: /\bcat\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)' },
-  { pattern: /\becho\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)' },
-  { pattern: /\btee\b\s+(?!\/tmp\/)/i,      label: 'write file via bash (use write_file instead)' },
-  { pattern: /\bsed\s+-i\b/i,               label: 'in-place file edit via bash (use write_file instead)' },
+  { pattern: /\bnpx\s/i,                    label: 'execute npm package (arbitrary code)', unattended: 'ask' },
+  { pattern: /\bpip3?\s+install\b/i,        label: 'install Python package', unattended: 'ask' },
+  { pattern: /\bgem\s+install\b/i,          label: 'install Ruby gem', unattended: 'ask' },
+  { pattern: /\bcargo\s+install\b/i,        label: 'install Rust crate', unattended: 'ask' },
+  { pattern: /\bgo\s+install\b/i,           label: 'install Go package', unattended: 'ask' },
+  { pattern: /\bprintenv\b/i,               label: 'print environment (secrets)', unattended: 'block' },
+  { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im, label: 'dump environment (secrets)', unattended: 'block' },
+  { pattern: /\bwget\b.*\|\s*(sh|bash)/i,   label: 'pipe to shell', unattended: 'ask' },
+  { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection', unattended: 'ask' },
+  { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem', unattended: 'ask' },
+  { pattern: /\b(cat|less|more|head|tail)\b.*\.env\b/i, label: 'read secrets file', unattended: 'allow' },
+  ...LYNOX_SECRET_BASH.map((entry) => ({ ...entry, unattended: 'block' as const })),
+  { pattern: /\bln\s+(-[a-zA-Z]*s|-[a-zA-Z]*\s+-[a-zA-Z]*s|--symbolic)\b/i, label: 'create symlink', unattended: 'allow' },
+  { pattern: /\bpython[23]?\s+-c\b/i,       label: 'python code execution', unattended: 'sends' },
+  { pattern: /\bnode\s+-e\b/i,              label: 'node code execution', unattended: 'sends' },
+  { pattern: /\bperl\s+-e\b/i,              label: 'perl code execution', unattended: 'sends' },
+  { pattern: /\bruby\s+-e\b/i,              label: 'ruby code execution', unattended: 'sends' },
+  { pattern: /\bcrontab\b/i,                label: 'modify cron jobs', unattended: 'ask' },
+  { pattern: /\biptables\b/i,               label: 'modify firewall rules', unattended: 'ask' },
+  { pattern: /\buseradd\b|\busermod\b|\bgroupadd\b/i, label: 'modify users/groups', unattended: 'ask' },
+  { pattern: /\bcat\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  { pattern: /\becho\b.*[^2]>\s*(?!\/tmp\/|\/dev\/null)/i, label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  { pattern: /\btee\b\s+(?!\/tmp\/)/i,      label: 'write file via bash (use write_file instead)', unattended: 'allow' },
+  { pattern: /\bsed\s+-i\b/i,               label: 'in-place file edit via bash (use write_file instead)', unattended: 'allow' },
   // HTTP mutations via bash (bypasses http_request SSRF protection) — keep AFTER secrets patterns
-  { pattern: /\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/i, label: 'HTTP mutation via curl' },
-  { pattern: /\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/i, label: 'HTTP data submission via curl' },
-  { pattern: /\bwget\b.*(--post-data|--post-file|--method)/i, label: 'HTTP mutation via wget' },
+  { pattern: /\bcurl\b.*-X\s*(POST|PUT|PATCH|DELETE)/i, label: 'HTTP mutation via curl', unattended: 'sends' },
+  { pattern: /\bcurl\b.*(--data\b|-d\s|-F\s|--form\b)/i, label: 'HTTP data submission via curl', unattended: 'sends' },
+  { pattern: /\bwget\b.*(--post-data|--post-file|--method)/i, label: 'HTTP mutation via wget', unattended: 'sends' },
   // Shell escape / arbitrary code execution
-  { pattern: /\beval\b/i,                             label: 'eval (arbitrary code execution)' },
-  { pattern: /base64.*\|.*(?:bash|sh|zsh)\b/i,        label: 'base64 decode piped to shell' },
-  { pattern: /\bbash\s+-c\b/i,                        label: 'bash -c (explicit subshell)' },
-  { pattern: /\becho\b.*\|.*\b(?:bash|sh|zsh)\b/i,    label: 'echo piped to shell' },
+  { pattern: /\beval\b/i,                             label: 'eval (arbitrary code execution)', unattended: 'ask' },
+  { pattern: /base64.*\|.*(?:bash|sh|zsh)\b/i,        label: 'base64 decode piped to shell', unattended: 'ask' },
+  { pattern: /\bbash\s+-c\b/i,                        label: 'bash -c (explicit subshell)', unattended: 'sends' },
+  { pattern: /\becho\b.*\|.*\b(?:bash|sh|zsh)\b/i,    label: 'echo piped to shell', unattended: 'ask' },
   // SQL — data destruction (also in CRITICAL_BASH for autonomous blocking)
-  { pattern: /\b(DROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW|TRIGGER))\b/i, label: 'SQL DROP (irreversible data destruction)' },
-  { pattern: /\bTRUNCATE\b/i, label: 'SQL TRUNCATE (irreversible data destruction)' },
-  { pattern: /\bDELETE\s+FROM\s+\S+\s*;/i, label: 'SQL DELETE without WHERE (full table wipe)' },
+  { pattern: /\b(DROP\s+(TABLE|DATABASE|SCHEMA|INDEX|VIEW|TRIGGER))\b/i, label: 'SQL DROP (irreversible data destruction)', unattended: 'block' },
+  { pattern: /\bTRUNCATE\b/i, label: 'SQL TRUNCATE (irreversible data destruction)', unattended: 'block' },
+  { pattern: /\bDELETE\s+FROM\s+\S+\s*;/i, label: 'SQL DELETE without WHERE (full table wipe)', unattended: 'block' },
   // Database CLIs — data access and modification
-  { pattern: /\b(psql|mysql|sqlite3|mongosh|mongo)\b/i, label: 'database CLI' },
-  { pattern: /\b(pg_dump|mysqldump|mongodump|pg_restore|mysqlimport|mongoexport)\b/i, label: 'database dump/restore (data exfiltration risk)' },
+  { pattern: /\b(psql|mysql|sqlite3|mongosh|mongo)\b/i, label: 'database CLI', unattended: 'ask' },
+  { pattern: /\b(pg_dump|mysqldump|mongodump|pg_restore|mysqlimport|mongoexport)\b/i, label: 'database dump/restore (data exfiltration risk)', unattended: 'ask' },
   // Email sending — outbound communication
-  { pattern: /\b(sendmail|msmtp|mutt|mailx?)\s/i, label: 'send email' },
+  { pattern: /\b(sendmail|msmtp|mutt|mailx?)\s/i, label: 'send email', unattended: 'ask' },
   // Payment CLIs — financial mutations (also in CRITICAL_BASH for specific mutations)
-  { pattern: /\bstripe\s+(charges|payouts|transfers|refunds|customers\s+delete|subscriptions\s+cancel)\b/i, label: 'payment mutation (financial impact)' },
-  { pattern: /\b(stripe|paypal)\s/i, label: 'payment platform CLI' },
+  { pattern: /\bstripe\s+(charges|payouts|transfers|refunds|customers\s+delete|subscriptions\s+cancel)\b/i, label: 'payment mutation (financial impact)', unattended: 'block' },
+  { pattern: /\b(stripe|paypal)\s/i, label: 'payment platform CLI', unattended: 'ask' },
   // Webhook/notification URLs via curl
-  { pattern: /\bcurl\b.*\b(hooks\.slack\.com|discord\.com\/api\/webhooks|webhook\.site)\b/i, label: 'webhook notification' },
+  { pattern: /\bcurl\b.*\b(hooks\.slack\.com|discord\.com\/api\/webhooks|webhook\.site)\b/i, label: 'webhook notification', unattended: 'ask' },
   // Messaging CLIs
-  { pattern: /\b(slack-cli|twilio)\s/i, label: 'messaging platform CLI' },
+  { pattern: /\b(slack-cli|twilio)\s/i, label: 'messaging platform CLI', unattended: 'ask' },
   // Encoding bypass — hex/octal decode piped to shell
-  { pattern: /\bxxd\b.*-r.*\|\s*(?:bash|sh|zsh)\b/i, label: 'hex decode piped to shell' },
-  { pattern: /\bprintf\b.*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/i, label: 'printf hex escape piped to shell' },
+  { pattern: /\bxxd\b.*-r.*\|\s*(?:bash|sh|zsh)\b/i, label: 'hex decode piped to shell', unattended: 'ask' },
+  { pattern: /\bprintf\b.*\\x[0-9a-f].*\|\s*(?:bash|sh|zsh)\b/i, label: 'printf hex escape piped to shell', unattended: 'ask' },
   // File upload via curl form (file exfiltration)
-  { pattern: /\bcurl\b.*-F\s*"?[^"]*@/i,           label: 'file upload via curl form (data exfiltration)' },
+  { pattern: /\bcurl\b.*-F\s*"?[^"]*@/i,           label: 'file upload via curl form (data exfiltration)', unattended: 'ask' },
   // Reverse shell / covert channel (also in CRITICAL for autonomous blocking)
-  { pattern: /\b(ncat|socat)\b/i,                  label: 'reverse shell enabler (ncat/socat)' },
+  { pattern: /\b(ncat|socat)\b/i,                  label: 'reverse shell enabler (ncat/socat)', unattended: 'block' },
   // Bash built-in networking
-  { pattern: /\/dev\/(tcp|udp)\//i,                label: 'bash built-in networking (/dev/tcp)' },
+  { pattern: /\/dev\/(tcp|udp)\//i,                label: 'bash built-in networking (/dev/tcp)', unattended: 'block' },
   // Local HTTP server
-  { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)' },
+  { pattern: /\bpython[23]?\s+-m\s+(http\.server|SimpleHTTPServer)\b/i, label: 'local HTTP server (data exfiltration)', unattended: 'block' },
 ];
+
+/** The rules of DANGEROUS_BASH an unattended run asks about (see DangerousBashRule). */
+const UNATTENDED_ASK_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended === 'ask');
+
+/**
+ * DANGEROUS_BASH without its `block` rules, for the chat scan that runs after CRITICAL_BASH found
+ * nothing: a `block` rule matches only what CRITICAL_BASH matches, so it cannot hit there, and
+ * scanning it would only cost time on a long command.
+ */
+const DANGEROUS_AFTER_CRITICAL_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended !== 'block');
 
 const SENSITIVE_PATHS: RegExp[] = [
   /^\/etc\//, /^\/usr\//, /^\/sys\//, /^\/proc\//, /^\/root\//,
@@ -822,8 +863,40 @@ export function stripShellQuotes(cmd: string): string {
   return out;
 }
 
-function _checkPatterns(segments: string[], patterns: Array<{ pattern: RegExp; label: string }>): { label: string } | null {
+/**
+ * One regex for a whole list: the union of its rules, so a segment no rule matches costs one
+ * pass per flag set, not one per rule. On a long command the surface runs to millions of
+ * characters, and the per-rule passes were what grew with every rule added. The rules are grouped
+ * by their flags, one union per group. Built only where each union is exact: no rule global or
+ * sticky, and no backreference (whose number would change in the union). Otherwise `null`, and
+ * every segment is read rule by rule as before.
+ */
+const listUnions = new WeakMap<ReadonlyArray<{ pattern: RegExp }>, RegExp[] | null>();
+function _listUnions(patterns: ReadonlyArray<{ pattern: RegExp }>): RegExp[] | null {
+  if (listUnions.has(patterns)) return listUnions.get(patterns)!;
+  let unions: RegExp[] | null = null;
+  if (patterns.every(({ pattern }) => !/[gy]/.test(pattern.flags) && !/\\[1-9]|\\k</.test(pattern.source))) {
+    const byFlags = new Map<string, string[]>();
+    for (const { pattern } of patterns) {
+      const sources = byFlags.get(pattern.flags) ?? [];
+      sources.push(`(?:${pattern.source})`);
+      byFlags.set(pattern.flags, sources);
+    }
+    try {
+      unions = [...byFlags].map(([flags, sources]) => new RegExp(sources.join('|'), flags));
+    } catch {
+      unions = null; // e.g. two rules naming the same group: read rule by rule
+    }
+  }
+  listUnions.set(patterns, unions);
+  return unions;
+}
+
+function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string }>): { label: string } | null {
+  const unions = _listUnions(patterns);
   for (const segment of segments) {
+    // Only a segment some rule matches is read rule by rule, in list order, for the label.
+    if (unions && !unions.some((union) => union.test(segment))) continue;
     for (const { pattern, label } of patterns) {
       if (pattern.test(segment)) {
         return { label };
@@ -918,7 +991,7 @@ const BASH_SCAN_OVERLAP = 2_000;
 
 function _scanBashDanger(
   rawCmd: string,
-  patterns: Array<{ pattern: RegExp; label: string }>,
+  patterns: ReadonlyArray<{ pattern: RegExp; label: string }>,
 ): { label: string } | null {
   // The command as written, in every window, before any reading with options dropped: a
   // variant only adds surface, so it must not put its label in front of a plain hit.
@@ -944,22 +1017,25 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const firstLine = rawCmd.split('\n')[0]!;
     const preview = firstLine.length > 80 ? firstLine.slice(0, 77) + '...' : firstLine;
 
-    // In autonomous mode, only block truly critical operations
+    // One pass per class, strictest first, each over the whole command: in a chain, the
+    // strictest rule any segment matches decides, wherever that segment stands.
     if (autonomy === 'autonomous') {
       const hit = _scanBashDanger(rawCmd, CRITICAL_BASH);
       if (hit) {
         return `⚠ ${toolName}: ${hit.label} — "${preview}" [BLOCKED — this action needs to be run manually for safety]`;
       }
-      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
+      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH);
       if (ask) {
         return `⚠ ${toolName}: ${ask.label} — "${preview}"`;
       }
       return null;
     }
 
-    // The ask list after the full dangerous scan, not merged into it: a merged list would let a
-    // new rule on an earlier segment take the label of an old rule on a later one.
-    const hit = _scanBashDanger(rawCmd, DANGEROUS_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
+    // In a chat everything an unattended run blocks is asked about too: a rule that stops a run
+    // no one watches must not pass silently where someone could have been asked. Lists in turn,
+    // not merged: a merged list would let a rule on an earlier segment take the label of a
+    // stricter rule on a later one.
+    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
     if (hit) {
       return `⚠ ${toolName}: ${hit.label} — "${preview}"`;
     }
