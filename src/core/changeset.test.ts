@@ -260,7 +260,8 @@ describe('ChangesetManager', () => {
       mgr.backupBeforeWrite(join(cwd, 'never-written.txt'));
       expect(mgr.hasChanges()).toBe(false);
       expect(mgr.size).toBe(0);
-      mgr.cleanup();
+      // Nothing is left to track, so nothing is left in the temp directory either.
+      expect(existsSync((mgr as unknown as { backupDir: string }).backupDir)).toBe(false);
     });
 
     it('next to an unchanged one, a changed file is still reported, and counted alone', () => {
@@ -351,6 +352,8 @@ describe('ChangesetManager', () => {
       const mgr = new ChangesetManager(cwd, 'test-run');
       mgr.backupBeforeWrite(filePath);
       rmSync(filePath);
+      // `size` read on its own, first: it counts what the review would show, not what is tracked.
+      expect(mgr.size).toBe(0);
       expect(mgr.hasChanges()).toBe(false);
       mgr.rollbackAll();
       expect(readFileSync(filePath, 'utf-8')).toBe('keep me');
