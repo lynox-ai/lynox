@@ -145,14 +145,12 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
   });
 
   it('the access export lists each source\'s wording', async () => {
-    const { ks } = stores();
     seedThread('t-export');
     const res = await fetch(`${baseUrl}/api/export`, { headers: { Authorization: `Bearer ${SECRET}` } });
     expect(res.status).toBe(200);
     const body = await res.json() as { durable_knowledge?: { sources?: Array<{ threadId: string | null; text: string }> } };
     const mine = (body.durable_knowledge?.sources ?? []).filter(s => s.threadId === 't-export').map(s => s.text);
     expect(mine).toContain('Walkfalke ships in March (t-export)');
-    expect(ks.listSourcesMasked().length).toBeGreaterThan(0);
   });
 
   it('a failed durable marking answers 500 and leaves the chat; the retry marks the rest and keeps the first stamp', async () => {

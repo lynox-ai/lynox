@@ -1358,6 +1358,17 @@ describe('a fact said in two chats: private mode takes only what the private cha
     expect(entry?.pinned).toBe(false);
   });
 
+  it('a pin the remaining chat set stays with it', () => {
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b', pin: true }).pinned).toBe(true);
+
+    ks.deleteByThread('chat-a');
+
+    expect(ks.getEntry(a.id)?.text).toBe(RESTATED);
+    expect(ks.getEntry(a.id)?.pinned).toBe(true);
+  });
+
   it('an edited approval replaces the queued wording in the source too', () => {
     const { ks } = make();
     const queued = ks.write({ text: 'Jana Reber moved from Gasse 4 and lives in Bern', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-q' });

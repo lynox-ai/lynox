@@ -506,14 +506,15 @@ export class KnowledgeStore {
         // be pinned on its first write (dedup early-returns before the pin path below, and no
         // other pin-update path exists). An active dup row is pin-eligible by H6; the incoming
         // write is trusted (we are in the status==='active' branch).
-        // The restating conversation becomes a source of the row it folded into, with its own
-        // wording, so switching the first conversation private does not take this one's fact.
-        if (params.sourceThreadId) this._addSource(dup.id, params);
         let dupPinned = dup.pinned === 1;
-        if (params.pin === true && !dupPinned && (dup.source_type as ProvenanceKind) !== 'external_unverified') {
+        const pinsNow = params.pin === true && (dup.source_type as ProvenanceKind) !== 'external_unverified';
+        if (pinsNow && !dupPinned) {
           this.db.prepare('UPDATE knowledge_entries SET pinned = 1 WHERE id = ?').run(dup.id);
           dupPinned = true;
         }
+        // The restating conversation becomes a source of the row it folded into, with its own
+        // wording and its own pin, so switching the first conversation private takes neither.
+        if (params.sourceThreadId) this._addSource(dup.id, params, pinsNow);
         return { id: dup.id, status: 'active', tier: dup.source_type as ProvenanceKind, subjectId: dup.subject_id, pinned: dupPinned, deduped: true };
       }
     }
@@ -544,7 +545,7 @@ export class KnowledgeStore {
       params.sourceThreadId ?? null,
       params.sourceRunId ?? null,
     );
-    this._addSource(id, params);
+    this._addSource(id, params, pinned === 1);
 
     return { id, status, tier, subjectId, pinned: pinned === 1, ...(subjectAmbiguous && !subjectId ? { subjectAmbiguous: true } : {}) };
   }
@@ -745,8 +746,8 @@ export class KnowledgeStore {
   private _backfillProfileSeeds(): void {
     const marker = this.db.prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined;
     if (!marker || marker.done === 1) return;
-    // Text the store cannot decrypt (a boot without the key) matches nothing; marking done
-    // then would skip these lines for good. Leave the marker open for a boot that can read.
+    // Encrypted text on a boot without the key matches nothing; marking done then would skip
+    // these lines for good. Leave the marker open for a boot that has the key.
     const readable = (t: string): boolean => this.engine.isEncrypted || !t.startsWith('enc:');
     const content = this.getBlock('profile')?.content ?? '';
     if (!readable(content)) return;
@@ -769,13 +770,17 @@ export class KnowledgeStore {
   }
 
   /** Add a conversation as a source of an entry, with the wording and evidence it came with. */
-  private _addSource(entryId: string, params: KnowledgeWriteParams): void {
+  private _addSource(entryId: string, params: KnowledgeWriteParams, pinned: boolean): void {
     this.db.prepare(
-      'INSERT OR IGNORE INTO entry_sources (entry_id, thread_id, run_id, text, source_channel, source_untrusted) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT OR IGNORE INTO entry_sources (entry_id, thread_id, run_id, text, source_channel, source_untrusted, pinned) VALUES (?, ?, ?, ?, ?, ?, ?)',
     ).run(
       entryId, params.sourceThreadId ?? null, params.sourceRunId ?? null, this.engine.enc(params.text),
-      params.sourceChannel ?? null, params.sourceUntrusted === true ? 1 : 0,
+      params.sourceChannel ?? null, params.sourceUntrusted === true ? 1 : 0, pinned ? 1 : 0,
     );
+    // A chat that is already a source and pins now: the pin is still this chat's.
+    if (pinned) {
+      this.db.prepare('UPDATE entry_sources SET pinned = 1 WHERE entry_id = ? AND thread_id IS ?').run(entryId, params.sourceThreadId ?? null);
+    }
   }
 
   /**
@@ -1317,10 +1322,10 @@ export class KnowledgeStore {
       WHERE source_thread_id = ? OR id IN (SELECT entry_id FROM entry_sources WHERE thread_id = ?)
     `).all(threadId, threadId) as Array<{ id: string; text: string; source_thread_id: string | null }>;
     const nextSource = this.db.prepare(`
-      SELECT thread_id, run_id, text, thread_deleted_at, source_channel, source_untrusted FROM entry_sources
+      SELECT thread_id, run_id, text, thread_deleted_at, source_channel, source_untrusted, pinned FROM entry_sources
       WHERE entry_id = ? AND (thread_id IS NULL OR thread_id != ?) ORDER BY id LIMIT 1
     `);
-    type Source = { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null; source_channel: string | null; source_untrusted: number };
+    type Source = { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null; source_channel: string | null; source_untrusted: number; pinned: number };
     const doomed: string[] = [];
     const rewritten: Array<{ id: string; next: Source }> = [];
     for (const row of touched) {
@@ -1337,13 +1342,14 @@ export class KnowledgeStore {
     }
     return this.db.transaction(() => {
       this.db.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run(threadId);
-      // The entry becomes the remaining source's: its wording AND its trust. The tier is derived
-      // from that source's evidence, never kept from the removed one; the pin and the review were
-      // acts on the removed wording and do not carry over.
+      // The entry becomes the remaining source's: its wording, its trust and its pin. The tier is
+      // derived from that source's evidence, never kept from the removed one. The entry stays
+      // pinned only if that source pinned it (and the H6 bar holds for its tier). The review
+      // fields go: a review is only ever of a queued entry's first wording, which this removes.
       const rewrite = this.db.prepare(`
         UPDATE knowledge_entries
         SET text = ?, source_thread_id = ?, source_run_id = ?, source_thread_deleted_at = ?,
-            source_channel = ?, source_untrusted = ?, source_type = ?, pinned = 0,
+            source_channel = ?, source_untrusted = ?, source_type = ?, pinned = ?,
             reviewed_at = NULL, review_action = NULL, updated_at = datetime('now')
         WHERE id = ?
       `);
@@ -1351,8 +1357,9 @@ export class KnowledgeStore {
         const tier = deriveProvenanceTier(knowledgeEvidence({
           sourceChannel: r.next.source_channel, sourceUntrusted: r.next.source_untrusted === 1, reviewAction: null,
         }));
+        const pinned = r.next.pinned === 1 && tier !== 'external_unverified' ? 1 : 0;
         rewrite.run(r.next.text, r.next.thread_id, r.next.run_id, r.next.thread_deleted_at,
-          r.next.source_channel, r.next.source_untrusted, tier, r.id);
+          r.next.source_channel, r.next.source_untrusted, tier, pinned, r.id);
       }
       const del = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?');
       let removed = 0;
