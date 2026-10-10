@@ -26,6 +26,6 @@ export function privateThreadRefusal(agent: IAgent): string | null {
   if (!threadId) return null;
   const thread = agent.toolContext.threadStore?.getThread(threadId);
   if (thread?.skip_extraction !== 1) return null;
-  return 'Not stored: this chat is in private mode, and nothing from it is kept in memory. '
+  return 'Not stored: this chat is in private mode. '
     + 'If the user wants this remembered, they can turn private mode off for this chat first.';
 }

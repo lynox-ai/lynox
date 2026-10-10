@@ -94,12 +94,26 @@ describe('memory-writing tools refuse in a private chat', () => {
     expect(ks.listActive().length + ks.pendingCount()).toBe(0);
   });
 
+  it('remember from a sub-agent of a chat that is not private: stores — the origin check is not a blanket refusal', async () => {
+    const { agent, ks } = make({ privateThread: false });
+    const child = Object.assign(Object.create(agent) as object, { currentThreadId: undefined, originThreadId: 't1' }) as IAgent;
+    await rememberTool.handler({ text: 'Jana Reber lives in Bern' }, child);
+    expect(ks.listActive().length + ks.pendingCount()).toBe(1);
+  });
+
   it('memory_block_edit: refused, the profile block unchanged', async () => {
     const { agent, ks } = make({ privateThread: true });
     ks.setBlockContent('profile', 'Operator: Alex.');
     const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Jana Reber lives in Bern' } as never, agent);
     expect(out).toBe(privateThreadRefusal(agent));
     expect(ks.getBlock('profile')?.content).toBe('Operator: Alex.');
+  });
+
+  it('memory_block_edit: applies in a chat that is not private — the second check is not a blanket one', async () => {
+    const { agent, ks } = make({ privateThread: false });
+    ks.setBlockContent('profile', 'Operator: Alex.');
+    await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Prefers calls after 18:00' } as never, agent);
+    expect(ks.getBlock('profile')?.content).toContain('Prefers calls after 18:00');
   });
 
   it('memory_block_edit: private mode switched on while the Apply dialog is open — still refused', async () => {
