@@ -644,3 +644,84 @@ describe('originWireFields', () => {
     expect(Object.values(originWireFields(undefined)).every(v => v === undefined)).toBe(true);
   });
 });
+
+describe('PromptStore — expiry of a prompt stored in the form the store writes', () => {
+  // The store writes `expires_at` as an ISO string. The fixtures above set it with
+  // `datetime('now', …)` — SQLite's own form, the one the SQL compared against — and so
+  // could not see that an ISO value read as live for the rest of its expiry day. These set
+  // it to an ISO instant a few seconds ago, on the same UTC day as SQLite's `now`.
+  let db: Database.Database;
+  let store: PromptStore;
+  let closeDb: () => void;
+
+  beforeEach(async () => {
+    // A value a few seconds before midnight lies on the previous day, where the old
+    // comparison happened to be right; wait out the first seconds of a day.
+    const now = new Date();
+    if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0 && now.getUTCSeconds() < 5) {
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+    ({ db, close: closeDb } = makeDb());
+    store = new PromptStore(db);
+  });
+
+  afterEach(() => {
+    closeDb();
+  });
+
+  const setExpiry = (id: string, offsetMs: number): void => {
+    db.prepare(`UPDATE pending_prompts SET expires_at = ? WHERE id = ?`)
+      .run(new Date(Date.now() + offsetMs).toISOString(), id);
+  };
+
+  it('a pending question past its expiry is no longer offered or answerable', () => {
+    const id = store.insertAskUser('s-1', 'q?');
+    setExpiry(id, -3_000);
+    expect(store.getPending('s-1')).toBeUndefined();
+    expect(store.answerUser(id, 'yes')).toBe(false);
+    const secret = store.insertAskSecret('s-2', 'KEY', 'secret?');
+    setExpiry(secret, -3_000);
+    expect(store.answerSecret(secret, 'saved')).toBe(false);
+  });
+
+  it('a question still inside its expiry stays offered, survives the sweep, and is answerable', () => {
+    const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1');
+    setExpiry(id, 60_000);
+    expect(store.getPending('s-1')?.id).toBe(id);
+    expect(store.expireOld()).toBe(0);
+    expect(store.getById(id)!.status).toBe('pending');
+    expect(store.answerUser(id, 'yes')).toBe(true);
+    // Answered and still inside its expiry: the sweep leaves the trigger attached.
+    store.expireOld();
+    expect(store.getById(id)!.trigger_id).toBe('trg-1');
+  });
+
+  it('the sweep closes it, and a waiter already waiting hears it at once', async () => {
+    const id = store.insertAskUser('s-1', 'q?');
+    setExpiry(id, 60_000);
+    const waiting = store.waitForSettled(id);
+    setExpiry(id, -3_000);
+    expect(store.expireOld()).toBe(1);
+    expect(store.getById(id)!.status).toBe('expired');
+    const outcome = await Promise.race([
+      waiting,
+      new Promise((r) => setTimeout(() => r('still waiting'), 1_000)),
+    ]);
+    expect(outcome).toEqual({ status: 'expired' });
+  });
+
+  it('a waiter that sees the expiry itself leaves the row closed, not answerable', async () => {
+    const id = store.insertAskUser('s-1', 'q?');
+    setExpiry(id, -3_000);
+    expect(await store.waitForSettled(id)).toEqual({ status: 'expired' });
+    expect(store.getById(id)!.status).toBe('expired');
+  });
+
+  it('the sweep detaches a trigger from an answered question past its expiry', () => {
+    const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1');
+    expect(store.answerUser(id, 'yes')).toBe(true);
+    setExpiry(id, -3_000);
+    store.expireOld();
+    expect(store.getById(id)!.trigger_id).toBeNull();
+  });
+});

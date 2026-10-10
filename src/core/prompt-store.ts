@@ -237,6 +237,14 @@ const PROMPT_TTL_MS = 24 * 60 * 60_000; // 24 hours
 // happy path; this timer only catches prompts whose 24h TTL elapsed while the
 // handler was awaiting.
 const EXPIRY_CHECK_MS = 30_000;
+// `expires_at` is written as an ISO string (`2026-10-10T09:00:00.000Z`). SQLite's
+// `datetime('now')` is `2026-10-10 09:00:00`, and compared as TEXT the two disagree for
+// the whole expiry day: `T` sorts after the space, so a prompt read as still live until
+// the date rolled over — up to a day past its TTL, while `waitForSettled` (which compares
+// in JS) had already given up on it. Both sides go through `julianday()`, which reads
+// either form as an instant, to the millisecond on both sides.
+const EXPIRED = `julianday(expires_at) <= julianday('now')`;
+const NOT_EXPIRED = `julianday(expires_at) > julianday('now')`;
 
 // ── Store ────────────────────────────────────────────────────────────────────
 
@@ -575,14 +583,14 @@ export class PromptStore {
    */
   expireOld(): number {
     const rows = this.db
-      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND expires_at <= datetime('now')`)
+      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND ${EXPIRED}`)
       .all() as { id: string }[];
     const result = this._getExpireOldStmt().run();
     // Detach answered-but-unclaimed pointers on the same pass and the same clock.
     this.db
       .prepare(
         `UPDATE pending_prompts SET trigger_id = NULL
-         WHERE status = 'answered' AND trigger_id IS NOT NULL AND expires_at <= datetime('now')`,
+         WHERE status = 'answered' AND trigger_id IS NOT NULL AND ${EXPIRED}`,
       )
       .run();
     // Emit for each so pending waiters return promptly.
@@ -834,7 +842,7 @@ export class PromptStore {
     return (this._stmtAnswer ??= this.db.prepare(`
       UPDATE pending_prompts
       SET answer = ?, status = 'answered', answered_at = datetime('now')
-      WHERE id = ? AND status = 'pending' AND expires_at > datetime('now')
+      WHERE id = ? AND status = 'pending' AND ${NOT_EXPIRED}
     `));
   }
 
@@ -842,7 +850,7 @@ export class PromptStore {
     return (this._stmtAnswerSecret ??= this.db.prepare(`
       UPDATE pending_prompts
       SET answer_saved = ?, answer_error = ?, status = 'answered', answered_at = datetime('now')
-      WHERE id = ? AND status = 'pending' AND expires_at > datetime('now')
+      WHERE id = ? AND status = 'pending' AND ${NOT_EXPIRED}
     `));
   }
 
@@ -857,7 +865,7 @@ export class PromptStore {
   private _getGetPendingStmt(): Database.Statement {
     return (this._stmtGetPending ??= this.db.prepare(`
       SELECT * FROM pending_prompts
-      WHERE session_id = ? AND status = 'pending' AND expires_at > datetime('now')
+      WHERE session_id = ? AND status = 'pending' AND ${NOT_EXPIRED}
       ORDER BY created_at DESC LIMIT 1
     `));
   }
@@ -872,7 +880,7 @@ export class PromptStore {
     return (this._stmtExpireOld ??= this.db.prepare(`
       UPDATE pending_prompts
       SET status = 'expired'
-      WHERE status = 'pending' AND expires_at <= datetime('now')
+      WHERE status = 'pending' AND ${EXPIRED}
     `));
   }
 
