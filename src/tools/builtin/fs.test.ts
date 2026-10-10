@@ -575,19 +575,25 @@ describe('read_file — the source label of the block', () => {
   });
 });
 
-// The placeholder exactly as a model sees it, produced by the real eviction
-// transform over a successful save — built, not typed, so a reworded
-// placeholder cannot leave these tests checking a string nobody writes.
-function evictionPlaceholder(): string {
+// The reference in the two forms a model can copy: the note the engine now appends to an
+// evicted save's result, produced by the real eviction transform over a successful save —
+// built, not typed, so a reworded note cannot leave these tests checking a string nobody
+// writes — and the in-field form it put into `content` until 2026-10-10, which threads
+// persisted before then still carry (typed: nothing writes it any more).
+function evictionPlaceholders(): Array<[string, string]> {
+  const result = 'Saved artifact "Pitch" (id: ab12cd34, v1).\nFile: /x/ab12cd34.html';
   const turn = [
     { role: 'user', content: 'write it' },
     { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'artifact_save', input: { title: 'Pitch', content: 'x'.repeat(EVICTION_MIN_CHARS + 1) } }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact "Pitch" (id: ab12cd34, v1).\nFile: /x/ab12cd34.html' }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: result }] },
   ] as BetaMessageParam[];
-  const block = (evictSavedArtifactBodies(turn)[1]!.content as Array<{ type: string; input?: { content?: string } }>).find(b => b.type === 'tool_use')!;
-  const placeholder = block.input!.content!;
-  if (placeholder.startsWith('xxx')) throw new Error('eviction did not run — the test fixture is wrong');
-  return placeholder;
+  const evictedResult = (evictSavedArtifactBodies(turn)[2]!.content as Array<{ content: string }>)[0]!.content;
+  const note = evictedResult.slice(result.length).trim();
+  if (note === '') throw new Error('eviction did not run — the test fixture is wrong');
+  return [
+    ['note', note],
+    ['in-field form', '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]'],
+  ];
 }
 
 describe('file tools refuse the eviction placeholder inside the artifacts directory', () => {
@@ -609,10 +615,13 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
       clearTenantWorkspace();
       const p = join(d, 'artifacts', 'abcdef12.html');
       writeFileSync(p, '# Pitch\n\nThree budget options.', 'utf-8');
-      await expect(
-        editFileTool.handler({ path: p, old_string: 'Three budget options.', new_string: evictionPlaceholder() }, makeAgent()),
-      ).rejects.toThrow(/refused[\s\S]*placeholder/);
-      expect(await readFile(p, 'utf-8')).toBe('# Pitch\n\nThree budget options.');
+      for (const [form, placeholder] of evictionPlaceholders()) {
+        await expect(
+          editFileTool.handler({ path: p, old_string: 'Three budget options.', new_string: placeholder }, makeAgent()),
+          form,
+        ).rejects.toThrow(/refused[\s\S]*placeholder/);
+        expect(await readFile(p, 'utf-8'), form).toBe('# Pitch\n\nThree budget options.');
+      }
     });
   });
 
@@ -620,14 +629,15 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
     await withDataDir(async (d) => {
       clearTenantWorkspace();
       const p = join(d, 'artifacts', 'abcdef12.html');
-      const placeholder = evictionPlaceholder();
-      writeFileSync(p, `# Draft\n\n${placeholder}`, 'utf-8');
-      // An edit that does not write the placeholder is not refused, even though the file keeps one.
-      await editFileTool.handler({ path: p, old_string: '# Draft', new_string: '# Pitch' }, makeAgent());
-      expect(await readFile(p, 'utf-8')).toBe(`# Pitch\n\n${placeholder}`);
-      // Replacing the placeholder with the real text works too.
-      await editFileTool.handler({ path: p, old_string: placeholder, new_string: 'Three budget options.' }, makeAgent());
-      expect(await readFile(p, 'utf-8')).toBe('# Pitch\n\nThree budget options.');
+      for (const [form, placeholder] of evictionPlaceholders()) {
+        writeFileSync(p, `# Draft\n\n${placeholder}`, 'utf-8');
+        // An edit that does not write the placeholder is not refused, even though the file keeps one.
+        await editFileTool.handler({ path: p, old_string: '# Draft', new_string: '# Pitch' }, makeAgent());
+        expect(await readFile(p, 'utf-8'), form).toBe(`# Pitch\n\n${placeholder}`);
+        // Replacing the placeholder with the real text works too.
+        await editFileTool.handler({ path: p, old_string: placeholder, new_string: 'Three budget options.' }, makeAgent());
+        expect(await readFile(p, 'utf-8'), form).toBe('# Pitch\n\nThree budget options.');
+      }
     });
   });
 
@@ -636,10 +646,13 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
       setTenantWorkspace(d);
       const p = join(d, 'artifacts', 'abcdef12.html');
       writeFileSync(p, '# Pitch', 'utf-8');
-      await expect(
-        writeFileTool.handler({ path: p, content: evictionPlaceholder() }, makeAgent()),
-      ).rejects.toThrow(/refused[\s\S]*placeholder/);
-      expect(await readFile(p, 'utf-8')).toBe('# Pitch');
+      for (const [form, placeholder] of evictionPlaceholders()) {
+        await expect(
+          writeFileTool.handler({ path: p, content: placeholder }, makeAgent()),
+          form,
+        ).rejects.toThrow(/refused[\s\S]*placeholder/);
+        expect(await readFile(p, 'utf-8'), form).toBe('# Pitch');
+      }
     });
   });
 
@@ -647,11 +660,12 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
     await withDataDir(async (d) => {
       setTenantWorkspace(d);
       const p = join(d, 'notes.md');
-      const placeholder = evictionPlaceholder();
-      await writeFileTool.handler({ path: p, content: placeholder }, makeAgent());
-      expect(await readFile(p, 'utf-8')).toBe(placeholder);
-      await editFileTool.handler({ path: p, old_string: placeholder, new_string: `quoted: ${placeholder}` }, makeAgent());
-      expect(await readFile(p, 'utf-8')).toBe(`quoted: ${placeholder}`);
+      for (const [form, placeholder] of evictionPlaceholders()) {
+        await writeFileTool.handler({ path: p, content: placeholder }, makeAgent());
+        expect(await readFile(p, 'utf-8'), form).toBe(placeholder);
+        await editFileTool.handler({ path: p, old_string: placeholder, new_string: `quoted: ${placeholder}` }, makeAgent());
+        expect(await readFile(p, 'utf-8'), form).toBe(`quoted: ${placeholder}`);
+      }
     });
   });
 });

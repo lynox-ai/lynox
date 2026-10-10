@@ -142,6 +142,11 @@ function saveHistory() {
   ];
 }
 
+/** Every persisted row's content, as stored — to check that no eviction note reached disk. */
+function diskRowsJson(store: ThreadStore): string {
+  return store.getMessages(THREAD, { limit: 10_000 }).map((r) => r.content_json).join('\n');
+}
+
 /** All assistant tool_use blocks persisted to disk, as the reload path sees them. */
 function diskToolUseInputs(store: ThreadStore): string[] {
   return store.getMessages(THREAD, { limit: 10_000 })
@@ -168,13 +173,15 @@ describe('persist keeps original artifact bodies (D4)', () => {
     const agent = makeAgent(store);
 
     // 1) Rehydrate a history whose artifact_save already succeeded. This runs
-    //    the F5 resume eviction: the BUFFER now carries the marker.
+    //    the F5 resume eviction: the BUFFER now carries the evicted form —
+    //    the call without its body, the note on its result.
     agent.loadMessages(saveHistory());
     const buffered = agent.getMessages()[1];
-    const bufferedContent = Array.isArray(buffered.content)
-      ? buffered.content[0] as { input: { content: string } }
+    const bufferedCall = Array.isArray(buffered.content)
+      ? buffered.content[0] as { input: Record<string, unknown> }
       : null;
-    expect(bufferedContent?.input.content).toContain('[evicted after successful save');
+    expect(bufferedCall?.input).not.toHaveProperty('content');
+    expect(JSON.stringify(agent.getMessages()[2])).toContain('removed from the conversation');
 
     // 2) The prod state this regression is about: the persist that should have
     //    written these rows failed, so the persisted mark still sits BELOW
@@ -192,7 +199,9 @@ describe('persist keeps original artifact bodies (D4)', () => {
     // THE assertion: durable history keeps the original body (D4). Pre-fix
     // this receives the evicted marker string.
     expect(persisted[0]).toBe(BIG_BODY);
-    expect(persisted[0]).not.toContain('[evicted after successful save');
+    // …and its result as it was: the note is context, never transcript.
+    expect(diskRowsJson(store)).toContain('Saved artifact \\"Report\\"');
+    expect(diskRowsJson(store)).not.toContain('removed from the conversation');
   });
 
   it('the model context stays evicted while the disk copy is original', async () => {
@@ -202,13 +211,16 @@ describe('persist keeps original artifact bodies (D4)', () => {
     mockProcess.mockResolvedValueOnce(endTurnResponse('done'));
     await agent.send('thanks, continue');
 
-    // Buffer (what the next wire call sends) carries the marker — the cost
+    // Buffer (what the next wire call sends) carries the evicted form — the cost
     // control is NOT given up by persisting the original.
     const assistantBlocks = agent.getMessages()[1].content;
     const toolUse = (Array.isArray(assistantBlocks) ? assistantBlocks : [])[0] as
-      | { input: { content: string } }
+      | { input: Record<string, unknown> }
       | undefined;
-    expect(toolUse?.input.content).toContain('[evicted after successful save');
+    expect(toolUse?.input).toBeDefined();
+    expect(toolUse?.input).not.toHaveProperty('content');
+    expect(JSON.stringify(agent.getMessages())).not.toContain(BIG_BODY);
     expect(diskToolUseInputs(store)[0]).toBe(BIG_BODY);
+    expect(diskRowsJson(store)).not.toContain('removed from the conversation');
   });
 });
