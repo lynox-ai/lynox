@@ -485,10 +485,11 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // off the curated allowlist (never silent-strip); the loader then hardens the
   // expanded tier_set the same way it does a raw one.
   'tier_preset',
-  // Not here: `background_model`. On a managed pool tier a tenant cannot set or change
-  // it: it is not tenant-writable until the published description of the operator's
-  // worker routing covers a tenant's own choice. Self-host and BYOK are not behind this
-  // gate and keep it writable.
+  // The background-task model. Same exposure as a tier_set slot, and bounded more
+  // tightly: the PUT handler refuses (400) a choice outside the blocklist, the
+  // max_tier ceiling or the managed provider allowlist, and the loader applies
+  // the same check (`admitBackgroundModel`) and the CP key at read time.
+  'background_model',
 ]);
 
 /**
@@ -7292,13 +7293,6 @@ export class LynoxHTTPApi {
       // 500, and a refused request must not mark the trigger as a mandate's edit either.
       if ('modelTier' in b && b['modelTier'] !== undefined && !isTriggerModelTierUpdate(b['modelTier'])) {
         errorResponse(res, 400, 'Invalid modelTier: use fast, balanced or deep, or null to clear it.');
-        return;
-      }
-      // On a managed pool tier background runs stay on the operator's worker routing: a
-      // trigger tier is not tenant-writable there until the published description of
-      // that routing covers a tenant's own choice. Clearing one stays allowed.
-      if (b['modelTier'] && requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
-        errorResponse(res, 403, 'modelTier cannot be set on this plan.');
         return;
       }
       // Refused here as well as in `update`, which throws only after the mark below.

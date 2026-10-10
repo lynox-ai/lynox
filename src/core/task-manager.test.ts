@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
-import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, admittedTriggerTier } from './task-manager.js';
+import { TaskManager, setPipelineModeLookup, deriveSourceEffect, BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from './task-manager.js';
 import { TriggerStore } from './trigger-store.js';
 import { runAsHandRun } from './hand-run-door.js';
 import { taskUpdateTool } from '../tools/builtin/task.js';
@@ -34,22 +34,6 @@ describe('deriveSourceEffect (create-path → clean axes; migration-remap twin)'
     expect(deriveSourceEffect({})).toEqual({ source: 'manual', effect: 'run_agent' });
     // an unknown taskType is a plain agent run, source from its firing shape:
     expect(deriveSourceEffect({ taskType: 'zzz' })).toEqual({ source: 'manual', effect: 'run_agent' });
-  });
-});
-
-describe('admittedTriggerTier', () => {
-  afterEach(() => { vi.unstubAllEnvs(); });
-
-  it('drops a stored tier on a managed pool tier and keeps it everywhere else', () => {
-    for (const tier of ['managed', 'managed_pro']) {
-      vi.stubEnv('LYNOX_BILLING_TIER', tier);
-      expect(admittedTriggerTier('deep'), tier).toBeUndefined();
-    }
-    vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
-    expect(admittedTriggerTier('deep')).toBe('deep');
-    vi.stubEnv('LYNOX_BILLING_TIER', '');
-    expect(admittedTriggerTier('fast')).toBe('fast');
-    expect(admittedTriggerTier(undefined)).toBeUndefined();
   });
 });
 

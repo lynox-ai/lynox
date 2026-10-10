@@ -4,8 +4,6 @@ import type { TaskRecord, TriggerRecord, TriggerStatus, TriggerSource, TriggerEf
 import type { DeliverySummary } from './notification-router.js';
 import type { BulkTriggerEffect } from '../types/pipeline.js';
 import { isValidCron, nextOccurrence } from './cron-parser.js';
-import { readEnvAlias } from './env.js';
-import { cpSuppliesLLMKey } from '../contract/vocab.js';
 import { compose, renderFence } from '../core/data-boundary.js';
 import { isHandRunOf } from './hand-run-door.js';
 import { isMandateTag, isOwnerPrincipal, ownedBy, type RequestPrincipal } from './request-principal.js';
@@ -180,17 +178,6 @@ export interface TaskUpdateParams {
  *  model tier reaches: a standard run or a watch analysis. */
 export function triggerTakesModelTier(effect: string): boolean {
   return effect === 'run_agent';
-}
-
-/**
- * The tier a run of a trigger is held to: its stored `model_tier`, except on a managed
- * pool tier, where a tenant cannot choose one and background runs keep the operator's
- * worker routing. Read at run time, not only at the write: a tier can also arrive with
- * an imported engine.db or from before a plan change.
- */
-export function admittedTriggerTier(tier: ModelTier | undefined): ModelTier | undefined {
-  if (!tier) return undefined;
-  return cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER')) ? undefined : tier;
 }
 
 /** Whether `value` is something {@link TaskUpdateParams.modelTier} accepts. Only the
