@@ -452,8 +452,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.variant.sonnet46_label':         { de: 'Claude Sonnet 4.6 · Standard',                                                 en: 'Claude Sonnet 4.6 · Standard' },
 	'llm.variant.sonnet46_hint':          { de: 'Bewährtes Standardmodell mit 200k-Kontext.',                                   en: 'Proven default model with 200k context.' },
 	'llm.variant.sonnet5_label':          { de: 'Claude Sonnet 5 · neu',                                                        en: 'Claude Sonnet 5 · new' },
-	'llm.variant.sonnet5_hint':           { de: '1M-Kontext, stärker bei agentischen Aufgaben, ~gleicher Preis.',  en: '1M context, stronger on agentic tasks, ~same price.' },
-	'llm.variant.note':                   { de: 'Nach dem Speichern schaltet Sonnet 5 unten das größere Kontextfenster frei. Sein neuer Tokenizer zählt allerdings ~30 % mehr Tokens pro Text — bei gleichem Preis pro Token liegen die Kosten pro Aufgabe daher etwas höher.', en: 'After you save, Sonnet 5 unlocks the larger context window below. Its newer tokenizer counts ~30% more tokens per text, though — so at the same per-token price, the cost per equivalent task is a touch higher.' },
+	'llm.variant.sonnet5_hint':           { de: '1M-Kontext, stärker bei agentischen Aufgaben, ähnliche Kosten pro Aufgabe.',  en: '1M context, stronger on agentic tasks, similar cost per task.' },
+	'llm.variant.note':                   { de: 'Nach dem Speichern schaltet Sonnet 5 unten das größere Kontextfenster frei. Sein neuer Tokenizer zählt ~30 % mehr Tokens pro Text, dafür ist der Preis pro Token tiefer — die Kosten pro Aufgabe liegen daher etwa gleich oder leicht darunter.', en: 'After you save, Sonnet 5 unlocks the larger context window below. Its newer tokenizer counts ~30% more tokens per text, but each token costs less — so the cost per equivalent task is about the same or slightly lower.' },
 
 	// LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven on LLMSettings.svelte —
 	// adding a 4th entry (e.g. OpenAI-native, PRD-OPENAI-NATIVE.md Phase 4) is

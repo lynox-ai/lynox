@@ -8,7 +8,7 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite:
 	// Values kept in lockstep with MODEL_CAPABILITIES in core/src/types/models.ts.
 	'claude-opus-4-6':           { input: 5,    output: 25,  cacheWrite: 10,    cacheRead: 0.50 },
 	'claude-sonnet-4-6':         { input: 3,    output: 15,  cacheWrite: 6,     cacheRead: 0.30 },
-	'claude-sonnet-5':           { input: 3,    output: 15,  cacheWrite: 6,     cacheRead: 0.30 },
+	'claude-sonnet-5':           { input: 2,    output: 10,  cacheWrite: 4,     cacheRead: 0.20 },
 	'claude-haiku-4-5-20251001': { input: 1,    output: 5,   cacheWrite: 2,     cacheRead: 0.10 },
 };
 
