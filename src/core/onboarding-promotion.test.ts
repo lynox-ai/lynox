@@ -42,6 +42,34 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
     expect(active[0]!.sourceThreadId).toBe(THREAD); // AC-1.10 identifiability
   });
 
+  it('the seeded line remembers its entry: the onboarding chat going private takes it, and only it', () => {
+    // Removal takes a `profile` line only when the line's seed is recorded. Without the record
+    // the seeded line would outlive its entry in every future turn.
+    const { ks } = makeKs();
+    promoteOnboardingBasics(
+      [{ key: 'company', answer: 'Acme GmbH' }],
+      { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+    );
+    ks.setBlockContent('profile', `${ks.getBlock('profile')?.content ?? ''}\nPrefers short answers`);
+
+    expect(ks.deleteByThread(THREAD)).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe('Prefers short answers');
+  });
+
+  it('a re-run that skips a known fact records the seed against the STORED entry', () => {
+    const { ks } = makeKs();
+    ks.write({ text: 'Company: Acme GmbH', sourceChannel: 'user', sourceThreadId: 'earlier-chat' });
+    const r = promoteOnboardingBasics(
+      [{ key: 'company', answer: 'Acme AG' }],
+      { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+    );
+    expect(r.skipped).toBe(1);
+    expect(r.profileSeeded).toBe(1);
+
+    expect(ks.deleteByThread('earlier-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content ?? '').toBe('');
+  });
+
   it('both basics promote; company mints an organization subject', () => {
     const { ks, subjects } = makeKs();
     const answers: OnboardingBasicAnswer[] = [
