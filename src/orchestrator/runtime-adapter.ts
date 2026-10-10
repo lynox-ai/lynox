@@ -647,6 +647,9 @@ export async function spawnViaAgent(
   /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
    *  D1, §3.13 E5). After `abortScope` for the reason given there. Absent = the owner. */
   principal?: RequestPrincipal | undefined,
+  /** The engine's ToolContext, so this step's tools run under its egress policy, as
+   *  `spawnInline` does. Last because it was added last; absent = an empty context. */
+  parentToolContext?: ToolContext | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -811,6 +814,9 @@ export async function spawnViaAgent(
     // tag), so an isDangerous guard decision during this step is stamped onto
     // the append-only audit with the run it occurred in.
     currentRunId: stepRunId,
+    // The engine's context: without it the Agent builds an empty one, and a tool that
+    // reads the egress policy from it finds none and allows every host.
+    toolContext: parentToolContext,
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
