@@ -793,6 +793,21 @@ export interface RunOptions {
 		| { kind: 'mail-batch'; ids: string[] };
 }
 
+/**
+ * Whether a send must wait for the open changeset review — and if so, says so and points at
+ * the review. A caller that holds the user's text asks this BEFORE clearing it: `sendMessage`
+ * returns without sending in that case, and text cleared first is lost.
+ */
+export function sendBlockedByReview(): boolean {
+	if (!pendingChangeset) return false;
+	addToast(t('changeset.review_pending'), 'info', 4000);
+	// Scroll changeset into view if visible
+	setTimeout(() => {
+		document.querySelector('[data-changeset-review]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+	}, 100);
+	return true;
+}
+
 export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[], runOptions?: RunOptions): Promise<void> {
 	// Overload: sendMessage(task, files?) — backwards compatible
 	if (Array.isArray(displayText)) {
@@ -801,14 +816,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 	}
 
 	// Block if changeset review is pending — user must review before next run
-	if (pendingChangeset) {
-		addToast(t('changeset.review_pending'), 'info', 4000);
-		// Scroll changeset into view if visible
-		setTimeout(() => {
-			document.querySelector('[data-changeset-review]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-		}, 100);
-		return;
-	}
+	if (sendBlockedByReview()) return;
 
 	// Queue if a run is in progress
 	if (isStreaming) {

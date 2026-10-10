@@ -44,13 +44,15 @@ export class ChangesetManager {
   }
 
   /**
-   * Produce unified diffs for all changed files.
+   * The tracked files that differ from their pre-run state, with their current content.
+   * The backup is taken before the write tool runs, so a write that failed or wrote the
+   * same text leaves an entry behind. Such a file is unchanged and not reported: an
+   * empty entry would open a review with nothing in it, and the review holds the next
+   * message until it is answered. `getChanges`, `hasChanges` and `size` all read this.
    */
-  getChanges(): ChangesetDiff[] {
-    const diffs: ChangesetDiff[] = [];
-
+  private _changed(): Array<[string, ChangesetEntry, string]> {
+    const changed: Array<[string, ChangesetEntry, string]> = [];
     for (const [abs, entry] of this.entries) {
-      const rel = relative(this.cwd, abs);
       let currentContent: string;
       try {
         currentContent = readFileSync(abs, 'utf-8');
@@ -58,6 +60,20 @@ export class ChangesetManager {
         // File was deleted during run — skip
         continue;
       }
+      if (entry.status === 'modified' && currentContent === entry.originalContent) continue;
+      changed.push([abs, entry, currentContent]);
+    }
+    return changed;
+  }
+
+  /**
+   * Produce unified diffs for all changed files.
+   */
+  getChanges(): ChangesetDiff[] {
+    const diffs: ChangesetDiff[] = [];
+
+    for (const [abs, entry, currentContent] of this._changed()) {
+      const rel = relative(this.cwd, abs);
 
       let diffText: string;
       if (entry.status === 'added') {
@@ -137,10 +153,10 @@ export class ChangesetManager {
   }
 
   /**
-   * Whether any file writes were tracked.
+   * Whether any tracked file differs from its pre-run state.
    */
   hasChanges(): boolean {
-    return this.entries.size > 0;
+    return this._changed().length > 0;
   }
 
   /**
@@ -151,10 +167,10 @@ export class ChangesetManager {
   }
 
   /**
-   * Number of tracked files.
+   * Number of tracked files that differ from their pre-run state.
    */
   get size(): number {
-    return this.entries.size;
+    return this._changed().length;
   }
 
   private _rollbackOne(abs: string, entry: ChangesetEntry): void {

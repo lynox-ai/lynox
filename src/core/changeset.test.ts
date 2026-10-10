@@ -32,11 +32,11 @@ describe('ChangesetManager', () => {
 
     mgr.backupBeforeWrite(filePath);
 
-    expect(mgr.hasChanges()).toBe(true);
-    expect(mgr.size).toBe(1);
-
     // Write new content (simulating what write_file tool does)
     writeFileSync(filePath, 'modified content', 'utf-8');
+
+    expect(mgr.hasChanges()).toBe(true);
+    expect(mgr.size).toBe(1);
 
     const changes = mgr.getChanges();
     expect(changes).toHaveLength(1);
@@ -215,6 +215,7 @@ describe('ChangesetManager', () => {
     const filePath = join(cwd, 'clean.txt');
     writeFileSync(filePath, 'content', 'utf-8');
     mgr.backupBeforeWrite(filePath);
+    writeFileSync(filePath, 'content, edited', 'utf-8');
 
     // Access backup dir via getChanges (it reads from backup dir internally)
     const changes = mgr.getChanges();
@@ -223,5 +224,59 @@ describe('ChangesetManager', () => {
     mgr.cleanup();
     // After cleanup, getChanges still works (reads from entries map + current files)
     // but backup dir is gone
+  });
+
+  // The backup is taken before the write tool runs. A write that failed — or wrote the same
+  // text — leaves an entry behind; it must not open a review, because an open review holds
+  // the next message until it is answered.
+  describe('a tracked file that did not change is not a change', () => {
+    it('backup without a write: nothing to review', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'failed-edit.txt');
+      writeFileSync(filePath, 'as it was', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      expect(mgr.getChanges()).toEqual([]);
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+      mgr.cleanup();
+    });
+
+    it('a write of the same text: nothing to review', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'same.txt');
+      writeFileSync(filePath, 'same text', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      writeFileSync(filePath, 'same text', 'utf-8');
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+      mgr.cleanup();
+    });
+
+    it('a new file that was never created: nothing to review', () => {
+      const cwd = makeTempDir();
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'never-written.txt'));
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+      mgr.cleanup();
+    });
+
+    it('next to an unchanged one, a changed file is still reported, and counted alone', () => {
+      const cwd = makeTempDir();
+      const untouched = join(cwd, 'untouched.txt');
+      const edited = join(cwd, 'edited.txt');
+      writeFileSync(untouched, 'a', 'utf-8');
+      writeFileSync(edited, 'b', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(untouched);
+      mgr.backupBeforeWrite(edited);
+      writeFileSync(edited, 'b, edited', 'utf-8');
+      expect(mgr.getChanges().map(c => c.file)).toEqual(['edited.txt']);
+      expect(mgr.hasChanges()).toBe(true);
+      expect(mgr.size).toBe(1);
+      mgr.cleanup();
+    });
   });
 });

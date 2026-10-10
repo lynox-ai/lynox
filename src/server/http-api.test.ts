@@ -27,6 +27,7 @@ import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSu
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
+import { ChangesetManager } from '../core/changeset.js';
 
 // === Mock dependencies ===
 
@@ -1631,6 +1632,39 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('event: text');
       expect(text).toContain('Hello world');
       expect(text).toContain('event: done');
+    });
+
+    // The changeset backup is taken before a write tool runs, so a write that failed leaves a
+    // tracked file with nothing changed. The run must not announce a review for it: an open
+    // review holds the next message until it is answered.
+    it('announces changeset_ready only for a file that actually changed', async () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-ready-'));
+      try {
+        const file = join(cwd, 'artifact.md');
+        writeFileSync(file, 'as it was', 'utf-8');
+        const runOnce = async (write: string | null): Promise<string> => {
+          const csm = new ChangesetManager(cwd, 'run');
+          mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+          mockSessionRun.mockImplementationOnce(async () => {
+            csm.backupBeforeWrite(file);
+            if (write !== null) writeFileSync(file, write, 'utf-8');
+            return 'done';
+          });
+          const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'edit it' }) });
+          const text = await res.text();
+          csm.cleanup();
+          return text;
+        };
+        const failedWrite = await runOnce(null);
+        expect(failedWrite, 'positive control: the run finished').toContain('event: done');
+        expect(failedWrite).not.toContain('event: changeset_ready');
+        const realWrite = await runOnce('as it is now');
+        expect(realWrite).toContain('event: changeset_ready');
+        expect(realWrite).toContain('"fileCount":1');
+      } finally {
+        mockSessionInstance.getChangesetManager.mockReturnValue(null);
+        rmSync(cwd, { recursive: true, force: true });
+      }
     });
 
     it('carries fatal through to the wire on an ENGINE error, not just the catch', async () => {
