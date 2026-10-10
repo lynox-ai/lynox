@@ -31,8 +31,11 @@ export class PromptBudgetExceededError extends Error {
   constructor(public readonly limit: number) {
     super(
       `Pipeline prompt budget exceeded: this run is capped at ${limit} interactive prompts. ` +
-      `Refuse further ask_user / ask_secret calls. ` +
-      `Configure 'pipeline_prompt_budget' to raise the cap (at most ${MAX_PROMPT_BUDGET}) if a higher count is genuinely needed.`,
+      `Refuse further ask_user / ask_secret calls.` +
+      // The model reads this: at the maximum there is nothing left to raise, so it says nothing.
+      (limit < MAX_PROMPT_BUDGET
+        ? ` Configure 'pipeline_prompt_budget' to raise the cap (at most ${MAX_PROMPT_BUDGET}) if a higher count is genuinely needed.`
+        : ''),
     );
     this.name = 'PromptBudgetExceededError';
   }
