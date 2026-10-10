@@ -95,9 +95,11 @@ describe('an open changeset review holds the next send', () => {
 	it('the tap on a failed message keeps it failed, and nothing is sent', async () => {
 		await reviewOpen();
 		const failed = { role: 'user' as const, content: 'lost?', failed: true };
+		toasts.length = 0;
 		await store.retryFailedTurn(failed, 'lost?');
 		await settle();
 		expect(failed.failed, 'the message keeps its tap-to-retry').toBe(true);
+		expect(toasts, 'the user tapped, so the review is named').toHaveLength(1);
 		expect(runPosts()).toBe(1);
 	});
 
