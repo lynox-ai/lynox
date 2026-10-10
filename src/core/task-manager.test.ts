@@ -494,22 +494,28 @@ describe('TaskManager', () => {
     });
 
     it('rejects scheduling a cron task for an interactive pipeline', () => {
-      setPipelineModeLookup(() => 'interactive');
+      setPipelineModeLookup(() => ({ mode: 'interactive', schedulable: false }));
       expect(() => tm.create({
         title: 'Daily run',
         pipelineId: 'pipe-1',
         scheduleCron: '0 9 * * *',
-      })).toThrow(/only 'autonomous' pipelines/);
+      })).toThrow(/only an 'autonomous' pipeline, or an interactive one whose only question tool is ask_user/);
     });
 
     it('accepts scheduling a cron task for an autonomous pipeline', () => {
-      setPipelineModeLookup(() => 'autonomous');
+      setPipelineModeLookup(() => ({ mode: 'autonomous', schedulable: true }));
       const task = tm.create({
         title: 'Daily run',
         pipelineId: 'pipe-1',
         scheduleCron: '0 9 * * *',
       });
       expect(task.title).toBe('Daily run');
+      expect(task.schedule_cron).toBe('0 9 * * *');
+    });
+
+    it('accepts scheduling an interactive pipeline whose only question tool is ask_user (PRD 3b-2 §4.3)', () => {
+      setPipelineModeLookup(() => ({ mode: 'interactive', schedulable: true }));
+      const task = tm.create({ title: 'Asks the owner', pipelineId: 'pipe-1', scheduleCron: '0 9 * * *' });
       expect(task.schedule_cron).toBe('0 9 * * *');
     });
 
@@ -523,12 +529,12 @@ describe('TaskManager', () => {
     });
 
     it('does not block tasks without a schedule', () => {
-      setPipelineModeLookup(() => 'interactive');
+      setPipelineModeLookup(() => ({ mode: 'interactive', schedulable: false }));
       expect(() => tm.create({ title: 'Manual', pipelineId: 'pipe-1', assignee: 'user' })).not.toThrow();
     });
 
     it('rejects interactive pipeline with explicit nextRunAt', () => {
-      setPipelineModeLookup(() => 'interactive');
+      setPipelineModeLookup(() => ({ mode: 'interactive', schedulable: false }));
       expect(() => tm.create({
         title: 'Schedule once',
         pipelineId: 'pipe-1',
@@ -537,7 +543,7 @@ describe('TaskManager', () => {
     });
 
     it('rejects interactive pipeline auto-triggered via assignee=lynox', () => {
-      setPipelineModeLookup(() => 'interactive');
+      setPipelineModeLookup(() => ({ mode: 'interactive', schedulable: false }));
       // No schedule supplied, but assignee=lynox sets nextRunAt=now under the hood.
       expect(() => tm.create({
         title: 'Auto run',
@@ -704,7 +710,7 @@ describe('TaskManager', () => {
       //     queue even when status='failed')
       //   - A subsequent successful run auto-recovers status to 'open'
       //     (see "auto-recovers" test below)
-      setPipelineModeLookup(() => 'autonomous');
+      setPipelineModeLookup(() => ({ mode: 'autonomous', schedulable: true }));
       const task = tm.createScheduled({
         title: 'Hourly check',
         scheduleCron: '0 * * * *',
@@ -726,7 +732,7 @@ describe('TaskManager', () => {
       // 'timeout' into 'failed' (a timed-out probe is unhealthy from the
       // operator's perspective). Guards a future "only 'failed' triggers
       // the flip" optimization that would mask timeouts.
-      setPipelineModeLookup(() => 'autonomous');
+      setPipelineModeLookup(() => ({ mode: 'autonomous', schedulable: true }));
       const task = tm.createScheduled({
         title: 'Hourly check',
         scheduleCron: '0 * * * *',
@@ -742,7 +748,7 @@ describe('TaskManager', () => {
       // Steady-state guard: a future "only flip status on transition"
       // optimization would mask chronic failures. Two failures in a row
       // must keep status pinned at 'failed' (not flap open/failed).
-      setPipelineModeLookup(() => 'autonomous');
+      setPipelineModeLookup(() => ({ mode: 'autonomous', schedulable: true }));
       const task = tm.createScheduled({
         title: 'Hourly check',
         scheduleCron: '0 * * * *',
@@ -761,7 +767,7 @@ describe('TaskManager', () => {
       // excluding all status='failed' rows, a single transient failure
       // would permanently freeze a weekly cron — the exact bug this
       // sprint fixes.
-      setPipelineModeLookup(() => 'autonomous');
+      setPipelineModeLookup(() => ({ mode: 'autonomous', schedulable: true }));
       const task = tm.createScheduled({
         title: 'Hourly check',
         scheduleCron: '0 * * * *',
@@ -785,7 +791,7 @@ describe('TaskManager', () => {
       // Self-healing: failed → success flips status back without
       // operator intervention. Matches the "derived from latest run"
       // design choice (Approach A in the PR description).
-      setPipelineModeLookup(() => 'autonomous');
+      setPipelineModeLookup(() => ({ mode: 'autonomous', schedulable: true }));
       const task = tm.createScheduled({
         title: 'Hourly check',
         scheduleCron: '0 * * * *',

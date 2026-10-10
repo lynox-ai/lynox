@@ -419,9 +419,28 @@ describe('Task Tools', () => {
         { title: 'Ask then act', assignee: 'lynox', workflow_id: 'wf-interactive', schedule: '0 2 * * *' },
         makeAgent(),
       );
-      expect(result).toContain("only an 'autonomous' workflow runs unattended");
+      expect(result).toContain("a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user");
       expect(result).not.toContain('workflow library');
       expect(tm.listTriggers().find((t) => t.title === 'Ask then act')).toBeUndefined();
+    });
+
+    it.each([
+      ['ask_secret', true, 'wf-asks-secret', [{ id: 'k', task: 'ask_secret for the key' }]],
+      ['only ask_user', false, 'wf-asks-user', [{ id: 'pick', task: 'ask_user which list' }]],
+    ])('a workflow that asks through %s: refused as unschedulable = %s (PRD 3b-2 §4.3)', async (_label, refusedAsUnschedulable, id, steps) => {
+      // One id per case: the pipeline cache would otherwise hand the second case the first's steps.
+      history.insertPlannedPipeline({
+        id, name: 'Asks', goal: 'ask', steps,
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        mode: 'interactive',
+      } as Parameters<typeof history.insertPlannedPipeline>[0]);
+      const result = await taskCreateTool.handler(
+        { title: 'Asks', assignee: 'lynox', workflow_id: id, schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      // A schedulable one passes the mode gate and reaches the next one: the confirmation.
+      expect(result.includes('only question tool is ask_user')).toBe(refusedAsUnschedulable);
+      expect(result.includes('has not been confirmed')).toBe(!refusedAsUnschedulable);
     });
 
     it('refuses a workflow that is not in the library, naming the save step', async () => {

@@ -4,6 +4,7 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -412,8 +413,8 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         const { getPipeline } = await import('./pipeline.js');
         const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
         if (planned) {
-          const unschedulable = planned.mode !== 'autonomous'
-            ? `is '${planned.mode}'; only an 'autonomous' workflow runs unattended. Convert it (remove its ask_user / ask_secret steps) before scheduling it.`
+          const unschedulable = !isSchedulableWorkflow(planned)
+            ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
               ? 'is not a saved workflow. Save it to the workflow library first; scheduling it from there confirms it and creates the task.'
               : !planned.confirmedAt
