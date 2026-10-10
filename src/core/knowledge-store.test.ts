@@ -1175,6 +1175,23 @@ describe('the always-loaded profile block and who may reach into it', () => {
     expect(ks.getBlock('profile')?.content).toBe(LINE);
   });
 
+  it('once its seeded line is gone, an entry that stays does not claim the identical hand-written one', () => {
+    // The entry outlives the private chat (another chat said it too), and the operator had
+    // written the same line by hand. The seeded copy goes; the seed must go with it, or the
+    // entry's later removal would take the operator's line as if it were the seeded one.
+    const { ks } = make();
+    ks.setBlockContent('profile', `${LINE}\n${LINE}`);
+    const first = ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'first-chat' });
+    ks.recordProfileSeed(first.id);
+    expect(ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'second-chat' }).deduped).toBe(true);
+
+    expect(ks.deleteByThread('first-chat')).toBe(0);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+
+    expect(ks.deleteByThread('second-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
   it('a seeded line the operator removed, then wrote again by hand, is theirs', () => {
     // The seed is forgotten when its line leaves the block, so a later identical line is not
     // mistaken for the seeded one.
