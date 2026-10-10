@@ -508,7 +508,7 @@ export class KnowledgeStore {
         // write is trusted (we are in the status==='active' branch).
         // The restating conversation becomes a source of the row it folded into, with its own
         // wording, so switching the first conversation private does not take this one's fact.
-        if (params.sourceThreadId) this._addSource(dup.id, params.sourceThreadId, params.sourceRunId, params.text);
+        if (params.sourceThreadId) this._addSource(dup.id, params);
         let dupPinned = dup.pinned === 1;
         if (params.pin === true && !dupPinned && (dup.source_type as ProvenanceKind) !== 'external_unverified') {
           this.db.prepare('UPDATE knowledge_entries SET pinned = 1 WHERE id = ?').run(dup.id);
@@ -544,7 +544,7 @@ export class KnowledgeStore {
       params.sourceThreadId ?? null,
       params.sourceRunId ?? null,
     );
-    this._addSource(id, params.sourceThreadId, params.sourceRunId, params.text);
+    this._addSource(id, params);
 
     return { id, status, tier, subjectId, pinned: pinned === 1, ...(subjectAmbiguous && !subjectId ? { subjectAmbiguous: true } : {}) };
   }
@@ -745,14 +745,20 @@ export class KnowledgeStore {
   private _backfillProfileSeeds(): void {
     const marker = this.db.prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined;
     if (!marker || marker.done === 1) return;
+    // Text the store cannot decrypt (a boot without the key) matches nothing; marking done
+    // then would skip these lines for good. Leave the marker open for a boot that can read.
+    const readable = (t: string): boolean => this.engine.isEncrypted || !t.startsWith('enc:');
     const content = this.getBlock('profile')?.content ?? '';
+    if (!readable(content)) return;
     const open = new Set(content.split('\n').map(l => l.trim()).filter(l => l.length > 0));
     if (open.size > 0) {
       const rows = this.db.prepare(
         "SELECT id, text FROM knowledge_entries WHERE source_type = 'user_asserted' ORDER BY created_at, rowid",
       ).all() as Array<{ id: string; text: string }>;
       for (const r of rows) {
-        const line = collapseToSingleLine(this.engine.dec(r.text));
+        const plain = this.engine.dec(r.text);
+        if (!readable(plain)) return;
+        const line = collapseToSingleLine(plain);
         if (line && open.has(line)) {
           this.recordProfileSeed(r.id);
           open.delete(line);
@@ -762,11 +768,28 @@ export class KnowledgeStore {
     this.db.prepare('UPDATE profile_seed_backfill SET done = 1 WHERE id = 1').run();
   }
 
-  /** Add a conversation as a source of an entry, with the wording it used. */
-  private _addSource(entryId: string, threadId: string | undefined, runId: string | undefined, text: string): void {
+  /** Add a conversation as a source of an entry, with the wording and evidence it came with. */
+  private _addSource(entryId: string, params: KnowledgeWriteParams): void {
     this.db.prepare(
-      'INSERT OR IGNORE INTO entry_sources (entry_id, thread_id, run_id, text) VALUES (?, ?, ?, ?)',
-    ).run(entryId, threadId ?? null, runId ?? null, this.engine.enc(text));
+      'INSERT OR IGNORE INTO entry_sources (entry_id, thread_id, run_id, text, source_channel, source_untrusted) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(
+      entryId, params.sourceThreadId ?? null, params.sourceRunId ?? null, this.engine.enc(params.text),
+      params.sourceChannel ?? null, params.sourceUntrusted === true ? 1 : 0,
+    );
+  }
+
+  /**
+   * Each source's wording, masked, for the access export: a source keeps the words that
+   * conversation used, which the entry itself may not carry.
+   */
+  listSourcesMasked(limit = 500): Array<{ entryId: string; threadId: string | null; text: string; addedAt: string; threadDeletedAt: string | null }> {
+    const rows = this.db.prepare(
+      'SELECT entry_id, thread_id, text, added_at, thread_deleted_at FROM entry_sources ORDER BY id LIMIT ?',
+    ).all(limit) as Array<{ entry_id: string; thread_id: string | null; text: string; added_at: string; thread_deleted_at: string | null }>;
+    return rows.map(r => ({
+      entryId: r.entry_id, threadId: r.thread_id, text: this._maskText(this.engine.dec(r.text)),
+      addedAt: r.added_at, threadDeletedAt: r.thread_deleted_at,
+    }));
   }
 
   /**
@@ -1057,6 +1080,11 @@ export class KnowledgeStore {
             reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
         WHERE id = ?
       `).run(approvedTier, this.engine.enc(text), subjectId, action, id);
+      // The queued wording was the entry's only source; the reviewer's edit replaces it there
+      // too, so what was edited out is not kept beside the entry.
+      this.db.prepare(
+        'UPDATE entry_sources SET text = ? WHERE id = (SELECT MIN(id) FROM entry_sources WHERE entry_id = ?)',
+      ).run(this.engine.enc(text), id);
       return this.getEntry(id);
     }
     this.db.prepare(`
@@ -1289,13 +1317,14 @@ export class KnowledgeStore {
       WHERE source_thread_id = ? OR id IN (SELECT entry_id FROM entry_sources WHERE thread_id = ?)
     `).all(threadId, threadId) as Array<{ id: string; text: string; source_thread_id: string | null }>;
     const nextSource = this.db.prepare(`
-      SELECT thread_id, run_id, text, thread_deleted_at FROM entry_sources
+      SELECT thread_id, run_id, text, thread_deleted_at, source_channel, source_untrusted FROM entry_sources
       WHERE entry_id = ? AND (thread_id IS NULL OR thread_id != ?) ORDER BY id LIMIT 1
     `);
+    type Source = { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null; source_channel: string | null; source_untrusted: number };
     const doomed: string[] = [];
-    const rewritten: Array<{ id: string; next: { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null } }> = [];
+    const rewritten: Array<{ id: string; next: Source }> = [];
     for (const row of touched) {
-      const next = nextSource.get(row.id, threadId) as { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null } | undefined;
+      const next = nextSource.get(row.id, threadId) as Source | undefined;
       // The entry's text is this conversation's when it is the first source; then its seeded
       // line is this conversation's wording too, and goes whether or not the entry stays.
       if (next === undefined) {
@@ -1308,12 +1337,23 @@ export class KnowledgeStore {
     }
     return this.db.transaction(() => {
       this.db.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run(threadId);
+      // The entry becomes the remaining source's: its wording AND its trust. The tier is derived
+      // from that source's evidence, never kept from the removed one; the pin and the review were
+      // acts on the removed wording and do not carry over.
       const rewrite = this.db.prepare(`
         UPDATE knowledge_entries
-        SET text = ?, source_thread_id = ?, source_run_id = ?, source_thread_deleted_at = ?, updated_at = datetime('now')
+        SET text = ?, source_thread_id = ?, source_run_id = ?, source_thread_deleted_at = ?,
+            source_channel = ?, source_untrusted = ?, source_type = ?, pinned = 0,
+            reviewed_at = NULL, review_action = NULL, updated_at = datetime('now')
         WHERE id = ?
       `);
-      for (const r of rewritten) rewrite.run(r.next.text, r.next.thread_id, r.next.run_id, r.next.thread_deleted_at, r.id);
+      for (const r of rewritten) {
+        const tier = deriveProvenanceTier(knowledgeEvidence({
+          sourceChannel: r.next.source_channel, sourceUntrusted: r.next.source_untrusted === 1, reviewAction: null,
+        }));
+        rewrite.run(r.next.text, r.next.thread_id, r.next.run_id, r.next.thread_deleted_at,
+          r.next.source_channel, r.next.source_untrusted, tier, r.id);
+      }
       const del = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?');
       let removed = 0;
       for (const id of doomed) removed += del.run(id).changes;

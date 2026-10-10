@@ -269,7 +269,11 @@ export function promoteOnboardingBasics(
 
     if (result.status === 'active') {
       promoted++;
-      activeLines.push({ prefix, text: collapseToSingleLine(`${prefix}${value}`), entryId: result.id });
+      // A folded answer has no entry of its own: `result.id` is an existing entry with other
+      // wording, and a line seeded under it would not leave with this chat. No line then.
+      if (result.deduped !== true) {
+        activeLines.push({ prefix, text: collapseToSingleLine(`${prefix}${value}`), entryId: result.id });
+      }
     } else queued++;
   }
 

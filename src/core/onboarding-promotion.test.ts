@@ -56,6 +56,20 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
     expect(ks.getBlock('profile')?.content).toBe('Prefers short answers');
   });
 
+  it('an answer that folds into an existing entry of other wording seeds no line', () => {
+    // The fold returns the existing entry's id; a line seeded under it would not leave with the
+    // onboarding chat, because that entry belongs to another one.
+    const { ks } = makeKs();
+    ks.write({ text: 'Acme GmbH is the company the operator runs', subjectName: 'Acme GmbH', subjectKind: 'organization', sourceChannel: 'agent', sourceThreadId: 'earlier-chat' });
+    const r = promoteOnboardingBasics(
+      [{ key: 'company', answer: 'Acme GmbH' }],
+      { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+    );
+    expect(r.promoted).toBe(1);
+    expect(r.profileSeeded).toBe(0);
+    expect(ks.getBlock('profile')?.content ?? '').toBe('');
+  });
+
   it('a re-run that skips a known fact records the seed against the STORED entry', () => {
     const { ks } = makeKs();
     ks.write({ text: 'Company: Acme GmbH', sourceChannel: 'user', sourceThreadId: 'earlier-chat' });
