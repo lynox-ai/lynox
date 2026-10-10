@@ -314,6 +314,9 @@ export function createStepStreamHandler(opts: {
  */
 export interface SubAgentPromptHandles {
   parentPromptUser?: PromptUserFn | undefined;
+  /** The question channel of `ask_user` alone (`Agent.askUserPrompt`), for a step of a
+   *  scheduled workflow: the step may ask, but no consent gate in it can use the channel. */
+  parentAskUserPrompt?: PromptUserFn | undefined;
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
   promptBudget?: PromptBudget | undefined;
@@ -337,7 +340,7 @@ export interface SubAgentPromptHandles {
 export function buildSubAgentPromptCallbacks(
   step: ManifestStep,
   parent: SubAgentPromptHandles | undefined,
-): { promptUser?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
+): { promptUser?: PromptUserFn | undefined; askUserPrompt?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
   if (!parent) return {};
   const meta: PromptMeta = { stepId: step.id, stepTask: step.task, workflowName: parent.workflowName };
   const budget = parent.promptBudget;
@@ -351,6 +354,17 @@ export function buildSubAgentPromptCallbacks(
           if (budget) budget.consume();
           try {
             return await parent.parentPromptUser!(q, opts, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
+        }
+      : undefined,
+    askUserPrompt: parent.parentAskUserPrompt
+      ? async (q, opts, m) => {
+          if (budget) budget.consume();
+          try {
+            return await parent.parentAskUserPrompt!(q, opts, { ...meta, ...m });
           } catch (err) {
             if (budget) budget.refund();
             throw err;
@@ -382,9 +396,23 @@ export function buildSubAgentPromptCallbacks(
   };
 }
 
-export function stripHumanInTheLoopTools(tools: ToolEntry[]): ToolEntry[] {
-  if (!tools.some(t => isHumanInTheLoopTool(t.definition.name))) return tools;
-  return tools.filter(t => !isHumanInTheLoopTool(t.definition.name));
+/** Whether a step keeps a human-in-the-loop tool: each one only where the channel its handler
+ *  needs is there. `ask_user` asks over `promptUser` or, in a scheduled workflow, over the
+ *  question channel alone; `ask_secret` only ever over `promptSecret`, never over the question
+ *  channel. Without its channel a tool would only throw when called. */
+export function keepsHumanInTheLoopTool(name: string, parent: SubAgentPromptHandles | undefined): boolean {
+  switch (name) {
+    case 'ask_user': return parent?.parentPromptUser !== undefined || parent?.parentAskUserPrompt !== undefined;
+    case 'ask_secret': return parent?.parentPromptSecret !== undefined;
+    default: return parent?.parentPromptUser !== undefined;
+  }
+}
+
+/** Drops each human-in-the-loop tool the step has no channel for (`keepsHumanInTheLoopTool`). */
+export function stripHumanInTheLoopToolsWithout(tools: ToolEntry[], parent: SubAgentPromptHandles | undefined): ToolEntry[] {
+  const drop = (name: string): boolean => isHumanInTheLoopTool(name) && !keepsHumanInTheLoopTool(name, parent);
+  if (!tools.some(t => drop(t.definition.name))) return tools;
+  return tools.filter(t => !drop(t.definition.name));
 }
 
 // The module-level `activePipelineAgents` set and `abortPipelineAgents()` are GONE, for
@@ -739,13 +767,11 @@ export async function spawnViaAgent(
     );
   }
 
-  // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
-  // Belt-and-suspenders default: the validator already rejects autonomous
-  // pipelines that need them, but a registry drift here would silently throw
-  // "ask_user: agent.promptUser is not set" deep in the run.
-  if (!parentPrompt?.parentPromptUser) {
-    tools = stripHumanInTheLoopTools(tools);
-  }
+  // Strip each human-in-the-loop tool the step has no channel for (autonomous run, or a
+  // scheduled workflow that may ask but not request a secret). Belt-and-suspenders: the
+  // validator already rejects pipelines that need a missing channel, but a registry drift here
+  // would throw at tool dispatch time.
+  tools = stripHumanInTheLoopToolsWithout(tools, parentPrompt);
 
   // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
   // Pipeline steps were previously bypassing this gate — see #401 follow-up.
@@ -820,6 +846,7 @@ export async function spawnViaAgent(
     // only and never read it.)
     toolContext: parentToolContext,
     promptUser: promptCallbacks.promptUser,
+    askUserPrompt: promptCallbacks.askUserPrompt,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
@@ -1066,12 +1093,11 @@ export async function spawnInline(
       );
     }
   }
-  // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
-  // Belt-and-suspenders: validator/scheduler should already block this path,
-  // but a registry drift here would silently throw at tool dispatch time.
-  if (!parentPrompt?.parentPromptUser) {
-    tools = stripHumanInTheLoopTools(tools);
-  }
+  // Strip each human-in-the-loop tool the step has no channel for (autonomous run, or a
+  // scheduled workflow that may ask but not request a secret). Belt-and-suspenders: the
+  // validator already rejects pipelines that need a missing channel, but a registry drift here
+  // would throw at tool dispatch time.
+  tools = stripHumanInTheLoopToolsWithout(tools, parentPrompt);
   // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
   const disabledToolsInline = config.disabled_tools ?? [];
   if (disabledToolsInline.length > 0) {
@@ -1144,6 +1170,7 @@ export async function spawnInline(
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
+    askUserPrompt: promptCallbacks.askUserPrompt,
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
