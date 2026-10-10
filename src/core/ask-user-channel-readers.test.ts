@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url';
  *
  * Comment lines are left out of the scan, so a doc comment naming the field is not a site. The
  * match is on the identifier, which also finds `agent['askUserPrompt']` and a destructured
- * `{ askUserPrompt }`.
+ * `{ askUserPrompt }`. The price of skipping comments by their first characters: a code line that
+ * begins with `*` or `/*` (a continued multiplication, a leading block comment) is skipped too.
+ * Formatted TypeScript in this repo writes neither, and a review of such a line would catch it.
  */
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
@@ -51,8 +53,17 @@ const EXPECTED: Record<string, string[]> = {
     'askUserPrompt: parent.parentAskUserPrompt',
     'return await parent.parentAskUserPrompt!(q, opts, { ...meta, ...m });',
     "return name === 'ask_user' && parent?.parentAskUserPrompt !== undefined;",
-    'askUserPrompt: promptCallbacks.askUserPrompt,',
-    'askUserPrompt: promptCallbacks.askUserPrompt,',
+    'askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),',
+    'askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),',
+  ],
+  // A scheduled workflow run: the worker hands the run its channel, and `runSavedWorkflow`
+  // passes it on alone, as `parentAskUserPrompt`, never as `parentPromptUser`.
+  'core/worker-loop.ts': [
+    'parentPrompt: { parentAskUserPrompt: questions.channel.ask },',
+  ],
+  'tools/builtin/pipeline.ts': [
+    'const asksItsOwner = runtime?.parentPrompt?.parentAskUserPrompt !== undefined && asksOnlyViaAskUser(planned.steps);',
+    'parentPrompt: asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : undefined,',
   ],
   'types/agent.ts': ['askUserPrompt?: PromptUserFn | undefined;'],
   'types/config.ts': ['askUserPrompt?:   PromptUserFn | undefined;'],

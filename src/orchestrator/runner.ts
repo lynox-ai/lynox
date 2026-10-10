@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
@@ -185,6 +185,13 @@ export interface RunManifestOptions {
    * ending the step agents in flight is `abortScope`'s job, so a caller passes both.
    */
   stopSignal?: AbortSignal | undefined;
+  /**
+   * The question channel's state, for a scheduled run whose steps may ask its owner (PRD 3b-2
+   * §4.5, G5): a question that went unanswered halts the run, after the owner's stop, and the
+   * time spent waiting for answers does not count against the wall clock. Absent for every run
+   * that cannot ask.
+   */
+  questionWait?: import('../core/workflow-questions.js').WorkflowQuestionWait | undefined;
 }
 
 /**
@@ -239,6 +246,8 @@ export interface RunCtxInput {
    * ending the step agents in flight is `abortScope`'s job, so a caller passes both.
    */
   stopSignal?: AbortSignal | undefined;
+  /** See `RunManifestOptions.questionWait`. */
+  questionWait?: import('../core/workflow-questions.js').WorkflowQuestionWait | undefined;
 }
 
 /**
@@ -278,6 +287,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     runTaint: input.runTaint,
     abortScope: input.abortScope,
     stopSignal: input.stopSignal,
+    questionWait: input.questionWait,
   };
 }
 
@@ -290,6 +300,20 @@ function stoppedByOwner(options: RunManifestOptions, state: RunState): boolean {
   if (state.status !== 'running') return true;
   state.status = 'failed';
   state.error = WORKFLOW_STOPPED_ERROR;
+  state.completedAt = new Date().toISOString();
+  return true;
+}
+
+/**
+ * Whether a question of the run went unanswered until its TTL ran out; if so, end the run with
+ * that cause (PRD 3b-2 §4.5). Checked after `stoppedByOwner`: a stop wins. A run that already
+ * ended on a cause of its own keeps it, as with the stop.
+ */
+function questionUnanswered(options: RunManifestOptions, state: RunState): boolean {
+  if (options.questionWait?.unanswered !== true) return false;
+  if (state.status !== 'running') return true;
+  state.status = 'failed';
+  state.error = WORKFLOW_QUESTION_UNANSWERED_ERROR;
   state.completedAt = new Date().toISOString();
   return true;
 }
@@ -680,7 +704,9 @@ async function runSequential(
   const startMs = Date.parse(state.startedAt);
   let iterations = 0;
   for (const step of manifest.agents) {
-    const exceeded = workflowBoundExceeded(options.limits, startMs, iterations, stepCounters);
+    // The time the run spent waiting for its owner's answers is left out (G5 (a)): the
+    // question's TTL bounds the wait, and only one clock may.
+    const exceeded = workflowBoundExceeded(options.limits, startMs + (options.questionWait?.pausedMs() ?? 0), iterations, stepCounters);
     if (exceeded) {
       state.status = 'failed';
       state.error = exceeded;
@@ -748,7 +774,9 @@ async function runParallel(
   const startMs = Date.parse(state.startedAt);
   let iterations = 0;
   for (const phase of phases) {
-    const exceeded = workflowBoundExceeded(options.limits, startMs, iterations, stepCounters);
+    // The time the run spent waiting for its owner's answers is left out (G5 (a)): the
+    // question's TTL bounds the wait, and only one clock may.
+    const exceeded = workflowBoundExceeded(options.limits, startMs + (options.questionWait?.pausedMs() ?? 0), iterations, stepCounters);
     if (exceeded) {
       state.status = 'failed';
       state.error = exceeded;
@@ -898,6 +926,7 @@ async function executeStep(
   // next sequential step, the first step of the next phase, and a step of a wide phase the
   // pool hands out after the stop (the scope can only abort agents that already exist).
   if (stoppedByOwner(options, state)) return 'halt';
+  if (questionUnanswered(options, state)) return 'halt';
 
   const stepStart = new Date().toISOString();
   // A2: the step's `pipeline_step` run id (declared before the try so the catch
@@ -1134,6 +1163,7 @@ async function executeStep(
     // A step that failed while the owner's stop is out ended because of it (its agent was
     // aborted) or ends the run anyway: a stopped run does not carry on to the next step.
     if (stoppedByOwner(options, state)) return 'halt';
+    if (questionUnanswered(options, state)) return 'halt';
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
       state.status = 'rejected';

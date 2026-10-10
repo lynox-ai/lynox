@@ -33,6 +33,8 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
+import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
+import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
@@ -2283,11 +2285,13 @@ export class WorkerLoop {
       return;
     }
 
-    // Hard gate: WorkerLoop only runs autonomous pipelines. Interactive
-    // pipelines that somehow got onto a cron schedule (legacy data, manual
-    // edit, sync from another instance) are refused at the boundary so they
-    // can't hang waiting for a non-existent live session.
-    if (planned.mode !== 'autonomous') {
+    // Hard gate: WorkerLoop runs autonomous pipelines, and interactive ones whose only question
+    // tool is `ask_user` (PRD 3b-2 §4.3): their questions go to the owner through the run's own
+    // channel below. Any other interactive pipeline that got onto a schedule (legacy data, manual
+    // edit, sync from another instance) is refused at the boundary — a step asking for a secret
+    // has nobody to ask here.
+    const asksItsOwner = planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps);
+    if (planned.mode !== 'autonomous' && !asksItsOwner) {
       throw new Error(
         `Pipeline "${planned.id}" is marked '${planned.mode}'; WorkerLoop only runs 'autonomous' pipelines. ` +
         `Convert it (remove ask_user/ask_secret steps) or invoke it manually from a chat session.`,
@@ -2360,6 +2364,13 @@ export class WorkerLoop {
     }
 
     const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
+    const active = this.activeTasks.get(task.id);
+    // The 5-minute deadline stops at the start of a workflow run (§4.4) and stays stopped. It has
+    // never ended a workflow; all it would still do is abort the controller at minute 5, and a
+    // question asked after that would find the run gone before it was written. Resumed by nothing
+    // on this path: an answer that re-armed it would leave a second question the same trap.
+    active?.pauseDeadline();
+    const questions = asksItsOwner ? this.#workflowQuestions(task, starter, active, ownerStop, scope) : undefined;
     // Seeded from what the session that created this task had taken in: the run has no session
     // of its own, and its params came from that one.
     const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
@@ -2372,6 +2383,12 @@ export class WorkerLoop {
       ...(starter ? { principal: starter } : {}),
       stopSignal: ownerStop,
       abortScope: scope,
+      // The run's id is set here when it may ask: its questions and its thread carry it.
+      ...(questions !== undefined ? {
+        runId: questions.runId,
+        parentPrompt: { parentAskUserPrompt: questions.channel.ask },
+        questionWait: questions.channel,
+      } : {}),
     });
     ownerStop.removeEventListener('abort', onStop);
 
@@ -2434,6 +2451,43 @@ export class WorkerLoop {
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });
+  }
+
+  /**
+   * The question channel of a scheduled workflow run that may ask its owner (PRD 3b-2 §4.1): the
+   * run's steps reach the owner through it, with the run's id as the address. What differs from
+   * the task path (`executeStandard`) is the teardown: nothing is parked, and the wait listens to
+   * the owner's stop and the step's signal, and to the controller only to end at teardown.
+   *
+   * ⚠ A step's children and nested workflows do not get the channel: a spawned agent and a
+   * nested `run_workflow` pass on `promptUser` only, which a scheduled step does not have.
+   */
+  #workflowQuestions(
+    task: TriggerRecord, starter: RequestPrincipal | undefined, active: ActiveTask | undefined,
+    ownerStop: AbortSignal, scope: AbortScope,
+  ): { runId: string; channel: WorkflowQuestions } {
+    const runId = randomUUID();
+    const teardown = active?.controller.signal ?? new AbortController().signal;
+    const channel = new WorkflowQuestions({
+      runId,
+      scheduleId: task.id,
+      title: task.title,
+      createdBy: principalTag(starter ?? OWNER_PRINCIPAL),
+      handRun: active?.handRun === true,
+      promptStore: () => this.engine.getPromptStore(),
+      threadStore: () => this.engine.getThreadStore(),
+      // The vault's mask only, as on the task path: the generic pattern fallback mangles text a
+      // human has to read and answer.
+      maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
+      notify: (msg) => this.notificationRouter.notify(msg),
+      recordDelivery: () => this.#recordEscalation(task.id),
+      ownerStop,
+      teardown,
+      tearingDown: () => active?.tearingDown === true,
+      abortScope: scope,
+      onPending: (promptId) => { if (active) active.pendingPromptId = promptId; },
+    });
+    return { runId, channel };
   }
 
   /**

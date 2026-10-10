@@ -6113,6 +6113,27 @@ describe('the question channel of ask_user', () => {
     expect(askUserPrompt).toHaveBeenCalledTimes(1);
   });
 
+  it('an exempt tool\'s question over it survives the tool timeout', async () => {
+    // ask_user is exempt from the 15-minute tool timeout: a question to the owner of a scheduled
+    // workflow may wait far longer, bounded by its TTL alone (PRD 3b-2 G5 (a)).
+    vi.useFakeTimers();
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Which list?' } }]))
+        .mockResolvedValueOnce(endTurnResponse('Used list B'));
+      const askUserPrompt = vi.fn(() => new Promise<string>((resolve) => { setTimeout(() => resolve('B'), 3_600_000); }));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], askUserPrompt });
+      const run = agent.send('Go');
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      await expect(run).resolves.toBe('Used list B');
+      const results = (agent.getMessages()[2] as { content: Array<{ content: string; is_error?: boolean }> }).content;
+      expect(results[0]!.content).toContain('B');
+      expect(results[0]!.is_error).not.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a guard warning is still refused, and nothing is asked over the channel', async () => {
     vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
     const tool = makeTool('bash');
