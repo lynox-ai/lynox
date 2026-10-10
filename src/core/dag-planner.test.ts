@@ -135,8 +135,12 @@ describe('planDAG', () => {
       }),
       usage: { input_tokens: 1000, output_tokens: 200 },
     });
-    const result = await planDAG('build the app');
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
     expect(result).not.toBeNull();
+    // A reply that does plan is handed over for booking too — once, at the plan's own cost.
+    expect(onSpend).toHaveBeenCalledOnce();
+    expect(onSpend.mock.calls[0]![0]).toBe(result!.actualCostUsd);
     // Priced on the resolved fast model — a positive, finite, sub-cent-ish cost
     // (a 1.2k-token call), NOT the model-emitted `estimated_cost_usd` (0.01).
     expect(Number.isFinite(result!.actualCostUsd)).toBe(true);
