@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { parseToolInput } from './entity-extractor-v2.js';
+import type Anthropic from '@anthropic-ai/sdk';
+import { extractEntitiesV2, parseToolInput } from './entity-extractor-v2.js';
 
 describe('entity-extractor-v2 parseToolInput', () => {
   it('keeps proper-noun entities at sufficient confidence', () => {
@@ -160,5 +161,34 @@ describe('entity-extractor-v2 parseToolInput', () => {
       relations: [],
     });
     expect(result.entities.map(e => e.canonicalName).sort()).toEqual(['1Password', '2026 Roadmap', 'AC/DC', 'Q3/Q4 Planning']);
+  });
+});
+
+describe('entity-extractor-v2 request', () => {
+  it('sends no sampling parameters, so any model the fast slot can hold accepts it', async () => {
+    let sent: Record<string, unknown> | undefined;
+    const client = {
+      beta: {
+        messages: {
+          stream: (params: Record<string, unknown>) => {
+            sent = params;
+            return {
+              finalMessage: async () => ({ content: [], usage: { input_tokens: 10, output_tokens: 5 } }),
+            };
+          },
+        },
+      },
+    } as unknown as Anthropic;
+
+    const result = await extractEntitiesV2('Acme AG signed the contract with Beta GmbH in Zurich.', client);
+
+    // The request really went through this client and the call ran to its end (a
+    // `costUsd` is only set on the success path, not in the catch) — without that,
+    // the absence asserts below would pass on a request that was never built.
+    expect(sent?.['tool_choice']).toEqual({ type: 'tool', name: expect.any(String) });
+    expect(result.costUsd).toBeDefined();
+    expect(sent).not.toHaveProperty('temperature');
+    expect(sent).not.toHaveProperty('top_p');
+    expect(sent).not.toHaveProperty('top_k');
   });
 });

@@ -290,7 +290,9 @@ export async function extractEntitiesV2(
     const stream = fastClient.beta.messages.stream({
       model: fast.modelId,
       max_tokens: 1024,
-      temperature: 0,
+      // No `temperature`: the fast slot can be any Anthropic model the tier picker
+      // offers, and Opus 4.7 and later, Sonnet 5 and Fable 5 accept only the default
+      // sampling. The forced tool and its schema already constrain the output.
       ...(fast.betas ? { betas: fast.betas } : {}),
       system: systemBlocks,
       tools: [TOOL_DEFINITION],
