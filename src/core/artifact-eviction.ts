@@ -34,6 +34,17 @@ export const EVICTION_MIN_CHARS = 2048;
 
 const EVICTED_PREFIX = '[evicted after successful save';
 
+/** Whether `content` carries the placeholder this module writes in place of a
+ *  saved body. The placeholder sits in the very field a model fills on its next
+ *  save, and a model can copy it from there: on a real tenant (2026-10-09) Kimi
+ *  K3 saved the placeholder as the document five times, and two documents never
+ *  reached disk — each file held ~176 bytes while the agent reported it finished. The
+ *  save handler refuses such content. Anywhere in the body, not only at the
+ *  start: a copied placeholder under a heading is the same loss. */
+export function containsEvictionMarker(content: string): boolean {
+  return content.includes(EVICTED_PREFIX);
+}
+
 interface ToolUseBlock {
   type: 'tool_use';
   id: string;
