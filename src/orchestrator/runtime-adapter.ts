@@ -647,8 +647,8 @@ export async function spawnViaAgent(
   /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
    *  D1, §3.13 E5). After `abortScope` for the reason given there. Absent = the owner. */
   principal?: RequestPrincipal | undefined,
-  /** The engine's ToolContext, so this step's tools run under its egress policy, as
-   *  `spawnInline` does. Last because it was added last; absent = an empty context. */
+  /** The engine's ToolContext, handed to the step agent as `spawnInline` does. Last because
+   *  it was added last; absent = the Agent builds an empty one. */
   parentToolContext?: ToolContext | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
@@ -814,8 +814,10 @@ export async function spawnViaAgent(
     // tag), so an isDangerous guard decision during this step is stamped onto
     // the append-only audit with the run it occurred in.
     currentRunId: stepRunId,
-    // The engine's context: without it the Agent builds an empty one, and a tool that
-    // reads the egress policy from it finds none and allows every host.
+    // The engine's context, as for an inline step. Without it the Agent builds an empty
+    // one: its guard decisions reach no audit trail, its helper model calls go unmetered,
+    // and it sees no API profiles. (The definition's own tools are called with their input
+    // only and never read it.)
     toolContext: parentToolContext,
     promptUser: promptCallbacks.promptUser,
     promptTabs: promptCallbacks.promptTabs,
@@ -1278,6 +1280,10 @@ export async function spawnPipeline(
   /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
    *  D1, §3.13 E5). After `isAcceptedParam` for the reason given above. Absent = the owner. */
   principal?: RequestPrincipal | undefined,
+  /** The engine's ToolContext, handed to the nested run. After `principal`, for the reason
+   *  given above. Without it the nested inline steps build an empty context, and the tools
+   *  they inherit from the caller read no egress policy from it. */
+  parentToolContext?: ToolContext | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1352,6 +1358,8 @@ export async function spawnPipeline(
     abortScope,
     // The nested run's steps are built for the same principal as this one.
     principal,
+    // …and with the same ToolContext, so they run under the engine's egress policy.
+    parentToolContext,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.

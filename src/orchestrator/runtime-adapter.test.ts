@@ -2300,19 +2300,25 @@ describe('spawnViaAgent — tool_gates reach the tools the agent runs', () => {
   });
 });
 
-describe('spawnViaAgent — a named-agent step runs under the engine egress policy', () => {
-  // The step's tools read the egress policy from `agent.toolContext`. Built without the
-  // engine's context, the Agent makes an empty one (agent.ts), whose unset policy the egress
-  // check treats as allow-all. This drives the real http tool against the context the step
-  // agent was given, falling back the way the Agent constructor does.
+describe('step runtimes get the engine ToolContext', () => {
+  // The egress policy, the guard audit, metering and API profiles live on the ToolContext.
+  // Built without the engine's, an Agent makes an empty one (agent.ts), whose unset policy
+  // the egress check treats as allow-all.
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetRole.mockReturnValue(undefined);
   });
 
-  it('refuses a request under deny-all', async () => {
-    const engineCtx = createToolContext({} as LynoxUserConfig);
-    applyNetworkPolicy(engineCtx, 'deny-all', undefined);
+  const denyAll = (): ToolContext => {
+    const ctx = createToolContext({} as LynoxUserConfig);
+    applyNetworkPolicy(ctx, 'deny-all', undefined);
+    return ctx;
+  };
+  const givenToLastAgent = (): ToolContext | undefined =>
+    (vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as { toolContext?: ToolContext }).toolContext;
+
+  it('a named-agent step gets the engine context', async () => {
+    const engineCtx = denyAll();
     const step: ManifestStep = { id: 'n', agent: 'n', runtime: 'agent', task: 'fetch it' };
     const agentDef: AgentDef = { name: 'n', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
     await spawnViaAgent(
@@ -2320,9 +2326,28 @@ describe('spawnViaAgent — a named-agent step runs under the engine egress poli
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, engineCtx,
     );
-    const given = (vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as { toolContext?: ToolContext }).toolContext;
+    expect(givenToLastAgent()).toBe(engineCtx);
+  });
+
+  it('an inline step inside a nested pipeline cannot send a request under deny-all', async () => {
+    // The nested steps inherit the caller's tools, http_request among them. This drives that
+    // tool against the context the nested step agent was given, falling back the way the
+    // Agent constructor does when it was given none.
+    const engineCtx = denyAll();
+    const parentTools: ToolEntry[] = [httpRequestTool as unknown as ToolEntry];
+    const step: ManifestStep = {
+      id: 'outer', agent: 'outer', runtime: 'pipeline',
+      pipeline: [{ id: 'inner', task: 'fetch the page', tools: ['http_request'] }],
+    } as ManifestStep;
+    await spawnPipeline(
+      step, {}, mockConfig, parentTools, 0,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, engineCtx,
+    );
+    const inner = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as { name: string; tools: ToolEntry[] };
+    expect(inner.tools.map((t) => t.definition.name)).toContain('http_request');
     const stepAgent = {
-      toolContext: given ?? createToolContext({} as LynoxUserConfig),
+      toolContext: givenToLastAgent() ?? createToolContext({} as LynoxUserConfig),
       sessionCounters: { httpRequests: 0, writeBytes: 0 },
       principal: OWNER_PRINCIPAL,
       governingContract: () => ({ contract: undefined, withheld: 'none' }),

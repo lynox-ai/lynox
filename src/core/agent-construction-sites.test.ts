@@ -4,12 +4,17 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Every agent the engine builds runs under the engine's egress policy.
+ * Every place that builds an Agent hands it a ToolContext.
  *
- * The policy lives on the ToolContext, and an Agent built without one makes an empty
+ * The egress policy lives on the ToolContext, and an Agent built without one makes an empty
  * context of its own, whose policy is unset — which the egress check treats as allow-all.
- * So every `new Agent(` in src/ must hand one in. The set of sites is pinned: a new site
- * fails here until it is listed, and listing it means deciding where its context comes from.
+ * So every `new Agent(` in src/ must pass one. The set of sites is pinned: a new site fails
+ * here until it is listed, and listing it means deciding where its context comes from.
+ *
+ * This reads the source, so it sees that a site passes the key, not that a value arrives:
+ * a site that forwards an optional parameter passes it even when the caller left it out.
+ * Whether the engine's context reaches each step runtime is pinned by behaviour, in
+ * runtime-adapter.test.ts and runner.test.ts.
  */
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
