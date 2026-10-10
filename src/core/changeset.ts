@@ -49,20 +49,32 @@ export class ChangesetManager {
    * same text leaves an entry behind. Such a file is unchanged and not reported: an
    * empty entry would open a review with nothing in it, and the review holds the next
    * message until it is answered. `getChanges`, `hasChanges` and `size` all read this.
+   *
+   * An unchanged entry is also dropped, with its backup copy. Otherwise a later edit of
+   * that file — by the user or another run — would be reverted by `rollbackAll` without
+   * ever having been shown in the review. Dropping it is safe at any point: a further
+   * write backs the file up again, and its content is still the pre-run content.
    */
   private _changed(): Array<[string, ChangesetEntry, string]> {
     const changed: Array<[string, ChangesetEntry, string]> = [];
-    for (const [abs, entry] of this.entries) {
+    for (const [abs, entry] of [...this.entries]) {
       let currentContent: string;
       try {
         currentContent = readFileSync(abs, 'utf-8');
       } catch {
-        // File was deleted during run — skip
+        // A new file that was never created is unchanged. A modified file that can no
+        // longer be read is not reported, but stays tracked so a rollback restores it.
+        if (entry.status === 'added') this.entries.delete(abs);
         continue;
       }
-      if (entry.status === 'modified' && currentContent === entry.originalContent) continue;
+      if (entry.status === 'modified' && currentContent === entry.originalContent) {
+        this.entries.delete(abs);
+        try { rmSync(join(this.backupDir, relative(this.cwd, abs)), { force: true }); } catch { /* best-effort, like cleanup() */ }
+        continue;
+      }
       changed.push([abs, entry, currentContent]);
     }
+    if (this.entries.size === 0) this.cleanup();
     return changed;
   }
 

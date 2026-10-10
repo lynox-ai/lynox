@@ -18,11 +18,13 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await n
 
 let store: Store;
 let calls: string[];
+let listeners: Record<string, () => void>;
+let threadMessages: unknown = { messages: [], activeRun: null };
 
 function serve(changedFiles: Array<{ file: string; status: string; diff: string }>): void {
-	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
-		calls.push(url);
+		calls.push(`${init?.method ?? 'GET'} ${url}`);
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
 		if (url.endsWith('/run')) {
@@ -37,15 +39,23 @@ function serve(changedFiles: Array<{ file: string; status: string; diff: string 
 			return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
 		if (url.endsWith('/changeset')) return json({ hasChanges: changedFiles.length > 0, files: changedFiles });
-		return json({ messages: [], activeRun: null });
+		return json(threadMessages);
 	}));
 }
 
 const runPosts = (): number => calls.filter((u) => u.endsWith('/run')).length;
+const reviewOpen = async (): Promise<void> => {
+	serve([{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }]);
+	await store.sendMessage('edit the notes');
+	await settle();
+	expect(store.getPendingChangeset(), 'positive control: the review is open').not.toBeNull();
+};
 
 beforeEach(async () => {
 	vi.stubGlobal('navigator', { onLine: true });
-	vi.stubGlobal('window', { addEventListener: () => {} });
+	listeners = {};
+	threadMessages = { messages: [], activeRun: null };
+	vi.stubGlobal('window', { addEventListener: (event: string, fn: () => void) => { listeners[event] = fn; } });
 	vi.stubGlobal('document', { querySelector: () => null });
 	vi.resetModules();
 	store = await import('./chat.svelte.js');
@@ -73,5 +83,40 @@ describe('an open changeset review holds the next send', () => {
 
 		await store.sendMessage('next question');
 		expect(runPosts(), 'the held message was not sent').toBe(1);
+	});
+
+	it('the tap on a failed message keeps it failed, and nothing is sent', async () => {
+		await reviewOpen();
+		const failed = { role: 'user' as const, content: 'lost?', failed: true };
+		await store.retryFailedTurn(failed, 'lost?');
+		await settle();
+		expect(failed.failed, 'the message keeps its tap-to-retry').toBe(true);
+		expect(runPosts()).toBe(1);
+	});
+
+	it('the automatic retry on reconnect waits for the review too', async () => {
+		await reviewOpen();
+		store.getMessages().push({ role: 'user', content: 'sent while offline', failed: true });
+		expect(listeners.online, 'positive control: the store listens for online').toBeTypeOf('function');
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700)); // past the re-fire delay
+		await settle();
+		expect(store.getMessages().at(-1)?.failed, 'the turn stays failed').toBe(true);
+		expect(runPosts(), 'nothing was sent past the open review').toBe(1);
+	});
+
+	it('Retry on an interrupted run keeps the banner, and nothing is sent', async () => {
+		await reviewOpen();
+		threadMessages = {
+			messages: [{ role: 'user', content: 'edit the notes' }, { role: 'assistant', content: 'edited' }],
+			activeRun: { runId: 'r-int', status: 'interrupted', lastPersistedSeq: 0 },
+		};
+		await store.reconcileThread();
+		expect(store.getRunInterrupted(), 'positive control: the banner is up').toEqual({ runId: 'r-int' });
+		await store.retryInterruptedRun();
+		await settle();
+		expect(store.getRunInterrupted(), 'the banner and its Retry stay').toEqual({ runId: 'r-int' });
+		expect(calls.filter((c) => c.startsWith('DELETE'))).toEqual([]);
+		expect(runPosts()).toBe(1);
 	});
 });

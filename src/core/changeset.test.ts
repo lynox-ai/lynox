@@ -279,4 +279,82 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
     });
   });
+
+  // A file the review does not show must not be reverted by "Rollback all" either, and the
+  // copy of its content must not stay behind in the temp directory.
+  describe('an unchanged entry is dropped once it is seen', () => {
+    const backupDirOf = (mgr: ChangesetManager): string => (mgr as unknown as { backupDir: string }).backupDir;
+
+    it('a later edit of a file the review did not show survives rollbackAll', () => {
+      const cwd = makeTempDir();
+      const untouched = join(cwd, 'untouched.txt');
+      const edited = join(cwd, 'edited.txt');
+      writeFileSync(untouched, 'before', 'utf-8');
+      writeFileSync(edited, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(untouched);
+      mgr.backupBeforeWrite(edited);
+      writeFileSync(edited, 'by the run', 'utf-8');
+      expect(mgr.getChanges().map(c => c.file)).toEqual(['edited.txt']);
+      writeFileSync(untouched, 'by the user, after the run', 'utf-8');
+      mgr.rollbackAll();
+      expect(readFileSync(edited, 'utf-8'), 'positive control: the shown file is reverted').toBe('before');
+      expect(readFileSync(untouched, 'utf-8')).toBe('by the user, after the run');
+      mgr.cleanup();
+    });
+
+    it('its backup copy is removed, the changed file keeps its own', () => {
+      const cwd = makeTempDir();
+      writeFileSync(join(cwd, 'a.txt'), 'a', 'utf-8');
+      writeFileSync(join(cwd, 'b.txt'), 'b', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'a.txt'));
+      mgr.backupBeforeWrite(join(cwd, 'b.txt'));
+      writeFileSync(join(cwd, 'b.txt'), 'b, edited', 'utf-8');
+      expect(existsSync(join(backupDirOf(mgr), 'a.txt')), 'positive control: the copy was taken').toBe(true);
+      mgr.hasChanges();
+      expect(existsSync(join(backupDirOf(mgr), 'a.txt'))).toBe(false);
+      expect(existsSync(join(backupDirOf(mgr), 'b.txt'))).toBe(true);
+      mgr.cleanup();
+    });
+
+    it('when nothing changed, the backup directory is gone after the check', () => {
+      const cwd = makeTempDir();
+      writeFileSync(join(cwd, 'a.txt'), 'a', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'a.txt'));
+      expect(existsSync(backupDirOf(mgr)), 'positive control').toBe(true);
+      expect(mgr.hasChanges()).toBe(false);
+      expect(existsSync(backupDirOf(mgr))).toBe(false);
+    });
+
+    it('a write after the drop is tracked again, against the pre-run text', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'later.txt');
+      writeFileSync(filePath, 'pre-run', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      expect(mgr.hasChanges()).toBe(false);
+      mgr.backupBeforeWrite(filePath);
+      writeFileSync(filePath, 'written later', 'utf-8');
+      expect(mgr.size).toBe(1);
+      expect(mgr.getChanges()[0]!.diff).toContain('-pre-run');
+      mgr.rollbackAll();
+      expect(readFileSync(filePath, 'utf-8')).toBe('pre-run');
+      mgr.cleanup();
+    });
+
+    it('a modified file that was deleted is not shown, but rollbackAll still restores it', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'deleted.txt');
+      writeFileSync(filePath, 'keep me', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      rmSync(filePath);
+      expect(mgr.hasChanges()).toBe(false);
+      mgr.rollbackAll();
+      expect(readFileSync(filePath, 'utf-8')).toBe('keep me');
+      mgr.cleanup();
+    });
+  });
 });

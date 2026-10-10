@@ -600,6 +600,8 @@ let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : fa
 /** Queue a failed user turn for another send. Extracted so the confirmed and
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
+	// Runs past `sendMessage`, so it asks itself; the turn stays failed and keeps its tap-to-retry.
+	if (sendBlockedByReview()) return;
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
 	msg.queued = true;
@@ -1193,6 +1195,7 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 		addToast(t('chat.still_running'), 'info', 6000);
 		return;
 	}
+	if (sendBlockedByReview()) return;
 	if (!await askBeforeResend()) return;
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
@@ -3262,6 +3265,8 @@ export async function dismissInterruptedRun(): Promise<void> {
  * as a fresh run (there is no cross-restart resume — the partial output stays
  * in the transcript as history). */
 export async function retryInterruptedRun(): Promise<void> {
+	// Before the dismiss: a blocked send would otherwise take the banner and its Retry with it.
+	if (sendBlockedByReview()) return;
 	let lastUserText = '';
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
