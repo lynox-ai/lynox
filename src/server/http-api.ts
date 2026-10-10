@@ -439,7 +439,7 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'max_context_window_tokens',  // LLM Advanced radios (200k / 500k / 1M) — caps the agent trim budget, no cost / capability impact on CP.
   // Sonnet-variant picker (LLM Advanced): which served Sonnet the `balanced`
   // tier resolves to (4.6 ↔ 5). A user-preference — same Anthropic provider,
-  // ~same per-token price, debit auto-metered — so it shapes the user's own
+  // lower per-token price, debit auto-metered — so it shapes the user's own
   // session and never widens blast radius. The PUT handler additionally
   // validates the value against SERVED_BALANCED_SONNET_IDS (400 otherwise), so
   // an invalid/non-Sonnet id can never reach config even though the field is

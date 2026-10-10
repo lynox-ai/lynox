@@ -730,8 +730,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // they are also the 1h-write and cache-hit prices the pricing page lists.
   // charsPerToken 2.7 (≈ 3.5 / 1.3): Sonnet 5's new tokenizer emits ~30% more
   // tokens/text (documented Anthropic fact) — a conservative baseline pending
-  // live count_tokens measurement (measure-first). Same per-token RATE as 4.6;
-  // the real cost delta is the tokenizer, which the metered debit counts directly.
+  // live count_tokens measurement (measure-first). The per-token rate is a third
+  // below 4.6's, the tokenizer adds ~30% tokens back; the metered debit counts both.
   'claude-sonnet-5': {
     id: 'claude-sonnet-5',
     provider: 'anthropic',

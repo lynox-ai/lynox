@@ -119,12 +119,12 @@ describe('getModelPricing + estimateCost', () => {
 		expect(cost).toBeCloseTo(6.3, 4);
 	});
 
-	it('prices claude-sonnet-5 at the Sonnet sticker rate', () => {
+	it('prices claude-sonnet-5 at its standard $2/$10 rate', () => {
 		const p = getModelPricing('claude-sonnet-5');
-		expect(p.input).toBe(3);
-		expect(p.output).toBe(15);
-		expect(p.cacheWrite).toBe(6);
-		expect(p.cacheRead).toBe(0.3);
+		expect(p.input).toBe(2);
+		expect(p.output).toBe(10);
+		expect(p.cacheWrite).toBe(4);
+		expect(p.cacheRead).toBe(0.2);
 	});
 });
 
