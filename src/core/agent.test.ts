@@ -6086,6 +6086,101 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
   });
 });
 
+/**
+ * The question channel of `ask_user` alone (`askUserPrompt`): what a step of a scheduled workflow
+ * gets. It lets the step ask; it gives no consent gate a way to ask, and it goes through the same
+ * wrapper as `promptUser` (the run's signal, and the note that a question reached nobody).
+ */
+describe('the question channel of ask_user', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('neither field stands in for the other', () => {
+    const asks = new Agent({ name: 'test', model: 'claude-sonnet-4-6', askUserPrompt: vi.fn(async () => 'a') });
+    expect(asks.askUserPrompt).toBeTypeOf('function');
+    expect(asks.promptUser).toBeUndefined();
+    const consents = new Agent({ name: 'test', model: 'claude-sonnet-4-6', promptUser: vi.fn(async () => 'a') });
+    expect(consents.promptUser).toBeTypeOf('function');
+    expect(consents.askUserPrompt).toBeUndefined();
+  });
+
+  it('ask_user asks over it, and the run goes on with the answer', async () => {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Which list?' } }]))
+      .mockResolvedValueOnce(endTurnResponse('Used list B'));
+    const askUserPrompt = vi.fn().mockResolvedValue('B');
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], askUserPrompt });
+    await expect(agent.send('Go')).resolves.toBe('Used list B');
+    expect(askUserPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('a guard warning is still refused, and nothing is asked over the channel', async () => {
+    vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
+    const tool = makeTool('bash');
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'bash', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('OK'));
+    const askUserPrompt = vi.fn().mockResolvedValue('Allow');
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], askUserPrompt });
+    await agent.send('Dangerous');
+    const results = (agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> }).content;
+    expect(results[0]!.content).toContain('Permission denied (non-interactive)');
+    expect(tool.handler).not.toHaveBeenCalled();
+    expect(askUserPrompt).not.toHaveBeenCalled();
+  });
+
+  it('a question over it carries the run signal, and a caller\'s own wins', async () => {
+    const seen: Array<AbortSignal | undefined> = [];
+    const own = new AbortController();
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6',
+      askUserPrompt: vi.fn(async (_q, _o, m) => { seen.push(m?.signal); return 'ok'; }),
+    });
+    const tool = makeTool('asker', vi.fn(async () => {
+      await agent.askUserPrompt!('q');
+      await agent.askUserPrompt!('q2', undefined, { signal: own.signal });
+      return 'done';
+    }));
+    (agent as unknown as { tools: unknown[] }).tools = [tool];
+    let runSignal: AbortSignal | undefined;
+    mockProcess
+      .mockImplementationOnce(() => { runSignal = agent.runSignal; return Promise.resolve(toolUseResponse([{ id: 'tu_a', name: 'asker', input: {} }])); })
+      .mockResolvedValueOnce(endTurnResponse('end'));
+    await agent.send('go');
+    expect(runSignal).toBeInstanceOf(AbortSignal);
+    expect(seen).toEqual([runSignal, own.signal]);
+  });
+
+  it('an aborted run withdraws a question asked over it', async () => {
+    const deadline = new AbortController();
+    let questionSignal: AbortSignal | undefined;
+    const askUserPrompt = vi.fn((_q: unknown, _o?: string[], meta?: { signal?: AbortSignal }) => {
+      questionSignal = meta?.signal;
+      return new Promise<string>(() => { /* nobody answers */ });
+    });
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name: 'ask_user', input: { question: 'Which list?' } }]));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [askUserTool], askUserPrompt });
+    const run = agent.send('go', { disposableDeadline: deadline.signal });
+    setTimeout(() => deadline.abort(), 20);
+    await expect(run).rejects.toBeInstanceOf(RunAbortedError);
+    expect(askUserPrompt).toHaveBeenCalledTimes(1);
+    expect(questionSignal?.aborted).toBe(true);
+  }, 3000);
+
+  it('a question over it that reaches nobody ends the run, even when a tool swallows the error', async () => {
+    const swallowing = makeTool('confirm_tool', vi.fn(async (_input: unknown, a: IAgent) => {
+      try { await a.askUserPrompt!('Which list?'); return 'done'; }
+      catch (err) { return `confirm_tool error: ${(err as Error).message}`; }
+    }));
+    mockProcess.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'confirm_tool', input: {} }]));
+    const askUserPrompt = vi.fn(() => Promise.reject(new InputRequiredError('Which list?')));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [swallowing], askUserPrompt });
+    const err = await agent.send('Go').then(() => null, (e: unknown) => e);
+    expect(swallowing.handler).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(InputRequiredError);
+    expect(mockProcess, 'the model gets no turn to work around it').toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('untrusted epoch for write approvals', () => {
   const H = 'api.example.test';
   const POST_H = approvalKey('POST', H);

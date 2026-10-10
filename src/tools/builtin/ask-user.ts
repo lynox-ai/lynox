@@ -132,7 +132,8 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     },
   },
   handler: async (input: AskUserInput, agent: IAgent): Promise<string> => {
-    if (!agent.promptUser) {
+    const ask = agent.promptUser ?? agent.askUserPrompt;
+    if (!ask) {
       // ⛔ Thrown, not returned. A returned sentence is a tool RESULT: the model reads it and
       // carries on without the decision it just said it needed. The agent re-throws this
       // error and the run ends as "needs input" (`input-required.ts`).
@@ -184,7 +185,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
           throw new Error('ask_user: every entry in `questions` needs a non-empty `question`.');
         }
         const labels = q.options && q.options.length > 0 ? [...toLabels(q.options), '\x00'] : undefined;
-        const answer = await agent.promptUser(promptValue(q.question), labels);
+        const answer = await ask(promptValue(q.question), labels);
         // Store hint for this answer
         const hint = findHint(q.options, answer);
         if (hint) {
@@ -211,8 +212,8 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     // <strong>, `## …` an <h2>. `promptValue` exists for this caller and names
     // it in its own doc.
     const answer = input.multiSelect
-      ? await agent.promptUser(promptValue(question), labels, { multiSelect: true })
-      : await agent.promptUser(promptValue(question), labels);
+      ? await ask(promptValue(question), labels, { multiSelect: true })
+      : await ask(promptValue(question), labels);
 
     // Multi-select answers come back as a JSON-encoded string[] of labels.
     // Present them to the model as a clean comma-joined list; a step hint only

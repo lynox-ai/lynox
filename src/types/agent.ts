@@ -335,6 +335,9 @@ export interface IAgent {
   // assignable here.
   onStream:        EmittingStreamHandler | null;
   promptUser?: PromptUserFn | undefined;
+  /** The question channel of `ask_user` alone, for a step of a scheduled workflow. No consent
+   *  gate or guard reads it, so a run that may ask cannot thereby approve anything. */
+  askUserPrompt?: PromptUserFn | undefined;
   /** The current run's abort signal, `undefined` between runs (`Agent.runSignal`). */
   readonly runSignal?: AbortSignal | undefined;
   promptTabs?: PromptTabsFn | undefined;
