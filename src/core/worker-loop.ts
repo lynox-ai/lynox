@@ -1471,14 +1471,12 @@ export class WorkerLoop {
 
       // Only notify when no retry comes (`willRetry` above) — or on a stop, which does
       // not retry and so has no later attempt to report. A cron or a watch is never
-      // retried, so each of its failed runs reports. Not on a teardown that keeps the
-      // run's question for the next process: an answer there resumes the run, so
-      // "failed" would be the wrong word, and every deploy would send it. ⚠ A stop is not "final" either: a stopped CRON
+      // retried, so each of its failed runs reports. ⚠ A stop is not "final" either: a stopped CRON
       // keeps its schedule and a stopped watch its interval (`recordTaskRun` computes
       // both), so what ends here is the RUN, not necessarily the trigger. The word and
       // the follow-ups differ because the reader's next move does: "Explain why this
       // failed" is the wrong offer for a run that did what it was told.
-      if (!willRetry && !keepsQuestionForNextProcess(entry) && this.notificationRouter.hasChannels()) {
+      if (!willRetry && this.notificationRouter.hasChannels()) {
         const stopped = status === 'stopped';
         await this.notificationRouter.notify({
           title: `${stopped ? '\u23f9' : '\u2717'} ${task.title}`,

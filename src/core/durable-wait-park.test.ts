@@ -64,7 +64,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string; oneShotRetries?: number; channels?: boolean }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean; secretValues?: string[]; maxToolResultChars?: number; question?: string }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -75,17 +75,11 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const prompts = new PromptStore(history.getDb());
     const manager = new TaskManager(history);
 
-    history.insertTrigger(opts?.oneShotRetries !== undefined
-      ? {
-        id: 'trg-1', title: 'Daily report', source: 'manual', effect: 'run_agent',
-        nextRunAt: '2026-01-01T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z',
-        maxRetries: opts.oneShotRetries,
-      }
-      : {
-        id: 'trg-1', title: 'Daily report', source: 'cron', effect: 'run_agent',
-        scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
-        confirmedAt: '2026-01-01T00:00:00.000Z',
-      });
+    history.insertTrigger({
+      id: 'trg-1', title: 'Daily report', source: 'cron', effect: 'run_agent',
+      scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z',
+    });
 
     let promptId: string | undefined;
     let signalParked: () => void;
@@ -157,7 +151,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     } as unknown as Engine;
 
     const router = {
-      hasChannels: () => opts?.channels === true,
+      hasChannels: () => false,
       notify: vi.fn().mockResolvedValue(undefined),
     } as unknown as NotificationRouter;
 
@@ -853,23 +847,6 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(revived?.waiting_until).toBeUndefined();
     expect(new Date(revived!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
     next.stop();
-  });
-
-  // MUTATION: drop `!keepsQuestionForNextProcess(entry)` from the failure notification in
-  // WorkerLoop.executeTask → the owner is told the run failed while its question stands.
-  it('W2-13 — a graceful shutdown does not tell the owner the run failed while its question stands', async () => {
-    const h = makeHarness({ oneShotRetries: 2, channels: true });
-    await h.parked;
-    expect(h.history.getTrigger('trg-1')?.status, 'the fixture must really be parked').toBe('waiting');
-
-    h.loop.stop();
-    await waitUntil('the aborted wait to unwind through its finally',
-      () => (h.history.getTrigger('trg-1')?.last_run_at ?? null) !== null);
-
-    const titles = vi.mocked(h.router.notify).mock.calls.map((c) => (c[0] as { title?: string }).title ?? '');
-    expect(titles.filter((t) => t.startsWith('\u2717'))).toEqual([]);
-    // The question still stands, so an answer resumes the run in the next process.
-    expect(h.prompts.getById(h.promptIdOf()!)?.status).toBe('pending');
   });
 
   it('W2-13 — "Run now" refuses a trigger that is still waiting, instead of starting a SECOND run', async () => {

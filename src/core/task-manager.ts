@@ -1045,10 +1045,10 @@ export class TaskManager {
       retryCount,
     });
     // A retry is only real where the worker will pick it up: `getDue` leaves out a row
-    // completed, disabled, parked or marked failed while the run went on. (A parked row
+    // completed, disabled, parked or marked failed while the run went on. A parked row
     // that is answered later runs again, but as the resume of its question, not as this
-    // retry.) (The confirmation gates in `getDue` are not
-    // repeated here; a row that loses its confirmation mid-run still reads as retrying.)
+    // retry. The confirmation gates in `getDue` are not repeated here: a row that loses
+    // its confirmation mid-run still reads as retrying.
     return retrying && task.status !== 'completed' && task.status !== 'waiting'
       && task.status !== 'failed' && task.enabled !== 0;
   }
