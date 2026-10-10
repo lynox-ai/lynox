@@ -1203,6 +1203,33 @@ describe('the always-loaded profile block and who may reach into it', () => {
     expect(ks.getBlock('profile')?.content).toBe(LINE);
   });
 
+  it('a boot that cannot read the encrypted store leaves the backfill for a boot that can', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-block-key-'));
+    tmpDirs.push(dir);
+    const path = join(dir, 'engine.db');
+    const key = `k-${'0'.repeat(8)}-${Date.now().toString(36)}`;
+    const withKey = new EngineDb(path, key);
+    const ks = new KnowledgeStore(withKey, new SubjectStore(withKey));
+    ks.setBlockContent('profile', LINE);
+    ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'onboarding' });
+    const raw = rawDb(ks);
+    raw.prepare('DELETE FROM profile_seeds').run();
+    raw.prepare('UPDATE profile_seed_backfill SET done = 0').run();
+    withKey.close();
+
+    const noKey = new EngineDb(path, '');
+    new KnowledgeStore(noKey, new SubjectStore(noKey));
+    expect(noKey.getDb().prepare('SELECT done FROM profile_seed_backfill').get()).toEqual({ done: 0 });
+    noKey.close();
+
+    const again = new EngineDb(path, key);
+    const reopened = new KnowledgeStore(again, new SubjectStore(again));
+    expect(again.getDb().prepare('SELECT done FROM profile_seed_backfill').get()).toEqual({ done: 1 });
+    expect(reopened.deleteByThread('onboarding')).toBe(1);
+    expect(reopened.getBlock('profile')?.content ?? '').toBe('');
+    again.close();
+  });
+
   it('a block written before seeds were recorded is backfilled once from user-asserted entries', () => {
     const { ks } = make();
     ks.setBlockContent('profile', `${LINE}\nOperator works from Bern`);
@@ -1303,7 +1330,7 @@ describe('a fact said in two chats: private mode takes only what the private cha
     expect(ks.getEntry(a.id)?.text).toBe(FULL);
   });
 
-  it('the wording each chat used is stored encrypted, and the private chat\'s goes', () => {
+  it('the wording each chat used is kept per source, and the private chat\'s goes', () => {
     const { ks, db } = make();
     const id = sayInTwoChats(ks);
     const raw = db.prepare('SELECT thread_id, text FROM entry_sources WHERE entry_id = ? ORDER BY id').all(id) as Array<{ thread_id: string; text: string }>;
@@ -1312,6 +1339,30 @@ describe('a fact said in two chats: private mode takes only what the private cha
     ks.deleteByThread('chat-a');
 
     expect((db.prepare('SELECT thread_id FROM entry_sources WHERE entry_id = ?').all(id) as Array<{ thread_id: string }>).map(r => r.thread_id)).toEqual(['chat-b']);
+  });
+
+  it('an entry that takes another chat\'s wording takes that chat\'s trust, and loses the pin', () => {
+    // A was typed by the user and pinned; B is the agent's own restatement. Keeping A's tier and
+    // pin on B's words would make agent text read as user-asserted, everywhere the tier decides.
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a', pin: true });
+    expect(ks.getEntry(a.id)?.pinned).toBe(true);
+    expect(ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'agent', sourceThreadId: 'chat-b' }).deduped).toBe(true);
+
+    ks.deleteByThread('chat-a');
+
+    const entry = ks.getEntry(a.id);
+    expect(entry?.text).toBe(RESTATED);
+    expect(entry?.sourceType).toBe('agent_inferred');
+    expect(entry?.sourceChannel).toBe('agent');
+    expect(entry?.pinned).toBe(false);
+  });
+
+  it('an edited approval replaces the queued wording in the source too', () => {
+    const { ks } = make();
+    const queued = ks.write({ text: 'Jana Reber moved from Gasse 4 and lives in Bern', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-q' });
+    ks.reviewEntry(queued.id, 'edit_approve', 'Jana Reber lives in Bern');
+    expect(ks.listSourcesMasked().filter(s => s.entryId === queued.id).map(s => s.text)).toEqual(['Jana Reber lives in Bern']);
   });
 
   it('deleting a chat marks its source, not only the entry\'s first chat', () => {
