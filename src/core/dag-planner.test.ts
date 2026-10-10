@@ -40,8 +40,11 @@ describe('planDAG', () => {
   it('returns null when API call fails', async () => {
     mockCreate.mockRejectedValueOnce(new Error('Internal Server Error'));
 
-    const result = await planDAG('build the app');
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
     expect(result).toBeNull();
+    // Nothing came back, nothing was spent.
+    expect(onSpend).not.toHaveBeenCalled();
   });
 
   it('a reply that lost the forced call returns null and is counted by name, not swallowed', async () => {
@@ -50,8 +53,12 @@ describe('planDAG', () => {
       { content: [{ type: 'text', text: 'Step 1: …' }], usage: { input_tokens: 300, output_tokens: 80 } },
     ));
     const before = forcedToolMissCounts()['dag-planner'] ?? 0;
-    const result = await planDAG('build the app');
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
     expect(result).toBeNull();
+    // The reply that planned nothing is still handed over for booking, once.
+    expect(onSpend).toHaveBeenCalledOnce();
+    expect(onSpend.mock.calls[0]![0] as number).toBeGreaterThan(0);
     expect(forcedToolMissCounts()['dag-planner']).toBe(before + 1);
   });
 

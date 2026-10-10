@@ -70,6 +70,12 @@ export async function planDAG(
     openaiModelId?: string | undefined;
     maxSteps?: number | undefined;
     projectContext?: string | undefined;
+    /**
+     * Called once with the USD cost of the planning reply, as soon as it arrives — also when
+     * the reply yields no plan (`null`). Book the spend here rather than from the result: a
+     * reply that plans nothing was paid for all the same.
+     */
+    onSpend?: ((costUsd: number) => void) | undefined;
   },
 ): Promise<DagPlanResult | null> {
   try {
@@ -113,6 +119,19 @@ export async function planDAG(
         { signal: controller.signal },
       );
       const { message: response, missed } = await settleForcedTool(stream.finalMessage());
+
+      // Actual pool-key spend of this planning call, for the managed in-run
+      // debit at the call site. Normalize the SDK's null cache fields.
+      const u = response.usage;
+      const actualCostUsd = u
+        ? calculateCost(model, {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+          })
+        : 0;
+      options?.onSpend?.(actualCostUsd);
       reportForcedToolMiss('dag-planner', missed);
 
       clearTimeout(timeout);
@@ -164,18 +183,6 @@ export async function planDAG(
 
       // Enforce max steps limit
       const trimmed = steps.slice(0, maxSteps);
-
-      // Actual pool-key spend of this planning call, for the managed in-run
-      // debit at the call site. Normalize the SDK's null cache fields.
-      const u = response.usage;
-      const actualCostUsd = u
-        ? calculateCost(model, {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
-            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
-          })
-        : 0;
 
       return {
         steps: trimmed,

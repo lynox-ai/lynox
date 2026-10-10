@@ -691,11 +691,14 @@ describe('plan_task auto-planning fallback', () => {
   });
 
   it('debits the DAG-planning pool-key spend to the local cap + tenant balance', async () => {
-    mockPlanDAG.mockResolvedValueOnce({
-      steps: [{ id: 'research', task: 'Research the topic' }],
-      reasoning: 'r',
-      estimatedCost: 0.02,
-      actualCostUsd: 0.003,
+    mockPlanDAG.mockImplementationOnce(async (_goal: string, opts?: { onSpend?: (usd: number) => void }) => {
+      opts?.onSpend?.(0.003);
+      return {
+        steps: [{ id: 'research', task: 'Research the topic' }],
+        reasoning: 'r',
+        estimatedCost: 0.02,
+        actualCostUsd: 0.003,
+      };
     });
     const onAfterRun = vi.fn();
     const counters = {
@@ -713,12 +716,35 @@ describe('plan_task auto-planning fallback', () => {
     expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.003, 6);
   });
 
+  it('debits a planning reply that yields no plan, exactly once', async () => {
+    // The reply was paid for even though it planned nothing (e.g. the model answered
+    // without the forced tool): the spend must reach the cap and the tenant balance.
+    mockPlanDAG.mockImplementationOnce(async (_goal: string, opts?: { onSpend?: (usd: number) => void }) => {
+      opts?.onSpend?.(0.004);
+      return null;
+    });
+    const onAfterRun = vi.fn();
+    const counters = {
+      httpRequests: 0, writeBytes: 0, costUSD: 0,
+    };
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
+
+    await planTaskTool.handler({ summary: 'Create a research report' }, agent);
+    expect(counters.costUSD).toBeCloseTo(0.004, 6);
+    expect(onAfterRun).toHaveBeenCalledOnce();
+    expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.004, 6);
+  });
+
   it('does not debit when the DAG plan returns a zero actual cost', async () => {
-    mockPlanDAG.mockResolvedValueOnce({
-      steps: [{ id: 'a', task: 'do a' }],
-      reasoning: 'r',
-      estimatedCost: 0.02,
-      actualCostUsd: 0,
+    mockPlanDAG.mockImplementationOnce(async (_goal: string, opts?: { onSpend?: (usd: number) => void }) => {
+      opts?.onSpend?.(0);
+      return {
+        steps: [{ id: 'a', task: 'do a' }],
+        reasoning: 'r',
+        estimatedCost: 0.02,
+        actualCostUsd: 0,
+      };
     });
     const onAfterRun = vi.fn();
     const counters = {

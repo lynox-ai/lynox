@@ -66,7 +66,7 @@ export function forcedToolInstruction(forced: ForcedTool): string {
 }
 
 function appendSystem(system: unknown, text: string): unknown {
-  if (system === undefined) return text;
+  if (system === undefined || system === '') return text;
   if (typeof system === 'string') return `${system}\n\n${text}`;
   if (Array.isArray(system)) return [...system, { type: 'text', text }];
   return system;
@@ -155,7 +155,8 @@ function wrapMessages(surface: Record<string, unknown> | undefined): void {
     const { params: shaped, forced } = shapeRequestForModel(params);
     const result = orig(shaped, ...rest);
     // A streaming create returns a stream, not a message; the stream() wrapper is the
-    // checked path for streams, and no caller forces a tool through stream:true.
+    // checked path for streams. No caller forces a tool through stream:true, and the
+    // forcing-sites test in llm-wire-rules.test.ts fails if one starts to.
     if (!forced || shaped['stream'] === true) return result;
     return (result as Promise<Reply>).then((msg) => {
       assertForcedToolCalled(String(shaped['model']), forced, msg);

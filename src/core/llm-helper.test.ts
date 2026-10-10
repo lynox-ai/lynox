@@ -8,6 +8,7 @@ import {
   BudgetError,
   SchemaValueError,
   ExtractShapeError,
+  extractionSpendOf,
   type ExtractSchema,
 } from './llm-helper.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
@@ -664,8 +665,35 @@ describe('callForStructuredJson — a reply that lost the forced call', () => {
       },
     } as unknown as Anthropic;
     const before = forcedToolMissCounts()['llm-helper'] ?? 0;
-    await expect(callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client }))
-      .rejects.toBeInstanceOf(ExtractShapeError);
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client, model: 'claude-opus-5-5' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExtractShapeError);
     expect(forcedToolMissCounts()['llm-helper']).toBe(before + 1);
+    // The paid reply travels with the error, priced at the model's rate: 100 in at $4/M, 50 out at $20/M.
+    expect(extractionSpendOf(err)).toEqual({ costUsd: expect.closeTo(0.0014, 9) as number, tier: 'deep' });
+  });
+});
+
+describe('callForStructuredJson — the spend behind a failed extraction', () => {
+  it('rides with a schema refusal of a reply that did call the tool', async () => {
+    const client = {
+      messages: {
+        create: async () => ({
+          content: [{ type: 'tool_use', id: 't', name: 'extract', input: { wrong: true } }],
+          usage: { input_tokens: 1000, output_tokens: 100 },
+        }),
+      },
+    } as unknown as Anthropic;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client, model: 'claude-sonnet-4-6' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
+  });
+
+  it('is absent when the call never reached the model', async () => {
+    const client = { messages: { create: async () => { throw new Error('connect ECONNREFUSED'); } } } as unknown as Anthropic;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client })
+      .catch((e: unknown) => e);
+    expect(extractionSpendOf(err)).toBeUndefined();
   });
 });

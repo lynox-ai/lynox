@@ -55,6 +55,13 @@ describe('shapeRequestForModel', () => {
     expect(params['system']).toBe(`You extract facts.\n\n${forcedToolInstruction(TOOL)}`);
   });
 
+  it('uses the instruction alone when system is absent or empty', () => {
+    for (const system of [undefined, '']) {
+      const { params } = shapeRequestForModel({ model: 'claude-opus-5-5', ...(system === undefined ? {} : { system }), tool_choice: { type: 'any' } });
+      expect(params['system']).toBe(forcedToolInstruction({ type: 'any' }));
+    }
+  });
+
   it('appends the instruction as a block to a block-array system, keeping cache markers in place', () => {
     const block = { type: 'text', text: 'cached prefix', cache_control: { type: 'ephemeral' } };
     const { params } = shapeRequestForModel({ model: 'claude-sonnet-5-5', system: [block], tool_choice: { type: 'any' } });
@@ -218,7 +225,7 @@ describe('every call site that forces a tool handles the lost call', () => {
     // route the reply through settleForcedTool (books once) and reportForcedToolMiss (says
     // so) — one of each per forcing site. A new forcing site fails here until it does.
     const root = join(__dirname, '..');
-    const perFile = new Map<string, { forces: number; settles: number; reports: number }>();
+    const perFile = new Map<string, { forces: number; settles: number; reports: number; unchecked: number }>();
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
@@ -226,12 +233,16 @@ describe('every call site that forces a tool handles the lost call', () => {
         if (!p.endsWith('.ts') || p.endsWith('.test.ts') || p.endsWith('.d.ts')) continue;
         if (p.endsWith('llm-wire-rules.ts') || p.endsWith('openai-adapter.ts')) continue;
         const src = readFileSync(p, 'utf8');
-        const forces = (src.match(/tool_choice:\s*\{\s*type:\s*'(tool|any)'/g) ?? []).length;
+        // Field order and quote style inside the literal do not matter.
+        const forces = (src.match(/tool_choice:\s*\{[^}]*\btype:\s*['"`](tool|any)['"`]/g) ?? []).length;
         if (forces === 0) continue;
         perFile.set(relative(root, p), {
           forces,
           settles: (src.match(/settleForcedTool\(/g) ?? []).length,
           reports: (src.match(/reportForcedToolMiss\(/g) ?? []).length,
+          // The boundary checks the reply on `create` and on a stream's `finalMessage()` only.
+          // These readers get the reply past that check, so a forcing file must not use them.
+          unchecked: (src.match(/\.finalText\(|\.done\(\)|['"]finalMessage['"]|stream:\s*true/g) ?? []).length,
         });
       }
     };
@@ -247,6 +258,7 @@ describe('every call site that forces a tool handles the lost call', () => {
     for (const [file, n] of perFile) {
       expect(n.settles, `${file}: settleForcedTool per forcing site`).toBe(n.forces);
       expect(n.reports, `${file}: reportForcedToolMiss per forcing site`).toBe(n.forces);
+      expect(n.unchecked, `${file}: reads a forced reply past the check (finalText / done / 'finalMessage' event / stream:true)`).toBe(0);
     }
   });
 });
