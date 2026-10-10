@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url';
  *
  * Comment lines are left out of the scan, so a doc comment naming the field is not a site. The
  * match is on the identifier, which also finds `agent['askUserPrompt']` and a destructured
- * `{ askUserPrompt }`.
+ * `{ askUserPrompt }`. The price of skipping comments by their first characters: a code line that
+ * begins with `*` or `/*` (a continued multiplication, a leading block comment) is skipped too.
+ * Formatted TypeScript in this repo writes neither, and a review of such a line would catch it.
  */
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
