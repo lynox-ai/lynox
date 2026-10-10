@@ -360,6 +360,17 @@ export class Agent implements IAgent {
     return raw ? (question, options, meta) => this._notingAskedNobody(raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
   }
   set promptUser(fn: PromptUserFn | undefined) { this._promptUser = fn; }
+  // The question channel of `ask_user` alone, for a step of a scheduled workflow. A field of its
+  // own and not a flag on `promptUser`: every consent gate and guard reads `promptUser`, and a
+  // run that may ask a question must not thereby gain a way to approve anything. No reader of
+  // `promptUser` knows this field, and neither getter ever returns the other's callback. It goes
+  // through the same wrapper as `promptUser`, so the run's signal still withdraws the question.
+  private _askUserPrompt: PromptUserFn | undefined;
+  get askUserPrompt(): PromptUserFn | undefined {
+    const raw = this._askUserPrompt;
+    return raw ? (question, options, meta) => this._notingAskedNobody(raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
+  }
+  set askUserPrompt(fn: PromptUserFn | undefined) { this._askUserPrompt = fn; }
   get promptTabs(): PromptTabsFn | undefined {
     const raw = this._promptTabs;
     return raw ? (questions, meta) => this._notingAskedNobody(raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
@@ -1200,6 +1211,7 @@ export class Agent implements IAgent {
     this.onMessageCheckpoint = config.onMessageCheckpoint;
     this.onWireSnapshot = config.onWireSnapshot;
     this.promptUser = config.promptUser;
+    this.askUserPrompt = config.askUserPrompt;
     this.promptTabs = config.promptTabs;
     this.promptSecret = config.promptSecret;
     this.promptMailConnect = config.promptMailConnect;

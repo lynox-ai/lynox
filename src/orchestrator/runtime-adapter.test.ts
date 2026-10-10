@@ -40,7 +40,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
@@ -678,15 +678,25 @@ describe('spawnInline thinking gating', () => {
   });
 });
 
-describe('stripHumanInTheLoopTools', () => {
-  it('drops ask_user / ask_secret entries', () => {
-    const tools: ToolEntry[] = [
-      { definition: { name: 'bash', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'ok' },
-      { definition: { name: 'ask_user', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'q' },
-      { definition: { name: 'ask_secret', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 's' },
-    ];
-    const stripped = stripHumanInTheLoopTools(tools);
-    expect(stripped.map(t => t.definition.name)).toEqual(['bash']);
+describe('stripHumanInTheLoopToolsWithout — each tool only with its channel', () => {
+  const hitl = (): ToolEntry[] => ['bash', 'ask_user', 'ask_secret', 'ask_human'].map(name => (
+    { definition: { name, description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => name }
+  ));
+  const names = (handles: SubAgentPromptHandles | undefined): string[] =>
+    stripHumanInTheLoopToolsWithout(hitl(), handles).map(t => t.definition.name);
+  const fn = async () => 'x';
+
+  it('no channel: all three go', () => {
+    expect(names(undefined)).toEqual(['bash']);
+  });
+  it('the question channel alone keeps ask_user, never ask_secret', () => {
+    expect(names({ parentAskUserPrompt: fn })).toEqual(['bash', 'ask_user']);
+  });
+  it('promptUser and promptSecret keep all three, as in a chat run', () => {
+    expect(names({ parentPromptUser: fn, parentPromptSecret: async () => 'saved' as const })).toEqual(['bash', 'ask_user', 'ask_secret', 'ask_human']);
+  });
+  it('promptUser without promptSecret drops ask_secret, which would only throw', () => {
+    expect(names({ parentPromptUser: fn })).toEqual(['bash', 'ask_user', 'ask_human']);
   });
 });
 
@@ -748,6 +758,16 @@ describe('buildSubAgentPromptCallbacks', () => {
     expect(budget.usedCount).toBe(0);
   });
 
+  it('passes the question channel on as its own callback, tagged and budgeted, and never as promptUser', async () => {
+    const budget = new PromptBudget(1);
+    const parent = vi.fn(async () => 'B');
+    const cbs = buildSubAgentPromptCallbacks(step, { parentAskUserPrompt: parent, promptBudget: budget });
+    expect(cbs.promptUser).toBeUndefined();
+    await expect(cbs.askUserPrompt!('Which list?')).resolves.toBe('B');
+    expect(parent).toHaveBeenCalledWith('Which list?', undefined, { stepId: 'vote', stepTask: 'Welche Tagline?' });
+    await expect(cbs.askUserPrompt!('Again?')).rejects.toBeInstanceOf(PromptBudgetExceededError);
+  });
+
   it('consumes budget on promptTabs success', async () => {
     const budget = new PromptBudget(2);
     const cbs = buildSubAgentPromptCallbacks(step, {
@@ -798,6 +818,36 @@ describe('spawnInline + parentPrompt propagation', () => {
     expect(tools.find(t => t.definition.name === 'ask_user')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'ask_secret')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'ask_human')).toBeUndefined();
+  });
+
+  it('with the question channel alone: ask_user stays, ask_secret goes, and the step has no promptUser — both runtimes', async () => {
+    const parentAskUserPrompt = vi.fn(async () => 'B');
+    const hitl: ToolEntry[] = ['ask_user', 'ask_secret'].map(name => (
+      { definition: { name, description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => name }
+    ));
+    await spawnInline(
+      { id: 'scheduled', agent: 'scheduled', runtime: 'inline', task: 'ask' }, {}, mockConfig, [...mockParentTools, ...hitl],
+      undefined, undefined, undefined, { parentAskUserPrompt },
+    );
+    const inline = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const inlineTools = (inline['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(inlineTools).toContain('ask_user');
+    expect(inlineTools).not.toContain('ask_secret');
+    expect(inline['promptUser']).toBeUndefined();
+    await (inline['askUserPrompt'] as (q: string) => Promise<string>)('Which list?');
+    expect(parentAskUserPrompt).toHaveBeenCalledWith('Which list?', undefined, expect.objectContaining({ stepId: 'scheduled' }));
+
+    const agentTools = ['ask_user', 'ask_secret'].map(name => ({ name, description: '', input_schema: { type: 'object' as const, properties: {} }, execute: async () => name }));
+    await spawnViaAgent(
+      { id: 'a', agent: 'a', runtime: 'agent' }, { name: 'a', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: agentTools },
+      {}, mockConfig, undefined, 'run-1', undefined, undefined, { parentAskUserPrompt },
+    );
+    const named = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const namedTools = (named['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(namedTools).toContain('ask_user');
+    expect(namedTools).not.toContain('ask_secret');
+    expect(named['promptUser']).toBeUndefined();
+    expect(named['askUserPrompt']).toBeTypeOf('function');
   });
 
   it('keeps ask_user in sub-agent tools when parentPromptUser is present', async () => {
