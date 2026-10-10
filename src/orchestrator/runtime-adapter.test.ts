@@ -678,7 +678,7 @@ describe('spawnInline thinking gating', () => {
   });
 });
 
-describe('stripHumanInTheLoopToolsWithout — each tool only with its channel', () => {
+describe('stripHumanInTheLoopToolsWithout — which human-in-the-loop tools a step keeps', () => {
   const hitl = (): ToolEntry[] => ['bash', 'ask_user', 'ask_secret', 'ask_human'].map(name => (
     { definition: { name, description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => name }
   ));
@@ -692,11 +692,13 @@ describe('stripHumanInTheLoopToolsWithout — each tool only with its channel', 
   it('the question channel alone keeps ask_user, never ask_secret', () => {
     expect(names({ parentAskUserPrompt: fn })).toEqual(['bash', 'ask_user']);
   });
-  it('promptUser and promptSecret keep all three, as in a chat run', () => {
+  it('promptUser keeps all three, as before — with or without promptSecret', () => {
     expect(names({ parentPromptUser: fn, parentPromptSecret: async () => 'saved' as const })).toEqual(['bash', 'ask_user', 'ask_secret', 'ask_human']);
+    // Without promptSecret, ask_secret answers with a pointer to Settings; the step keeps it.
+    expect(names({ parentPromptUser: fn })).toEqual(['bash', 'ask_user', 'ask_secret', 'ask_human']);
   });
-  it('promptUser without promptSecret drops ask_secret, which would only throw', () => {
-    expect(names({ parentPromptUser: fn })).toEqual(['bash', 'ask_user', 'ask_human']);
+  it('the question channel with promptSecret beside it still keeps only ask_user', () => {
+    expect(names({ parentAskUserPrompt: fn, parentPromptSecret: async () => 'saved' as const })).toEqual(['bash', 'ask_user']);
   });
 });
 

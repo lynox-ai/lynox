@@ -13,9 +13,13 @@ import { fileURLToPath } from 'node:url';
  * would compile and look harmless, so the set of lines that name the channel is pinned here,
  * line by line: a new reader fails this test until it is listed, and listing it is the review.
  *
- * Comments are stripped before the scan, so a doc comment naming the field is not a site. The
- * match is on the bare identifier, which also finds `agent['askUserPrompt']` and a destructured
- * `{ askUserPrompt }`; `parentAskUserPrompt` is a different identifier and is not counted.
+ * The handle a workflow run passes its steps (`SubAgentPromptHandles.parentAskUserPrompt`) is
+ * pinned the same way: `promptUser: parent.parentAskUserPrompt` would hand a step real consent
+ * just as surely.
+ *
+ * Comment lines are left out of the scan, so a doc comment naming the field is not a site. The
+ * match is on the identifier, which also finds `agent['askUserPrompt']` and a destructured
+ * `{ askUserPrompt }`.
  */
 const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
@@ -27,14 +31,10 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-/** Block and line comments blanked out, line breaks kept so line numbers stay true. */
-function withoutComments(text: string): string {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
-}
+/** A line that is only a comment: `//`, `/*`, or the `*` of a block comment's body. */
+const isCommentLine = (line: string): boolean => /^\s*(\/\/|\/\*|\*)/.test(line);
 
-const NAME = /\baskUserPrompt\b/;
+const NAME = /\b(askUserPrompt|parentAskUserPrompt)\b/;
 
 const EXPECTED: Record<string, string[]> = {
   'core/agent.ts': [
@@ -46,8 +46,11 @@ const EXPECTED: Record<string, string[]> = {
     'const ask = agent.promptUser ?? agent.askUserPrompt;',
   ],
   'orchestrator/runtime-adapter.ts': [
+    'parentAskUserPrompt?: PromptUserFn | undefined;',
     '): { promptUser?: PromptUserFn | undefined; askUserPrompt?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {',
     'askUserPrompt: parent.parentAskUserPrompt',
+    'return await parent.parentAskUserPrompt!(q, opts, { ...meta, ...m });',
+    "return name === 'ask_user' && parent?.parentAskUserPrompt !== undefined;",
     'askUserPrompt: promptCallbacks.askUserPrompt,',
     'askUserPrompt: promptCallbacks.askUserPrompt,',
   ],
@@ -58,8 +61,8 @@ const EXPECTED: Record<string, string[]> = {
 describe('the question channel of ask_user is named only at the listed lines', () => {
   const found: Record<string, string[]> = {};
   for (const file of sourceFiles(SRC)) {
-    const lines = withoutComments(readFileSync(file, 'utf-8')).split('\n')
-      .filter((l) => NAME.test(l)).map((l) => l.trim());
+    const lines = readFileSync(file, 'utf-8').split('\n')
+      .filter((l) => !isCommentLine(l) && NAME.test(l)).map((l) => l.trim());
     if (lines.length > 0) found[relative(SRC, file)] = lines;
   }
 
@@ -72,9 +75,9 @@ describe('the question channel of ask_user is named only at the listed lines', (
   });
 
   it('the scan finds a reader where one is added (positive control)', () => {
-    const consentSite = 'if (this.promptUser ?? this.askUserPrompt) {';
-    expect(NAME.test(withoutComments(consentSite))).toBe(true);
-    expect(NAME.test(withoutComments('// falls back to askUserPrompt'))).toBe(false);
-    expect(NAME.test('parent.parentAskUserPrompt')).toBe(false);
+    expect(NAME.test('if (this.promptUser ?? this.askUserPrompt) {')).toBe(true);
+    expect(NAME.test('promptUser: parent.parentPromptUser ?? parent.parentAskUserPrompt,')).toBe(true);
+    expect(isCommentLine('  // falls back to askUserPrompt')).toBe(true);
+    expect(isCommentLine("  const glob = 'src/*'; const ask = agent.askUserPrompt;")).toBe(false);
   });
 });

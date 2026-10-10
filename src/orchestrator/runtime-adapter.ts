@@ -396,19 +396,17 @@ export function buildSubAgentPromptCallbacks(
   };
 }
 
-/** Whether a step keeps a human-in-the-loop tool: each one only where the channel its handler
- *  needs is there. `ask_user` asks over `promptUser` or, in a scheduled workflow, over the
- *  question channel alone; `ask_secret` only ever over `promptSecret`, never over the question
- *  channel. Without its channel a tool would only throw when called. */
+/** Whether a step keeps a human-in-the-loop tool. With `promptUser` it keeps all of them, as
+ *  before: `ask_secret` without `promptSecret` answers with a pointer to Settings rather than
+ *  asking, and that answer keeps a model from asking for the key in plain text. With the
+ *  question channel alone (a step of a scheduled workflow) it keeps `ask_user` and nothing
+ *  else: a scheduled run never asks for a secret. Without either it keeps none. */
 export function keepsHumanInTheLoopTool(name: string, parent: SubAgentPromptHandles | undefined): boolean {
-  switch (name) {
-    case 'ask_user': return parent?.parentPromptUser !== undefined || parent?.parentAskUserPrompt !== undefined;
-    case 'ask_secret': return parent?.parentPromptSecret !== undefined;
-    default: return parent?.parentPromptUser !== undefined;
-  }
+  if (parent?.parentPromptUser !== undefined) return true;
+  return name === 'ask_user' && parent?.parentAskUserPrompt !== undefined;
 }
 
-/** Drops each human-in-the-loop tool the step has no channel for (`keepsHumanInTheLoopTool`). */
+/** Drops each human-in-the-loop tool the step may not use (`keepsHumanInTheLoopTool`). */
 export function stripHumanInTheLoopToolsWithout(tools: ToolEntry[], parent: SubAgentPromptHandles | undefined): ToolEntry[] {
   const drop = (name: string): boolean => isHumanInTheLoopTool(name) && !keepsHumanInTheLoopTool(name, parent);
   if (!tools.some(t => drop(t.definition.name))) return tools;
@@ -767,10 +765,8 @@ export async function spawnViaAgent(
     );
   }
 
-  // Strip each human-in-the-loop tool the step has no channel for (autonomous run, or a
-  // scheduled workflow that may ask but not request a secret). Belt-and-suspenders: the
-  // validator already rejects pipelines that need a missing channel, but a registry drift here
-  // would throw at tool dispatch time.
+  // Strip each human-in-the-loop tool the step may not use (`keepsHumanInTheLoopTool`): all of
+  // them in an autonomous run, all but ask_user in a scheduled workflow that may ask.
   tools = stripHumanInTheLoopToolsWithout(tools, parentPrompt);
 
   // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
@@ -1093,10 +1089,8 @@ export async function spawnInline(
       );
     }
   }
-  // Strip each human-in-the-loop tool the step has no channel for (autonomous run, or a
-  // scheduled workflow that may ask but not request a secret). Belt-and-suspenders: the
-  // validator already rejects pipelines that need a missing channel, but a registry drift here
-  // would throw at tool dispatch time.
+  // Strip each human-in-the-loop tool the step may not use (`keepsHumanInTheLoopTool`): all of
+  // them in an autonomous run, all but ask_user in a scheduled workflow that may ask.
   tools = stripHumanInTheLoopToolsWithout(tools, parentPrompt);
   // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
   const disabledToolsInline = config.disabled_tools ?? [];
