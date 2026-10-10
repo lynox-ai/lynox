@@ -148,14 +148,30 @@ describe('an open changeset review holds the next send', () => {
 			// The server's answer, once released: nothing live, the thread ends on the user turn.
 			threadMessages = { messages: [{ role: 'user', content: 'held turn' }], activeRun: null };
 			const posts = runPosts();
+			toasts.length = 0;
 			release();
 			await new Promise((r) => setTimeout(r, 700));
 			await settle();
 			expect(runPosts(), 'nothing sent past the review').toBe(posts);
+			expect(toasts, 'nothing said for an action the user did not take').toEqual([]);
 			// Every mark stays, so the next re-send asks the server again.
 			expect(store.getMessages().find((m) => m.content === 'held turn')).toMatchObject({ failed: true, ...marks });
 		});
 	}
+
+	it('with no review open, a turn that failed offline is re-sent after the probe and loses its offline mark', async () => {
+		serve([]);
+		await store.sendMessage('first');
+		await settle();
+		store.getMessages().push({ role: 'user', content: 'offline turn', failed: true, failedOffline: true });
+		threadMessages = { messages: [{ role: 'user', content: 'offline turn' }], activeRun: null };
+		const posts = runPosts();
+		listeners.online!();
+		await new Promise((r) => setTimeout(r, 700));
+		await settle();
+		expect(runPosts(), 'positive control: the probe path does re-send').toBe(posts + 1);
+		expect(store.getMessages().find((m) => m.content === 'offline turn')?.failedOffline).toBe(false);
+	});
 
 	it('Retry on an interrupted run keeps the banner, and nothing is sent', async () => {
 		await reviewOpen();
