@@ -679,6 +679,8 @@ describe('TaskManager', () => {
     it.each([
       ['completed', (id: string) => { tm.complete(id); }],
       ['disabled', (id: string) => { tm.setEnabled(id, false); }],
+      ['parked', (id: string) => { history.updateTrigger(id, { status: 'waiting' }); }],
+      ['marked failed', (id: string) => { history.updateTrigger(id, { status: 'failed' }); }],
     ] as const)('a one-shot with retries left that was %s during its run reports no retry, since it is not due', (_how, change) => {
       const task = tm.create({ title: 'Flaky task', assignee: 'lynox', maxRetries: 3 });
       change(task.id);

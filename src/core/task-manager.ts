@@ -1044,9 +1044,12 @@ export class TaskManager {
       nextRunAt,
       retryCount,
     });
-    // A retry is only real where the worker will pick it up: a row completed or disabled
-    // while the run went on keeps its backoff, but is not due until someone reopens it.
-    return retrying && task.status !== 'completed' && task.enabled !== 0;
+    // A retry is only real where the worker will pick it up: a row completed, disabled,
+    // parked or marked failed while the run went on keeps its backoff, but `getDue` leaves
+    // it out until someone changes that. (The confirmation gates in `getDue` are not
+    // repeated here; a row that loses its confirmation mid-run still reads as retrying.)
+    return retrying && task.status !== 'completed' && task.status !== 'waiting'
+      && task.status !== 'failed' && task.enabled !== 0;
   }
 }
 

@@ -1469,8 +1469,9 @@ export class WorkerLoop {
       entry.pauseDeadline();
       entry.controller.abort();
 
-      // Only notify on FINAL failure (all retries exhausted) — or on a stop, which does
-      // not retry and so has no later attempt to report. ⚠ NOT "final": a stopped CRON
+      // Only notify when no retry comes (`willRetry` above) — or on a stop, which does
+      // not retry and so has no later attempt to report. A cron or a watch is never
+      // retried, so each of its failed runs reports. ⚠ A stop is not "final" either: a stopped CRON
       // keeps its schedule and a stopped watch its interval (`recordTaskRun` computes
       // both), so what ends here is the RUN, not necessarily the trigger. The word and
       // the follow-ups differ because the reader's next move does: "Explain why this
