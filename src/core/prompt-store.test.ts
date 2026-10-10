@@ -725,3 +725,29 @@ describe('PromptStore — expiry of a prompt stored in the form the store writes
     expect(store.getById(id)!.trigger_id).toBeNull();
   });
 });
+
+describe('expireUnparked — the reason a restart leaves on the question', () => {
+  let db: Database.Database;
+  let store: PromptStore;
+  let closeDb: () => void;
+  beforeEach(() => { ({ db, close: closeDb } = makeDb()); store = new PromptStore(db); });
+  afterEach(() => { closeDb(); });
+
+  it('marks every question it closes "process_restarted", and leaves a parked one open', () => {
+    const chat = store.insertAskUser('s-chat', 'Which list?');
+    const parked = store.insertAskUser('s-task', 'Approve?', undefined, undefined, undefined, undefined, 'trigger-1');
+    expect(store.expireUnparked()).toBe(1);
+    expect(store.getById(chat)).toMatchObject({ status: 'expired', closed_reason: 'process_restarted' });
+    expect(store.getById(parked)).toMatchObject({ status: 'pending', closed_reason: null });
+  });
+
+  it('a question closed on its own clock, or withdrawn, carries no reason', () => {
+    const timedOut = store.insertAskUser('s-ttl', 'q');
+    db.prepare("UPDATE pending_prompts SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 3_000).toISOString(), timedOut);
+    store.expireOld();
+    const withdrawn = store.insertAskUser('s-withdrawn', 'q');
+    store.expirePrompt(withdrawn);
+    expect(store.getById(timedOut)).toMatchObject({ status: 'expired', closed_reason: null });
+    expect(store.getById(withdrawn)).toMatchObject({ status: 'expired', closed_reason: null });
+  });
+});
