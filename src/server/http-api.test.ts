@@ -6913,7 +6913,7 @@ describe('LynoxHTTPApi', () => {
       try {
         const res = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: 'fast' }) });
         expect(res.status).toBe(200);
-        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'fast' }));
+        expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: 'fast' }), undefined, OWNER_PRINCIPAL);
         const clear = await jsonFetch('/api/tasks/task-1', { method: 'PATCH', body: JSON.stringify({ modelTier: null }) });
         expect(clear.status).toBe(200);
         expect(mockTaskUpdate).toHaveBeenCalledWith('task-1', expect.objectContaining({ modelTier: null }), undefined, OWNER_PRINCIPAL);
