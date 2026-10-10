@@ -186,8 +186,15 @@ describe('evictSavedArtifactBodies', () => {
     expect(resultOf(out)).not.toMatch(/removed from the conversation|It is persisted/);
   });
 
+  it('a long body that only starts with the old reference gets the regular note', () => {
+    const out = evictSavedArtifactBodies(saveTurn({ content: IN_FIELD + BIG }));
+    expect(inputOf(out)).not.toHaveProperty('content');
+    expect(resultOf(out)).toMatch(/removed from the conversation[^\]]*\]$/);
+  });
+
   it('a regular eviction gets the regular note, not the one for the old form', () => {
     const out = evictSavedArtifactBodies(saveTurn());
+    expect(resultOf(out)).toMatch(/removed from the conversation[^\]]*\]$/);
     expect(resultOf(out)).not.toContain(LEGACY_EVICTION_NOTE.trim());
   });
 
@@ -284,11 +291,14 @@ describe('contract with the real artifact_save handler', () => {
   it('a CREATE result satisfies isSuccessfulSaveResult', async () => {
     const result = await runRealSave({ title: 'T', content: 'body' }, stubStore);
     expect(isSuccessfulSaveResult(result)).toBe(true);
+    // Both eviction notes send the model to "the File: path above".
+    expect(result).toMatch(/^File: \/workspace\/artifacts\/new1\.md$/m);
   });
 
   it('an UPDATE result satisfies isSuccessfulSaveResult', async () => {
     const result = await runRealSave({ title: 'T', content: 'body', id: 'ab1' }, stubStore);
     expect(isSuccessfulSaveResult(result)).toBe(true);
+    expect(result).toMatch(/^File: \/workspace\/artifacts\/ab1\.md$/m);
   });
 
   it('the store-unavailable failure does NOT satisfy it', async () => {

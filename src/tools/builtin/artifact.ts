@@ -48,7 +48,8 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
     if (containsEvictionMarker(input.content)) {
       throw new Error(
         'artifact_save refused: `content` contains the engine\'s placeholder for a saved document ' +
-        '("[evicted after successful save …]" or "[The body of this document was removed …]"). The ' +
+        '("[evicted after successful save …]", "[The body of this document was removed …]" or ' +
+        '"[The content of this call was the engine\'s placeholder …]"). The ' +
         'engine puts it in your context where a document it already saved used to be — it is ' +
         'not a document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
         'artifact, read_file its path and apply edit_file. To create one, write the full document ' +

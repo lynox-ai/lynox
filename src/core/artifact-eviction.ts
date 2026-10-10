@@ -59,7 +59,8 @@ const LEGACY_NOTE_PREFIX = '[The content of this call was the engine\'s placehol
  *  document, or a row of the 2026-08-14 persist bug, whose file is fine — the
  *  note must not claim either. */
 export const LEGACY_EVICTION_NOTE = `\n${LEGACY_NOTE_PREFIX}, not a document. ` +
-  'Whether the file holds the document is not known: read_file the File: path above before relying on it.]';
+  'Whether the file holds the document is not known: read_file the File: path above before relying on it; ' +
+  'if it holds this placeholder, artifact_history lists earlier versions.]';
 
 const NOTES = [EVICTION_NOTE, LEGACY_EVICTION_NOTE] as const;
 
@@ -221,7 +222,10 @@ export function evictSavedArtifactBodies(
       if (result === undefined || !isSuccessfulSaveResult(result)) continue;
 
       onEvict?.(block.id, content);
-      evicted.set(block.id, content.startsWith(EVICTED_PREFIX) ? LEGACY_EVICTION_NOTE : EVICTION_NOTE);
+      // Only a short body is the old reference itself; a long one that merely starts with it
+      // carries real text and gets the regular note.
+      const oldReference = content.length <= EVICTION_MIN_CHARS && content.startsWith(EVICTED_PREFIX);
+      evicted.set(block.id, oldReference ? LEGACY_EVICTION_NOTE : EVICTION_NOTE);
       const { content: _dropped, ...rest } = input as Record<string, unknown>;
       newContent ??= [...msg.content];
       newContent[j] = { ...block, input: rest };
