@@ -20,25 +20,31 @@ let store: Store;
 let calls: string[];
 let listeners: Record<string, () => void>;
 let threadMessages: unknown = { messages: [], activeRun: null };
+let changed: Array<{ file: string; status: string; diff: string }> = [];
+let holdActiveRuns: Promise<void> | null = null;
 
 function serve(changedFiles: Array<{ file: string; status: string; diff: string }>): void {
+	changed = changedFiles;
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		calls.push(`${init?.method ?? 'GET'} ${url}`);
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
-		if (url.endsWith('/runs/active')) return json({ runs: [] });
+		if (url.endsWith('/runs/active')) {
+			if (holdActiveRuns) await holdActiveRuns;
+			return json({ runs: [] });
+		}
 		if (url.endsWith('/run')) {
 			const enc = new TextEncoder();
 			const body = new ReadableStream<Uint8Array>({
 				start(c) {
-					c.enqueue(enc.encode(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: changedFiles.length })}\n\n`));
+					c.enqueue(enc.encode(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: changed.length })}\n\n`));
 					c.enqueue(enc.encode(`event: done\ndata: ${JSON.stringify({ result: 'edited' })}\n\n`));
 					c.close();
 				},
 			});
 			return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
-		if (url.endsWith('/changeset')) return json({ hasChanges: changedFiles.length > 0, files: changedFiles });
+		if (url.endsWith('/changeset')) return json({ hasChanges: changed.length > 0, files: changed });
 		return json(threadMessages);
 	}));
 }
@@ -55,6 +61,7 @@ beforeEach(async () => {
 	vi.stubGlobal('navigator', { onLine: true });
 	listeners = {};
 	threadMessages = { messages: [], activeRun: null };
+	holdActiveRuns = null;
 	vi.stubGlobal('window', { addEventListener: (event: string, fn: () => void) => { listeners[event] = fn; } });
 	vi.stubGlobal('document', { querySelector: () => null });
 	vi.resetModules();
@@ -94,16 +101,61 @@ describe('an open changeset review holds the next send', () => {
 		expect(runPosts()).toBe(1);
 	});
 
-	it('the automatic retry on reconnect waits for the review too', async () => {
-		await reviewOpen();
-		store.getMessages().push({ role: 'user', content: 'sent while offline', failed: true });
-		expect(listeners.online, 'positive control: the store listens for online').toBeTypeOf('function');
-		listeners.online!();
-		await new Promise((r) => setTimeout(r, 700)); // past the re-fire delay
-		await settle();
-		expect(store.getMessages().at(-1)?.failed, 'the turn stays failed').toBe(true);
-		expect(runPosts(), 'nothing was sent past the open review').toBe(1);
-	});
+	// The automatic re-send on reconnect is not the user's action: it waits silently, before
+	// any probe, and leaves every mark on the turn as it was.
+	for (const [branch, marks] of [
+		['a plain failed turn', {}],
+		['a turn that failed offline', { failedOffline: true }],
+		['a turn whose start was never confirmed', { sendUnconfirmed: true }],
+	] as const) {
+		it(`reconnect with a review open: ${branch} waits, unprobed and unchanged`, async () => {
+			await reviewOpen();
+			const turn = { role: 'user' as const, content: 'sent while offline', failed: true, ...marks };
+			store.getMessages().push(turn);
+			const before = calls.length;
+			toasts.length = 0;
+			expect(listeners.online, 'positive control: the store listens for online').toBeTypeOf('function');
+			listeners.online!();
+			await new Promise((r) => setTimeout(r, 700)); // past the re-fire delay
+			await settle();
+			const probeOrSend = calls.slice(before).filter((c) => /\/runs\/active$|\/messages$|\/run$/.test(c));
+			expect(probeOrSend, 'no probe, no send').toEqual([]);
+			expect(store.getMessages().at(-1)).toMatchObject({ failed: true, ...marks });
+			expect(toasts, 'nothing said for an action the user did not take').toEqual([]);
+		});
+	}
+
+	// The two branches that ask the server before re-sending: a review can open while they wait.
+	for (const [branch, marks] of [
+		['an unconfirmed start', { sendUnconfirmed: true }],
+		['a turn that failed offline', { failedOffline: true }],
+	] as const) {
+		it(`a review that opens while ${branch} is being asked about still holds the re-send`, async () => {
+			serve([]);
+			await store.sendMessage('first');
+			await settle();
+			expect(store.getPendingChangeset(), 'no review yet').toBeNull();
+			store.getMessages().push({ role: 'user', content: 'held turn', failed: true, ...marks });
+			let release!: () => void;
+			holdActiveRuns = new Promise<void>((r) => { release = r; });
+			listeners.online!();
+			await settle();
+			holdActiveRuns = null;
+			changed = [{ file: 'notes.md', status: 'modified', diff: '-a\n+b' }];
+			await store.sendMessage('edit the notes');
+			await settle();
+			expect(store.getPendingChangeset(), 'positive control: the review opened mid-question').not.toBeNull();
+			// The server's answer, once released: nothing live, the thread ends on the user turn.
+			threadMessages = { messages: [{ role: 'user', content: 'held turn' }], activeRun: null };
+			const posts = runPosts();
+			release();
+			await new Promise((r) => setTimeout(r, 700));
+			await settle();
+			expect(runPosts(), 'nothing sent past the review').toBe(posts);
+			// Every mark stays, so the next re-send asks the server again.
+			expect(store.getMessages().find((m) => m.content === 'held turn')).toMatchObject({ failed: true, ...marks });
+		});
+	}
 
 	it('Retry on an interrupted run keeps the banner, and nothing is sent', async () => {
 		await reviewOpen();

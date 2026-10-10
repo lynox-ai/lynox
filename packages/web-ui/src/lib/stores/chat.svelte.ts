@@ -600,9 +600,12 @@ let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : fa
 /** Queue a failed user turn for another send. Extracted so the confirmed and
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
-	// Runs past `sendMessage`, so it asks itself; the turn stays failed and keeps its tap-to-retry.
-	if (sendBlockedByReview()) return;
+	// Runs past `sendMessage`, so it checks the open review itself. Silently: it is not the
+	// user's action, and browsers fire `online` in bursts. The turn stays failed, with its
+	// tap-to-retry and its `failedOffline` mark, so a later re-send still asks the server first.
+	if (pendingChangeset) return;
 	msg.failed = false;
+	msg.failedOffline = false;
 	msg.sendUnconfirmed = false;
 	msg.queued = true;
 	msg.queueId = newQueueId();
@@ -624,7 +627,8 @@ if (typeof window !== 'undefined') {
 		isOffline = false;
 		// Auto-retry the last failed message
 		const lastFailed = [...messages].reverse().find((m) => m.role === 'user' && m.failed);
-		if (lastFailed && !isStreaming) {
+		// An open review holds the next send; nothing to probe or ask about until it is answered.
+		if (lastFailed && !isStreaming && !pendingChangeset) {
 			// A turn whose start failed before the server answered may be running: ask first.
 			if (lastFailed.sendUnconfirmed) {
 				void askBeforeResend().then((resend) => { if (resend) refireFailedTurn(lastFailed); });
@@ -689,7 +693,6 @@ if (typeof window !== 'undefined') {
 							}
 							return;
 						}
-						lastFailed.failedOffline = false;
 						refireFailedTurn(lastFailed);
 					} finally {
 						_offlineProbeInFlight = false;
