@@ -4,7 +4,7 @@
 	import { copyWithToast } from '../utils/clipboard.js';
 	import { invalidateAll } from '$app/navigation';
 
-	let { hasSecret = false, linkCode = '' }: { hasSecret: boolean; linkCode: string } = $props();
+	let { hasSecret = false, linkCode = '', ownerOnly = false }: { hasSecret: boolean; linkCode: string; ownerOnly?: boolean } = $props();
 
 	let expired = $state(false);
 
@@ -52,6 +52,10 @@
 	{#if !hasSecret}
 		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 text-sm text-text-muted">
 			{t('mobile.no_secret')}
+		</div>
+	{:else if ownerOnly}
+		<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5 text-sm text-text-muted">
+			{t('mobile.owner_only')}
 		</div>
 	{:else if expired}
 		<div class="flex flex-col items-center gap-4 py-12">

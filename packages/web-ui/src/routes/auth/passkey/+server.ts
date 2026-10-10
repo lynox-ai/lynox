@@ -9,7 +9,7 @@
 import type { RequestHandler } from './$types.js';
 import { json } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
-import { verifySessionToken } from '$lib/server/auth.js';
+import { isOwnerSession, verifySessionToken } from '$lib/server/auth.js';
 
 function getManagedConfig() {
 	const instanceId = env.LYNOX_MANAGED_INSTANCE_ID;
@@ -58,19 +58,30 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 
 	if (!action) return json({ error: 'Missing action' }, { status: 400 });
 
-	// Registration requires an active session
+	const secret = env.LYNOX_HTTP_SECRET;
+	const sessionToken = cookies.get('lynox_session');
+	// A passkey is registered on the owner's account and logs in as the owner,
+	// so only the owner's own session may add one.
+	const ownerMayRegister = isOwnerSession(sessionToken, secret);
+
+	// Registration requires the owner's session
 	if (action === 'register/start' || action === 'register/complete') {
-		const secret = env.LYNOX_HTTP_SECRET;
-		const sessionToken = cookies.get('lynox_session');
 		if (!secret || !sessionToken || !verifySessionToken(sessionToken, secret)) {
 			return json({ error: 'Authentication required' }, { status: 401 });
+		}
+		if (!ownerMayRegister) {
+			return json({ error: 'Only the account owner can add a passkey.' }, { status: 403 });
 		}
 	}
 
 	try {
 		switch (action) {
-			case 'status':
-				return proxyToControlPlane(managed, 'status', {});
+			case 'status': {
+				const res = await proxyToControlPlane(managed, 'status', {});
+				if (!res.ok) return res;
+				const data = await res.json() as Record<string, unknown>;
+				return json({ ...data, canRegister: ownerMayRegister }, { status: res.status });
+			}
 			case 'register/start':
 				return proxyToControlPlane(managed, 'register/start', {});
 			case 'register/complete':
