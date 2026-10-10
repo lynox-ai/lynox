@@ -1290,6 +1290,84 @@ describe('Agent', () => {
       }
     });
 
+    /** A prompt layer with the store's one rule: a second question while one is open throws,
+     *  as the partial unique index does (`PromptConflictError`). A question settles with its
+     *  queued answer (`null`: nobody answers), or as dismissed when its signal aborts. */
+    function oneOpenQuestion(answers: Array<string | null>): { promptUser: ReturnType<typeof vi.fn>; signals: Array<AbortSignal | undefined> } {
+      let open = false;
+      const signals: Array<AbortSignal | undefined> = [];
+      const promptUser = vi.fn((_q: unknown, _o: unknown, meta?: { signal?: AbortSignal }) => {
+        if (open) return Promise.reject(new Error('Session already has a pending prompt'));
+        open = true;
+        signals.push(meta?.signal);
+        return new Promise<string>((resolve) => {
+          const settle = (a: string): void => { open = false; resolve(a); };
+          meta?.signal?.addEventListener('abort', () => settle('__dismissed__'), { once: true });
+          const next = answers.shift();
+          if (typeof next === 'string') settle(next);
+        });
+      });
+      return { promptUser, signals };
+    }
+
+    it('a call that times out while it waits on a question withdraws it, so the next call can ask', async () => {
+      vi.useFakeTimers();
+      try {
+        const { promptUser, signals } = oneOpenQuestion([null, 'Yes']);
+        const asks = (name: string): ToolEntry => makeTool(name, async (_i, a) => (a as Agent).promptUser!('Go ahead?', ['Yes', 'No']));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_wait', name: 'waits_on_consent', input: {} }]))
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_next', name: 'asks_next', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({
+          name: 'test', model: 'claude-sonnet-4-6', tools: [asks('waits_on_consent'), asks('asks_next')], promptUser,
+        });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
+        await expect(p).resolves.toBe('done');
+        expect(signals[0]?.aborted).toBe(true);
+
+        const first = toolResultFor(agent, 'tu_wait');
+        expect(first.is_error).toBe(true);
+        expect(first.content).toBe(
+          'Tool "waits_on_consent" timed out after 900s while it was waiting for the user\'s answer. '
+          + 'The question was withdrawn unanswered: the user approved or chose nothing, so do not act as if they had. '
+          + 'If the call wrote or sent something before it asked, check whether that took effect before calling it again.',
+        );
+        expect(toolResultFor(agent, 'tu_next')).toMatchObject({ content: 'Yes' });
+        expect(promptUser).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // The withdrawal is the tool timeout's, and an exempt tool has none: a question that waits
+    // on a person by design (24 h expiry, or a scheduled workflow's wait) must outlive the cap.
+    it.each(['ask_user', 'plan_task'])('an exempt tool\'s question survives the tool timeout: %s', async (name) => {
+      vi.useFakeTimers();
+      try {
+        let answer: (a: string) => void = () => {};
+        let signal: AbortSignal | undefined;
+        const promptUser = vi.fn((_q: unknown, _o: unknown, meta?: { signal?: AbortSignal }) => {
+          signal = meta?.signal;
+          return new Promise<string>((r) => { answer = r; });
+        });
+        const tool = makeTool(name, async (_i, a) => (a as Agent).promptUser!('Proceed?', ['Proceed', 'Cancel']));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_ask', name, input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        expect(signal?.aborted).toBe(false);
+        answer('Proceed');
+        await p;
+        expect(toolResultFor(agent, 'tu_ask')).toMatchObject({ content: 'Proceed' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // The counterpart on the same machinery: an ordinary thrown error takes the
     // same outer catch and must NOT carry the timeout advice. Without it, the
     // test above would pass just as well if every tool error were given the
@@ -2783,19 +2861,22 @@ describe('Agent', () => {
         await agent.promptTabs!([{ question: 'q' }]);
         await agent.promptSecret!('K', 'p');
         await agent.promptUser!('q2', undefined, { signal: own.signal });
+        // Stop the run: every prompt that carries the run's signal sees it.
+        agent.abort();
         return 'done';
       }));
       (agent as unknown as { tools: unknown[] }).tools = [tool];
-      let runSignal: AbortSignal | undefined;
       mockProcess
-        .mockImplementationOnce(() => { runSignal = agent.runSignal; return Promise.resolve(toolUseResponse([{ id: 'tu-a', name: 'asker', input: {} }])); })
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu-a', name: 'asker', input: {} }]))
         .mockResolvedValueOnce(endTurnResponse('end'));
-      await agent.send('go');
-      expect(runSignal).toBeInstanceOf(AbortSignal);
-      expect(seen['tabs']).toBe(runSignal);
-      expect(seen['secret']).toBe(runSignal);
+      await agent.send('go').catch(() => undefined);
+      // Inside a tool call the prompt's signal joins the run's with the call's own, so it is
+      // not the run signal itself; it aborts with it.
+      expect(seen['tabs']?.aborted).toBe(true);
+      expect(seen['secret']?.aborted).toBe(true);
       // The last promptUser call passed its own signal — that one wins.
       expect(seen['user']).toBe(own.signal);
+      expect(own.signal.aborted).toBe(false);
     });
 
     it('the race says the tool may still complete, and leaves no listener on the run signal', async () => {
