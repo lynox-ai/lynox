@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readFileTool, writeFileTool, editFileTool } from './fs.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../../core/workspace.js';
+import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from '../../core/artifact-eviction.js';
 import type { SessionCounters } from '../../types/index.js';
 
 let dir: string;
@@ -570,5 +572,86 @@ describe('read_file — the source label of the block', () => {
     expect(tag, 'positive control: the file was read and wrapped').not.toBeNull();
     expect(tag![0], 'the opening tag is one line').not.toMatch(/\n/);
     expect(tag![0], 'and keeps the name, on one line').toContain('file:notes UID: 77.txt');
+  });
+});
+
+// The placeholder exactly as a model sees it, produced by the real eviction
+// transform over a successful save — built, not typed, so a reworded
+// placeholder cannot leave these tests checking a string nobody writes.
+function evictionPlaceholder(): string {
+  const turn = [
+    { role: 'user', content: 'write it' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'artifact_save', input: { title: 'Pitch', content: 'x'.repeat(EVICTION_MIN_CHARS + 1) } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact "Pitch" (id: ab12cd34, v1).\nFile: /x/ab12cd34.html' }] },
+  ] as BetaMessageParam[];
+  const block = (evictSavedArtifactBodies(turn)[1]!.content as Array<{ type: string; input?: { content?: string } }>).find(b => b.type === 'tool_use')!;
+  const placeholder = block.input!.content!;
+  if (placeholder.startsWith('xxx')) throw new Error('eviction did not run — the test fixture is wrong');
+  return placeholder;
+}
+
+describe('file tools refuse the eviction placeholder inside the artifacts directory', () => {
+  async function withDataDir(fn: (d: string) => Promise<void>): Promise<void> {
+    const d = await makeTempDir();
+    const prev = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = d;
+    try {
+      mkdirSync(join(d, 'artifacts'), { recursive: true });
+      await fn(d);
+    } finally {
+      if (prev === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prev;
+    }
+  }
+
+  it('edit_file: inserting the placeholder into an artifact throws and leaves the file as it was (CLI mode)', async () => {
+    await withDataDir(async (d) => {
+      clearTenantWorkspace();
+      const p = join(d, 'artifacts', 'abcdef12.html');
+      writeFileSync(p, '# Pitch\n\nThree budget options.', 'utf-8');
+      await expect(
+        editFileTool.handler({ path: p, old_string: 'Three budget options.', new_string: evictionPlaceholder() }, makeAgent()),
+      ).rejects.toThrow(/refused[\s\S]*placeholder/);
+      expect(await readFile(p, 'utf-8')).toBe('# Pitch\n\nThree budget options.');
+    });
+  });
+
+  it('edit_file: an artifact that already holds a placeholder can still be edited, elsewhere and on the placeholder', async () => {
+    await withDataDir(async (d) => {
+      clearTenantWorkspace();
+      const p = join(d, 'artifacts', 'abcdef12.html');
+      const placeholder = evictionPlaceholder();
+      writeFileSync(p, `# Draft\n\n${placeholder}`, 'utf-8');
+      // An edit that does not write the placeholder is not refused, even though the file keeps one.
+      await editFileTool.handler({ path: p, old_string: '# Draft', new_string: '# Pitch' }, makeAgent());
+      expect(await readFile(p, 'utf-8')).toBe(`# Pitch\n\n${placeholder}`);
+      // Replacing the placeholder with the real text works too.
+      await editFileTool.handler({ path: p, old_string: placeholder, new_string: 'Three budget options.' }, makeAgent());
+      expect(await readFile(p, 'utf-8')).toBe('# Pitch\n\nThree budget options.');
+    });
+  });
+
+  it('write_file: the placeholder into an artifact throws and leaves the file as it was (workspace mode)', async () => {
+    await withDataDir(async (d) => {
+      setTenantWorkspace(d);
+      const p = join(d, 'artifacts', 'abcdef12.html');
+      writeFileSync(p, '# Pitch', 'utf-8');
+      await expect(
+        writeFileTool.handler({ path: p, content: evictionPlaceholder() }, makeAgent()),
+      ).rejects.toThrow(/refused[\s\S]*placeholder/);
+      expect(await readFile(p, 'utf-8')).toBe('# Pitch');
+    });
+  });
+
+  it('outside the artifacts directory the placeholder text is written like any other text', async () => {
+    await withDataDir(async (d) => {
+      setTenantWorkspace(d);
+      const p = join(d, 'notes.md');
+      const placeholder = evictionPlaceholder();
+      await writeFileTool.handler({ path: p, content: placeholder }, makeAgent());
+      expect(await readFile(p, 'utf-8')).toBe(placeholder);
+      await editFileTool.handler({ path: p, old_string: placeholder, new_string: `quoted: ${placeholder}` }, makeAgent());
+      expect(await readFile(p, 'utf-8')).toBe(`quoted: ${placeholder}`);
+    });
   });
 });

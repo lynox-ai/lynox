@@ -5,6 +5,7 @@ import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/worksp
 import { getLynoxDir } from '../../core/config.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
+import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -83,6 +84,34 @@ function confineToWorkspace(rawPath: string): string {
   return real;
 }
 
+/** The artifact store's directory (`ArtifactStore`'s default), symlinks resolved. */
+function artifactsRoot(): string {
+  const raw = resolve(join(getLynoxDir(), 'artifacts'));
+  return existsSync(raw) ? realpathSync(raw) : raw;
+}
+
+/** Whether an already-resolved path lies inside the artifacts directory. */
+function isInArtifactsRoot(realPath: string): boolean {
+  const rel = relative(artifactsRoot(), realPath);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+/** The file-tool half of the check `artifact_save` makes: text carrying the
+ *  eviction placeholder must not be written into an artifact file. File tools
+ *  bypass the artifact store's version ring, so a placeholder written this way
+ *  leaves no earlier version to restore. Scoped to the artifacts directory: a
+ *  source file that legitimately names the placeholder (this repo has one) can
+ *  still be edited. */
+function refuseEvictionPlaceholder(written: string, realPath: string): void {
+  if (!isInArtifactsRoot(realPath) || !containsEvictionMarker(written)) return;
+  throw new Error(
+    'refused: the text contains "[evicted after successful save …]". That is the placeholder the ' +
+    'engine puts in your context in place of an artifact it already saved — it is not content. ' +
+    'Nothing was written. Write the actual text instead; artifact_history lists earlier versions ' +
+    'of an artifact.',
+  );
+}
+
 /** Resolve + boundary-validate a writable path with the same rules as
  *  write_file: validatePath when workspace isolation is active, else
  *  workspace-relative + escape-symlink rejection. */
@@ -94,20 +123,17 @@ function resolveWritablePath(rawPath: string): string {
   // NOT under the workspace dir. Honour an absolute path inside the artifacts
   // root as-is so the advertised "read_file the artifact path, then edit_file
   // it" flow works here too instead of basename-stripping into ~/.lynox/workspace/.
-  const artRootRaw = resolve(join(getLynoxDir(), 'artifacts'));
-  const artRoot = existsSync(artRootRaw) ? realpathSync(artRootRaw) : artRootRaw;
   const absRaw = resolve(rawPath);
   // Resolve symlinks on the FINAL path before the containment check so a
   // symlink planted inside the artifacts dir (evil.html → /etc/passwd) can't
-  // redirect the write outside it. A target that escapes artRoot fails the
+  // redirect the write outside it. A target that escapes the artifacts root fails the
   // relative()-check and falls through to the workspace-relative branch below.
   const realAbs = existsSync(absRaw)
     ? realpathSync(absRaw)
     : existsSync(dirname(absRaw))
       ? join(realpathSync(dirname(absRaw)), basename(absRaw))
       : absRaw;
-  const relToArt = relative(artRoot, realAbs);
-  if (relToArt !== '' && !relToArt.startsWith('..') && !isAbsolute(relToArt)) {
+  if (isInArtifactsRoot(realAbs)) {
     return realAbs;
   }
   const resolved = confineToWorkspace(rawPath);
@@ -257,6 +283,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
             ? join(realpathSync(dirname(resolved)), basename(resolved))
             : resolved;
       }
+      refuseEvictionPlaceholder(input.content, realPath);
       mkdirSync(dirname(realPath), { recursive: true });
       writeFileSync(realPath, input.content, 'utf-8');
       agent.sessionCounters.writeBytes += contentBytes;
@@ -307,6 +334,9 @@ export const editFileTool: ToolEntry<EditFileInput> = {
         throw new Error(`old_string matches ${matches} times — add surrounding context to make it unique, or set replace_all: true.`);
       }
       const updated = segments.join(input.new_string);
+      // On the inserted text, not on `updated`: what is refused is WRITING the
+      // placeholder. A file that already holds one can still be edited elsewhere.
+      refuseEvictionPlaceholder(input.new_string, realPath);
 
       // Scan the post-edit content too, so an edit can't assemble a malicious
       // payload that a single write_file would have been blocked from creating.
