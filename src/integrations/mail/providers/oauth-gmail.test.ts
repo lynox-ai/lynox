@@ -604,6 +604,50 @@ describe('OAuthGmailProvider — send', () => {
     expect(subjectLine).not.toContain('—'); // raw non-ASCII must be gone
   });
 
+  // A strict reading, written apart from the encoder: every physical header line that holds an
+  // encoded-word stays within 76 characters, every encoded-word within 75 and decodable on its own
+  // (no character split across two words), and unfolding + decoding gives back the subject.
+  it('folds a long non-ASCII subject into lines a strict client reads back intact', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-fold', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const subject = 'Grüße aus München — Protokoll der Besprechung über die Übergabe der Räume 🚀';
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject, text: 'body' });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const raw = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    const head = raw.slice(0, raw.indexOf('\r\n\r\n'));
+    const physical = head.split('\r\n');
+    const start = physical.findIndex((l) => l.startsWith('Subject:'));
+    let end = start + 1;
+    while (end < physical.length && /^[ \t]/.test(physical[end]!)) end++;
+    expect(end - start, 'the subject spans more than one line').toBeGreaterThan(1);
+    expect(physical[end], 'the next header is intact').toMatch(/^Date: /);
+    for (const line of physical.slice(start, end)) {
+      expect(line.length, `line ≤ 76: ${line}`).toBeLessThanOrEqual(76);
+    }
+    const value = physical.slice(start, end).join('\r\n').replace(/\r\n[ \t]/g, ' ').slice('Subject: '.length);
+    const strict = new TextDecoder('utf-8', { fatal: true });
+    const decoded = value.split(' ').map((word) => {
+      expect(word.length, `encoded-word ≤ 75: ${word}`).toBeLessThanOrEqual(75);
+      const m = /^=\?UTF-8\?Q\?([^?\s]*)\?=$/.exec(word);
+      expect(m, `a well-formed encoded-word: ${word}`).not.toBeNull();
+      const bytes: number[] = [];
+      const text = m![1]!;
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === '_') bytes.push(0x20);
+        else if (text[i] === '=') { bytes.push(parseInt(text.slice(i + 1, i + 3), 16)); i += 2; }
+        else bytes.push(text.charCodeAt(i));
+      }
+      return strict.decode(new Uint8Array(bytes));
+    }).join('');
+    expect(decoded).toBe(subject);
+  });
+
   it('RFC 2047-encodes a non-ASCII From display name (account sender)', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
       if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
