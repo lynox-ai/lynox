@@ -498,7 +498,7 @@ export interface LynoxUserConfig {
   pipeline_context_limit?: number | undefined;
   /** Pipeline step result truncation limit in bytes. Default: 51200 */
   pipeline_step_result_limit?: number | undefined;
-  /** Per-pipeline-run interactive prompt budget (ask_user / ask_secret). Default: 5 */
+  /** Per-pipeline-run interactive prompt budget (ask_user / ask_secret). Default: 5, at most 10. */
   pipeline_prompt_budget?: number | undefined;
   /** Memory extraction input truncation limit in chars. Default: 16000 */
   memory_extraction_limit?: number | undefined;

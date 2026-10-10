@@ -203,6 +203,35 @@ describe('how the wait ends (§4.5)', () => {
     expect(h.prompts.getById(id)!.closed_reason).toBe('process_restarted');
   });
 
+  it('a shutdown that closes the database before the wait continues still answers nothing', async () => {
+    // `LynoxHTTPApi.shutdown()` closes the rows, `stop()` aborts the controller, and the engine
+    // can reach `runHistory.close()` with no await in between; the wait continues afterwards.
+    // Reading the row then throws. The step must get no rejection — a rejection is a tool error
+    // its agent reads and carries on from.
+    const h = makeHarness();
+    const answer = h.q.ask('Across a fast shutdown?');
+    await openQuestion(h);
+    h.prompts.expireUnparked();
+    h.history.close();
+    expect(await stillPending(answer.catch((err: unknown) => `REJECTED ${String(err)}`))).toBe(true);
+    expect(h.q.unanswered).toBe(false);
+    expect(h.scopeMember.abort).not.toHaveBeenCalled();
+  });
+
+  it('a question the store refuses ends the run unanswered, and leaves no message in the thread', async () => {
+    // The owner's own chat in the run's thread holds the session's one open slot.
+    const h = makeHarness();
+    h.prompts.insertAskUser(RUN_ID, 'A question of the owner\'s own chat');
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await expect(h.q.ask('Which list?')).resolves.toBe('__dismissed__');
+    } finally { write.mockRestore(); }
+    expect(h.q.unanswered).toBe(true);
+    expect(h.scopeMember.abort).toHaveBeenCalledTimes(1);
+    expect(h.threads.getMessages(RUN_ID)).toEqual([]);
+    expect(h.notified).toHaveLength(0);
+  });
+
   it('a teardown through the controller leaves the question open for the next process to close', async () => {
     const h = makeHarness();
     const answer = h.q.ask('Across a crash-free stop?');

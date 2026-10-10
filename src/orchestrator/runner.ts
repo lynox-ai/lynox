@@ -19,7 +19,7 @@ import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
 import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
-import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
+import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 import { parallelStepCapFor } from './validate.js';
 
@@ -477,7 +477,7 @@ export async function runManifest(
   // prompt callbacks) skip budgeting entirely.
   let parentPrompt = options.parentPrompt;
   if (parentPrompt && !parentPrompt.promptBudget && depth === 0) {
-    const limit = config.pipeline_prompt_budget ?? DEFAULT_PROMPT_BUDGET;
+    const limit = promptBudgetLimit(config.pipeline_prompt_budget);
     const budget = options.promptBudget ?? new PromptBudget(limit);
     parentPrompt = { ...parentPrompt, promptBudget: budget };
   }
