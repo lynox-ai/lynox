@@ -13,12 +13,12 @@ import type { IAgent } from '../types/index.js';
 import { rememberTool } from '../tools/builtin/knowledge.js';
 
 /**
- * Switching private mode on removes what the conversation already put into memory — both
- * stores, through the route, on a real engine.
+ * Switching private mode on removes the thread's legacy memories and its durable entries —
+ * both stores, through the route, on a real engine.
  *
- * The UI says "this chat is kept out of memory", and people switch it on AFTER the sensitive
- * part was said. Until this, the switch reaped the legacy memories and left every durable
- * entry the thread had produced: `source_thread_id` is a soft reference, nothing cascades,
+ * People switch private mode on AFTER the sensitive part was said. Until this, the switch
+ * reaped the legacy memories and left every durable entry the thread had produced:
+ * `source_thread_id` is a soft reference, nothing cascades,
  * and the store had no delete keyed on it. A real engine because the two stores are reached
  * through different objects, and a mocked route test can only check that a method was called,
  * not that the entry is gone.

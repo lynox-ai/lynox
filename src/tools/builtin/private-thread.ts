@@ -4,10 +4,9 @@ import type { IAgent } from '../../types/index.js';
  * The answer a memory-writing tool gives in a private chat, or `null` when the chat is not
  * private.
  *
- * Private mode tells the user "this chat is kept out of memory", without exception. The
- * end-of-turn capture already honoured it; the tools did not, so a `remember` the model chose
- * on its own — or one the user asked for — went into memory from a chat the user had marked
- * private. The way to remember something from such a chat is to turn private mode off, and
+ * In private mode the end-of-turn capture already stood down; the tools did not, so a
+ * `remember` the model chose on its own — or one the user asked for — went into memory from
+ * a chat the user had marked private. The way to remember something from such a chat is to turn private mode off, and
  * the user is the one who decides that, so that is what the answer tells the model.
  *
  * Read from the thread store, not from the agent's `skipMemoryExtraction`: that flag is also
@@ -18,8 +17,6 @@ import type { IAgent } from '../../types/index.js';
  * and promoting one that is already stored, carry nothing from this chat.
  *
  * A sub-agent has no `currentThreadId`; it is checked against the chat it was spawned from.
- * Without that, `spawn_agent` was a way around this check, and the child's write carried no
- * thread id, so no later purge could find it either.
  */
 export function privateThreadRefusal(agent: IAgent): string | null {
   const threadId = agent.currentThreadId ?? agent.originThreadId;

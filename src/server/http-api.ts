@@ -4760,9 +4760,8 @@ export class LynoxHTTPApi {
         if (session) {
           session.setSkipMemoryExtraction(skipExtraction);
         }
-        // Private mode: remove what this thread already put into memory. The toggle tells the
-        // user "this chat is kept out of memory", and it is usually switched on AFTER the
-        // sensitive part was said — so the retroactive half is the half that counts.
+        // Private mode: remove what this thread already stored. It is usually switched on
+        // AFTER the sensitive part was said, so the retroactive half is the half that counts.
         //
         // What is tied to this thread by its id, in both stores, each attempted on its own:
         // the legacy memories (with their engine.db stubs) and the durable entries. A failure

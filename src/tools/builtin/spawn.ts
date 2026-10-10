@@ -1813,8 +1813,7 @@ async function executeThinker(
 
     // Private mode reaches the child too. It is spawned from the chat but does not run as it, so
     // it has no `currentThreadId`: the memory tools check the chat it came from instead, and its
-    // end-of-turn capture stays off whenever the parent's is. Without both, a child spawned in
-    // a private chat wrote to memory — with no thread id, so no later purge could find it.
+    // end-of-turn capture stays off whenever the parent's is.
     childAgent.originThreadId = parentAgent.currentThreadId ?? parentAgent.originThreadId;
     if (parentAgent.skipMemoryExtraction === true) childAgent.skipMemoryExtraction = true;
 

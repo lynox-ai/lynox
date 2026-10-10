@@ -1080,11 +1080,7 @@ export class KnowledgeStore {
     }
   }
 
-  /**
-   * The removal itself, without the best-effort wrapper: a failure throws. For the caller
-   * whose answer to the user is "nothing of this stays" — there a swallowed failure would
-   * leave the copy loading into every turn behind a success.
-   */
+  /** The removal itself: a failure throws, for a caller that reports it. */
   private _removeSeededProfileLine(entryText: string): void {
     const block = this.getBlock('profile');
     if (!block || !block.content) return;
@@ -1168,22 +1164,19 @@ export class KnowledgeStore {
   /**
    * Hard-delete every entry captured in one conversation, whatever its status.
    *
-   * The retroactive half of private mode. The toggle tells the user "this chat is kept out
-   * of memory", and people switch it on AFTER something sensitive was said — so the entries
-   * that conversation already produced have to go, not only the ones it would produce next.
-   * `source_thread_id` is a soft reference (no cascade reaches it), which is why this is a
-   * targeted delete and not a side effect of anything else.
+   * The retroactive half of private mode. People switch it on AFTER something sensitive was
+   * said, so the entries that conversation already produced go too, not only the ones it would
+   * produce next. `source_thread_id` is a soft reference (no cascade reaches it), which is why
+   * this is a targeted delete and not a side effect of anything else.
    *
    * Every status, `superseded` and `rejected` included: an entry kept "for audit" still holds
-   * the text, and the promise is about the text. The seeded `profile` line goes with it, as in
-   * {@link deleteBySubject} — the always-loaded block is where a surviving copy keeps being read.
+   * the text. The `profile` line seeded from an entry goes with it — the always-loaded block
+   * is where a copy keeps being read.
    *
-   * Unlike there, a failure on the block THROWS, and the block goes FIRST. The caller tells the
-   * user that nothing of the chat stays, so a swallowed failure would answer success over a
-   * surviving copy. And the order is what makes a retry work: rows deleted first, then a
-   * failing block, would leave a retry with no text to match — it would delete nothing,
-   * report success, and the line would stay for good. Block first, a failure leaves the rows,
-   * and the retry re-derives the lines from them.
+   * The block goes FIRST, and a failure on it throws, so the caller can report it. The order
+   * is what makes a retry work: with the rows deleted first, a failing block would leave a
+   * retry with no text to match. Block first, a failure leaves the rows, and the retry
+   * re-derives the lines from them.
    */
   deleteByThread(threadId: string): number {
     const doomed = this.db.prepare(

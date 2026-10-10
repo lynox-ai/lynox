@@ -12,11 +12,11 @@ import { privateThreadRefusal } from './private-thread.js';
 import type { IAgent } from '../../types/index.js';
 
 /**
- * In a private chat, no tool puts new content into memory.
+ * In a private chat, the memory-writing tools refuse.
  *
- * The UI promises "this chat is kept out of memory" without exception. The end-of-turn
- * capture honoured that; the tools did not, so `remember` — chosen by the model, or asked
- * for by the user — wrote from a chat the user had marked private.
+ * The end-of-turn capture already stood down in private mode; the tools did not, so
+ * `remember` — chosen by the model, or asked for by the user — wrote from a chat the user
+ * had marked private.
  */
 describe('memory-writing tools refuse in a private chat', () => {
   const tmpDirs: string[] = [];

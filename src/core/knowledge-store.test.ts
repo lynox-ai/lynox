@@ -1127,9 +1127,8 @@ describe('the always-loaded profile block and who may reach into it', () => {
   });
 
   it('a private-mode purge THROWS when the block cannot be changed, keeps the rows, and a retry finishes', () => {
-    // A swallowed failure here would answer "nothing of this chat stays" over a line that
-    // keeps loading into every turn. The rows stay so the retry can find the line again —
-    // deleted first, the retry would match nothing and report success.
+    // The caller reports the failure. The rows stay so the retry can find the line again —
+    // deleted first, the retry would have no text to match.
     const { ks } = make();
     ks.setBlockContent('profile', LINE);
     const id = ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'private-chat' }).id;
@@ -1144,7 +1143,7 @@ describe('the always-loaded profile block and who may reach into it', () => {
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
   });
 
-  it('the other erasures keep their best-effort block step — only the private purge changed', () => {
+  it('deleteEntry: a failing profile write does not undo the delete', () => {
     const { ks } = make();
     const id = seed(ks, 'agent');
     vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
