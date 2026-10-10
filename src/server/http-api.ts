@@ -4764,11 +4764,11 @@ export class LynoxHTTPApi {
         // user "this chat is kept out of memory", and it is usually switched on AFTER the
         // sensitive part was said — so the retroactive half is the half that counts.
         //
-        // Both stores, each attempted on its own: the legacy memories (with their engine.db
-        // stubs) and the durable entries. A failure is not swallowed. The flag is already
-        // stored, so future writes stay off either way; what the answer must not do is say
-        // "done" while the thread's facts are still recallable. The 500 carries the stored
-        // state, so the page does not show private mode as off when it is on.
+        // What is tied to this thread by its id, in both stores, each attempted on its own:
+        // the legacy memories (with their engine.db stubs) and the durable entries. A failure
+        // is not swallowed. The flag is already stored, so future writes stay off either way;
+        // what the answer must not do is say "done" when one of these removals failed. The
+        // 500 carries the stored state, so the page does not show private mode as off when it is on.
         if (skipExtraction) {
           const id = params['id']!;
           const failed: string[] = [];

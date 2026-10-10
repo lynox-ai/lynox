@@ -16,9 +16,13 @@ import type { IAgent } from '../../types/index.js';
  *
  * Only the tools that put NEW content into memory call this. Removing or retiring an entry,
  * and promoting one that is already stored, carry nothing from this chat.
+ *
+ * A sub-agent has no `currentThreadId`; it is checked against the chat it was spawned from.
+ * Without that, `spawn_agent` was a way around this check, and the child's write carried no
+ * thread id, so no later purge could find it either.
  */
 export function privateThreadRefusal(agent: IAgent): string | null {
-  const threadId = agent.currentThreadId;
+  const threadId = agent.currentThreadId ?? agent.originThreadId;
   if (!threadId) return null;
   const thread = agent.toolContext.threadStore?.getThread(threadId);
   if (thread?.skip_extraction !== 1) return null;

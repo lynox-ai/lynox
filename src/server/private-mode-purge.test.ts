@@ -9,6 +9,8 @@ import { reloadConfig } from '../core/config.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import type { KnowledgeLayer } from '../core/knowledge-layer.js';
+import type { IAgent } from '../types/index.js';
+import { rememberTool } from '../tools/builtin/knowledge.js';
 
 /**
  * Switching private mode on removes what the conversation already put into memory — both
@@ -159,6 +161,32 @@ describe('PATCH /api/threads/:id { skip_extraction: true } purges the thread fro
     expect(body['failed']).toEqual(['durable knowledge: disk full']);
     expect(ks.getBlock('profile')?.content).toContain(line);
     expect(ks.getEntry(seeded.id)).not.toBeNull(); // kept, so switching again can finish the job
+  });
+
+  it('on the booted engine, `remember` refuses in the private chat and stores in another — subject graph off', async () => {
+    // The tools read the chat's private flag through the tool context's thread store. That
+    // store used to be wired only with the subject-graph flag on, which is off by default: the
+    // refusal then saw no thread and the tool wrote. A unit test hands the store in itself and
+    // cannot see that; this one takes the tool context the engine built.
+    const { ts, ks } = stores();
+    ts.createThread('t-tool-private', { title: 'chat t-tool-private' });
+    ts.createThread('t-tool-open', { title: 'chat t-tool-open' });
+    expect((await setPrivate('t-tool-private')).status).toBe(200);
+    const toolContext = (engineOf() as unknown as { getToolContext: () => IAgent['toolContext'] }).getToolContext();
+    const agentIn = (threadId: string) => ({
+      toolContext, currentThreadId: threadId, currentRunId: 'r1', autonomy: 'supervised',
+      sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
+      skipMemoryExtraction: false, promptUser: async (_q: unknown, options: string[] = []) => options[0] ?? 'Apply',
+    } as unknown as IAgent);
+    const countFor = (threadId: string) => [...ks.listActive(), ...ks.listPending()]
+      .filter(e => e.sourceThreadId === threadId).length;
+
+    const refused = await rememberTool.handler({ text: 'Jana Reber moved to Zug' }, agentIn('t-tool-private'));
+    await rememberTool.handler({ text: 'ACME renews in March' }, agentIn('t-tool-open'));
+
+    expect(refused).toContain('private mode');
+    expect(countFor('t-tool-private')).toBe(0);
+    expect(countFor('t-tool-open')).toBe(1); // the same tool on the same engine does write
   });
 
   it('a failed legacy purge answers 500 too, and the durable half still runs', async () => {

@@ -1811,6 +1811,13 @@ async function executeThinker(
       childAgent.noteUntrustedData();
     }
 
+    // Private mode reaches the child too. It is spawned from the chat but does not run as it, so
+    // it has no `currentThreadId`: the memory tools check the chat it came from instead, and its
+    // end-of-turn capture stays off whenever the parent's is. Without both, a child spawned in
+    // a private chat wrote to memory — with no thread id, so no later purge could find it.
+    childAgent.originThreadId = parentAgent.currentThreadId ?? parentAgent.originThreadId;
+    if (parentAgent.skipMemoryExtraction === true) childAgent.skipMemoryExtraction = true;
+
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });
     // Built HERE, not at the return: `runHistory.updateRun` below stores

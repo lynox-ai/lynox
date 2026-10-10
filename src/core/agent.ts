@@ -395,6 +395,8 @@ export class Agent implements IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** See `IAgent.originThreadId` — set by spawn on a sub-agent, read only for private mode. */
+  originThreadId?: string | undefined;
   /** See `AgentConfig.recordToolCall` — the one owner of tool-call persistence. */
   recordToolCall?: ToolCallRecorder | undefined;
   readonly spawnDepth: number;

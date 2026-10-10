@@ -346,6 +346,12 @@ export interface IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** For a sub-agent: the chat it was spawned from, which it does not run AS (it has no
+   *  `currentThreadId`). Read only to honour that chat's private mode — see `private-thread.ts`. */
+  originThreadId?: string | undefined;
+  /** The end-of-turn capture switch (private mode, or the global extraction setting). Read by
+   *  spawn so a child stays off whenever its parent is. */
+  readonly skipMemoryExtraction?: boolean | undefined;
   /** Sink this agent's finished tool calls are handed to — read by `spawn_agent`
    *  so a child inherits it and books onto its own run. See
    *  {@link ToolCallRecorder}. */

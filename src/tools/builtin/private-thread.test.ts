@@ -85,11 +85,32 @@ describe('memory-writing tools refuse in a private chat', () => {
     expect(ks.listActive().length + ks.pendingCount()).toBe(1);
   });
 
+  it('remember from a sub-agent of a private chat: refused — the child is checked against the chat it came from', async () => {
+    // A spawned child has no currentThreadId; spawn hands it the chat's id as originThreadId.
+    const { agent, ks } = make({ privateThread: true });
+    const child = Object.assign(Object.create(agent) as object, { currentThreadId: undefined, originThreadId: 't1' }) as IAgent;
+    const out = await rememberTool.handler({ text: 'Jana Reber lives in Bern' }, child);
+    expect(out).toBe(privateThreadRefusal(child));
+    expect(ks.listActive().length + ks.pendingCount()).toBe(0);
+  });
+
   it('memory_block_edit: refused, the profile block unchanged', async () => {
     const { agent, ks } = make({ privateThread: true });
     ks.setBlockContent('profile', 'Operator: Alex.');
     const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Jana Reber lives in Bern' } as never, agent);
     expect(out).toBe(privateThreadRefusal(agent));
+    expect(ks.getBlock('profile')?.content).toBe('Operator: Alex.');
+  });
+
+  it('memory_block_edit: private mode switched on while the Apply dialog is open — still refused', async () => {
+    const opts = { privateThread: false };
+    const { agent, ks } = make(opts);
+    ks.setBlockContent('profile', 'Operator: Alex.');
+    const flipping = Object.assign(Object.create(agent) as object, {
+      promptUser: async () => { opts.privateThread = true; return 'Apply'; },
+    }) as IAgent;
+    const out = await memoryBlockEditTool.handler({ block: 'profile', mode: 'append', new_text: 'Jana Reber lives in Bern' } as never, flipping);
+    expect(out).toContain('private mode');
     expect(ks.getBlock('profile')?.content).toBe('Operator: Alex.');
   });
 

@@ -381,6 +381,10 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
       ['Apply', 'Cancel'],
     );
     if (answer !== 'Apply') return `Cancelled — the ${input.block} block is unchanged.`;
+    // Again after the dialog: it can stay open for a long time, and private mode may have been
+    // switched on meanwhile.
+    const privateAfterDialog = privateThreadRefusal(agent);
+    if (privateAfterDialog) return privateAfterDialog;
 
     try {
       ks.editBlock(input.block, input.mode, input.old_text, input.new_text);
