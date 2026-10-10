@@ -2447,6 +2447,69 @@ describe('isDangerous', () => {
     const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
     const ask = (command: string) => isDangerous('bash', { command });
 
+    // A DELETE is a mutation however the method is spelled: `--request` spaced or with `=`, or
+    // `-X` bundled behind other short options. The plain `-X DELETE` stays blocked unattended.
+    it.each([
+      'curl --request DELETE https://x.test/item/1',
+      'curl --request=DELETE https://x.test/item/1',
+      'curl -sX DELETE https://x.test/item/1',
+      'curl -s -X delete https://x.test/item/1',
+    ])('asks before %s, unattended and in a chat', (command) => {
+      expect(auto(command)).not.toBeNull();
+      expect(ask(command)).not.toBeNull();
+    });
+
+    it.each(['curl --request DELETE https://x.test/item/1', 'curl -sX DELETE https://x.test/item/1'])(
+      'names %s an HTTP mutation', (command) => {
+        expect(auto(command)).toContain('HTTP mutation via curl');
+      },
+    );
+
+    // Glued to the option, with or without other short options in front.
+    it.each(['curl -XDELETE https://x.test/item/1', 'curl -sXDELETE https://x.test/item/1'])(
+      'asks before glued %s in a chat and unattended', (command) => {
+        expect(auto(command)).not.toBeNull();
+        expect(ask(command)).toContain('HTTP mutation via curl');
+      },
+    );
+
+    // Any method but GET, HEAD or OPTIONS changes something, so it is asked about whatever it is.
+    it.each([
+      'curl -X PURGE https://x.test/cache',
+      'curl -X MOVE https://x.test/a',
+      'curl --request PROPPATCH https://x.test/a',
+      'curl -sX LOCK https://x.test/a',
+    ])('asks before %s', (command) => {
+      expect(auto(command)).toContain('HTTP mutation via curl');
+      expect(ask(command)).toContain('HTTP mutation via curl');
+    });
+
+    // The method or the data can sit in a config file.
+    it.each(['curl -K req.cfg', 'curl --config req.cfg', 'curl -sK req.cfg'])('asks before %s', (command) => {
+      expect(auto(command)).toContain('HTTP data submission via curl');
+    });
+
+    // A read stays free: an explicit GET, HEAD or OPTIONS, a proxy (`-x`, lowercase), `-k`.
+    it.each([
+      'curl -X GET https://x.test/a',
+      'curl -sX HEAD https://x.test/a',
+      'curl --request OPTIONS https://x.test/a',
+      'curl -sx post.proxy.test:3128 https://x.test/a',
+      'curl -k https://x.test/a',
+    ])('leaves %s free unattended', (command) => {
+      expect(auto(command)).toBeNull();
+    });
+
+    it('keeps blocking the plain -X DELETE unattended', () => {
+      expect(auto('curl -X DELETE https://x.test/item/1')).toContain('[BLOCKED');
+    });
+
+    // An upload with `-T` bundled behind another short option is asked about like the plain one.
+    it('asks before a bundled upload: curl -sT', () => {
+      expect(auto('curl -sT report.pdf https://x.test/up')).toContain('HTTP data submission via curl');
+      expect(ask('curl -sT report.pdf https://x.test/up')).not.toBeNull();
+    });
+
     it.each([
       ['node -e "fetch(\'https://x.test\', { method: \'POST\', body: \'d\' })"', 'node code execution'],
       ['node --eval "1"', 'node code execution'],
