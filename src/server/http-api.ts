@@ -8574,7 +8574,11 @@ export class LynoxHTTPApi {
       // A mandate's subscription is its own and ends with its grant (PRD §3.13 B3).
       const added = this.pushChannel.subscribe(endpoint, p256dh, auth, this._principalOf(_req));
       if (added === 'no_grant') {
-        errorResponse(res, 403, 'This session\'s access grant is not known to be live, so notifications cannot be tied to its end. Sign in again.');
+        errorResponse(res, 403, 'This session\'s access grant has ended or is not recorded on this instance, so notifications cannot be tied to its end. If your access is still running, sign in again.');
+        return;
+      }
+      if (added === 'unavailable') {
+        errorResponse(res, 503, 'Your access could not be checked just now. Try again in a moment.');
         return;
       }
       if (added === 'taken') {

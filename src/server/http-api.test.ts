@@ -425,7 +425,7 @@ vi.mock('../core/config.js', async (importOriginal) => ({
 // Its methods are spies (`pushMock`), so the push routes' tests can see what a route asks of it.
 const { pushMock } = vi.hoisted(() => ({
   pushMock: {
-    subscribe: vi.fn((): 'ok' | 'full' | 'no_grant' => 'ok'),
+    subscribe: vi.fn((): 'ok' | 'full' | 'no_grant' | 'taken' | 'unavailable' => 'ok'),
     unsubscribe: vi.fn(),
     addedBy: vi.fn((): { created_by: string | null } | undefined => ({ created_by: null })),
     subscriptionCount: vi.fn(() => 1),
@@ -11632,7 +11632,15 @@ describe('push routes and a mandate\'s session', () => {
     pushMock.subscribe.mockImplementation(() => 'no_grant');
     const noGrant = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/eva')) });
     expect(noGrant.status).toBe(403);
-    expect(((await noGrant.json()) as { error: string }).error).toBe('This session\'s access grant is not known to be live, so notifications cannot be tied to its end. Sign in again.');
+    expect(((await noGrant.json()) as { error: string }).error).toBe('This session\'s access grant has ended or is not recorded on this instance, so notifications cannot be tied to its end. If your access is still running, sign in again.');
+  });
+
+  it('answers 503 when the grant could not be checked just now', async () => {
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    pushMock.subscribe.mockImplementation(() => 'unavailable');
+    const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/eva')) });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toBe('Your access could not be checked just now. Try again in a moment.');
   });
 
   it('answers 409 when the browser already receives someone else\'s notifications', async () => {

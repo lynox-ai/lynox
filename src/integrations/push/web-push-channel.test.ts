@@ -153,13 +153,31 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		expect(ch.addedBy('https://push.example/old-1')).toBeUndefined();
 	});
 
-	it('keeps telling the owner when a grant lookup fails, and drops only that mandate\'s', async () => {
-		const failing = new WebPushNotificationChannel(dataDir, { isMandateLive: (id) => { if (id === 'TEST-MANDATE-2') throw new Error('engine.db busy'); return live.has(id); } });
-		failing.subscribe('https://push.example/eva', 'k', 'a', EVA);
+	it('keeps telling the owner when a grant lookup fails, and keeps but skips that mandate\'s', async () => {
+		let busy = false;
+		const flaky = new WebPushNotificationChannel(dataDir, { isMandateLive: (id) => { if (busy && id === 'TEST-MANDATE-2') throw new Error('engine.db busy'); return live.has(id); } });
 		const max = mandate('max@example.invalid', 'TEST-MANDATE-2');
-		expect(failing.subscribe('https://push.example/max', 'k', 'a', max)).toBe('no_grant');
-		await failing.send({ title: 't', body: 'b', priority: 'normal' });
-		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva']);
+		flaky.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(flaky.subscribe('https://push.example/max', 'k', 'a', max)).toBe('ok');
+		busy = true;
+		// Another subscribe runs the purge: a lookup that fails must not remove the row.
+		flaky.subscribe('https://push.example/owner-2', 'k', 'a', OWNER_PRINCIPAL);
+		await flaky.send({ title: 't', body: 'b', priority: 'normal' });
+		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva', 'https://push.example/owner-2']);
+		expect(flaky.addedBy('https://push.example/max')).toEqual({ created_by: 'mandate:max@example.invalid' });
+		expect(flaky.subscribe('https://push.example/max-2', 'k', 'a', max)).toBe('unavailable');
+		busy = false;
+		(webPush.sendNotification as ReturnType<typeof vi.fn>).mockClear();
+		await flaky.sendDetailed({ title: 't', body: 'b', priority: 'normal' }, max);
+		expect(sendCalls()).toEqual(['https://push.example/max']);
+	});
+
+	it('lets the owner take an endpoint a mandate holds, in the owner\'s own browser', () => {
+		ch.subscribe('https://push.example/eva', 'k', 'a', EVA);
+		expect(ch.subscribe('https://push.example/eva', 'k', 'a', OWNER_PRINCIPAL)).toBe('ok');
+		expect(ch.addedBy('https://push.example/eva')).toEqual({ created_by: null });
+		live.delete('TEST-MANDATE-1');
+		expect(ch.subscriptionCount()).toBe(2);
 	});
 
 	it('refuses a mandate whose session names no grant', () => {

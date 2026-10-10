@@ -231,25 +231,33 @@ export class WebPushNotificationChannel implements NotificationChannel {
    * (its end was never recorded, or it has ended); `taken` when the endpoint already belongs to
    * someone else, which happens when a mandate turns notifications on in a browser the owner
    * already uses (taking the row over would end the owner's subscription with the grant);
-   * `full` when the instance has no room it may take (see `PushSubscriptionStore.add`). Rows of
-   * ended grants are cleared first, so they take no room.
+   * `full` when the instance has no room it may take (see `PushSubscriptionStore.add`);
+   * `unavailable` when the grant could not be looked up just now. Rows of ended grants are
+   * cleared first, so they take no room. The owner re-adding an endpoint a mandate holds takes
+   * it: the owner reaches every subscription anyway, and it is the owner's own browser.
    */
-  subscribe(endpoint: string, p256dh: string, auth: string, by: RequestPrincipal): 'ok' | 'full' | 'no_grant' | 'taken' {
+  subscribe(endpoint: string, p256dh: string, auth: string, by: RequestPrincipal): 'ok' | 'full' | 'no_grant' | 'taken' | 'unavailable' {
     this.liveSubscriptions();
     if (isOwnerPrincipal(by)) return this.store.add(endpoint, p256dh, auth, { createdBy: null, mandateId: null });
-    if (by.kind !== 'mandate' || by.mandateId === undefined || !this.live(by.mandateId)) return 'no_grant';
+    if (by.kind !== 'mandate' || by.mandateId === undefined) return 'no_grant';
+    const grant = this.grantState(by.mandateId);
+    if (grant === 'unknown') return 'unavailable';
+    if (grant === 'ended') return 'no_grant';
     const tag = principalTag(by);
     const existing = this.store.get(endpoint);
     if (existing !== undefined && existing.created_by !== tag) return 'taken';
     return this.store.add(endpoint, p256dh, auth, { createdBy: tag, mandateId: by.mandateId });
   }
 
-  /** Whether a grant is live; a lookup that fails counts as ended, for this grant only. */
-  private live(mandateId: string): boolean {
+  /**
+   * Whether a grant is live. A lookup that fails is `unknown`: nothing is sent on it, but its
+   * subscription is kept, because a busy database says nothing about the grant.
+   */
+  private grantState(mandateId: string): 'live' | 'ended' | 'unknown' {
     try {
-      return this.isMandateLive(mandateId);
+      return this.isMandateLive(mandateId) ? 'live' : 'ended';
     } catch {
-      return false;
+      return 'unknown';
     }
   }
 
@@ -272,15 +280,17 @@ export class WebPushNotificationChannel implements NotificationChannel {
   /**
    * The subscriptions a send may reach: the owner's, and those of mandates still live. One a
    * mandate added whose grant has ended (or that names no grant) is removed here, so its
-   * device is told nothing after the end (PRD customer-granted-operator-access §3.13 B3).
-   * With `of` a mandate, only that mandate's own.
+   * device is told nothing after the end (PRD customer-granted-operator-access §3.13 B3). One
+   * whose grant cannot be looked up just now is skipped and kept. With `of` a mandate, only
+   * that mandate's own.
    */
   private liveSubscriptions(of?: RequestPrincipal): PushSubscriptionRow[] {
     const live: PushSubscriptionRow[] = [];
     for (const row of this.store.getAll()) {
-      if (isMandateTag(row.created_by) && (row.mandate_id === null || !this.live(row.mandate_id))) {
-        this.store.remove(row.endpoint);
-        continue;
+      if (isMandateTag(row.created_by)) {
+        const grant = row.mandate_id === null ? 'ended' : this.grantState(row.mandate_id);
+        if (grant === 'ended') this.store.remove(row.endpoint);
+        if (grant !== 'live') continue;
       }
       live.push(row);
     }
