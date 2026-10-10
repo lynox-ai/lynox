@@ -11204,6 +11204,8 @@ export class LynoxHTTPApi {
       // Only return the actual key when explicitly requested (settings page reveal)
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
+        // The key opens every stored secret: the owner's own session only.
+        if (this._refuseUnlessOwner(req, res, 'see the vault key')) return;
         // Managed mode: never expose vault key to users
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: vault key is system-controlled');
@@ -11255,6 +11257,8 @@ export class LynoxHTTPApi {
       }
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       if (url.searchParams.get('reveal') === 'true') {
+        // The token logs in as the owner: the owner's own session only.
+        if (this._refuseUnlessOwner(req, res, 'see the access token')) return;
         if (readEnvAlias('LYNOX_BILLING_TIER')) {
           errorResponse(res, 403, 'Managed instance: access token is system-controlled');
           return;

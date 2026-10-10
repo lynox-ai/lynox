@@ -405,6 +405,15 @@ describe('isOwnerSession (who may create a way back in as the owner)', () => {
 		expect(isOwnerSession(createSessionToken(SECRET), SECRET)).toBe(true);
 	});
 
+	it('is true for the oldest owner format `<ts>.<sig>`, which carries no principal either', () => {
+		expect(isOwnerSession(sign(`${Math.floor(Date.now() / 1000)}`), SECRET)).toBe(true);
+	});
+
+	it('is false for a mandate session whose principal has an unknown kind', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		expect(isOwnerSession(sign(`aaaaaaaaaaaaaaaa.${b64({ ...mandateAt(nowS), kind: 'member' })}.${nowS}`), SECRET)).toBe(false);
+	});
+
 	it('is false for a valid mandate session', () => {
 		const tok = createSessionToken(SECRET, mandateAt(Math.floor(Date.now() / 1000)));
 		expect(verifySessionToken(tok, SECRET)).toBe(true);

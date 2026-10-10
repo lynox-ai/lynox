@@ -974,6 +974,35 @@ describe('LynoxHTTPApi', () => {
       expect(asOwner.status).not.toBe(403);
     });
 
+    for (const [path, field, value, what] of [
+      ['/api/auth/token', 'token', TEST_SECRET, 'see the access token'],
+      ['/api/vault/key', 'key', 'TEST-VAULT-KEY-0000000000000000', 'see the vault key'],
+    ] as const) {
+      it(`reveals ${path} to the owner's session only, also where no billing tier is set`, async () => {
+        // Off managed the tier check does not refuse, so the owner check is what holds here.
+        // Only these three are set and put back: the block's own env stays as it is.
+        const keys = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_VAULT_KEY'] as const;
+        const prior = keys.map((k) => process.env[k]);
+        delete process.env['LYNOX_BILLING_TIER'];
+        delete process.env['LYNOX_MANAGED_MODE'];
+        process.env['LYNOX_VAULT_KEY'] = 'TEST-VAULT-KEY-0000000000000000';
+        try {
+          const reveal = (token: string): Promise<Response> =>
+            fetch(`${baseUrl}${path}?reveal=true`, { headers: { cookie: `lynox_session=${token}` } });
+          const asMandate = await reveal(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+          expect(asMandate.status).toBe(403);
+          const refused = await asMandate.json() as Record<string, unknown>;
+          expect(refused).toEqual({ error: `Only the owner of this instance can ${what}.` });
+          // Twin: the owner's cookie from the same minter gets the value.
+          const asOwner = await reveal(webUiLoginSession(TEST_SECRET, null)!.token);
+          expect(asOwner.status).toBe(200);
+          expect(((await asOwner.json()) as Record<string, unknown>)[field]).toBe(value);
+        } finally {
+          keys.forEach((k, i) => { const v = prior[i]; if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+        }
+      });
+    }
+
     it('starts no run for a mandate session, and the owner\'s run under the owner (§3.13 E1)', async () => {
       // Starting a conversation is the owner's until a mandate can be bound to what it set up.
       // The run route's key pre-flight, as the `runs` block sets it.
