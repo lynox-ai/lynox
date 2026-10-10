@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
+import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 
 interface ArtifactSaveInput {
   title: string;
@@ -41,6 +42,19 @@ export const artifactSaveTool: ToolEntry<ArtifactSaveInput> = {
   handler: async (input: ArtifactSaveInput, agent: IAgent): Promise<string> => {
     const store = agent.toolContext.artifactStore;
     if (!store) return 'Artifact store not available.';
+
+    // Before the save, not after: an update replaces the file, so a copied
+    // placeholder would overwrite the real document.
+    if (containsEvictionMarker(input.content)) {
+      throw new Error(
+        'artifact_save refused: `content` contains "[evicted after successful save …]". That is the ' +
+        'placeholder the engine puts in your context in place of a document it already saved — it is ' +
+        'not a document. Nothing was saved, and any existing artifact is unchanged. To change an ' +
+        'artifact, read_file its path and apply edit_file. To create one, write the full document ' +
+        'into `content`. If read_file returns this placeholder too, the file itself holds it: ' +
+        'artifact_history lists earlier versions, or write the document anew.',
+      );
+    }
 
     const artifact = store.save({
       title: input.title,
