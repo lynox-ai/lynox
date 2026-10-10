@@ -3133,11 +3133,16 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       session: session as unknown as Session,
       promptStore: store,
     });
-    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
     closers.unshift(() => { loop.stop(); });
     await loop.tick();
     await settle(() => late !== undefined);
     expect(pendingWhileParked).toBeDefined();
+    // Only the first question reached the owner; the one asked on an aborted signal was never
+    // inserted or pushed, not merely drained afterwards.
+    const pushed = vi.mocked(router.notify).mock.calls.filter(([m]) => (m as { inquiry?: unknown }).inquiry !== undefined);
+    expect(pushed).toHaveLength(1);
     expect(parked).toBe('__dismissed__');
     expect(late).toBe('__dismissed__');
     expect(store.getPending(SESSION_ID)).toBeUndefined();
