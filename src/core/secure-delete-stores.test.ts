@@ -38,8 +38,7 @@ describe('every user-data store opens its connection with secure_delete', () => 
       try {
         expect(secureDelete(store)).toBe(1);
       } finally {
-        // Through the handle: SecurityAudit has no close() of its own.
-        (store as { db: Database.Database }).db.close();
+        (store as { close(): void }).close();
       }
     });
   }

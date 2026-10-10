@@ -1,6 +1,7 @@
 import { LinearJwtRegExp, JWT_AUDIT_PREVIEW } from './jwt-scan.js';
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
+import type { Channel, ChannelListener } from 'node:diagnostics_channel';
 import { channels } from './observability.js';
 import { getLynoxDir } from './config.js';
 import { BASH_OBSERVE_EVENT } from '../tools/bash-allowlist.js';
@@ -39,6 +40,7 @@ export function maskSecrets(text: string): string {
 export class SecurityAudit {
   private db: Database.Database;
   private insertStmt: Database.Statement;
+  private subscriptions: Array<[Channel, ChannelListener]> = [];
 
   constructor(dbPath?: string | undefined) {
     const path = dbPath ?? join(getLynoxDir(), 'history.db');
@@ -91,7 +93,7 @@ export class SecurityAudit {
     // Subscribe to guardBlock channel (existing). A2: map the run id (so a
     // headless step's block is attributable to its run) + the contract version
     // that governed the decision — both newly carried on the published event.
-    channels.guardBlock.subscribe((msg: unknown) => {
+    const onGuardBlock = (msg: unknown): void => {
       const event = msg as { toolName?: string; warning?: string; autonomy?: string; runId?: string; contractVersion?: number };
       this.record({
         event_type: event.warning?.includes('[BLOCKED') ? 'tool_blocked' : 'danger_flagged',
@@ -102,18 +104,30 @@ export class SecurityAudit {
         run_id: event.runId,
         contract_version: event.contractVersion !== undefined ? String(event.contractVersion) : undefined,
       });
-    });
-
+    };
     // Subscribe to security channels
-    channels.securityBlocked.subscribe((msg: unknown) => {
+    const onSecurityEvent = (msg: unknown): void => {
       this.record(msg as SecurityEvent);
-    });
-    channels.securityFlagged.subscribe((msg: unknown) => {
-      this.record(msg as SecurityEvent);
-    });
-    channels.securityInjection.subscribe((msg: unknown) => {
-      this.record(msg as SecurityEvent);
-    });
+    };
+    this.subscriptions = [
+      [channels.guardBlock, onGuardBlock],
+      [channels.securityBlocked, onSecurityEvent],
+      [channels.securityFlagged, onSecurityEvent],
+      [channels.securityInjection, onSecurityEvent],
+    ];
+    for (const [ch, fn] of this.subscriptions) ch.subscribe(fn);
+  }
+
+  /**
+   * Stop listening and close the connection. Idempotent. Without it every engine that shut
+   * down left its listeners on the process-wide channels and its connection open, so the
+   * events of a later engine in the same process were recorded once per engine that came
+   * before it.
+   */
+  close(): void {
+    for (const [ch, fn] of this.subscriptions) ch.unsubscribe(fn);
+    this.subscriptions = [];
+    if (this.db.open) this.db.close();
   }
 
   record(event: SecurityEvent): void {
