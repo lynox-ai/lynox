@@ -54,6 +54,9 @@ interface Proc {
   dispatches: () => number;
   /** Finish this process's in-flight agent turn. */
   finish: (result?: string) => void;
+  /** End this process's in-flight agent turn with an error. */
+  fail: (error: Error) => void;
+  router: { hasChannels: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
 }
 
 /** One engine process on `dir`. Its agent turns hang until `finish` — a run in progress. */
@@ -71,7 +74,8 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
   const realRelease = manager.releaseLease.bind(manager);
   manager.releaseLease = (...a) => { realRelease(...a); released++; };
   const pending: Array<(r: string) => void> = [];
-  const run = vi.fn(() => new Promise<string>((resolve) => { pending.push(resolve); }));
+  const failing: Array<(e: Error) => void> = [];
+  const run = vi.fn(() => new Promise<string>((resolve, reject) => { pending.push(resolve); failing.push(reject); }));
   releases.push(() => { for (const r of pending.splice(0)) r('released'); });
   settles.push(async () => { await vi.waitFor(() => expect(released).toBeGreaterThanOrEqual(run.mock.calls.length), { timeout: 5_000 }); });
   // getLastRunStop: the real Session always has it and executeStandard reads the run's
@@ -88,13 +92,16 @@ function boot(dir: string, lease?: { heartbeatMs: number; ttlMs: number }): Proc
     workerRunModelOverride: () => ({}),
     escalateToUser: () => null,
   } as unknown as Engine;
-  const router = { hasChannels: () => false, notify: vi.fn().mockResolvedValue(undefined) } as unknown as NotificationRouter;
+  const routerDouble = { hasChannels: vi.fn(() => false), notify: vi.fn().mockResolvedValue(undefined) };
+  const router = routerDouble as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000, undefined, lease);
   closers.push(() => loop.stop());
   return {
     loop, manager, history, engineDb,
     dispatches: () => run.mock.calls.length,
-    finish: (result = 'done') => { for (const r of pending.splice(0)) r(result); },
+    finish: (result = 'done') => { failing.splice(0); for (const r of pending.splice(0)) r(result); },
+    fail: (error) => { pending.splice(0); for (const r of failing.splice(0)) r(error); },
+    router: routerDouble,
   };
 }
 
@@ -359,6 +366,23 @@ describe('a schedule deleted while its run is in flight', () => {
     } finally {
       process.off('unhandledRejection', onRejection);
     }
+  });
+
+  // MUTATION: drop the row check from `willRetry` in WorkerLoop.executeTask → the run
+  // counts on a retry its deleted row can no longer give, and no failure is reported.
+  it('reports a failure that its deleted schedule can no longer retry', async () => {
+    const dir = newDir();
+    const a = boot(dir);
+    a.history.insertTrigger({
+      id: 'trg-1', title: 'One-off report', source: 'cron', effect: 'run_agent',
+      nextRunAt: '2026-01-01T09:00:00.000Z', confirmedAt: '2026-01-01T00:00:00.000Z', maxRetries: 2,
+    });
+    a.router.hasChannels.mockReturnValue(true);
+    await a.loop.tick();
+    await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+    a.history.deleteTrigger('trg-1');
+    a.fail(new Error('provider down'));
+    await vi.waitFor(() => expect(a.router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '\u2717 One-off report' })));
   });
 
   it('is reported by the heartbeat as deleted, not as a lease lost to another process', async () => {

@@ -1452,13 +1452,16 @@ export class WorkerLoop {
       // so its failure is reported now or never.
       // Nor is a run a non-owner started by hand: a retry carries no request and would run
       // as the owner's schedule with the full tool set (§3.12 point 6, "once per request").
+      // And not a run whose schedule was deleted while it ran: the retry lives on the
+      // row, so without it the failure would be reported by nothing.
+      const taskManager = this.engine.getTaskManager();
       const willRetry = status !== 'stopped'
         && !isHandRunOf(task.id)
         && !startedByOther(entry)
         && (task.max_retries ?? 0) > 0
-        && (task.retry_count ?? 0) < (task.max_retries ?? 0);
+        && (task.retry_count ?? 0) < (task.max_retries ?? 0)
+        && taskManager?.getTrigger(task.id) !== undefined;
 
-      const taskManager = this.engine.getTaskManager();
       this.#recordRun(taskManager, task.id, errorMsg, status, entry);
 
       // If the task was parked on a human it was interrupted while waiting.
