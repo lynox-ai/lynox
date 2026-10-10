@@ -69,7 +69,7 @@ import { InputRequiredError, isInputRequired } from './input-required.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
-import { maskSecretPatterns, isProtectedSecretWrite } from './secret-store.js';
+import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
@@ -98,7 +98,6 @@ import { computeComposition, type CompositionSnapshot } from './context-composit
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys } from './api-store.js';
-import { mandateMayRead } from './profile-secret-view.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
@@ -106,7 +105,7 @@ import { runInCallSlot } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
 import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
@@ -4150,33 +4149,21 @@ export class Agent implements IAgent {
     if (this.secretStore && !Agent.SECRET_RESOLUTION_EXEMPT.has(tc.name)) {
       const secretNames = this.secretStore.extractSecretNames(tc.input);
       if (secretNames.length > 0) {
-        // A mandate's turn does not resolve the instance's provider keys or its infrastructure
-        // secrets (PRD customer-granted-operator-access D1). The same hurdle as the missing
-        // `bash`: on a managed instance the provider key in the environment is the platform's,
-        // and the consent and destination prompts below are no bar for a mandate, which
-        // answers its own session's prompts. Every provider slot is refused, the tenant's own
-        // keys included: a mandate sets the instance up and has no use for them in a request.
-        // Refused on the name, before the vault is asked: the value is never bound, and for a
-        // protected name the answer is the same whether the vault holds it or not.
+        // A mandate's turn resolves no `secret:` reference at all (PRD customer-granted-operator-
+        // access §3.13). A reference sends a value to whatever host the turn picks, and the consent
+        // and destination prompts below are no bar for a mandate, which answers its own session's
+        // prompts. What a mandate's profile may send, the engine attaches through that profile
+        // (`profile-secret-view.ts`): its own connection's tokens, and the owner's names the owner
+        // released to exactly that profile, for the hosts the owner was shown. A reference has no
+        // profile, so no release can be for it. Refused on the name, before the vault is asked: the
+        // value is never bound, and the answer is the same whether the vault holds it or not.
         if (this._toolLock !== null) {
-          // Past that, the same rule as a profile this mandate wrote (`mandateMayRead`), with no
-          // profile to go through: no value from the environment, nothing another author's
-          // profile reads, no credential of a provider preset connection, its own included (those
-          // reach their provider through the profile, not through a reference), and no token
-          // somebody else consented to. Without an API store only the environment rule is left.
-          const store = this.secretStore;
-          const apiStore = this.toolContext?.apiStore;
-          const tag = principalTag(this.principal);
-          const held = secretNames.filter(n => isProtectedSecretWrite(n)
-            || (apiStore ? !mandateMayRead(store, apiStore, tag, n) : (store.isEnvironmentSecret?.(n) ?? true)));
-          if (held.length > 0) {
-            return {
-              type: 'tool_result',
-              tool_use_id: tc.id,
-              content: annotateNonRetryable(`Secret(s) not available in this session: ${held.map(n => `"${n}"`).join(', ')}.`),
-              is_error: true,
-            };
-          }
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: annotateNonRetryable(`Secret(s) not available in this session: ${secretNames.map(n => `"${n}"`).join(', ')}. A secret reaches a request only through an API profile, which the engine attaches it from; write the request without "secret:" references.`),
+            is_error: true,
+          };
         }
         // Fail-loud gate: refuse the tool call if ANY referenced secret
         // is missing from the vault. Previously the resolver silently

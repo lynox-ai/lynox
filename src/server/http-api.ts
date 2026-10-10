@@ -27,7 +27,7 @@ import {
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile } from '../core/profile-secret-view.js';
+import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -73,7 +73,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
@@ -7606,7 +7606,7 @@ export class LynoxHTTPApi {
       }
       const apiStore = engine.getApiStore();
       const secretStore = engine.getSecretStore();
-      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, { apiStore, secretStore }))) {
+      if (!apiStore || !secretStore || !(await attachStoredCredential(key, {}, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: ctx.mandateEnds, secretReleases: ctx.secretReleases }))) {
         return 'The stored credential for this run\'s host cannot be attached. Check the API connection for the host, then try again.';
       }
       return null;
@@ -9048,7 +9048,7 @@ export class LynoxHTTPApi {
       const slotStore = engine.getSecretStore();
       const slotApis = engine.getApiStore();
       if (principal.kind === 'mandate' && profile && slotApis
-        && (!slotStore || !mandateMayConnect(slotStore, slotApis, principalTag(principal), profile))) {
+        && (!slotStore || !mandateMayConnect(slotStore, slotApis, principalTag(principal), profile, { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }))) {
         sendOAuthHtml(res, 409, 'This connection would store its token under a name that is not this session\'s to fill. Nothing was sent to the provider.');
         return;
       }
@@ -9086,7 +9086,9 @@ export class LynoxHTTPApi {
       // the link (`profile-secret-view.ts`).
       const rawStore = engine.getSecretStore();
       const connectApis = engine.getApiStore();
-      const connectStore = rawStore && profile && connectApis ? secretsForProfile(rawStore, profile, connectApis) : rawStore;
+      const connectStore = rawStore && profile && connectApis
+        ? secretsForProfile(rawStore, profile, connectApis, { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() })
+        : rawStore;
       const clientId = clientIdKey ? connectStore?.resolve(clientIdKey) : null;
       if (!clientId) {
         // `decideConnect` does not ask this: it decides whether the user may be
@@ -9094,7 +9096,13 @@ export class LynoxHTTPApi {
         // tool's `connect` action checks it before handing out the link, so
         // reaching here means the slot was emptied between the link and the
         // click.
-        sendOAuthHtml(res, 409, 'The client id for this profile is no longer in the vault. Set it again, then ask for a new link.');
+        // Withheld is not missing: a profile set up in a mandate's session reads the owner's client
+        // id only once the owner released it to that profile, and setting it again changes nothing.
+        const withheld = !!(rawStore && profile && connectApis && clientIdKey
+          && withheldFrom(rawStore, profile, connectApis, [clientIdKey], { principal, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() }).length > 0);
+        sendOAuthHtml(res, 409, withheld
+          ? 'The owner has not released the client id of this profile to it. Nothing was sent to the provider.'
+          : 'The client id for this profile is no longer in the vault. Set it again, then ask for a new link.');
         return;
       }
 
@@ -9199,6 +9207,11 @@ export class LynoxHTTPApi {
       // the mandate may have ended, during the minutes on the provider's page; a token stored
       // then would be one nobody may use.
       const by = signed.by;
+      // Who reads the client pair: the session that started the connection, with the grant it
+      // signed into the cookie. A release of the owner's name counts for that grant only.
+      const tagged = principalFromTag(by.tag);
+      const reader: RequestPrincipal = tagged.kind === 'mandate' ? { ...tagged, mandateId: by.mandateId } : tagged;
+      const readCtx = { principal: reader, ends: engine.getMandateEnds(), releases: engine.getSecretReleases() };
       // Asked twice: here, before anything goes to the provider, and again just before the
       // tokens are stored, because the exchange is an await and the profile, the mandate and
       // the names around them can all change while it runs.
@@ -9209,7 +9222,7 @@ export class LynoxHTTPApi {
           && by.mandateId !== undefined
           && engine.getMandateEnds()?.isLive(by.mandateId) === true
           && store !== null && store !== undefined
-          && mandateMayConnect(store, apiStore, by.tag, current);
+          && mandateMayConnect(store, apiStore, by.tag, current, readCtx);
       };
       if (!mayStillConnect(profile)) {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was changed.');
@@ -9230,10 +9243,15 @@ export class LynoxHTTPApi {
       // Read through the profile's view of the vault, as at the start of the connection;
       // the tokens below are written to the store itself.
       const secretStore = engine.getSecretStore();
-      const readable = secretStore ? secretsForProfile(secretStore, profile, apiStore) : null;
+      const readable = secretStore ? secretsForProfile(secretStore, profile, apiStore, readCtx) : null;
       const clientId = oauth.client_id_key ? readable?.resolve(oauth.client_id_key) : null;
       const clientSecret = oauth.client_secret_key ? readable?.resolve(oauth.client_secret_key) : null;
       if (!secretStore || !clientId || !clientSecret) {
+        const pair = [oauth.client_id_key, oauth.client_secret_key].filter((k): k is string => typeof k === 'string');
+        if (secretStore && withheldFrom(secretStore, profile, apiStore, pair, readCtx).length > 0) {
+          sendOAuthHtml(res, 409, 'The owner has not released the credentials of this profile to it. Nothing was changed.');
+          return;
+        }
         sendOAuthHtml(res, 409, 'The credentials for this connection are no longer in the vault. Set them again, then ask for a new link.');
         return;
       }

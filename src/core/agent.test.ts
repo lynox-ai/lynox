@@ -2149,13 +2149,14 @@ describe('Agent', () => {
       expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
     });
 
-    // PRD §3.13 (H2i): a reference in a mandate's turn follows the rule a profile the
-    // mandate wrote follows (`mandateMayRead`), without the profile.
+    // PRD §3.13 (H2i-2a-R): a mandate's turn resolves no reference at all — not the owner's
+    // names, and not the tokens of its own consent either: those reach a request only through the
+    // profile that holds the grant.
     it.each([
       ['does not resolve a name the owner\'s profile reads', 'OWNER_KEY', { kind: 'mandate', email: 'setup@example.org' } as const, false],
       ['control: the owner\'s turn resolves a name the owner\'s profile reads', 'OWNER_KEY', { kind: 'owner' } as const, true],
       ['does not resolve a name shaped like a token slot that no profile of its own holds', 'GONE_API_REFRESH_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, false],
-      ['resolves the token of its own consent on its profile without a preset', 'MINE_API_ACCESS_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, true],
+      ['does not resolve the token of its own consent either', 'MINE_API_ACCESS_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, false],
       ['does not resolve the token of the owner\'s consent on its profile', 'OWNERS_API_ACCESS_TOKEN', { kind: 'mandate', email: 'setup@example.org' } as const, false],
     ])('a mandate\'s turn: %s', async (_label, name, principal, runs) => {
       const { ApiStore } = await import('./api-store.js');
@@ -2185,7 +2186,10 @@ describe('Agent', () => {
       expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
     });
 
-    it('control: a mandate\'s turn still resolves a secret it may use', async () => {
+    it.each([
+      ['a mandate\'s turn without an API store resolves no reference either', { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } as const, false],
+      ['control: the owner\'s turn resolves the same reference', { kind: 'owner' } as const, true],
+    ])('%s', async (_label, principal, runs) => {
       const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true), isEnvironmentSecret: () => false });
       const tool = makeTool('http_request', vi.fn().mockResolvedValue('ok'));
       mockProcess
@@ -2196,10 +2200,10 @@ describe('Agent', () => {
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({
         name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'),
-        secretStore: store, principal: { kind: 'mandate', email: 'setup@example.org' },
+        secretStore: store, principal,
       });
       await agent.send('Call API');
-      expect(tool.handler).toHaveBeenCalled();
+      expect(tool.handler).toHaveBeenCalledTimes(runs ? 1 : 0);
     });
 
     it('resolves secret:KEY_NAME in tool input after consent', async () => {

@@ -26,6 +26,7 @@ import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
+import { SecretReleases } from './secret-releases.js';
 import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
@@ -1135,6 +1136,8 @@ export class Engine {
     // And the end of each mandate (v24), which a later reader checks without a request.
     this._mandateEnds = this.engineDb ? new MandateEnds(this.engineDb.getDb()) : null;
     this._toolContext.mandateEnds = this._mandateEnds;
+    // And the owner's releases of vault names to profiles a mandate wrote (v27).
+    this._toolContext.secretReleases = this.engineDb ? new SecretReleases(this.engineDb.getDb()) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -2339,6 +2342,8 @@ export class Engine {
   getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
+  /** The owner's releases of vault names to profiles a mandate wrote, or null without engine.db. */
+  getSecretReleases(): SecretReleases | null { return this._toolContext.secretReleases; }
   /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }

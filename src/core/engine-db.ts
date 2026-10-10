@@ -977,6 +977,32 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (26);
    ALTER TABLE triggers ADD COLUMN last_escalation_at TEXT;
    ALTER TABLE triggers ADD COLUMN last_escalation_outcome TEXT;`,
+
+  // v27: which of the owner's vault names a profile a mandate wrote may read
+  // (secret-releases.ts). A request is what the profile asked for when the mandate saved it; a
+  // release is the owner's answer. Two tables rather than a status column: only the owner's
+  // gesture writes a release, and no update of a request can turn into one. Both are keyed by
+  // profile, author and name, and a release also names the grant it was given to, so a later
+  // mandate for the same address, or another author under the same id, finds nothing.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (27);
+   CREATE TABLE IF NOT EXISTS secret_release_requests (
+     profile_id      TEXT NOT NULL,
+     profile_author  TEXT NOT NULL,
+     name            TEXT NOT NULL,
+     binding         TEXT NOT NULL,
+     mandate_id      TEXT NOT NULL,
+     requested_at    TEXT NOT NULL,
+     PRIMARY KEY (profile_id, profile_author, name)
+   );
+   CREATE TABLE IF NOT EXISTS secret_releases (
+     profile_id      TEXT NOT NULL,
+     profile_author  TEXT NOT NULL,
+     name            TEXT NOT NULL,
+     binding         TEXT NOT NULL,
+     mandate_id      TEXT NOT NULL,
+     released_at     TEXT NOT NULL,
+     PRIMARY KEY (profile_id, profile_author, name)
+   );`,
 ];
 
 /**

@@ -1633,7 +1633,8 @@ export class WorkerLoop {
         contract,
         hostPolicy: toolContext,
         ackHosts: resolveGuardedAckHosts(toolContext),
-        attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore }),
+        // A bulk run runs once the owner approved it (`approve` is the owner's), as the owner's.
+        attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases }),
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
       });

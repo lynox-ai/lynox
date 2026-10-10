@@ -18,10 +18,10 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
-import { accessTokenKey, collectVaultKeys, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
-import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME } from '../../core/profile-value-shape.js';
+import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
@@ -34,7 +34,9 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, hiddenFromProfile, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, secretsForProfile } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, mandateMayConnect, mayServeAsClientId, mandateSlotHolder, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import type { ReleaseAsk } from '../../core/secret-releases.js';
+import { newCorrelationId } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
@@ -57,7 +59,7 @@ const DOCS_FETCH_TIMEOUT_MS = 15_000;
  */
 const DOCS_EXTRACT_BUDGET_USD = 0.50;
 
-type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect' | 'adopt_connection';
+type ApiSetupAction = 'create' | 'update' | 'delete' | 'list' | 'view' | 'bootstrap' | 'refine' | 'fetch_token' | 'connect' | 'adopt_connection' | 'release_secret' | 'withdraw_release';
 
 interface RefinePatch {
   addGuidelines?: string[] | undefined;
@@ -76,6 +78,8 @@ interface ApiSetupInput {
   id?: string | undefined;
   /** For fetch_token: vault key name to store the access_token under. Default: derived from id. */
   output_secret_name?: string | undefined;
+  /** For release_secret / withdraw_release: the vault name a profile a mandate wrote asks for. */
+  secret_name?: string | undefined;
   /** OpenAPI spec URL — preferred bootstrap source when an OpenAPI 3.x JSON spec exists. */
   openapi_url?: string | undefined;
   /**
@@ -1432,6 +1436,15 @@ export function providerBodySummary(text: string, sent: readonly string[]): stri
   ], '\n');
 }
 
+/** Who reads through a profile's view in this agent's run, and what a release is checked against. */
+function readCtxOf(agent: IAgent): ReadCtx {
+  return {
+    principal: agent.principal,
+    ends: agent.toolContext?.mandateEnds ?? null,
+    releases: agent.toolContext?.secretReleases ?? null,
+  };
+}
+
 function hostOf(profile: ApiProfile): string | undefined {
   try { return new URL(profile.base_url).hostname; } catch { return undefined; }
 }
@@ -1443,20 +1456,20 @@ function hostOf(profile: ApiProfile): string | undefined {
  * (the profile picks the host within the preset's pattern); otherwise the profile's `token_url`.
  */
 function adoptionHosts(profile: ApiProfile): string[] {
-  const urls = [profile.base_url];
-  const oauth = profile.auth?.type === 'oauth2' ? profile.auth.oauth : undefined;
-  const preset = oauth?.preset_id ? OAUTH_PRESETS.get(oauth.preset_id) : undefined;
-  if (preset) {
-    const derived = derivePresetEndpoints(preset.id, oauth?.preset_params);
-    if (!('kind' in derived)) urls.push(derived.tokenUrl);
-  } else if (oauth?.token_url) {
-    urls.push(oauth.token_url);
+  return credentialHosts(profile).map((h) => shapedForLog(h, HOSTNAME_SHAPE, 255));
+}
+
+/**
+ * Where a released value goes, as the owner is asked about it: each of {@link credentialEndpoints}
+ * by its host, with the scheme when it is not https and the port when it is not the default.
+ */
+function releaseDestinations(profile: ApiProfile): string[] {
+  const shown = new Set<string>();
+  for (const e of credentialEndpoints(profile)) {
+    const u = new URL(e);
+    shown.add(`${u.protocol === 'https:' ? '' : `${shapedForLog(u.protocol.slice(0, -1), /^[a-z][a-z0-9+.-]{0,15}$/, 16)}://`}${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}`);
   }
-  const hosts = new Set<string>();
-  for (const u of urls) {
-    try { hosts.add(shapedForLog(new URL(u).hostname, HOSTNAME_SHAPE, 255)); } catch { /* not a URL: nothing to name */ }
-  }
-  return [...hosts];
+  return [...shown];
 }
 
 /**
@@ -1533,13 +1546,13 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   },
   definition: {
     name: 'api_setup',
-    description: 'Manage API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create / update: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.\n- adopt_connection: pass `id`.',
+    description: 'Manage API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create / update: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- connect: pass `id` for a link the USER clicks to authorize — show it INSTEAD of asking for a pasted token.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.\n- adopt_connection / release_secret / withdraw_release: pass `id` (the last two also `secret_name`).',
     input_schema: {
       type: 'object' as const,
       properties: {
         action: {
           type: 'string',
-          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect', 'adopt_connection'],
+          enum: ['create', 'update', 'delete', 'list', 'view', 'bootstrap', 'refine', 'fetch_token', 'connect', 'adopt_connection', 'release_secret', 'withdraw_release'],
           description: 'Action to perform',
         },
         profile: {
@@ -1561,6 +1574,10 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
         refine: {
           type: 'object',
           description: 'Additive patch for refine action: {addGuidelines[], addAvoid[], addNotes[], addEndpoints[], response_shape, rate_limit}.',
+        },
+        secret_name: {
+          type: 'string',
+          description: 'Vault name, for release_secret / withdraw_release.',
         },
         output_secret_name: {
           type: 'string',
@@ -2069,7 +2086,14 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
-      if (adopted !== undefined) parts.push(adoptionNote(adopted, profile));
+      if (adopted !== undefined) {
+        parts.push(adoptionNote(adopted, profile));
+        // The profile is the owner's now and reads the vault unfiltered: what was asked for it,
+        // and what was released to it, is moot.
+        agent.toolContext?.secretReleases?.forgetProfile(profile.id);
+      }
+      const releaseAsk = askForReleases(agent, profile);
+      if (releaseAsk !== '') parts.push(releaseAsk);
       if (grantDiscarded) {
         parts.push('The oauth_grant sent with this call was ignored: the engine keeps that record itself, and it is unchanged.');
       }
@@ -2206,12 +2230,14 @@ ${draftJson}
       const unnamed = [!clientIdKey ? 'auth.oauth.client_id_key' : null, !clientSecretKey ? 'auth.oauth.client_secret_key' : null].filter((n): n is string => n !== null);
       // Asked through the profile's view, as the route reads them, so a link is not handed out
       // that the route then refuses.
-      const connectStore = agent.secretStore ? secretsForProfile(agent.secretStore, profile, apiStore) : undefined;
+      const connectStore = agent.secretStore ? secretsForProfile(agent.secretStore, profile, apiStore, readCtxOf(agent)) : undefined;
       const unfilled = [clientIdKey, clientSecretKey].filter((k): k is string => typeof k === 'string' && !vaultHolds({ secretStore: connectStore } as IAgent, k));
       if (unnamed.length > 0 || unfilled.length > 0) {
         if (unnamed.length > 0) {
           return `Error: profile "${id}" cannot authorize yet — it does not name ${unnamed.join(' or ')}. Set the vault key name(s) with api_setup update, then collect the value with ask_secret.`;
         }
+        const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
+        if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
         return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
       }
       // The two refusals the route gives before anything is sent, asked here as well.
@@ -2219,7 +2245,7 @@ ${draftJson}
         return `Error: profile "${id}" names "${clientIdKey}" as its client id, and another profile reads that name as a credential. A client id is sent in the link, so the route would refuse it. Store the client id under a name of its own, update auth.oauth.client_id_key, then connect.`;
       }
       if (!isOwnerPrincipal(agent.principal) && agent.secretStore
-        && !mandateMayConnect(agent.secretStore, apiStore, principalTag(agent.principal), profile)) {
+        && !mandateMayConnect(agent.secretStore, apiStore, principalTag(agent.principal), profile, readCtxOf(agent))) {
         return `Error: connecting "${id}" would store its token under a name a profile of somebody else reads, so the route would refuse it. Nothing was sent. Tell the owner which account you meant to connect.`;
       }
       // Built from the parsed object, never by string surgery on the raw value.
@@ -2304,6 +2330,7 @@ ${draftJson}
         return `Error: deleted "${id}" from memory but on-disk file removal failed (${err instanceof Error ? err.message : String(err)}). Restart may resurrect the profile.`;
       }
       if (!removed) return `API profile "${id}" not found.`;
+      agent.toolContext?.secretReleases?.forgetProfile(id);
       // Only for a profile that was REGISTERED. `remove` also succeeds for a row
       // that sat in the store unregistered — the boot refuses the second of a
       // `-`/`_` pair — and a record read from such a row is not one this
@@ -2378,7 +2405,7 @@ ${draftJson}
       }
       // The profile's view of the vault: a profile a mandate wrote does not get the
       // environment's values or a preset account's credentials (`profile-secret-view.ts`).
-      const secretStore = agent.secretStore && apiStore ? secretsForProfile(agent.secretStore, profile, apiStore) : undefined;
+      const secretStore = agent.secretStore && apiStore ? secretsForProfile(agent.secretStore, profile, apiStore, readCtxOf(agent)) : undefined;
       if (!secretStore) {
         return 'Error: no secret store wired in this context — cannot resolve OAuth credentials.';
       }
@@ -2429,6 +2456,8 @@ ${draftJson}
       const presentedRefresh = grantType === 'refresh_token' ? resolveOne(refreshKey) : null;
       if (grantType === 'refresh_token' && presentedRefresh === null) missing.push(refreshKey);
       if (missing.length > 0) {
+        const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
+        if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
       }
       // Past this point every slot name has resolved, and `resolveOne` resolves only a
@@ -2470,7 +2499,7 @@ ${draftJson}
       // reads, whose requests would then carry a token this profile minted, or a token slot of
       // its own that somebody else's consent filled (`profile-secret-view.ts`). Its own slot
       // with no consent recorded yet is where this exchange records the first one.
-      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName, true)) {
+      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, outputName, readCtxOf(agent), true)) {
         return input.output_secret_name === undefined
           ? `Error: "${outputName}", where this profile's token would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its token gets a name of its own.`
           : `Error: output_secret_name "${outputName}" is a credential this profile may not write. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
@@ -2481,9 +2510,19 @@ ${draftJson}
       if (isMandateAuthored(profile) && outputName !== accessTokenKey(input.id)) {
         return `Error: output_secret_name "${outputName}" is not available for this profile. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
+      // And the other way round: a profile not written by a mandate does not store its token in a
+      // token slot of one that was. That profile would then hold the owner's token as if its own
+      // exchange had written it, and send it to the host its mandate chose. Asked of the input
+      // field, so a renewal (which names no output) is never refused here.
+      if (!isMandateAuthored(profile) && input.output_secret_name !== undefined && apiStore) {
+        const holder = mandateSlotHolder(apiStore, outputName);
+        if (holder !== undefined) {
+          return `Error: output_secret_name "${outputName}" is where the tokens of API profile "${holder.id}" go, which was set up in a mandate's session. Nothing was sent. Leave output_secret_name out, or choose a name of this profile's own.`;
+        }
+      }
       // The same question for the refresh slot: a provider that rotates the refresh token on
       // this exchange has it written there below, whatever grant was asked for.
-      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, refreshTokenKey(input.id), true)) {
+      if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, refreshTokenKey(input.id), readCtxOf(agent), true)) {
         return `Error: "${refreshTokenKey(input.id)}", where a renewed refresh token of this profile would go, is a credential this profile may not write. Nothing was sent. Save the profile under a different id, so its tokens get names of their own.`;
       }
       // Never a slot the refresh token lives in: the access token would be written
@@ -2755,6 +2794,92 @@ ${draftJson}
       return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as ${attachedAs} for any http_request that maps to api_profile "${input.id}" — do NOT pass the ${slot} header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${rotated !== null ? `Refresh token stored as \`${refreshName}\`.` : ''}`;
     }
 
+    if (input.action === 'release_secret' || input.action === 'withdraw_release') {
+      if (!input.id || !input.secret_name) return `Error: "id" and "secret_name" are required for ${input.action}.`;
+      const id = input.id;
+      const name = input.secret_name;
+      if (!isOwnerPrincipal(agent.principal)) {
+        return `Error: only the owner can ${input.action === 'release_secret' ? 'release a vault name to a profile' : 'take a release back'}. Nothing was changed.`;
+      }
+      const releases = agent.toolContext?.secretReleases ?? null;
+      const apiStore = agent.toolContext?.apiStore;
+      if (!releases || !apiStore || !agent.secretStore) {
+        return 'Error: releases cannot be recorded on this instance right now. Nothing was changed.';
+      }
+      const shownName = JSON.stringify(shapedForLog(name, VAULT_NAME_SHAPE, 64));
+      if (input.action === 'withdraw_release') {
+        // Narrows what a profile reads, so it is not asked.
+        const had = releases.withdraw({ kind: 'owner' }, id, name);
+        if (had) recordOwnerAct(agent, 'secret.withdraw', `${id} ${name}`);
+        return had
+          ? `The release of ${shownName} to API profile "${id}" was taken back. The profile no longer reads it.`
+          : `API profile "${id}" holds no release of ${shownName}. Nothing was changed.`;
+      }
+      // Never in a run without a person present. A schedule the owner stamped runs as the owner's,
+      // with a prompt channel, and a mandate may have written its instructions; there the question
+      // would reach the owner as a notification about an act nobody in front of a screen started.
+      if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+        return `Blocked: releasing ${shownName} to API profile "${id}" needs the user's own answer in an interactive session, and this run has none. Nothing was changed.`;
+      }
+      const profile = apiStore.get(id);
+      if (!profile) return `Error: API profile "${id}" not found.`;
+      if (!isMandateAuthored(profile)) {
+        return `API profile "${id}" was not set up in a mandate's session, so it reads the vault without releases. Nothing was changed.`;
+      }
+      const obstacle = releaseObstacle(agent.secretStore, apiStore, profile, name);
+      if (obstacle !== null) return `${shownName} cannot be released to API profile "${id}": ${RELEASE_OBSTACLE_TEXT[obstacle]} Nothing was changed.`;
+      const request = releases.requestOf(id, name);
+      if (!request) {
+        return `API profile "${id}" has not asked for ${shownName}. A profile asks when it is saved in a mandate's session. Nothing was changed.`;
+      }
+      // A request is what the profile asked for at its mandate's last save that could ask. A save
+      // without a grant id asks nothing and leaves the earlier request standing, so the profile
+      // may since name another author or send the value elsewhere than when the grant asked.
+      if (request.profileAuthor !== profile.created_by || request.binding !== releaseBinding(profile, name)) {
+        return `API profile "${id}" changed since it asked for ${shownName}. Nothing was changed; the profile asks again when it is next saved in a mandate's session.`;
+      }
+      // The request names the grant that asked. Once that mandate is no longer active, a release
+      // for it could never be read, and a yes would change nothing.
+      const ends = agent.toolContext?.mandateEnds ?? null;
+      if (ends === null || !ends.isLive(request.mandateId)) {
+        return `The mandate that asked for ${shownName} on API profile "${id}" is no longer active, so a release would not be read by anyone. Nothing was changed. If it is still wanted, the profile asks again when it is next saved in a mandate's session.`;
+      }
+      const promptUser = agent.promptUser;
+      const runSignal = agent.runSignal;
+      const author = profile.created_by!;
+      // What the person is shown is what is stored: the same binding, read once, before the wait.
+      const binding = releaseBinding(profile, name)!;
+      const hosts = releaseDestinations(profile);
+      const role = sendRole(profile, name)!;
+      const scope = profile.auth?.oauth?.scope;
+      const audience = profile.auth?.oauth?.audience;
+      const authority = [scope ? `scope ${JSON.stringify(singleLine(scope).slice(0, 200))}` : '', audience ? `audience ${JSON.stringify(singleLine(audience).slice(0, 200))}` : ''].filter((x) => x !== '').join(', ');
+      const held = vaultHolds({ secretStore: agent.secretStore } as IAgent, name);
+      const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
+        ? Promise.resolve(null)
+        : promptUser(
+          pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, while that mandate is active.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
+          ['Allow', 'Deny', '\x00'],
+        ));
+      if (answer === null) return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`;
+      if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) return `Blocked: ${shownName} was not released to API profile "${id}" — user declined.`;
+      // Only what the answer covered: the author and where the value goes. A renewal while the
+      // question was open changes neither, and does not void the answer.
+      const current = apiStore.get(id);
+      if (!current || current.created_by !== author || releaseBinding(current, name) !== binding
+        || releaseObstacle(agent.secretStore, apiStore, current, name) !== null) {
+        return `API profile "${id}" changed while the question was open, so the answer no longer covers it. Nothing was released; ask again if it is still wanted.`;
+      }
+      if (!ends.isLive(request.mandateId)) {
+        return `The mandate that asked for ${shownName} ended while the question was open. Nothing was released.`;
+      }
+      if (!recordOwnerAct(agent, 'secret.release', `${id} ${name}`)) {
+        return 'Refused: the release cannot be recorded in the instance\'s log right now. Nothing was released.';
+      }
+      releases.release({ kind: 'owner' }, { profileId: id, profileAuthor: author, name, binding, mandateId: request.mandateId });
+      return `Released ${shownName} to API profile "${id}" while the mandate that asked is active. Any change to where the value goes ends it; "withdraw_release" takes it back.`;
+    }
+
     if (input.action === 'adopt_connection') {
       if (!input.id) return 'Error: "id" is required for adopt_connection action.';
       const id = input.id;
@@ -2828,6 +2953,7 @@ ${draftJson}
       delete next.created_by;
       const saved = apiStore.save(next, apisDir);
       if (!saved.ok) return `Error: the connection of API profile "${id}" was not adopted: ${saved.reason}`;
+      agent.toolContext?.secretReleases?.forgetProfile(id);
       const lead = `Adopted: the connection of API profile "${id}" is yours now, and the engine uses its tokens for your requests and runs again.`;
       return isMandateAuthored(current) ? `${lead} ${adoptionNote(current, next)}` : lead;
     }
@@ -2845,8 +2971,88 @@ ${draftJson}
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   ...apiSetupEntry,
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> =>
-    `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}`,
+    `${await apiSetupEntry.handler(input, agent)}${waitingConnectionsNote(agent)}${releaseRequestsNote(agent)}`,
 };
+
+/** Why a name cannot be released, as the owner and the mandate are told. Content-free: none
+ *  of these depends on what the vault holds. */
+const RELEASE_OBSTACLE_TEXT: Record<ReleaseObstacle, string> = {
+  environment: 'its value comes from the engine\'s environment, not from the vault.',
+  protected: 'it is a provider key or an infrastructure secret.',
+  token: 'it is a connection\'s token, which only the profile holding the connection reads.',
+  'not-sent': 'the engine does not send it for this profile. Only a credential the engine attaches can be released: the client pair of an OAuth profile, the two halves of a split Basic credential, or the first vault key of a bearer or header profile.',
+  preset: 'a profile of a built-in provider reads it, and its credentials go to that provider only.',
+  'other-mandate': 'a profile set up in another mandate\'s session reads it.',
+};
+
+/** Record an act of the owner's in the actor trail. False when the trail is there and refused it. */
+function recordOwnerAct(agent: IAgent, action: string, target: string): boolean {
+  const log = agent.toolContext?.auditLog;
+  if (!log) return true;
+  try {
+    log.record({ principal: agent.principal, action, target, phase: 'done', correlationId: newCorrelationId() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * When a mandate saves a profile, ask the owner for each name it reads that is the owner's to
+ * release and is not released to it yet. The asks replace what the profile asked before, so a
+ * name it no longer reads leaves nothing behind. Returns what the mandate's turn is told.
+ *
+ * That text names every name the profile reads that it is not given — apart from its own
+ * connection's tokens — whether or not the owner can be asked for it. Which names can be asked
+ * for depends on the environment and on other profiles (`releaseObstacle`), and a mandate is told
+ * neither; nor how many asks the cap left out.
+ */
+function askForReleases(agent: IAgent, profile: ApiProfile): string {
+  const p = agent.principal;
+  if (p.kind !== 'mandate' || !isMandateAuthored(profile)) return '';
+  const releases = agent.toolContext?.secretReleases ?? null;
+  const apiStore = agent.toolContext?.apiStore;
+  const store = agent.secretStore;
+  // Without a grant id there is no grant a release could be for (`profile-secret-view.ts`): ask
+  // nothing, and the profile reads none of the owner's names.
+  if (!releases || !apiStore || !store || p.mandateId === undefined) return '';
+  const ctx = readCtxOf(agent);
+  const auth = profile.auth;
+  const own = grantTokenNames(profile);
+  const named = new Set([...collectVaultKeys(profile), auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key]
+    .filter((n): n is string => typeof n === 'string' && VAULT_NAME_SHAPE.test(n) && !own.has(n)));
+  const asks: ReleaseAsk[] = [];
+  const unread: string[] = [];
+  for (const name of named) {
+    const state = releaseState(store, apiStore, profile, name, ctx);
+    if (state === 'released') continue;
+    unread.push(name);
+    if (state === 'not-releasable') continue;
+    const binding = releaseBinding(profile, name);
+    if (binding !== null) asks.push({ name, binding });
+  }
+  releases.replaceRequests(profile.id, profile.created_by!, p.mandateId, asks);
+  if (unread.length === 0) return '';
+  const shown = unread.map((n) => JSON.stringify(shapedForLog(n, VAULT_NAME_SHAPE, 64))).join(', ');
+  return `This profile reads ${shown}, which the owner has not released to it, so the engine sends nothing under ${unread.length === 1 ? 'it' : 'them'}. The owner sees what the profile asks for and decides.`;
+}
+
+/**
+ * The note {@link apiSetupTool} appends for the owner: the names profiles of mandates ask for,
+ * while the mandate that asked is active. Empty otherwise, and always for a mandate's turn.
+ */
+export function releaseRequestsNote(agent: IAgent): string {
+  if (!isOwnerPrincipal(agent.principal)) return '';
+  const releases = agent.toolContext?.secretReleases ?? null;
+  const ends = agent.toolContext?.mandateEnds ?? null;
+  if (!releases || !ends) return '';
+  const open = releases.pendingReleases().filter((r) => ends.isLive(r.mandateId));
+  if (open.length === 0) return '';
+  // A registered profile's id has passed the id pattern; a name is shaped as a vault name.
+  const shown = open.slice(0, 10).map((r) => `${JSON.stringify(shapedForLog(r.name, VAULT_NAME_SHAPE, 64))} for "${r.profileId}"`).join(', ');
+  const more = open.length > 10 ? ` and ${String(open.length - 10)} more` : '';
+  return `\n\nWaiting for the owner: profiles set up in a mandate's session ask for vault names of the owner's: ${shown}${more}. Until one is released, the engine sends nothing under it for that profile. Tell the user. To release one, call api_setup with action "release_secret", the id and the secret_name (the user is asked first).`;
+}
 
 /** The note {@link apiSetupTool} appends: empty unless the owner asks and a connection waits. */
 export function waitingConnectionsNote(agent: IAgent): string {

@@ -19,6 +19,7 @@ import { isDangerous } from '../permission-guard.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
+import { releaseBinding } from '../../core/profile-secret-view.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
@@ -133,12 +134,39 @@ function makeVault(
  * renew" test would have gone green for the wrong reason: the gate would have
  * refused everything and the assertions would have proved nothing.
  */
+/**
+ * The owner's releases as most tests here need them: every name a profile a mandate wrote reads
+ * counts as released to it, for the reader's own grant. These tests predate releases and are
+ * about the other rules of the view, which a release does not lift (environment, guarded names,
+ * tokens, other authors' presets). The release rule has its own witnesses, with `releases:
+ * 'none'` here and in `profile-secret-view.test.ts`.
+ */
+function releasedEverywhere(apiStore: ApiStore, principal: RequestPrincipal): { secretReleases: unknown; mandateEnds: unknown } {
+  const mandateId = principal.kind === 'mandate' ? (principal.mandateId ?? 'TEST-NO-ID') : 'TEST-OWNER-READ';
+  return {
+    secretReleases: {
+      releaseOf: (id: string, _author: string, name: string) => {
+        const p = apiStore.get(id);
+        const binding = p ? releaseBinding(p, name) : null;
+        return binding === null ? undefined : { binding, mandateId };
+      },
+      requestOf: () => undefined,
+      replaceRequests: () => 0,
+      pendingReleases: () => [],
+      activeReleases: () => [],
+      forgetProfile: () => undefined,
+    },
+    mandateEnds: { isLive: () => true },
+  };
+}
+
 function makeAgent(
   apiStore: ApiStore,
   vault: MockVault,
   promptUser?: () => Promise<string>,
   granted: readonly string[] = ['http_request', 'api_setup'],
   principal: RequestPrincipal = OWNER_PRINCIPAL,
+  releases: 'all' | 'none' = 'all',
 ): never {
   return {
     principal,
@@ -163,6 +191,7 @@ function makeAgent(
       dailyRateLimit: Infinity,
       isolationEnvOverride: undefined,
       isolationMinimalEnv: false,
+      ...(releases === 'all' ? releasedEverywhere(apiStore, principal) : { secretReleases: null, mandateEnds: null }),
     },
   } as never;
 }
@@ -3503,7 +3532,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
 // wrote does not get the environment's values or a preset account's credentials. The owner is
 // the control each time.
 describe('mandates and stored credentials', () => {
-  const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+  const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'TEST-MANDATE-1' };
   const M = 'mandate:setup@example.org';
   const PRESET_ACK = { accepted: true as const, hosts: ['api.crm.example', 'auth.bexio.com'], accepted_at: '2026-09-22T00:00:00.000Z' };
   const SEED = { CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', CRM_API_ACCESS_TOKEN: 'OLD_TOKEN', CRM_API_REFRESH_TOKEN: 'REFRESH' };
@@ -3528,6 +3557,7 @@ describe('mandates and stored credentials', () => {
     v: MockVault,
     req: { url: string; method?: string; body?: string },
     principal: RequestPrincipal,
+    releases: 'all' | 'none' = 'all',
   ): Promise<{ calls: Array<{ url: string; auth: string | undefined }>; out: string }> {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);
@@ -3543,7 +3573,7 @@ describe('mandates and stored credentials', () => {
       }
       return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
     });
-    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal) as unknown as { toolContext: Record<string, unknown> };
+    const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal, releases) as unknown as { toolContext: Record<string, unknown> };
     // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
     // so the log only has to accept the rows. Without one the renewal is skipped by design.
     agent.toolContext['auditLog'] = { record: (): void => {} };
@@ -3607,9 +3637,32 @@ describe('mandates and stored credentials', () => {
     expect(calls[0]?.auth).toBe('Bearer from-env');
   });
 
-  it('control: a profile a mandate wrote gets what the setup stored', async () => {
+  // H2i-2a-R: the value is the owner's; the attach sends it only once the owner released it.
+  // (What it says is a hint shown with a 401; the request itself goes without the credential.)
+  it('a profile a mandate wrote does not send the owner\'s value it was not released', async () => {
+    const { calls } = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example/v1/contacts' }, mandate, 'none');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.auth).toBeUndefined();
+  });
+
+  it('control: a profile a mandate wrote gets what the setup stored, once released', async () => {
     const { calls } = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example/v1/contacts' }, mandate);
     expect(calls[0]?.auth).toBe('Bearer stored');
+  });
+
+  // Plain http needs no case here: the attach refuses a stored credential over anything but https.
+  it('a release does not travel to another port of the profile\'s host', async () => {
+    const { calls } = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example:8443/v1/contacts' }, mandate);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.auth).toBeUndefined();
+  });
+
+  it('a split Basic profile a mandate wrote sends nothing it was not released, and says withheld, not missing', async () => {
+    const basic: ApiProfile = { ...crmProfile({ auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['SETUP_USER', 'SETUP_PASS'] } }), created_by: M };
+    const { calls, out } = await send([basic], vault({ SETUP_USER: 'u', SETUP_PASS: 'p' }), { url: 'https://api.crm.example/v1/contacts' }, mandate, 'none');
+    expect(calls).toEqual([]);
+    expect(out).toContain('not available to this profile');
+    expect(out).not.toContain('no usable value');
   });
 
   it.each([
@@ -3715,7 +3768,8 @@ describe('mandates and stored credentials', () => {
       const calls = minting();
       const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec', GCP_PROJECT_ID: 'owner-project' });
       const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'GCP_PROJECT_ID' }, makeAgent(apiStore, v as never, undefined, undefined, mandate));
-      expect(out).toContain('is not available for this profile');
+      // The owner's name, never released to this profile: the view withholds it, for writing too.
+      expect(out).toContain('is a credential this profile may not write');
       expect(calls).toEqual([]);
       expect(v.peek('GCP_PROJECT_ID')).toBe('owner-project');
     });
@@ -3797,9 +3851,12 @@ describe('mandates and stored credentials', () => {
       const apiStore = mandateStore();
       const calls = minting();
       const v = vault({ CRM_CLIENT_ID: 'id', CRM_CLIENT_SECRET: 'sec' });
-      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_TOKEN' }, makeAgent(apiStore, v as never));
+      // A name released to the profile, so the view lets it through and only the own-slot rule
+      // can refuse it.
+      const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(apiStore, v as never));
       expect(out).toContain('is not available for this profile');
       expect(calls).toEqual([]);
+      expect(v.peek('CRM_CLIENT_SECRET')).toBe('sec');
     });
 
     it('control: a mandate sets up an oauth2 profile under a free id', async () => {
@@ -3972,7 +4029,8 @@ describe('fetch_token — whose consent a grant records', () => {
       extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/secret:([A-Z_][A-Z0-9_]*)/g)].map((m) => m[1]!),
     });
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    expect(await fetchToken(makeAgent(store, v, undefined, undefined, A))).toContain('vault is missing the OAuth credentials for profile "crm-api": "CRM_API_REFRESH_TOKEN"');
+    // Withheld, and said so: telling a mandate to collect it with ask_secret would loop.
+    expect(await fetchToken(makeAgent(store, v, undefined, undefined, A))).toContain('"CRM_API_REFRESH_TOKEN" is not available to this profile');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
