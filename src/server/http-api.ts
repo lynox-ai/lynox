@@ -875,6 +875,17 @@ function maskForClient(text: string, opts?: { includeGeneric?: boolean }): strin
  * prose. For a message that is entirely uncontrolled the caller asks for more —
  * see the SSE error path, which also caps the length.
  */
+/** The answer to an answer that came too late: 410. A question the boot or shutdown sweep closed
+ *  (`closed_reason`, prompt-store v59) says that the run which asked is gone and has to be
+ *  started again; every other closed question keeps the bare "expired". */
+function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'closed_reason'>): void {
+  if (row.closed_reason === 'process_restarted') {
+    errorResponse(res, 410, 'Prompt closed: the engine restarted, so the run that asked is no longer waiting. Start it again.', 'process_restarted');
+    return;
+  }
+  errorResponse(res, 410, 'Prompt expired');
+}
+
 function errorResponse(
   res: ServerResponse,
   status: number,
@@ -4369,7 +4380,7 @@ export class LynoxHTTPApi {
         const existing = ps.getById(promptId);
         if (existing) {
           if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
-          if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
+          if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
           if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
         }
         if (ps.answerUser(promptId, answer)) { jsonResponse(res, 200, { ok: true }); return; }
@@ -4403,7 +4414,7 @@ export class LynoxHTTPApi {
       const existing = ps.getById(promptId);
       if (!existing) { errorResponse(res, 404, 'No pending prompt'); return; }
       if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
-      if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
+      if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
       if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
       if (!existing.questions_json) { errorResponse(res, 400, 'Prompt is not a tabs prompt — use /reply'); return; }
 
@@ -4525,7 +4536,7 @@ export class LynoxHTTPApi {
         const existing = ps.getById(promptId);
         if (existing) {
           if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
-          if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
+          if (existing.status === 'expired') { refuseClosedPrompt(res, existing); return; }
           if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
           if (existing.prompt_type === 'connect_mail') {
             answered = ps.answerMailConnect(promptId, connected);
@@ -7548,7 +7559,16 @@ export class LynoxHTTPApi {
       }
       this._endRequestTrail(trail, outcome.ok ? 'done' : 'refused');
       if (!outcome.ok) {
-        if (outcome.reason === 'already_running') { errorResponse(res, 409, 'Trigger is already running'); return; }
+        if (outcome.reason === 'already_running') {
+          // After a deploy the lease of the lost run holds until its TTL; say from when a start
+          // can go through. "At the earliest": a live run renews its lease.
+          if (outcome.leaseUntil !== undefined) {
+            errorResponse(res, 409, `Trigger is already running. It can be started again at the earliest at ${outcome.leaseUntil}.`, undefined, { leaseUntil: outcome.leaseUntil });
+          } else {
+            errorResponse(res, 409, 'Trigger is already running');
+          }
+          return;
+        }
         // Its own answer, not "already running": the run exists and is waiting for the
         // owner. Answering the question is what moves it; starting a second run would
         // strand the first question.
