@@ -255,11 +255,16 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\b(?:sh|bash|dash|zsh|ksh)\s+-[a-zA-Z]*c\b/i, label: 'shell -c (inline script)' },
   { pattern: new RegExp(String.raw`\|\s*(?:[\w.~-]*\/)*(?:env\s+(?:\w+=\S*\s+)*)?${INTERPRETER}\b`, 'i'), label: 'input piped to an interpreter' },
   { pattern: new RegExp(String.raw`\b${INTERPRETER}\b[^|;&\n]{0,256}<`, 'i'), label: 'input redirected to an interpreter' },
-  // Data sent out over HTTP. (A DELETE is already blocked in autonomous mode and asked about in
-  // interactive mode by the rules above.) Short options are case-sensitive: `-d`, `-F` and `-T`
-  // send, `-D` and `-f` do not; a short option may be bundled or carry its value glued.
-  { pattern: /\bcurl\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?:POST|PUT|PATCH)\b/i, label: 'HTTP mutation via curl' },
-  { pattern: /\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|-[a-zA-Z]*[dFT])/, label: 'HTTP data submission via curl' },
+  // Data sent out over HTTP, or a request with any method but GET, HEAD or OPTIONS: a method set
+  // with `-X` (bundled or glued) or `--request` (spaced or with `=`). Only a literal, uppercase
+  // GET, HEAD or OPTIONS is free, so a quoted or lowercase `get` is asked about too. A `-X DELETE`
+  // is blocked in autonomous mode by the rule above; this rule asks about the spellings it does
+  // not reach. A config file (`-K`, `--config`) can set the method or the data, so it is asked
+  // about too. Short options are case-sensitive, like curl's own: `-X` sets the method, `-x` a
+  // proxy; `-d`, `-F` and `-T` send, `-D` and `-f` do not. A short option may be bundled or carry
+  // its value glued.
+  { pattern: /\b[cC][uU][rR][lL]\b.*(?:\s-[a-zA-Z]*X\s*|\s--request(?:\s+|=))(?!(?:GET|HEAD|OPTIONS)\b)\S/, label: 'HTTP mutation via curl' },
+  { pattern: /\b[cC][uU][rR][lL]\b.*\s(?:--(?:expand-)?data\b|--form\b|--upload-file\b|--json\b|--config\b|-[a-zA-Z]*[dFTK])/, label: 'HTTP data submission via curl' },
   { pattern: /\bwget\b.*\s--(?:post-[df]|body-[df]|meth)/i, label: 'HTTP mutation via wget' },
   // Writes into the lynox data dir outside the workspace: profiles there are read back as
   // configuration. A command that names a writing verb and such a path is asked about, in
