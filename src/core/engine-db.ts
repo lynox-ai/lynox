@@ -1019,8 +1019,9 @@ const MIGRATIONS: string[] = [
   // source used (enc()'d like the entry), because the entry's own text is the first source's
   // and can hold detail a later source never said. Private mode removes a conversation's
   // source rows; an entry with sources left takes the earliest remaining source's wording.
-  // A source also keeps its own evidence (channel, untrusted flag): an entry that takes a
-  // remaining source's wording takes that source's trust with it, never the removed one's.
+  // A source also keeps its own evidence (channel, untrusted flag) and whether it pinned the
+  // entry: an entry that takes a remaining source's wording takes that source's trust and pin
+  // with it, never the removed one's.
   // Fed by the provenance primitive once it exists (thread_id/run_id then come from its
   // context). Backfilled with one row per existing entry, `thread_id` NULL included, so an
   // entry that never had a conversation is not removed when a restatement's goes.
@@ -1037,13 +1038,14 @@ const MIGRATIONS: string[] = [
      text              TEXT NOT NULL,
      source_channel    TEXT,
      source_untrusted  INTEGER NOT NULL DEFAULT 0,
+     pinned            INTEGER NOT NULL DEFAULT 0,
      added_at          TEXT NOT NULL DEFAULT (datetime('now')),
      thread_deleted_at TEXT
    );
    CREATE UNIQUE INDEX IF NOT EXISTS idx_entry_sources_entry_thread ON entry_sources(entry_id, thread_id);
    CREATE INDEX IF NOT EXISTS idx_entry_sources_thread ON entry_sources(thread_id);
-   INSERT INTO entry_sources (entry_id, thread_id, run_id, text, source_channel, source_untrusted, added_at, thread_deleted_at)
-     SELECT k.id, k.source_thread_id, k.source_run_id, k.text, k.source_channel, k.source_untrusted, k.created_at, k.source_thread_deleted_at
+   INSERT INTO entry_sources (entry_id, thread_id, run_id, text, source_channel, source_untrusted, pinned, added_at, thread_deleted_at)
+     SELECT k.id, k.source_thread_id, k.source_run_id, k.text, k.source_channel, k.source_untrusted, k.pinned, k.created_at, k.source_thread_deleted_at
      FROM knowledge_entries k
      WHERE NOT EXISTS (SELECT 1 FROM entry_sources s WHERE s.entry_id = k.id);
    CREATE TABLE IF NOT EXISTS profile_seeds (
