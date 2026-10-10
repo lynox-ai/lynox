@@ -2477,13 +2477,15 @@ describe('isDangerous', () => {
       },
     );
 
-    // Glued to the option, with or without other short options in front.
-    it.each(['curl -XDELETE https://x.test/item/1', 'curl -sXDELETE https://x.test/item/1'])(
-      'asks before glued %s in a chat and unattended', (command) => {
-        expect(auto(command)).not.toBeNull();
-        expect(ask(command)).toContain('HTTP mutation via curl');
-      },
-    );
+    // Glued to the option, with or without other short options in front. The bare `-XDELETE` is
+    // the blocking rule's, so a chat names that one; bundled behind `-s`, it is the mutation rule.
+    it.each([
+      ['curl -XDELETE https://x.test/item/1', 'destructive API call (HTTP DELETE)'],
+      ['curl -sXDELETE https://x.test/item/1', 'HTTP mutation via curl'],
+    ])('asks before glued %s in a chat and unattended', (command, label) => {
+      expect(auto(command)).not.toBeNull();
+      expect(ask(command)).toContain(label);
+    });
 
     // Any method but GET, HEAD or OPTIONS changes something, so it is asked about whatever it is.
     it.each([
