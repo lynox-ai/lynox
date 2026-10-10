@@ -19,6 +19,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
 import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
+import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -413,7 +414,7 @@ export async function callForStructuredJson<T = unknown>(
         }
       : {},
   );
-  const response = await client.messages.create({
+  const { message: response, missed } = await settleForcedTool(client.messages.create({
     model,
     max_tokens: maxOutputTokens,
     // Explicit thinking-OFF for the forced-tool extraction. Omitting `thinking`
@@ -432,7 +433,8 @@ export async function callForStructuredJson<T = unknown>(
       input_schema: schema as unknown as Anthropic.Tool.InputSchema,
     }],
     tool_choice: { type: 'tool', name: 'extract' },
-  });
+  }));
+  reportForcedToolMiss('llm-helper', missed);
 
   const toolUseBlock = response.content.find(
     (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === 'extract',

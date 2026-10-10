@@ -17,6 +17,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 import { planDAG, estimatePipelineCost } from './dag-planner.js';
 import type { InlinePipelineStep } from '../types/index.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
 
 function makeToolUseResponse(input: unknown) {
   return {
@@ -41,6 +42,17 @@ describe('planDAG', () => {
 
     const result = await planDAG('build the app');
     expect(result).toBeNull();
+  });
+
+  it('a reply that lost the forced call returns null and is counted by name, not swallowed', async () => {
+    mockCreate.mockRejectedValueOnce(new ForcedToolNotCalledError(
+      'claude-opus-5-5', { type: 'tool', name: 'propose_dag' },
+      { content: [{ type: 'text', text: 'Step 1: …' }], usage: { input_tokens: 300, output_tokens: 80 } },
+    ));
+    const before = forcedToolMissCounts()['dag-planner'] ?? 0;
+    const result = await planDAG('build the app');
+    expect(result).toBeNull();
+    expect(forcedToolMissCounts()['dag-planner']).toBe(before + 1);
   });
 
   it('returns null when tool_use block missing', async () => {

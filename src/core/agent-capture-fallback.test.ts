@@ -53,6 +53,7 @@ import { calculateCost } from './pricing.js';
 import { debitInRunHelperCost } from './metered-request.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { StreamEvent } from '../types/index.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
 
 interface Internals {
   _captureFallback(text: string, turnUntrusted: boolean, turnCause: string): Promise<void>;
@@ -1111,5 +1112,35 @@ describe('turn-end capture — private mode switched on while the pass is out', 
     await inner._captureFallback(ANSWER, false, 'none');
     expect(reply).toHaveBeenCalledTimes(1); // the pass did run up to the call
     expect(made.write).not.toHaveBeenCalled();
+  });
+});
+
+describe('turn-end capture — a model that lost the forced call', () => {
+  // The boundary relaxes the forced `remember` call to `auto` on models that reject a
+  // forced choice; a reply without the call arrives as ForcedToolNotCalledError. The
+  // spend must be booked exactly once (three ledgers), `capture_ran` must still fire —
+  // its silence was the original defect — and the miss must be counted by name.
+  it('books once on all three ledgers, still announces the run, and writes nothing', async () => {
+    const missReply = { content: [{ type: 'text', text: 'Keine Fakten.' }], usage: USAGE };
+    const reply = vi.fn().mockRejectedValue(
+      new ForcedToolNotCalledError('claude-opus-5-5', { type: 'tool', name: CAPTURE_TOOL_NAME }, missReply));
+    const { inner, write } = makeAgent({ reply });
+    const recordExternalCost = vi.fn().mockReturnValue(false);
+    inner.costGuard = { recordExternalCost };
+    inner._helperCostUsd = 0;
+    const before = forcedToolMissCounts()['agent.capture'] ?? 0;
+
+    await inner._captureFallback(ANSWER, false, 'none');
+
+    expect(vi.mocked(debitInRunHelperCost), 'debited once: not lost, not twice').toHaveBeenCalledTimes(1);
+    expect(recordExternalCost).toHaveBeenCalledTimes(1);
+    expect(inner._helperCostUsd, 'the run\'s own cost line moves with the debit').toBeGreaterThan(0);
+    expect(write).not.toHaveBeenCalled();
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran, 'a lost call must not silence capture_ran').toHaveLength(1);
+    expect(ran[0]).toMatchObject({ facts: 0, source: 'capture' });
+    expect(forcedToolMissCounts()['agent.capture']).toBe(before + 1);
   });
 });

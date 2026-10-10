@@ -11,6 +11,7 @@ import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget, isJunkPersonShape } from './kg-stopwords.js';
 import { calculateCost } from './pricing.js';
 import { compose, renderFence } from '../core/data-boundary.js';
+import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
 
 /**
  * Entity extracted by the v2 tool-call pipeline.
@@ -305,7 +306,7 @@ export async function extractEntitiesV2(
       ],
     });
 
-    const response = await stream.finalMessage();
+    const { message: response, missed } = await settleForcedTool(stream.finalMessage());
     // Cost of this pool-key helper call, for the managed debit. Computed BEFORE
     // the no-tool-use early return so the spend is surfaced (and debited) even
     // when the model didn't emit the forced tool. calculateCost is priced by the
@@ -320,6 +321,7 @@ export async function extractEntitiesV2(
           cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
         })
       : 0;
+    reportForcedToolMiss('entity-extractor', missed);
     const toolUse = response.content.find(
       (b): b is Extract<typeof b, { type: 'tool_use' }> =>
         b.type === 'tool_use' && b.name === TOOL_NAME,
