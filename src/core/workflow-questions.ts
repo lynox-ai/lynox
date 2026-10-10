@@ -47,7 +47,8 @@ export interface WorkflowQuestionDeps {
   onPending: (promptId: string | undefined) => void;
 }
 
-/** The answer slot's marker for "nobody answered"; the agent ends the run on it. */
+/** The answer slot's marker for "nobody answered". It is an answer the model reads, not an end:
+ *  where the run must stop, the scope abort or the step's own aborted signal ends it. */
 const DISMISSED_ANSWER = '__dismissed__';
 
 /** A promise that never settles: what a step gets when the process is tearing its run down. */
@@ -113,12 +114,22 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     const segments = promptSegments(rawQuestion);
     const storedSegments = segments.some((s) => s.kind === 'value') ? segments : undefined;
     const offBoxText = flattenPrompt(offBoxPrompt(rawQuestion));
-    this.#writeToThread(offBoxText);
     // No `trigger_id`: neither the re-arm nor the expiry sweep may find this question (§4.4).
-    const promptId = store.insertAskUser(deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
-      createdBy: deps.createdBy,
-      handRun: deps.handRun,
-    });
+    let promptId: string;
+    try {
+      promptId = store.insertAskUser(deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
+        createdBy: deps.createdBy,
+        handRun: deps.handRun,
+      });
+    } catch (err: unknown) {
+      // The question could not be put to the owner — e.g. a question of the owner's own chat
+      // in the run's thread holds the session's one open slot. Not an answer: carrying on would
+      // let the step act on a guess, so the run ends as one whose question went unanswered.
+      process.stderr.write(`[lynox:worker] asking a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      return this.#endUnanswered();
+    }
+    // Written only once the question exists, so the thread never shows one nobody can answer.
+    this.#writeToThread(offBoxText);
     deps.onPending(promptId);
     this.#waitingSince = Date.now();
     this.#notify(deps.maskOffBox(offBoxText), options, promptId);
@@ -130,17 +141,11 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       // The cause is read here, after the wait, and never in a settled listener: at shutdown
       // `expireUnparked` settles this wait as `expired` BEFORE `stop()` marks the teardown, and a
       // deploy read as a TTL would record the run failed and escalate it (§4.8). The row says
-      // which it was, whatever the order.
-      const closedByRestart = store.getById(promptId)?.closed_reason === 'process_restarted';
-      const cause = this.#causeOfEnd(meta?.signal) ?? (closedByRestart ? 'teardown' : 'ttl');
+      // which it was, whatever the order — read only when the run itself says nothing, so a
+      // teardown that already closed the database is not a query that throws.
+      const cause = this.#causeOfEnd(meta?.signal) ?? this.#causeFromRow(store, promptId);
       if (cause === 'teardown') return neverSettles();
-      if (cause === 'ttl') {
-        this.#unanswered = true;
-        for (const member of deps.abortScope.members) {
-          try { member.abort(); } catch { /* the next one still gets its abort */ }
-        }
-        return DISMISSED_ANSWER;
-      }
+      if (cause === 'ttl') return this.#endUnanswered();
       // A stop or a withdrawal: the question goes, so an answer given later finds it closed.
       try { store.expirePrompt(promptId); } catch (err: unknown) {
         process.stderr.write(`[lynox:worker] withdrawing a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -150,6 +155,29 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       if (this.#waitingSince !== undefined) this.#pausedMs += Date.now() - this.#waitingSince;
       this.#waitingSince = undefined;
       deps.onPending(undefined);
+    }
+  }
+
+  /** The run goes on no further: no later step runs, and every step in flight ends (§4.5). */
+  #endUnanswered(): string {
+    this.#unanswered = true;
+    for (const member of this.#deps.abortScope.members) {
+      try { member.abort(); } catch { /* the next one still gets its abort */ }
+    }
+    return DISMISSED_ANSWER;
+  }
+
+  /**
+   * Why an expired question expired, when nothing on the run says so: the shutdown's sweep
+   * (`process_restarted`), or its TTL. A database the engine already closed is a teardown too.
+   * Any other failed read ends the run unanswered — bounded and safe for the steps after it,
+   * where a step left waiting would hold the run until the process ends.
+   */
+  #causeFromRow(store: PromptStore, promptId: string): 'teardown' | 'ttl' {
+    try {
+      return store.getById(promptId)?.closed_reason === 'process_restarted' ? 'teardown' : 'ttl';
+    } catch {
+      return store.isOpen() ? 'ttl' : 'teardown';
     }
   }
 

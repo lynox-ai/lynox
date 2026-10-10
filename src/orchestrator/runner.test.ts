@@ -945,6 +945,22 @@ describe('runManifest — inline runtime', () => {
     expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
   });
 
+  it('caps a configured prompt budget above the maximum on the budget a run hands its steps', async () => {
+    // A scheduled run that asks its owner stands up to 24 h per question, so the budget bounds
+    // how long it can hold its slot: a config of 50 must not become 50 days. spawnInline's
+    // parentPrompt is the 8th positional argument (index 7).
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    const step = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline' as const, task: 'Do something' }] };
+    const parentPrompt = { promptUser: async () => 'ok' };
+    const budgetFor = async (configured: number): Promise<number | undefined> => {
+      mockSpawnInline.mockClear();
+      await runManifest(step, { ...CONFIG, pipeline_prompt_budget: configured }, { parentTools: tools, parentPrompt });
+      return (mockSpawnInline.mock.calls[0]![7] as { promptBudget?: { limit: number } } | undefined)?.promptBudget?.limit;
+    };
+    expect(await budgetFor(50)).toBe(10);
+    expect(await budgetFor(3)).toBe(3);
+  });
+
   it('threads options.parentActiveScopes into the inline spawner', async () => {
     // Inline steps run the caller's task and memory tools, which filter by `agent.activeScopes`.
     // spawnInline's parentActiveScopes is the 16th positional argument (index 15).
