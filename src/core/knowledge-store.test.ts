@@ -1122,7 +1122,9 @@ describe('the always-loaded profile block and who may reach into it', () => {
     // deleted the row and left the text loading into every future turn — the one place it
     // was guaranteed to keep being read.
     const { ks } = make();
-    const id = seed(ks, 'agent');
+    // A line the operator wrote by hand, never seeded: erasure takes it anyway.
+    ks.setBlockContent('profile', `${LINE}\n${LINE}`);
+    const id = ks.write({ text: LINE, sourceChannel: 'agent' }).id;
     expect(ks.deleteEntry(id)).toBe(true);
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
   });
@@ -1158,6 +1160,18 @@ describe('the always-loaded profile block and who may reach into it', () => {
     // The same text from the private chat, never seeded: a pending twin, so dedup does not fold it.
     ks.write({ text: LINE, sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'private-chat' });
     expect(ks.deleteByThread('private-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('a chat that only restated a seeded fact going private leaves the seeded line', () => {
+    const { ks } = make();
+    // Same subject on both writes: that is what lets the restatement fold into the first entry.
+    ks.setBlockContent('profile', LINE);
+    const first = ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'first-chat' });
+    ks.recordProfileSeed(first.id);
+    const again = ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'restating-chat' });
+    expect(again.deduped).toBe(true);
+    expect(ks.deleteByThread('restating-chat')).toBe(0);
     expect(ks.getBlock('profile')?.content).toBe(LINE);
   });
 
