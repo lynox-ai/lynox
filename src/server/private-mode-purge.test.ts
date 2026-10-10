@@ -152,6 +152,7 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     const line = 'Jana Reber prefers calls after 18:00';
     ks.setBlockContent('profile', line);
     const seeded = ks.write({ text: line, sourceChannel: 'user', sourceUntrusted: false, sourceThreadId: 't-block-fails' });
+    ks.recordProfileSeed(seeded.id); // as the onboarding promotion records the line it seeds
     stores().ts.createThread('t-block-fails', { title: 'chat t-block-fails' });
     vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
 

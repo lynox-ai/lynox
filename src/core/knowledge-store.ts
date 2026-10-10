@@ -192,6 +192,13 @@ export class KnowledgeStore {
     private readonly secretStore: SecretStoreLike | null = null,
   ) {
     this.db = engine.getDb();
+    // Once per database, and never fatal: a store that cannot backfill still works, and the
+    // marker stays at 0 so the next boot tries again.
+    try {
+      this._backfillProfileSeeds();
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox:knowledge] profile seed backfill failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
   }
 
   setFocusOverride(subjectId: string | null): void {
@@ -499,6 +506,9 @@ export class KnowledgeStore {
         // be pinned on its first write (dedup early-returns before the pin path below, and no
         // other pin-update path exists). An active dup row is pin-eligible by H6; the incoming
         // write is trusted (we are in the status==='active' branch).
+        // The restating conversation becomes a source of the row it folded into, with its own
+        // wording, so switching the first conversation private does not take this one's fact.
+        if (params.sourceThreadId) this._addSource(dup.id, params.sourceThreadId, params.sourceRunId, params.text);
         let dupPinned = dup.pinned === 1;
         if (params.pin === true && !dupPinned && (dup.source_type as ProvenanceKind) !== 'external_unverified') {
           this.db.prepare('UPDATE knowledge_entries SET pinned = 1 WHERE id = ?').run(dup.id);
@@ -534,6 +544,7 @@ export class KnowledgeStore {
       params.sourceThreadId ?? null,
       params.sourceRunId ?? null,
     );
+    this._addSource(id, params.sourceThreadId, params.sourceRunId, params.text);
 
     return { id, status, tier, subjectId, pinned: pinned === 1, ...(subjectAmbiguous && !subjectId ? { subjectAmbiguous: true } : {}) };
   }
@@ -698,6 +709,64 @@ export class KnowledgeStore {
       VALUES (?, ?, ?, datetime('now'))
       ON CONFLICT(id) DO UPDATE SET content = excluded.content, updated_at = datetime('now')
     `).run(id, this.engine.enc(content), limit);
+    if (id === 'profile') this._pruneProfileSeeds(content);
+  }
+
+  /**
+   * Record that a `profile` line was seeded from this entry. Only a recorded seed lets an
+   * entry's removal take a line out of the block; see {@link _removeSeededProfileLine}.
+   */
+  recordProfileSeed(entryId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO profile_seeds (entry_id) VALUES (?)').run(entryId);
+  }
+
+  /**
+   * Forget the seeds whose line is no longer in the block. A seeded line the operator edited
+   * or removed is theirs from then on, and so is an identical line they write later.
+   */
+  private _pruneProfileSeeds(content: string): void {
+    const seeds = this.db.prepare(
+      'SELECT p.entry_id AS entry_id, k.text AS text FROM profile_seeds p LEFT JOIN knowledge_entries k ON k.id = p.entry_id',
+    ).all() as Array<{ entry_id: string; text: string | null }>;
+    if (seeds.length === 0) return;
+    const lines = new Set(content.split('\n').map(l => l.trim()));
+    const drop = this.db.prepare('DELETE FROM profile_seeds WHERE entry_id = ?');
+    for (const s of seeds) {
+      if (s.text === null || !lines.has(collapseToSingleLine(this.engine.dec(s.text)))) drop.run(s.entry_id);
+    }
+  }
+
+  /**
+   * One-time: record the seeds of `profile` lines written before seeds were recorded. Those
+   * lines came from the onboarding promotion, which seeds only from `user_asserted` entries on
+   * the `user` channel, so a line equal to such an entry's text is taken as seeded by the
+   * earliest one. Text equality once, here, instead of on every removal.
+   */
+  private _backfillProfileSeeds(): void {
+    const marker = this.db.prepare('SELECT done FROM profile_seed_backfill WHERE id = 1').get() as { done: number } | undefined;
+    if (!marker || marker.done === 1) return;
+    const content = this.getBlock('profile')?.content ?? '';
+    const open = new Set(content.split('\n').map(l => l.trim()).filter(l => l.length > 0));
+    if (open.size > 0) {
+      const rows = this.db.prepare(
+        "SELECT id, text FROM knowledge_entries WHERE source_type = 'user_asserted' AND source_channel = 'user' ORDER BY created_at, rowid",
+      ).all() as Array<{ id: string; text: string }>;
+      for (const r of rows) {
+        const line = collapseToSingleLine(this.engine.dec(r.text));
+        if (line && open.has(line)) {
+          this.recordProfileSeed(r.id);
+          open.delete(line);
+        }
+      }
+    }
+    this.db.prepare('UPDATE profile_seed_backfill SET done = 1 WHERE id = 1').run();
+  }
+
+  /** Add a conversation as a source of an entry, with the wording it used. */
+  private _addSource(entryId: string, threadId: string | undefined, runId: string | undefined, text: string): void {
+    this.db.prepare(
+      'INSERT OR IGNORE INTO entry_sources (entry_id, thread_id, run_id, text) VALUES (?, ?, ?, ?)',
+    ).run(entryId, threadId ?? null, runId ?? null, this.engine.enc(text));
   }
 
   /**
@@ -896,13 +965,13 @@ export class KnowledgeStore {
    * text is impossible: an entry can reach `active` by being written on a clean turn OR
    * by being approved out of the review queue, and only the row knows which.
    */
-  findActiveFactWithPrefix(prefix: string): { text: string; sourceType: ProvenanceKind } | null {
+  findActiveFactWithPrefix(prefix: string): { id: string; text: string; sourceType: ProvenanceKind } | null {
     const rows = this.db.prepare(
-      "SELECT text, source_type FROM knowledge_entries WHERE status = 'active'",
-    ).all() as { text: string; source_type: string }[];
+      "SELECT id, text, source_type FROM knowledge_entries WHERE status = 'active'",
+    ).all() as { id: string; text: string; source_type: string }[];
     for (const r of rows) {
       const text = this.engine.dec(r.text);
-      if (text.startsWith(prefix)) return { text, sourceType: r.source_type as ProvenanceKind };
+      if (text.startsWith(prefix)) return { id: r.id, text, sourceType: r.source_type as ProvenanceKind };
     }
     return null;
   }
@@ -1051,7 +1120,7 @@ export class KnowledgeStore {
     // come from different places. Provenance is the right one, and `user_asserted` is exactly
     // the channel that seeded those lines. The UI/HTTP retire path keeps working; the agent's
     // own `agent_inferred` retire no longer touches the block.
-    if (retiringTier === 'user_asserted') this._dropSeededProfileLine(entry.text);
+    if (retiringTier === 'user_asserted') this._dropSeededProfileLine(entry.id, entry.text);
     return this.getEntry(entry.id)!;
   }
 
@@ -1070,9 +1139,9 @@ export class KnowledgeStore {
    * to rewrite their words. Best-effort: a block failure must not undo the retire, which is
    * already committed above.
    */
-  private _dropSeededProfileLine(entryText: string): void {
+  private _dropSeededProfileLine(entryId: string, entryText: string): void {
     try {
-      this._removeSeededProfileLine(entryText);
+      this._removeSeededProfileLine(entryId, entryText);
     } catch (err: unknown) {
       process.stderr.write(
         `[lynox:knowledge] could not drop the retired line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -1080,15 +1149,46 @@ export class KnowledgeStore {
     }
   }
 
-  /** The removal itself: a failure throws, for a caller that reports it. */
-  private _removeSeededProfileLine(entryText: string): void {
+  /**
+   * Erasure's reach into the block: every line equal to the erased text, whoever wrote it —
+   * an erasure request asks for the text to be gone, not only the copy this store seeded.
+   * Best-effort like {@link _dropSeededProfileLine}: the delete is already committed.
+   */
+  private _dropErasedProfileLines(entryText: string): void {
+    try {
+      const block = this.getBlock('profile');
+      const erased = collapseToSingleLine(entryText);
+      if (!block?.content || !erased) return;
+      const kept = block.content.split('\n').filter(l => l.trim() !== erased);
+      if (kept.length === block.content.split('\n').length) return;
+      this.setBlockContent('profile', kept.join('\n').trim());
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:knowledge] could not drop the erased line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  /**
+   * The removal itself: a failure throws, for a caller that reports it.
+   *
+   * Only a line this entry seeded ({@link recordProfileSeed}), and only one of it: an identical
+   * line the operator wrote, or one seeded from a different entry, stays. The seed row goes
+   * after the block, so a failing block write leaves it for the retry.
+   */
+  private _removeSeededProfileLine(entryId: string, entryText: string): void {
+    if (!this.db.prepare('SELECT 1 FROM profile_seeds WHERE entry_id = ?').get(entryId)) return;
     const block = this.getBlock('profile');
-    if (!block || !block.content) return;
     const seeded = collapseToSingleLine(entryText);
-    if (!seeded) return;
-    const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
-    if (kept.length === block.content.split('\n').length) return;
-    this.setBlockContent('profile', kept.join('\n').trim());
+    if (block?.content && seeded) {
+      const lines = block.content.split('\n');
+      const at = lines.findIndex(l => l.trim() === seeded);
+      if (at >= 0) {
+        lines.splice(at, 1);
+        this.setBlockContent('profile', lines.join('\n').trim());
+      }
+    }
+    this.db.prepare('DELETE FROM profile_seeds WHERE entry_id = ?').run(entryId);
   }
 
   // ── Erasure ──
@@ -1128,7 +1228,7 @@ export class KnowledgeStore {
     // may touch the block, while a deletion IS the request to be forgotten.
     const doomed = this.getEntry(id);
     const gone = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
-    if (gone && doomed) this._dropSeededProfileLine(doomed.text);
+    if (gone && doomed) this._dropErasedProfileLines(doomed.text);
     return gone;
   }
 
@@ -1156,7 +1256,7 @@ export class KnowledgeStore {
     ).all(canonical) as Array<{ text: string }>;
     const removed = this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
     if (removed > 0) {
-      for (const row of doomed) this._dropSeededProfileLine(this.engine.dec(row.text));
+      for (const row of doomed) this._dropErasedProfileLines(this.engine.dec(row.text));
     }
     return removed;
   }
@@ -1173,17 +1273,52 @@ export class KnowledgeStore {
    * the text. The `profile` line seeded from an entry goes with it — the always-loaded block
    * is where a copy keeps being read.
    *
+   * What this conversation said, and no more. An entry another conversation also said
+   * (`entry_sources`) stays, with that conversation's wording: the entry's own text is the
+   * first source's and can hold detail only this conversation said. An entry left with no
+   * source is deleted.
+   *
    * The block goes FIRST, and a failure on it throws, so the caller can report it. The order
-   * is what makes a retry work: with the rows deleted first, a failing block would leave a
+   * is what makes a retry work: with the rows changed first, a failing block would leave a
    * retry with no text to match. Block first, a failure leaves the rows, and the retry
-   * re-derives the lines from them.
+   * re-derives the lines from them. Returns the number of entries deleted.
    */
   deleteByThread(threadId: string): number {
-    const doomed = this.db.prepare(
-      'SELECT text FROM knowledge_entries WHERE source_thread_id = ?',
-    ).all(threadId) as Array<{ text: string }>;
-    for (const row of doomed) this._removeSeededProfileLine(this.engine.dec(row.text));
-    return this.db.prepare('DELETE FROM knowledge_entries WHERE source_thread_id = ?').run(threadId).changes;
+    const touched = this.db.prepare(`
+      SELECT id, text, source_thread_id FROM knowledge_entries
+      WHERE source_thread_id = ? OR id IN (SELECT entry_id FROM entry_sources WHERE thread_id = ?)
+    `).all(threadId, threadId) as Array<{ id: string; text: string; source_thread_id: string | null }>;
+    const nextSource = this.db.prepare(`
+      SELECT thread_id, run_id, text, thread_deleted_at FROM entry_sources
+      WHERE entry_id = ? AND (thread_id IS NULL OR thread_id != ?) ORDER BY id LIMIT 1
+    `);
+    const doomed: string[] = [];
+    const rewritten: Array<{ id: string; next: { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null } }> = [];
+    for (const row of touched) {
+      const next = nextSource.get(row.id, threadId) as { thread_id: string | null; run_id: string | null; text: string; thread_deleted_at: string | null } | undefined;
+      // The entry's text is this conversation's when it is the first source; then its seeded
+      // line is this conversation's wording too, and goes whether or not the entry stays.
+      if (next === undefined) {
+        this._removeSeededProfileLine(row.id, this.engine.dec(row.text));
+        doomed.push(row.id);
+      } else if (row.source_thread_id === threadId) {
+        this._removeSeededProfileLine(row.id, this.engine.dec(row.text));
+        rewritten.push({ id: row.id, next });
+      }
+    }
+    return this.db.transaction(() => {
+      this.db.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run(threadId);
+      const rewrite = this.db.prepare(`
+        UPDATE knowledge_entries
+        SET text = ?, source_thread_id = ?, source_run_id = ?, source_thread_deleted_at = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `);
+      for (const r of rewritten) rewrite.run(r.next.text, r.next.thread_id, r.next.run_id, r.next.thread_deleted_at, r.id);
+      const del = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?');
+      let removed = 0;
+      for (const id of doomed) removed += del.run(id).changes;
+      return removed;
+    })();
   }
 
   /**
@@ -1197,9 +1332,14 @@ export class KnowledgeStore {
    * Returns how many entries it marked.
    */
   markThreadDeleted(threadId: string): number {
-    return this.db.prepare(
-      "UPDATE knowledge_entries SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ? AND source_thread_deleted_at IS NULL",
-    ).run(threadId).changes;
+    return this.db.transaction(() => {
+      this.db.prepare(
+        "UPDATE entry_sources SET thread_deleted_at = datetime('now') WHERE thread_id = ? AND thread_deleted_at IS NULL",
+      ).run(threadId);
+      return this.db.prepare(
+        "UPDATE knowledge_entries SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ? AND source_thread_deleted_at IS NULL",
+      ).run(threadId).changes;
+    })();
   }
 
   // ── Focus derivation (H2-gated) ──
