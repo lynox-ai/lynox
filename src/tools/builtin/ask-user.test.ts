@@ -72,7 +72,61 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
  * A single round-trip test would need a harness spanning both packages, which
  * does not exist; that is a real gap.
  */
+/** A closed question reaches the model as a sentence, never as the bare marker, and the sentence
+ *  says not to act on an assumed answer. */
+function expectClosedResult(result: string): void {
+  expect(result).not.toContain('__dismissed__');
+  expect(result).toMatch(/closed this question without answering/);
+  expect(result).toMatch(/Do not act on any of the options/);
+}
+
 describe('askUserTool', () => {
+  describe('a question the user closed without answering', () => {
+    it('single question: the model is told not to act, not handed the bare marker', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      expectClosedResult(await askUserTool.handler({ question: 'Which task?', options: ['A', 'B'] }, agent));
+    });
+
+    it('single question without options: the same', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      expectClosedResult(await askUserTool.handler({ question: 'Anything else?' }, agent));
+    });
+
+    it('sets no step hint, even when an option happens to be labelled like the marker', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      await askUserTool.handler({ question: 'q', options: [{ label: '__dismissed__', hint: { effort: 'high' } }] }, agent);
+      expect(agent.toolContext.pendingStepHint).toBeNull();
+    });
+
+    it('sequential batch: the closed one is marked, the answered one kept, and the note added once', async () => {
+      const promptUser = vi.fn().mockResolvedValueOnce('A').mockResolvedValueOnce('__dismissed__');
+      const agent = makeAgent({ promptUser });
+      const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
+      const lines = result.split('\n');
+      expect(lines[0]).toBe('First?: A');
+      expect(lines[1]).toBe('Second?: (closed without an answer)');
+      expect(lines).toHaveLength(3);
+      expect(lines[2]).toMatch(/Do not act on an assumed answer/);
+      expect(result).not.toContain('__dismissed__');
+    });
+
+    it('tabbed batch: the same', async () => {
+      const promptTabs = vi.fn().mockResolvedValue(['__dismissed__', 'B']);
+      const agent = makeAgent({ promptUser: vi.fn(), promptTabs });
+      const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
+      expect(result.split('\n').slice(0, 2)).toEqual(['First?: (closed without an answer)', 'Second?: B']);
+      expect(result).toMatch(/Do not act on an assumed answer/);
+      expect(result).not.toContain('__dismissed__');
+    });
+
+    it('a batch with every question answered carries no note', async () => {
+      const promptTabs = vi.fn().mockResolvedValue(['A', 'B']);
+      const agent = makeAgent({ promptUser: vi.fn(), promptTabs });
+      expect(await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent))
+        .toBe('First?: A\nSecond?: B');
+    });
+  });
+
   it('calls promptUser with question and returns result', async () => {
     const promptUser = vi.fn().mockResolvedValue('user answer');
     const agent = makeAgent({ promptUser });
@@ -117,11 +171,12 @@ describe('askUserTool', () => {
       expect(agent.toolContext.pendingStepHint).toBeNull();
     });
 
-    it('passes through __dismissed__ and an empty selection as dismissed', async () => {
+    it('tells the model a closed question and an empty selection were not answered', async () => {
       const dismissed = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
-      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, dismissed)).toBe('__dismissed__');
+      const closed = await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, dismissed);
+      expectClosedResult(closed);
       const empty = makeAgent({ promptUser: vi.fn().mockResolvedValue(JSON.stringify([])) });
-      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, empty)).toBe('__dismissed__');
+      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, empty)).toBe(closed);
     });
 
     it('falls back to the raw answer when a legacy client returns a non-JSON string', async () => {

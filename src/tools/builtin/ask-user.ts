@@ -32,6 +32,27 @@ function findHint(options: AskUserOption[] | undefined, selectedLabel: string): 
   return undefined;
 }
 
+/** What the prompt layer hands back for a question the user closed without answering. Other
+ *  readers of a prompt answer treat it as a control value, so it is translated here, for the
+ *  model only, and stays unchanged everywhere else. */
+const DISMISSED = '__dismissed__';
+/** Bare, the marker reads as an answer, and a model that reads "go ahead" into it acts on a choice
+ *  the user refused to make. The result says what happened and what not to do. */
+const DISMISSED_RESULT =
+  'The user closed this question without answering. Do not act on any of the options or on an '
+  + 'assumed answer. Ask briefly what they want instead, or wait for their next message.';
+/** One question of a batch that the user closed; the batch result ends with the instruction once. */
+const DISMISSED_IN_BATCH = '(closed without an answer)';
+const DISMISSED_BATCH_NOTE =
+  'The user closed the questions marked as closed without answering them. Do not act on an assumed '
+  + 'answer to those; ask briefly what they want instead, or wait for their next message.';
+
+/** The batch result: one line per question, a closed one marked, and the note when any was closed. */
+function batchResult(questions: ReadonlyArray<{ question: string }>, answers: readonly string[]): string {
+  const lines = answers.map((a, i) => `${questions[i]!.question}: ${a === DISMISSED ? DISMISSED_IN_BATCH : a}`);
+  return answers.includes(DISMISSED) ? [...lines, DISMISSED_BATCH_NOTE].join('\n') : lines.join('\n');
+}
+
 /** Convert AskUserOption[] to plain string[] for promptUser. */
 function toLabels(options: AskUserOption[]): string[] {
   return options.map(optionLabel);
@@ -171,7 +192,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
             break;
           }
         }
-        return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
+        return batchResult(input.questions, answers);
       }
       // Sequential fallback: ask each question one at a time
       const answers: string[] = [];
@@ -192,7 +213,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
         }
         answers.push(answer);
       }
-      return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
+      return batchResult(input.questions, answers);
     }
 
     // Single-question path: reached only when no `questions` batch was given,
@@ -217,7 +238,8 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     // Multi-select answers come back as a JSON-encoded string[] of labels.
     // Present them to the model as a clean comma-joined list; a step hint only
     // applies when exactly one option was chosen (hints are single-choice).
-    if (input.multiSelect && answer !== '__dismissed__') {
+    if (answer === DISMISSED) return DISMISSED_RESULT;
+    if (input.multiSelect) {
       let selected: string[] | null = null;
       try {
         const parsed = JSON.parse(answer) as unknown;
@@ -228,7 +250,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
           const hint = findHint(input.options, selected[0]!);
           if (hint) agent.toolContext.pendingStepHint = hint;
         }
-        return selected.length > 0 ? selected.join(', ') : '__dismissed__';
+        return selected.length > 0 ? selected.join(', ') : DISMISSED_RESULT;
       }
     }
 
