@@ -1549,9 +1549,9 @@ describe('LynoxHTTPApi', () => {
 
         // PRD 3b-2 §4.3: the preview asks the same predicate as the schedule route.
         it.each([
-          ['only ask_user', 'post, then ask_user which month', 200],
-          ['ask_secret', 'post, then ask_secret for the key', 400],
-        ] as const)('the preview of an interactive workflow that asks through %s answers %i', async (_label, task, status) => {
+          ['only ask_user', 200, 'post, then ask_user which month'],
+          ['ask_secret', 400, 'post, then ask_secret for the key'],
+        ] as const)('the preview of an interactive workflow that asks through %s answers %i', async (_label, status, task) => {
           storeWf({ mode: 'interactive', steps: [{ id: 's', task, input_template: { url: 'https://api.example.com/v1/reports', body: '{{params.month}}' } }] });
           await withGrantServices(async () => {
             const res = await jsonFetch('/api/workflows/wf-sched/grant-preview', { method: 'POST', body: JSON.stringify({ ...GRANT, params: VALUES, scheduleCron: CRON }) });
