@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
 	isArtifactContentInline,
+	shouldRenderArtifactCard,
 	parseArtifactIdFromResult,
 	artifactIdMarker,
 	artifactFenceHeader,
@@ -118,5 +119,23 @@ describe('artifact fence header ↔ render round-trip', () => {
 		const { artifactId, src } = resolveArtifactRender(fence);
 		expect(artifactId).toBe('');
 		expect(src).toBe(fence); // comment preserved, nothing stripped
+	});
+});
+
+describe('shouldRenderArtifactCard', () => {
+	const doc = '# Pitch\n\nThree budget options.';
+
+	it('renders a finished or still-running save', () => {
+		expect(shouldRenderArtifactCard('done', doc, [])).toBe(true);
+		expect(shouldRenderArtifactCard('running', doc, [])).toBe(true);
+	});
+
+	it('does not render a failed save, whose input never became an artifact', () => {
+		expect(shouldRenderArtifactCard('error', doc, [])).toBe(false);
+	});
+
+	it('does not render empty content or content already shown inline', () => {
+		expect(shouldRenderArtifactCard('done', '', [])).toBe(false);
+		expect(shouldRenderArtifactCard('done', doc, ['```artifact\n' + doc + '\n```'])).toBe(false);
 	});
 });

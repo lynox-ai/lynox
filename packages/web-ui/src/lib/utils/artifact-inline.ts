@@ -36,6 +36,23 @@ export function isArtifactContentInline(
 	return textBlocks.some((t) => normalizeWhitespace(t).includes(needle));
 }
 
+/**
+ * Whether an `artifact_save` call gets an inline artifact card. Not when the
+ * call failed: the card is drawn from the call's INPUT, so a refused save
+ * (e.g. the eviction placeholder sent as content) would still show a card
+ * that reads like a finished document, and opening it would save that input
+ * to the gallery. Not when the content is empty or already inline either.
+ */
+export function shouldRenderArtifactCard(
+	status: 'running' | 'done' | 'error',
+	content: string,
+	textBlocks: ReadonlyArray<string>,
+): boolean {
+	if (status === 'error') return false;
+	if (!content) return false;
+	return !isArtifactContentInline(content, textBlocks);
+}
+
 // ── Inline artifact ↔ gallery linking ─────────────────────────────────
 //
 // artifact_save persists to the gallery server-side and returns the id in its

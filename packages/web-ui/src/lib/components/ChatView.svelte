@@ -85,7 +85,7 @@
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
-	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
+	import { shouldRenderArtifactCard, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
 	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
@@ -579,10 +579,11 @@
 				if (tc.name === 'artifact_save') {
 					const inp = tc.input as Record<string, unknown> | undefined;
 					const content = String(inp?.['content'] ?? '');
-					// Render the saved artifact as a card UNLESS the agent already
-					// showed this exact content in prose. An edit supplies new
-					// content not present inline, so its updated card still renders.
-					if (content && !isArtifactContentInline(content, artifactTextBlocks)) {
+					// Render the saved artifact as a card UNLESS the save failed or
+					// the agent already showed this exact content in prose. An edit
+					// supplies new content not present inline, so its updated card
+					// still renders.
+					if (shouldRenderArtifactCard(tc.status, content, artifactTextBlocks)) {
 						const title = String(inp?.['title'] ?? 'Artifact');
 						const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
 						// artifact_save persists to the gallery server-side and returns
