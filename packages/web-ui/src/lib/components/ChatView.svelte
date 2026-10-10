@@ -598,7 +598,9 @@
 						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
-					continue;
+					// A failed save gets no card, but it must not vanish either: it falls
+					// through to the ordinary tool row, which shows it as failed.
+					if (tc.status !== 'error') continue;
 				}
 
 				// Special: plan_task → collapsible plan

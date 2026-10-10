@@ -38,10 +38,13 @@ export function isArtifactContentInline(
 
 /**
  * Whether an `artifact_save` call gets an inline artifact card. Not when the
- * call failed: the card is drawn from the call's INPUT, so a refused save
- * (e.g. the eviction placeholder sent as content) would still show a card
- * that reads like a finished document, and opening it would save that input
- * to the gallery. Not when the content is empty or already inline either.
+ * call's status is `error` (the handler threw): the card is drawn from the
+ * call's INPUT, so a refused save (e.g. the eviction placeholder sent as
+ * content) would still show a card that reads like a finished document, and
+ * opening it would save that input to the gallery. A failure the handler
+ * returns as plain text ("Artifact store not available.") arrives as `done`
+ * and is not caught here. Not when the content is empty or already inline
+ * either.
  */
 export function shouldRenderArtifactCard(
 	status: 'running' | 'done' | 'error',
