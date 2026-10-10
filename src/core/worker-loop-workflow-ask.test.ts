@@ -195,11 +195,14 @@ describe('a scheduled workflow that asks its owner', () => {
   });
 
   it('a question asked after the 5-minute deadline still waits, and so does a second one after the answer', async () => {
-    // The deadline, shortened to 30 ms. Without the pause at the start it aborts the controller
-    // first, and the question then finds the run gone before it is written.
+    // The deadline, shortened as far as it goes: `WallClockBudget` floors every arm at 1 s
+    // (`minRearmMs`), so a 30 ms budget fires after 1 s. Each question comes 1.2 s after the
+    // previous event, past it. Without the pause at the start the deadline aborts the controller
+    // first, and the question then finds the run gone before it is written; the second question
+    // is the witness against an answer re-arming the deadline.
     const h = makeHarness({ taskTimeoutMs: 30 });
     const answers: string[] = [];
-    wf.step = askingStep(answers, { delayMs: 80, count: 2 });
+    wf.step = askingStep(answers, { delayMs: 1_200, count: 2 });
     void h.loop.tick();
     const first = await openQuestion(h);
     h.prompts.answerUser(first.id, 'A');
@@ -211,7 +214,7 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(answers).toEqual(['A', 'B']);
     expect(h.records[0]![2]).toBe('success');
-  });
+  }, 10_000);
 
   it('a stop during the wait ends the run stopped, withdraws the question, and escalates nothing', async () => {
     const h = makeHarness();
