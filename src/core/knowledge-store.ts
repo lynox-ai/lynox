@@ -1072,18 +1072,23 @@ export class KnowledgeStore {
    */
   private _dropSeededProfileLine(entryText: string): void {
     try {
-      const block = this.getBlock('profile');
-      if (!block || !block.content) return;
-      const seeded = collapseToSingleLine(entryText);
-      if (!seeded) return;
-      const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
-      if (kept.length === block.content.split('\n').length) return;
-      this.setBlockContent('profile', kept.join('\n').trim());
+      this._removeSeededProfileLine(entryText);
     } catch (err: unknown) {
       process.stderr.write(
         `[lynox:knowledge] could not drop the retired line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
+  }
+
+  /** The removal itself: a failure throws, for a caller that reports it. */
+  private _removeSeededProfileLine(entryText: string): void {
+    const block = this.getBlock('profile');
+    if (!block || !block.content) return;
+    const seeded = collapseToSingleLine(entryText);
+    if (!seeded) return;
+    const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
+    if (kept.length === block.content.split('\n').length) return;
+    this.setBlockContent('profile', kept.join('\n').trim());
   }
 
   // ── Erasure ──
@@ -1154,6 +1159,31 @@ export class KnowledgeStore {
       for (const row of doomed) this._dropSeededProfileLine(this.engine.dec(row.text));
     }
     return removed;
+  }
+
+  /**
+   * Hard-delete every entry captured in one conversation, whatever its status.
+   *
+   * The retroactive half of private mode. People switch it on AFTER something sensitive was
+   * said, so the entries that conversation already produced go too, not only the ones it would
+   * produce next. `source_thread_id` is a soft reference (no cascade reaches it), which is why
+   * this is a targeted delete and not a side effect of anything else.
+   *
+   * Every status, `superseded` and `rejected` included: an entry kept "for audit" still holds
+   * the text. The `profile` line seeded from an entry goes with it — the always-loaded block
+   * is where a copy keeps being read.
+   *
+   * The block goes FIRST, and a failure on it throws, so the caller can report it. The order
+   * is what makes a retry work: with the rows deleted first, a failing block would leave a
+   * retry with no text to match. Block first, a failure leaves the rows, and the retry
+   * re-derives the lines from them.
+   */
+  deleteByThread(threadId: string): number {
+    const doomed = this.db.prepare(
+      'SELECT text FROM knowledge_entries WHERE source_thread_id = ?',
+    ).all(threadId) as Array<{ text: string }>;
+    for (const row of doomed) this._removeSeededProfileLine(this.engine.dec(row.text));
+    return this.db.prepare('DELETE FROM knowledge_entries WHERE source_thread_id = ?').run(threadId).changes;
   }
 
   // ── Focus derivation (H2-gated) ──

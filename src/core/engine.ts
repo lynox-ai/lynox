@@ -1208,6 +1208,10 @@ export class Engine {
       try {
         const { ThreadStore } = await import('./thread-store.js');
         this._threadStore = new ThreadStore(this.runHistory.getDb());
+        // Wired whatever the subject-graph flag says: the memory-writing tools read a chat's
+        // private flag through it, and without a store they cannot see that a chat is private.
+        // The tools that act on threads through it register only with the flag on (below).
+        this._toolContext.threadStore = this._threadStore;
       } catch (err) {
         process.stderr.write(`[lynox] ThreadStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._threadStore = null;
@@ -2053,18 +2057,18 @@ export class Engine {
     }
 
     // Foundation Rework v2 — Context-Hierarchy Scoping (Slice A2). Expose the
-    // subject-graph + live thread stores to tool handlers and register the
-    // `set_thread_context` tool — ONLY when the subject-graph flag is on. Off in
-    // prod today → the tool + stores are absent from the agent surface entirely
-    // (zero new standing attack surface when the flag is off). SubjectStore is a
-    // thin per-call wrapper over engine.db (same pattern as CRM/KnowledgeLayer).
+    // subject-graph store to tool handlers and register the `set_thread_context`
+    // and `subjects_merge` tools — ONLY when the subject-graph flag is on. Off in
+    // prod today → the tools are absent from the agent surface entirely (zero new
+    // standing attack surface when the flag is off). The thread store is on the
+    // tool context regardless (see its init); these two tools are what act on it.
+    // SubjectStore is a thin per-call wrapper over engine.db (same pattern as CRM/KnowledgeLayer).
     if (this.userConfig.subject_graph_enabled === true && this.engineDb && this._threadStore) {
       try {
         const { SubjectStore, makeSubjectColumnBridge } = await import('./subject-store.js');
         const subjectStore = new SubjectStore(this.engineDb);
         this._subjectStore = subjectStore;
         this._toolContext.subjectStore = subjectStore;
-        this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
         this.registry.register(subjectsMergeTool);
 

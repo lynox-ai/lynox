@@ -1666,6 +1666,27 @@ describe('spawn_agent tool', () => {
     ).toBeGreaterThan(0);
   });
 
+  it('private mode reaches the child: it is checked against the parent\'s chat and its capture stays off', async () => {
+    // A child does not run AS the chat (no currentThreadId). Without the origin, the memory
+    // tools' private check found no thread and let it write; without the switch, its own
+    // end-of-turn capture ran in a private chat.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const agent = makeAgent({ currentThreadId: 't-private', skipMemoryExtraction: true } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as IAgent;
+    expect(child.originThreadId).toBe('t-private');
+    expect(child.skipMemoryExtraction).toBe(true);
+  });
+
+  it('a grandchild carries the chat\'s id down; a parent with capture on leaves the child\'s switch alone', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const child = makeAgent({ originThreadId: 't-private', skipMemoryExtraction: false } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'g1', task: 'do work' }] }, child);
+    const grandchild = vi.mocked(MockAgent).mock.instances[0] as unknown as IAgent;
+    expect(grandchild.originThreadId).toBe('t-private');
+    expect(grandchild.skipMemoryExtraction).not.toBe(true);
+  });
+
   it('F5/S8: an INHERITED taint seeds the sticky latch only — not the run marker', async () => {
     // The gate is identical either way, but the marker is also what gets REPORTED: the review
     // chip names the cause. `noteUntrustedData()` here would make a turn that read nothing

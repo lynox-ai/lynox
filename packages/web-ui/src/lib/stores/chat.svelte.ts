@@ -24,6 +24,7 @@ import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody,
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
+import { privateToggleFailure } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -3056,7 +3057,9 @@ export async function toggleSkipExtraction(): Promise<void> {
 		body: JSON.stringify({ skip_extraction: newValue }),
 	});
 	if (!res.ok) {
-		skipExtraction = !newValue;
+		const failure = privateToggleFailure(!newValue, await res.json().catch(() => null));
+		skipExtraction = failure.skip;
+		addToast(t(failure.messageKey), 'error');
 	}
 	// Refresh thread list so sidebar indicator updates
 	void loadThreads();

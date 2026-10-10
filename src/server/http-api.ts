@@ -4760,18 +4760,43 @@ export class LynoxHTTPApi {
         if (session) {
           session.setSkipMemoryExtraction(skipExtraction);
         }
-        // Private mode: purge extracted knowledge from this thread
+        // Private mode: remove what is stored under this thread's id. It is usually switched on
+        // AFTER the sensitive part was said, so the retroactive half is the half that counts.
+        //
+        // What is tied to this thread by its id, in both stores, each attempted on its own:
+        // the legacy memories (with their engine.db stubs) and the durable entries. A failure
+        // is not swallowed. The flag is already stored, so future capture stays off either way;
+        // what the answer must not do is say "done" when one of these removals failed. The
+        // 500 carries the stored state, so the page does not show private mode as off when it is on.
         if (skipExtraction) {
+          const id = params['id']!;
+          const failed: string[] = [];
           const knowledgeLayer = engine.getKnowledgeLayer();
           if (knowledgeLayer) {
             try {
-              const purged = knowledgeLayer.purgeThread(params['id']!);
-              if (purged > 0) {
-                process.stderr.write(`[lynox:private] Purged ${purged} memories from thread ${params['id']!.slice(0, 8)}\n`);
-              }
+              const purged = knowledgeLayer.purgeThread(id);
+              if (purged > 0) process.stderr.write(`[lynox:private] Purged ${purged} memories from thread ${id.slice(0, 8)}\n`);
             } catch (err: unknown) {
-              process.stderr.write(`[lynox:private] Purge failed for thread ${params['id']!.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}\n`);
+              failed.push(`memories: ${err instanceof Error ? err.message : String(err)}`);
             }
+          }
+          const knowledgeStore = engine.getKnowledgeStore();
+          if (knowledgeStore) {
+            try {
+              const purged = knowledgeStore.deleteByThread(id);
+              if (purged > 0) process.stderr.write(`[lynox:private] Purged ${purged} durable entries from thread ${id.slice(0, 8)}\n`);
+            } catch (err: unknown) {
+              failed.push(`durable knowledge: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          if (failed.length > 0) {
+            process.stderr.write(`[lynox:private] Purge incomplete for thread ${id.slice(0, 8)}: ${failed.join('; ')}\n`);
+            jsonResponse(res, 500, {
+              error: 'Private mode is on, but removing what is stored under this chat ran into an error.',
+              skip_extraction: true,
+              failed: failed.map(f => maskForClient(f)),
+            });
+            return;
           }
         }
       }

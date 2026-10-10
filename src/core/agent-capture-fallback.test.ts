@@ -1095,3 +1095,21 @@ describe('cause — both ends of the ratio, or it is not a ratio', () => {
     expect(sup[0]!.cause).toBeUndefined();
   });
 });
+
+describe('turn-end capture — private mode switched on while the pass is out', () => {
+  it('writes nothing when the switch lands during the extractor call', async () => {
+    // The gate in `_captureAtTurnEnd` ran before the call. The switch purges what the
+    // thread already stored, so a write landing after it would survive the purge — the
+    // exact entry the user turned private mode on to get rid of.
+    let inner!: Agent & Internals;
+    const reply = vi.fn().mockImplementation(async () => {
+      inner.skipMemoryExtraction = true; // the PATCH arrives while the pass waits on the model
+      return { content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: FACTS } }], usage: USAGE };
+    });
+    const made = makeAgent({ reply });
+    inner = made.inner;
+    await inner._captureFallback(ANSWER, false, 'none');
+    expect(reply).toHaveBeenCalledTimes(1); // the pass did run up to the call
+    expect(made.write).not.toHaveBeenCalled();
+  });
+});
