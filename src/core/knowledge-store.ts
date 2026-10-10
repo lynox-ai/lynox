@@ -1344,12 +1344,14 @@ export class KnowledgeStore {
       this.db.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run(threadId);
       // The entry becomes the remaining source's: its wording, its trust and its pin. The tier is
       // derived from that source's evidence, never kept from the removed one. The entry stays
-      // pinned only if that source pinned it (and the H6 bar holds for its tier). The review
+      // pinned only if that source pinned it and the H6 bar holds: the entry is active and its
+      // tier is not external_unverified (a retired entry is never pinned). The review
       // fields go: a review is only ever of a queued entry's first wording, which this removes.
       const rewrite = this.db.prepare(`
         UPDATE knowledge_entries
         SET text = ?, source_thread_id = ?, source_run_id = ?, source_thread_deleted_at = ?,
-            source_channel = ?, source_untrusted = ?, source_type = ?, pinned = ?,
+            source_channel = ?, source_untrusted = ?, source_type = ?,
+            pinned = CASE WHEN status = 'active' THEN ? ELSE 0 END,
             reviewed_at = NULL, review_action = NULL, updated_at = datetime('now')
         WHERE id = ?
       `);

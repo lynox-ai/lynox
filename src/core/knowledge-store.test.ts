@@ -1369,6 +1369,32 @@ describe('a fact said in two chats: private mode takes only what the private cha
     expect(ks.getEntry(a.id)?.pinned).toBe(true);
   });
 
+  it('a pin the remaining chat set later, as a source already, stays with it', () => {
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b', pin: true });
+
+    ks.deleteByThread('chat-a');
+
+    expect(ks.getEntry(a.id)?.pinned).toBe(true);
+  });
+
+  it('a retired entry the remaining chat had pinned is handed over unpinned, not refused', () => {
+    // The pin CHECK allows a pin only on an active entry. Retirement unpins the entry; the
+    // source still says it pinned. The purge must not fail on that, or the chat stays stuck.
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b', pin: true });
+    ks.retireEntry(a.id, 'user_asserted');
+
+    expect(() => ks.deleteByThread('chat-a')).not.toThrow();
+
+    expect(ks.getEntry(a.id)?.text).toBe(RESTATED);
+    expect(ks.getEntry(a.id)?.status).toBe('superseded');
+    expect(ks.getEntry(a.id)?.pinned).toBe(false);
+  });
+
   it('an edited approval replaces the queued wording in the source too', () => {
     const { ks } = make();
     const queued = ks.write({ text: 'Jana Reber moved from Gasse 4 and lives in Bern', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-q' });
