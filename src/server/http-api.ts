@@ -171,6 +171,34 @@ const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
 
 /** Reject out-of-range port numbers before they reach the socket layer. */
 /**
+ * Whether `principal` may stop a run that `starterTag` started (PRD customer-granted-operator-
+ * access §3.13 E7): the owner always, a mandate only a run it started itself. The predicate
+ * behind a delete that also stops the run; pure so a test can hold both directions.
+ */
+export function mayStopRun(principal: RequestPrincipal, starterTag: string): boolean {
+  return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal);
+}
+
+/** What a delete did to a run of the schedule it deleted. */
+export type RunOnDelete =
+  /** The run was stopped with the delete. */
+  | 'stopped'
+  /** No run of the schedule was in flight. */
+  | 'not_running'
+  /** The run's effect is one a delete leaves alone (`STOPPED_BY_DELETE`); it finishes. */
+  | 'effect_kept'
+  /** The caller may not stop this run (`mayStopRun`); it finishes. */
+  | 'not_permitted'
+  /** The run is in a phase nothing interrupts right now; it finishes. `POST /stop` may reach it later. */
+  | 'unstoppable_now'
+  /** The stop threw. The delete stands; the run may still be going. */
+  | 'stop_failed';
+
+/** The effects a stop ends. `backup` and `notify` have nothing a stop reaches, and `bulk_apply`
+ *  halts for a resume that re-creates the schedule, so deleting one of those leaves its run alone. */
+const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_agent']);
+
+/**
  * Withdraw a pending prompt when the run that asked it is aborted (`PromptMeta.signal`:
  * a Stop, or a sub-agent past its spawn time limit). Expiring the row settles the
  * prompt's wait and frees the session's single pending slot; it also makes an
@@ -182,22 +210,6 @@ const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
  * Fenced: this runs in an abort listener, where a throw (SQLITE_BUSY, a closed db)
  * would be an uncaught exception.
  */
-/**
- * Whether `principal` may stop a run that `starterTag` started (PRD customer-granted-operator-
- * access §3.13 E7): the owner always, a mandate only a run it started itself. The predicate
- * behind a delete that also stops the run; pure so a test can hold both directions.
- */
-export function mayStopRun(principal: RequestPrincipal, starterTag: string): boolean {
-  return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal);
-}
-
-/** What a delete did to a run of the schedule it deleted. */
-export type RunOnDelete = 'stopped' | 'not_running' | 'not_stopped';
-
-/** The effects a stop ends. `backup` and `notify` have nothing a stop reaches, and `bulk_apply`
- *  halts for a resume that re-creates the schedule, so deleting one of those leaves its run alone. */
-const STOPPED_BY_DELETE: ReadonlySet<string> = new Set(['run_workflow', 'run_agent']);
-
 export function withdrawPromptOnAbort(
   store: { expirePrompt(id: string): boolean },
   promptId: string,
@@ -1821,9 +1833,9 @@ export class LynoxHTTPApi {
     const loop = this.engine?.getWorkerLoop();
     const starter = loop?.runningStarterTag(id);
     if (loop === undefined || loop === null || starter === undefined) return 'not_running';
-    if (!STOPPED_BY_DELETE.has(loop.runningEffect(id) ?? '')) return 'not_stopped';
-    if (!mayStopRun(principal, starter)) return 'not_stopped';
-    return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'not_stopped';
+    if (!STOPPED_BY_DELETE.has(loop.runningEffect(id) ?? '')) return 'effect_kept';
+    if (!mayStopRun(principal, starter)) return 'not_permitted';
+    return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'unstoppable_now';
   }
 
   /** The 403 a mandate gets for an act only the owner may perform. */
@@ -7393,21 +7405,27 @@ export class LynoxHTTPApi {
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
       let deleted: boolean;
-      // Set only when the id names a schedule: what the delete did to its run in flight.
-      let run: RunOnDelete | undefined;
+      let scheduleDeleted = false;
       try {
         deleted = taskManager.deleteTodo(params['id']!, by);
-        if (!deleted) {
-          deleted = runHistory.deleteTrigger(params['id']!);
-          // The run is stopped after its row is gone: a stop only aborts, and the run ends
-          // later, finding nothing to record. Only a delete that took a row stops a run, so a
-          // 404 has done nothing.
-          if (deleted) run = this._stopRunOfDeletedSchedule(by, params['id']!);
-        }
+        if (!deleted) scheduleDeleted = deleted = runHistory.deleteTrigger(params['id']!);
       } catch (err: unknown) {
-        this._endRequestTrail(trail, 'refused', run === undefined ? undefined : `run:${run}`);
+        this._endRequestTrail(trail, 'refused');
         if (this._answerTodoRefusal(res, err)) return;
         throw err;
+      }
+      // Set only when the delete took a schedule's row: what it did to the run in flight. The
+      // run is stopped after its row is gone: a stop only aborts, and the run ends later,
+      // finding nothing to record. A 404 has done nothing, so it stops nothing. A stop that
+      // throws does not turn the delete, which happened, into a 500.
+      let run: RunOnDelete | undefined;
+      if (scheduleDeleted) {
+        try {
+          run = this._stopRunOfDeletedSchedule(by, params['id']!);
+        } catch (err: unknown) {
+          run = 'stop_failed';
+          process.stderr.write(`[lynox:http] stopping the run of deleted schedule "${params['id']!}" threw: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       }
       this._endRequestTrail(trail, deleted ? 'done' : 'refused', run === undefined ? undefined : `run:${run}`);
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }

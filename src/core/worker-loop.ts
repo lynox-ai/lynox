@@ -571,15 +571,15 @@ export class WorkerLoop {
    * comment argued against shipping because the abort was process-wide; `session.ts`
    * scoped it since, which is what this route relies on.
    */
-  /**
-   * Who started a running task by hand, as a `principalTag`, or `'owner'` for a run the
-   * schedule fired (the owner's schedule). `undefined` when the task is not running.
-   */
   /** The effect of the run of `taskId` in flight, or undefined when none is. */
   runningEffect(taskId: string): string | undefined {
     return this.activeTasks.get(taskId)?.effect;
   }
 
+  /**
+   * Who started a running task by hand, as a `principalTag`, or `'owner'` for a run the
+   * schedule fired (the owner's schedule). `undefined` when the task is not running.
+   */
   runningStarterTag(taskId: string): string | undefined {
     const active = this.activeTasks.get(taskId);
     if (active === undefined) return undefined;

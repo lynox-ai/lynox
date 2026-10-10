@@ -14196,10 +14196,10 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
       const foreign = loopWith('owner', 'run_workflow');
       const byMandate = await deleteAs('mandate', foreign);
-      expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
+      expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_permitted' } });
       expect(byMandate.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
       expect(foreign.stopTask).not.toHaveBeenCalled();
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_permitted');
     });
 
     it('a mandate\'s delete stops a run it started itself, and the trail says so', async () => {
@@ -14211,8 +14211,25 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
     it.each(['backup', 'notify', 'bulk_apply'])('the owner\'s delete of a %s schedule leaves its run alone, as before', async (effect) => {
       const loop = loopWith('owner', effect);
-      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
+      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'effect_kept' } });
       expect(loop.stopTask).not.toHaveBeenCalled();
+    });
+
+    it('says so when the stop reaches nothing in the run\'s current phase', async () => {
+      const loop = { ...loopWith('owner', 'run_agent'), stopTask: vi.fn().mockReturnValue({ kind: 'unstoppable', effect: 'run_agent' }) };
+      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'unstoppable_now' } });
+      expect(loop.stopTask).toHaveBeenCalledWith('trg-9');
+    });
+
+    it('a stop that throws leaves the delete standing and says the stop failed', async () => {
+      const loop = { ...loopWith(TAG, 'run_workflow'), stopTask: vi.fn(() => { throw new Error('boom'); }) };
+      const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const res = await deleteAs('mandate', loop);
+        expect(res).toMatchObject({ status: 200, body: { deleted: true, run: 'stop_failed' } });
+        expect(res.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      } finally { write.mockRestore(); }
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:stop_failed');
     });
 
     it('a delete that finds no row stops nothing', async () => {
