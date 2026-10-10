@@ -14,6 +14,7 @@ import type {
   NotificationChannel,
   NotificationMessage,
 } from '../../core/notification-router.js';
+import { isMandateTag, isOwnerPrincipal, principalTag, type RequestPrincipal } from '../../core/request-principal.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,7 +25,19 @@ interface PushSubscriptionRow {
   keys_p256dh: string;
   keys_auth: string;
   created_at: string;
+  /** Who added it, as a principal tag; NULL for the owner (and every row from before tags). */
+  created_by: string | null;
+  /** The grant a mandate added it under; its end ends the subscription. NULL for the owner. */
+  mandate_id: string | null;
 }
+
+/** How many subscriptions the whole instance keeps. */
+const MAX_SUBSCRIPTIONS = 50;
+/** How many of those one mandate may hold (PRD customer-granted-operator-access §3.13 B3). */
+export const MAX_MANDATE_SUBSCRIPTIONS = 5;
+
+/** Who a subscription is added for: the owner, or a mandate with the grant whose end ends it. */
+type SubscriptionOwner = { readonly createdBy: null; readonly mandateId: null } | { readonly createdBy: string; readonly mandateId: string };
 
 interface PushPayload {
   title: string;
@@ -89,20 +102,49 @@ class PushSubscriptionStore {
         created_at   TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
+    // Who added a subscription, added to files from before; their rows stay the owner's (NULL).
+    const columns = new Set((this.db.prepare('PRAGMA table_info(push_subscriptions)').all() as Array<{ name: string }>).map((c) => c.name));
+    if (!columns.has('created_by')) this.db.exec('ALTER TABLE push_subscriptions ADD COLUMN created_by TEXT');
+    if (!columns.has('mandate_id')) this.db.exec('ALTER TABLE push_subscriptions ADD COLUMN mandate_id TEXT');
   }
 
-  add(endpoint: string, p256dh: string, auth: string): void {
-    // Limit to 50 subscriptions per instance (prevents DB bloat)
-    const count = this.count();
-    if (count >= 50) {
-      // Remove oldest subscription to make room
-      this.db.prepare(`DELETE FROM push_subscriptions WHERE rowid IN (SELECT rowid FROM push_subscriptions ORDER BY created_at ASC LIMIT 1)`).run();
+  /**
+   * Add or replace a subscription. The instance keeps 50; the owner's add always succeeds and
+   * makes room by removing the owner's own oldest, or the oldest a mandate added when the owner
+   * holds none. A mandate holds at most `MAX_MANDATE_SUBSCRIPTIONS` and makes
+   * room only among its own, so its adds never remove one of the owner's; when the instance is
+   * full and it has none of its own to remove, the add is refused (`full`). Re-adding an endpoint
+   * that is already stored takes no room.
+   */
+  add(endpoint: string, p256dh: string, auth: string, owner: SubscriptionOwner): 'ok' | 'full' {
+    if (this.get(endpoint) === undefined) {
+      if (owner.createdBy === null) {
+        // The owner always gets in: room comes from the owner's own oldest, and only when the
+        // owner holds none, from the oldest a mandate added.
+        if (this.count() >= MAX_SUBSCRIPTIONS) {
+          this.db.prepare(`DELETE FROM push_subscriptions WHERE rowid IN (SELECT rowid FROM push_subscriptions ORDER BY COALESCE(created_by LIKE 'mandate:%', 0) ASC, created_at ASC, rowid ASC LIMIT 1)`).run();
+        }
+      } else {
+        const own = (this.db.prepare('SELECT COUNT(*) AS cnt FROM push_subscriptions WHERE created_by = ?').get(owner.createdBy) as { cnt: number }).cnt;
+        if (own >= MAX_MANDATE_SUBSCRIPTIONS) {
+          this.db.prepare(`DELETE FROM push_subscriptions WHERE rowid IN (SELECT rowid FROM push_subscriptions WHERE created_by = ? ORDER BY created_at ASC, rowid ASC LIMIT 1)`).run(owner.createdBy);
+        } else if (this.count() >= MAX_SUBSCRIPTIONS) {
+          return 'full';
+        }
+      }
     }
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO push_subscriptions (endpoint, keys_p256dh, keys_auth) VALUES (?, ?, ?)`,
+        `INSERT OR REPLACE INTO push_subscriptions (endpoint, keys_p256dh, keys_auth, created_by, mandate_id) VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(endpoint, p256dh, auth);
+      .run(endpoint, p256dh, auth, owner.createdBy, owner.mandateId);
+    return 'ok';
+  }
+
+  get(endpoint: string): PushSubscriptionRow | undefined {
+    return this.db
+      .prepare(`SELECT endpoint, keys_p256dh, keys_auth, created_at, created_by, mandate_id FROM push_subscriptions WHERE endpoint = ?`)
+      .get(endpoint) as PushSubscriptionRow | undefined;
   }
 
   /** Remove subscriptions older than 90 days. */
@@ -121,7 +163,7 @@ class PushSubscriptionStore {
 
   getAll(): PushSubscriptionRow[] {
     return this.db
-      .prepare(`SELECT endpoint, keys_p256dh, keys_auth, created_at FROM push_subscriptions`)
+      .prepare(`SELECT endpoint, keys_p256dh, keys_auth, created_at, created_by, mandate_id FROM push_subscriptions`)
       .all() as PushSubscriptionRow[];
   }
 
@@ -160,7 +202,15 @@ export class WebPushNotificationChannel implements NotificationChannel {
     this.store.scrubFreedPages();
   }
 
-  constructor(dataDir: string) {
+  /** Whether a mandate is still live; a subscription it added ends with it. */
+  private readonly isMandateLive: (mandateId: string) => boolean;
+
+  /**
+   * `isMandateLive` answers for the grant a mandate's subscription was added under. Without
+   * one, every mandate counts as ended, so nothing reaches a device a mandate added.
+   */
+  constructor(dataDir: string, opts: { isMandateLive?: (mandateId: string) => boolean } = {}) {
+    this.isMandateLive = opts.isMandateLive ?? (() => false);
     this.vapidKeys = loadOrGenerateVapidKeys(dataDir);
     this.store = new PushSubscriptionStore(join(dataDir, 'push-subscriptions.db'));
     webPush.setVapidDetails(
@@ -175,9 +225,15 @@ export class WebPushNotificationChannel implements NotificationChannel {
     return this.vapidKeys.publicKey;
   }
 
-  /** Add a push subscription. */
-  subscribe(endpoint: string, p256dh: string, auth: string): void {
-    this.store.add(endpoint, p256dh, auth);
+  /**
+   * Add a push subscription for whoever asked. A mandate's is tied to the grant it logged in
+   * with: `no_grant` when its session names no grant to end it with, `full` when the instance
+   * has no room it may take (see `PushSubscriptionStore.add`).
+   */
+  subscribe(endpoint: string, p256dh: string, auth: string, by: RequestPrincipal): 'ok' | 'full' | 'no_grant' {
+    if (isOwnerPrincipal(by)) return this.store.add(endpoint, p256dh, auth, { createdBy: null, mandateId: null });
+    if (by.kind !== 'mandate' || by.mandateId === undefined) return 'no_grant';
+    return this.store.add(endpoint, p256dh, auth, { createdBy: principalTag(by), mandateId: by.mandateId });
   }
 
   /** Remove a push subscription. */
@@ -185,9 +241,35 @@ export class WebPushNotificationChannel implements NotificationChannel {
     this.store.remove(endpoint);
   }
 
-  /** Number of active subscriptions. */
-  subscriptionCount(): number {
-    return this.store.count();
+  /** Who added the subscription at `endpoint` (`created_by`, NULL for the owner); undefined when none is stored. */
+  addedBy(endpoint: string): { created_by: string | null } | undefined {
+    const row = this.store.get(endpoint);
+    return row === undefined ? undefined : { created_by: row.created_by };
+  }
+
+  /** Number of live subscriptions; for a mandate, of its own. */
+  subscriptionCount(of?: RequestPrincipal): number {
+    return this.liveSubscriptions(of).length;
+  }
+
+  /**
+   * The subscriptions a send may reach: the owner's, and those of mandates still live. One a
+   * mandate added whose grant has ended (or that names no grant) is removed here, so its
+   * device is told nothing after the end (PRD customer-granted-operator-access §3.13 B3).
+   * With `of` a mandate, only that mandate's own.
+   */
+  private liveSubscriptions(of?: RequestPrincipal): PushSubscriptionRow[] {
+    const live: PushSubscriptionRow[] = [];
+    for (const row of this.store.getAll()) {
+      if (isMandateTag(row.created_by) && (row.mandate_id === null || !this.isMandateLive(row.mandate_id))) {
+        this.store.remove(row.endpoint);
+        continue;
+      }
+      live.push(row);
+    }
+    if (of === undefined || isOwnerPrincipal(of)) return live;
+    const tag = principalTag(of);
+    return live.filter((row) => row.created_by === tag);
   }
 
   /** `failed` with no subscription too: nobody was told, and that is what the caller asks. */
@@ -196,11 +278,12 @@ export class WebPushNotificationChannel implements NotificationChannel {
     return result.sent > 0 ? 'delivered' : 'failed';
   }
 
-  async sendDetailed(msg: NotificationMessage): Promise<{ sent: number; failed: number; cleaned: number }> {
+  /** With `onlyFor` a mandate, the message goes only to that mandate's own subscriptions. */
+  async sendDetailed(msg: NotificationMessage, onlyFor?: RequestPrincipal): Promise<{ sent: number; failed: number; cleaned: number }> {
     // Prune expired subscriptions on each send (lightweight — SQLite handles it fast)
     this.store.prune();
 
-    const subscriptions = this.store.getAll();
+    const subscriptions = this.liveSubscriptions(onlyFor);
     if (subscriptions.length === 0) return { sent: 0, failed: 0, cleaned: 0 };
 
     const tag = msg.taskId ?? `lynox-${Date.now()}`;

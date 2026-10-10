@@ -422,8 +422,28 @@ vi.mock('../core/config.js', async (importOriginal) => ({
 
 // Keep _initPushChannel a deterministic no-op — with getLynoxDir now mocked
 // it would otherwise generate VAPID keys on disk during init().
+// Its methods are spies (`pushMock`), so the push routes' tests can see what a route asks of it.
+const { pushMock } = vi.hoisted(() => ({
+  pushMock: {
+    subscribe: vi.fn((): 'ok' | 'full' | 'no_grant' => 'ok'),
+    unsubscribe: vi.fn(),
+    addedBy: vi.fn((): { created_by: string | null } | undefined => ({ created_by: null })),
+    subscriptionCount: vi.fn(() => 1),
+    sendDetailed: vi.fn(async () => ({ sent: 1, failed: 0, cleaned: 0 })),
+  },
+}));
 vi.mock('../integrations/push/web-push-channel.js', () => ({
-  WebPushNotificationChannel: class { /* test no-op */ subscribe(): void { /* accepted */ } eraseSubscriptions(): void { /* nothing stored */ } scrubFreedPages(): void { /* nothing stored */ } },
+  WebPushNotificationChannel: class {
+    /* test no-op */
+    subscribe = pushMock.subscribe;
+    unsubscribe = pushMock.unsubscribe;
+    addedBy = pushMock.addedBy;
+    subscriptionCount = pushMock.subscriptionCount;
+    sendDetailed = pushMock.sendDetailed;
+    getPublicKey(): string { return 'pub'; }
+    eraseSubscriptions(): void { /* nothing stored */ }
+    scrubFreedPages(): void { /* nothing stored */ }
+  },
 }));
 
 // POST /api/workflows/:id/run dynamically imports the pipeline tool module.
@@ -11575,6 +11595,78 @@ describe('POST /api/push/subscribe', () => {
   });
 });
 
+// PRD customer-granted-operator-access §3.13 B3: a mandate's push subscription is its own. The
+// channel's rules (who it reaches, the end, the caps) are its own tests; here the routes hand it
+// the request's principal and refuse what is not the mandate's. The owner is the control.
+describe('push routes and a mandate\'s session', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'TEST-MANDATE-1' };
+  const sub = (endpoint: string) => ({ subscription: { endpoint, keys: { p256dh: 'p', auth: 'a' } } });
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  beforeEach(() => { for (const f of Object.values(pushMock)) f.mockClear(); });
+  afterEach(() => {
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    pushMock.subscribe.mockImplementation(() => 'ok');
+    pushMock.addedBy.mockImplementation(() => ({ created_by: null }));
+    for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+  });
+
+  it('subscribes under the request\'s principal', async () => {
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/eva')) });
+    expect(res.status).toBe(201);
+    expect(pushMock.subscribe).toHaveBeenCalledWith('https://fcm.googleapis.com/fcm/send/eva', 'p', 'a', MANDATE);
+    api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+    await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/own')) });
+    expect(pushMock.subscribe).toHaveBeenLastCalledWith('https://fcm.googleapis.com/fcm/send/own', 'p', 'a', OWNER_PRINCIPAL);
+  });
+
+  it('answers 409 when the channel has no room for it, and 403 when the session names no grant', async () => {
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    pushMock.subscribe.mockImplementation(() => 'full');
+    const full = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/eva')) });
+    expect(full.status).toBe(409);
+    expect(((await full.json()) as { error: string }).error).toBe('This instance holds as many notification subscriptions as it keeps. Remove one of yours, or ask the owner.');
+    pushMock.subscribe.mockImplementation(() => 'no_grant');
+    const noGrant = await jsonFetch('/api/push/subscribe', { method: 'POST', body: JSON.stringify(sub('https://fcm.googleapis.com/fcm/send/eva')) });
+    expect(noGrant.status).toBe(403);
+    expect(((await noGrant.json()) as { error: string }).error).toBe('This session names no access grant, so notifications cannot be tied to its end. Sign in again.');
+  });
+
+  it('lets a mandate remove only a subscription it added, and refuses a missing one', async () => {
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const ONLY_OWN = 'In this session you can remove only a notification subscription you added yourself.';
+    for (const [row, label] of [[{ created_by: null }, 'owner\'s'], [{ created_by: 'mandate:max@example.invalid' }, 'another mandate\'s'], [undefined, 'missing']] as const) {
+      pushMock.addedBy.mockImplementation(() => row);
+      const res = await jsonFetch('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: 'https://fcm.googleapis.com/fcm/send/x' }) });
+      expect(res.status, label).toBe(403);
+      expect(((await res.json()) as { error: string }).error, label).toBe(ONLY_OWN);
+    }
+    expect(pushMock.unsubscribe).not.toHaveBeenCalled();
+    pushMock.addedBy.mockImplementation(() => ({ created_by: 'mandate:eva@example.invalid' }));
+    const own = await jsonFetch('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: 'https://fcm.googleapis.com/fcm/send/eva' }) });
+    expect(own.status).toBe(200);
+    expect(pushMock.unsubscribe).toHaveBeenCalledWith('https://fcm.googleapis.com/fcm/send/eva');
+  });
+
+  it('lets the owner remove any subscription, as before', async () => {
+    pushMock.addedBy.mockImplementation(() => ({ created_by: 'mandate:eva@example.invalid' }));
+    const res = await jsonFetch('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: 'https://fcm.googleapis.com/fcm/send/eva' }) });
+    expect(res.status).toBe(200);
+    expect(pushMock.unsubscribe).toHaveBeenCalledWith('https://fcm.googleapis.com/fcm/send/eva');
+  });
+
+  it('tests only the mandate\'s own subscriptions', async () => {
+    api.setPrincipalResolverForTesting(() => MANDATE);
+    const res = await jsonFetch('/api/push/test', { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(pushMock.subscriptionCount).toHaveBeenCalledWith(MANDATE);
+    expect(pushMock.sendDetailed).toHaveBeenCalledWith(expect.objectContaining({ title: 'lynox' }), MANDATE);
+  });
+});
+
 describe('metered audio routes: managed credit gate + debit', () => {
   /** Read an SSE response body to completion as a single string. */
   async function readSse(res: Response): Promise<string> {
@@ -14305,6 +14397,9 @@ describe('mandate stance of every route that writes', () => {
       'POST /api/mail/autodiscover free',
       'POST /api/onboarding/derive-domain free',
       'POST /api/onboarding/knowledge/start own',
+      'POST /api/push/subscribe own',
+      'POST /api/push/test own',
+      'POST /api/push/unsubscribe own',
       'POST /api/searxng/check free',
       'POST /api/secrets/validate-key free',
       'POST /api/sessions own',
