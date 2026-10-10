@@ -919,9 +919,9 @@ export class TaskManager {
    */
   recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped', opts?: { noRetry?: boolean | undefined }): void {
     const task = this.history.getTrigger(id);
-    if (!task) {
-      throw new Error(`Trigger not found: ${id}`);
-    }
+    // The schedule was deleted while this run was in flight: deleting removes the row and
+    // leaves the run going, so there is nothing left to record the run against.
+    if (!task) return;
 
     // §0 T1/A5: a PARKED trigger's status is not this method's to write. Three of
     // the five branches below set `status`, and each would end a wait that is

@@ -334,3 +334,51 @@ describe('the heartbeat', () => {
     await vi.waitFor(() => expect(leaseRow(a).lease_holder).toBeNull());
   });
 });
+
+describe('a schedule deleted while its run is in flight', () => {
+  // The delete route removes the row and leaves the run going; the run ends later and
+  // records its result against a row that no longer exists. MUTATION: put the throw back
+  // in TaskManager.recordTaskRun (`if (!task) throw …`) → the first test sees the rejection.
+  it('ends without an unhandled rejection, and records nothing', async () => {
+    const dir = newDir();
+    const a = boot(dir);
+    seedCron(a);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => { rejections.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await a.loop.tick();
+      await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+      expect(a.history.deleteTrigger('trg-1')).toBe(true);
+
+      a.finish();
+      // Two macrotask turns: the run's settle chain and Node's rejection report.
+      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setImmediate(r));
+      expect(rejections).toEqual([]);
+      expect(a.history.getTrigger('trg-1')).toBeFalsy();
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
+  it('is reported by the heartbeat as deleted, not as a lease lost to another process', async () => {
+    const dir = newDir();
+    const a = boot(dir, { heartbeatMs: 20, ttlMs: 60 });
+    seedCron(a);
+    const lines: string[] = [];
+    const realWrite = process.stderr.write.bind(process.stderr);
+    vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      if (typeof chunk === 'string' && chunk.includes('[lynox:worker]')) { lines.push(chunk); return true; }
+      return (realWrite as (c: string | Uint8Array, ...r: unknown[]) => boolean)(chunk, ...rest);
+    }) as typeof process.stderr.write);
+    await a.loop.tick();
+    await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+    a.history.deleteTrigger('trg-1');
+    // Several heartbeat intervals pass with the row gone.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(lines.filter((l) => l.includes('lost its run lease'))).toEqual([]);
+    expect(lines.filter((l) => l.includes('was deleted'))).toHaveLength(1);
+    a.finish();
+  });
+});
