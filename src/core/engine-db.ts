@@ -1003,6 +1003,13 @@ const MIGRATIONS: string[] = [
      released_at     TEXT NOT NULL,
      PRIMARY KEY (profile_id, profile_author, name)
    );`,
+
+  // v28: when the conversation a durable entry came from was deleted. Deleting a chat keeps
+  // what was learned in it; `source_thread_id` keeps the id, and this says the transcript
+  // behind it is gone. NULL means the chat still exists or the entry never had one.
+  // Mirrors agent-memory.db v7.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (28);
+   ALTER TABLE knowledge_entries ADD COLUMN source_thread_deleted_at TEXT;`,
 ];
 
 /**

@@ -160,6 +160,8 @@ export interface KnowledgeEntry {
   /** Derived trust tier (re-derivable from the evidence columns via provenance.ts). */
   sourceType: ProvenanceKind;
   sourceThreadId: string | null;
+  /** When the chat in `sourceThreadId` was deleted; null while it exists or when there is none. */
+  sourceThreadDeletedAt: string | null;
   sourceRunId: string | null;
   supersededBy: string | null;
   reviewedAt: string | null;

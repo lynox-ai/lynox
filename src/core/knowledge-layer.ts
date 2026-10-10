@@ -1219,6 +1219,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Mark the memories written in a conversation as coming from a chat that was deleted.
+   * They stay recallable; see {@link AgentMemoryDb.markThreadDeleted}. The engine.db stubs
+   * carry no thread id, so there is nothing to mark there.
+   */
+  markThreadDeleted(threadId: string): number {
+    return this.db.markThreadDeleted(threadId);
+  }
+
+  /**
    * Purge all knowledge extracted from a specific thread.
    * Deletes memories and orphaned entities (reference-counted).
    */

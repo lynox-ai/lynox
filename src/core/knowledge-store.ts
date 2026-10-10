@@ -1186,6 +1186,21 @@ export class KnowledgeStore {
     return this.db.prepare('DELETE FROM knowledge_entries WHERE source_thread_id = ?').run(threadId).changes;
   }
 
+  /**
+   * Mark every entry captured in one conversation as coming from a chat that was deleted.
+   *
+   * Deleting a chat keeps what was learned in it; only private mode removes it
+   * ({@link deleteByThread}). The entries keep their `source_thread_id`, and this stamps when
+   * the transcript behind it went, so a reader can tell "chat deleted" from "chat exists" and
+   * from "never had one" (NULL id). Every status, like {@link deleteByThread}. Returns how many
+   * entries it marked.
+   */
+  markThreadDeleted(threadId: string): number {
+    return this.db.prepare(
+      "UPDATE knowledge_entries SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ?",
+    ).run(threadId).changes;
+  }
+
   // ── Focus derivation (H2-gated) ──
 
   private _renderFocus(turnText: string, threadAnchorSubjectId: string | null, focusOverrideSubjectId: string | null): string | null {
@@ -1417,6 +1432,7 @@ export class KnowledgeStore {
       sourceUntrusted: row.source_untrusted === 1,
       sourceType: row.source_type as ProvenanceKind,
       sourceThreadId: row.source_thread_id,
+      sourceThreadDeletedAt: row.source_thread_deleted_at,
       sourceRunId: row.source_run_id,
       supersededBy: row.superseded_by,
       reviewedAt: row.reviewed_at,
@@ -1497,6 +1513,7 @@ interface KnowledgeRow {
   source_untrusted: number;
   source_type: string;
   source_thread_id: string | null;
+  source_thread_deleted_at: string | null;
   source_run_id: string | null;
   superseded_by: string | null;
   reviewed_at: string | null;
