@@ -67,3 +67,15 @@ describe('promptBudgetLimit', () => {
     expect(promptBudgetLimit(500)).toBe(10);
   });
 });
+
+describe('PromptBudgetExceededError', () => {
+  it('offers to raise the cap below the maximum, and names the maximum', () => {
+    expect(new PromptBudgetExceededError(5).message).toContain(`raise the cap (at most ${MAX_PROMPT_BUDGET})`);
+  });
+
+  it('offers nothing to raise at the maximum', () => {
+    const msg = new PromptBudgetExceededError(MAX_PROMPT_BUDGET).message;
+    expect(msg).toContain('capped at 10 interactive prompts');
+    expect(msg).not.toContain('pipeline_prompt_budget');
+  });
+});
