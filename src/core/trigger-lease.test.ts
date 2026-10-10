@@ -368,8 +368,9 @@ describe('a schedule deleted while its run is in flight', () => {
     }
   });
 
-  // MUTATION: drop the row check from `willRetry` in WorkerLoop.executeTask → the run
-  // counts on a retry its deleted row can no longer give, and no failure is reported.
+  // MUTATION: `willRetry` recomputed from the snapshot's counters instead of read back
+  // from `recordTaskRun` → the run counts on a retry its deleted row can no longer give,
+  // and no failure is reported. Same mutant, next test: a cron is never retried.
   it('reports a failure that its deleted schedule can no longer retry', async () => {
     const dir = newDir();
     const a = boot(dir);
@@ -383,6 +384,24 @@ describe('a schedule deleted while its run is in flight', () => {
     a.history.deleteTrigger('trg-1');
     a.fail(new Error('provider down'));
     await vi.waitFor(() => expect(a.router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '\u2717 One-off report' })));
+  });
+
+  it('reports the failure of a cron with retries set, which is never retried', async () => {
+    const dir = newDir();
+    const a = boot(dir);
+    a.history.insertTrigger({
+      id: 'trg-1', title: 'Daily report', source: 'cron', effect: 'run_agent',
+      scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
+      confirmedAt: '2026-01-01T00:00:00.000Z', maxRetries: 2,
+    });
+    a.router.hasChannels.mockReturnValue(true);
+    await a.loop.tick();
+    await vi.waitFor(() => expect(a.dispatches()).toBe(1));
+    a.fail(new Error('provider down'));
+    await vi.waitFor(() => expect(a.router.notify).toHaveBeenCalledWith(expect.objectContaining({ title: '\u2717 Daily report' })));
+    // …and the schedule moved to its next occurrence (09:00) rather than a backoff.
+    expect(leaseRow(a).next_run_at).toMatch(/T09:00:00\.000Z$/);
+    expect(Date.parse(leaseRow(a).next_run_at!)).toBeGreaterThan(Date.now());
   });
 
   it('is reported by the heartbeat as deleted, not as a lease lost to another process', async () => {

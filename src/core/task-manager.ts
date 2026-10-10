@@ -916,12 +916,16 @@ export class TaskManager {
    *   non-owner started by hand (PRD customer-granted-operator-access §3.12 point 6, "once
    *   per request"). A retry carries no request, so it would run as the owner's schedule with
    *   the full tool set.
+   * @returns Whether this scheduled a retry of the run. The caller reports a failure only
+   *   when it did not, so this is the one place that decides — a second copy of the retry
+   *   conditions drifted from it (a cron or watch with retries set was never retried here,
+   *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped', opts?: { noRetry?: boolean | undefined }): void {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped', opts?: { noRetry?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
-    if (!task) return;
+    if (!task) return false;
 
     // §0 T1/A5: a PARKED trigger's status is not this method's to write. Three of
     // the five branches below set `status`, and each would end a wait that is
@@ -951,7 +955,7 @@ export class TaskManager {
         nextRunAt: undefined,
         retryCount: undefined,
       });
-      return;
+      return false;
     }
 
     const now = new Date();
@@ -965,6 +969,7 @@ export class TaskManager {
     // be re-selected by getDueTriggers the next tick).
     let nextRunAt: string | null | undefined;
     let retryCount: number | undefined;
+    let retrying = false;
 
     if (task.schedule_cron) {
       // Recurring cron trigger — always compute next run
@@ -999,6 +1004,7 @@ export class TaskManager {
     ) {
       // Retry with exponential backoff if retries remaining
       retryCount = (task.retry_count ?? 0) + 1;
+      retrying = true;
       const backoffMs = Math.min(60_000 * Math.pow(2, retryCount - 1), 30 * 60_000); // 1m, 2m, 4m... cap 30m
       nextRunAt = new Date(now.getTime() + backoffMs).toISOString();
     } else if (status === 'success') {
@@ -1038,6 +1044,9 @@ export class TaskManager {
       nextRunAt,
       retryCount,
     });
+    // A retry is only real where the worker will pick it up: a row completed or disabled
+    // while the run went on keeps its backoff, but is not due until someone reopens it.
+    return retrying && task.status !== 'completed' && task.enabled !== 0;
   }
 }
 

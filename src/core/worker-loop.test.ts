@@ -3719,7 +3719,13 @@ describe('hand runs carry the starter\'s principal', () => {
     });
     const session = makeSession(new Error('provider down'));
     const router = makeNotificationRouter(true);
-    const loop = new WorkerLoop(makeEngine({ taskManager: makeTaskManager([task]), session }), router, 60_000);
+    const taskManager = makeTaskManager([task]);
+    // Whether a retry comes is `recordTaskRun`'s answer, and the loop reports only when it
+    // is no; this stands in for it the way it decides a one-shot with retries left (pinned
+    // in task-manager.test.ts): retried unless the run is withheld from retrying.
+    (taskManager.recordTaskRun as unknown as ReturnType<typeof vi.fn>)
+      .mockImplementation((_id: string, _r: string, _s: string, opts?: { noRetry?: boolean }) => opts?.noRetry !== true);
+    const loop = new WorkerLoop(makeEngine({ taskManager, session }), router, 60_000);
     await (loop as unknown as Exec).executeTask(task, null, who === 'the mandate' ? loop.claimHandRunMinter()('hr-lock', EVA) : undefined);
     const told = (router.notify as unknown as ReturnType<typeof vi.fn>).mock.calls
       .some((c) => String((c[0] as { body?: unknown }).body ?? '').includes('provider down'));
@@ -3769,7 +3775,7 @@ describe('hand runs carry the starter\'s principal', () => {
     // that nothing records past it.
     const code = src.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
     expect(code.filter((line) => line.includes('recordTaskRun')).map((line) => line.trim().slice(0, 41)))
-      .toEqual(['tm?.recordTaskRun(id, result, status, ...']);
+      .toEqual(['return tm?.recordTaskRun(id, result, stat']);
     // Positive control: the writer is in use at more than one place.
     expect([...src.matchAll(/this\.#recordRun\(/g)].length).toBeGreaterThan(10);
   });

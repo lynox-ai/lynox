@@ -594,10 +594,10 @@ export class WorkerLoop {
     result: string,
     status: 'success' | 'failed' | 'timeout' | 'stopped',
     run?: RunStarterSlot | null,
-  ): void {
+  ): boolean {
     // `null`: the caller decided there is no run, so nothing is looked up.
     const slot = run === undefined ? this.#runSlotOf(id) : run ?? undefined;
-    tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : []));
+    return tm?.recordTaskRun(id, result, status, ...(startedByOther(slot) ? [{ noRetry: true }] : [])) ?? false;
   }
 
   /**
@@ -1439,7 +1439,12 @@ export class WorkerLoop {
         ? 'stopped' as const
         : (isTimeout ? 'timeout' as const : 'failed' as const);
 
-      // Check if task will be retried BEFORE recording (retry_count not yet incremented)
+      // Whether the run will be retried is what recording it decided — read back from
+      // `recordTaskRun`, not recomputed here. A copy of its conditions stood here and
+      // drifted: it counted a retry for a cron or a watch with retries set, which is never
+      // retried, and for a schedule deleted while it ran, which has no row to retry from;
+      // either failure was then reported by nothing. What the copy guarded still holds,
+      // because `recordTaskRun` decides it the same way:
       //
       // ⛔ Derived from the STATUS, not from the counters alone. `recordTaskRun` sends
       // only `failed` and `timeout` into the backoff, so after a stop the counters still
@@ -1452,17 +1457,8 @@ export class WorkerLoop {
       // so its failure is reported now or never.
       // Nor is a run a non-owner started by hand: a retry carries no request and would run
       // as the owner's schedule with the full tool set (§3.12 point 6, "once per request").
-      // And not a run whose schedule was deleted while it ran: the retry lives on the
-      // row, so without it the failure would be reported by nothing.
       const taskManager = this.engine.getTaskManager();
-      const willRetry = status !== 'stopped'
-        && !isHandRunOf(task.id)
-        && !startedByOther(entry)
-        && (task.max_retries ?? 0) > 0
-        && (task.retry_count ?? 0) < (task.max_retries ?? 0)
-        && taskManager?.getTrigger(task.id) !== undefined;
-
-      this.#recordRun(taskManager, task.id, errorMsg, status, entry);
+      const willRetry = this.#recordRun(taskManager, task.id, errorMsg, status, entry);
 
       // If the task was parked on a human it was interrupted while waiting.
       // It used to be RESOLVED with 'Task failed while waiting for your
