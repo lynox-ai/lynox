@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
-import { evictSavedArtifactBodies, restoreEvictedBodies, containsEvictionMarker, isSuccessfulSaveResult, EVICTION_MIN_CHARS, EVICTION_NOTE } from './artifact-eviction.js';
+import { evictSavedArtifactBodies, restoreEvictedBodies, containsEvictionMarker, isSuccessfulSaveResult, EVICTION_MIN_CHARS, EVICTION_NOTE, LEGACY_EVICTION_NOTE } from './artifact-eviction.js';
 
 const BIG = 'x'.repeat(EVICTION_MIN_CHARS + 1);
 
@@ -181,6 +181,20 @@ describe('evictSavedArtifactBodies', () => {
     expect(IN_FIELD.length).toBeLessThan(EVICTION_MIN_CHARS);
     expect(inputOf(out)).not.toHaveProperty('content');
     expect(seen).toEqual([['tu_1', IN_FIELD]]);
+    // Its note claims nothing about the file: the file can hold the reference, or the document.
+    expect(resultOf(out)).toMatch(new RegExp(`${LEGACY_EVICTION_NOTE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+    expect(resultOf(out)).not.toMatch(/removed from the conversation|It is persisted/);
+  });
+
+  it('a regular eviction gets the regular note, not the one for the old form', () => {
+    const out = evictSavedArtifactBodies(saveTurn());
+    expect(resultOf(out)).not.toContain(LEGACY_EVICTION_NOTE.trim());
+  });
+
+  // An overwrite result also names the backup of the previous version, below the File: line.
+  it('the note points at the File: line, not at "the path above"', () => {
+    expect(EVICTION_NOTE).toContain('read_file the File: path above');
+    expect(LEGACY_EVICTION_NOTE).toContain('read_file the File: path above');
   });
 
   it('the old in-field reference on a FAILED save stays — that call is no evidence of a saved document', () => {
@@ -230,6 +244,12 @@ describe('restoreEvictedBodies', () => {
     expect(restoreEvictedBodies(out.slice(0, 2), originals)).toEqual(msgs.slice(0, 2));
   });
 
+  it('a malformed tail with a null content block does not throw', () => {
+    const { out, originals } = evictWithOriginals(saveTurn());
+    const tail = [...out, { role: 'user', content: [null, { type: 'text', text: 'next' }] }] as unknown as BetaMessageParam[];
+    expect(() => restoreEvictedBodies(tail, originals)).not.toThrow();
+  });
+
   it('touches nothing it holds no original for', () => {
     const { out } = evictWithOriginals(saveTurn());
     expect(restoreEvictedBodies(out, new Map([['other', 'x']]))).toBe(out);
@@ -240,6 +260,7 @@ describe('containsEvictionMarker', () => {
   it('finds the note and the old in-field reference, anywhere in the text', () => {
     expect(containsEvictionMarker(`# Pitch\n\n${EVICTION_NOTE.trim()}`)).toBe(true);
     expect(containsEvictionMarker(`intro ${IN_FIELD}`)).toBe(true);
+    expect(containsEvictionMarker(`# Pitch\n\n${LEGACY_EVICTION_NOTE.trim()}`)).toBe(true);
     expect(containsEvictionMarker('# Pitch\n\nThe body was removed from the page.')).toBe(false);
   });
 });

@@ -48,8 +48,20 @@ const EVICTED_PREFIX = '[evicted after successful save';
 const NOTE_PREFIX = '[The body of this document was removed from the conversation';
 
 /** Appended to the tool_result of an evicted save, never put in `content`.
- *  Worded as measured; a change of wording is a change of what was measured. */
-export const EVICTION_NOTE = `\n${NOTE_PREFIX} to save space. It is persisted; read_file the path above if you need it.]`;
+ *  Worded as measured, except "the File: path": an overwrite result also names
+ *  the backup of the previous version, below the File: line. */
+export const EVICTION_NOTE = `\n${NOTE_PREFIX} to save space. It is persisted; read_file the File: path above if you need it.]`;
+
+const LEGACY_NOTE_PREFIX = '[The content of this call was the engine\'s placeholder';
+
+/** Appended instead when the evicted `content` was the old in-field reference.
+ *  Such a call is either a model-made save of the reference, whose file holds no
+ *  document, or a row of the 2026-08-14 persist bug, whose file is fine — the
+ *  note must not claim either. */
+export const LEGACY_EVICTION_NOTE = `\n${LEGACY_NOTE_PREFIX}, not a document. ` +
+  'Whether the file holds the document is not known: read_file the File: path above before relying on it.]';
+
+const NOTES = [EVICTION_NOTE, LEGACY_EVICTION_NOTE] as const;
 
 /** Whether `content` carries a reference this module writes in place of a
  *  saved body: the old in-field form or the note. A model can copy either: on
@@ -59,7 +71,7 @@ export const EVICTION_NOTE = `\n${NOTE_PREFIX} to save space. It is persisted; r
  *  Anywhere in the body, not only at the start: a copied placeholder under a
  *  heading is the same loss. */
 export function containsEvictionMarker(content: string): boolean {
-  return content.includes(EVICTED_PREFIX) || content.includes(NOTE_PREFIX);
+  return content.includes(EVICTED_PREFIX) || content.includes(NOTE_PREFIX) || content.includes(LEGACY_NOTE_PREFIX);
 }
 
 interface ToolUseBlock {
@@ -113,19 +125,19 @@ type ResultContent = string | unknown[] | undefined;
 
 /** Called once per eviction: a second pass finds no `content` on the call and
  *  never gets here, so the note is not appended twice. */
-function withNote(content: ResultContent): ResultContent {
-  if (typeof content === 'string') return content + EVICTION_NOTE;
-  if (Array.isArray(content)) return [...content, { type: 'text', text: EVICTION_NOTE.trimStart() }];
+function withNote(content: ResultContent, note: string): ResultContent {
+  if (typeof content === 'string') return content + note;
+  if (Array.isArray(content)) return [...content, { type: 'text', text: note.trimStart() }];
   return content;
 }
 
 function withoutNote(content: ResultContent): ResultContent {
-  if (typeof content === 'string') {
-    return content.endsWith(EVICTION_NOTE) ? content.slice(0, -EVICTION_NOTE.length) : content;
-  }
-  if (Array.isArray(content)) {
-    const last = content[content.length - 1] as { type?: unknown; text?: unknown } | undefined;
-    return last?.type === 'text' && last.text === EVICTION_NOTE.trimStart() ? content.slice(0, -1) : content;
+  for (const note of NOTES) {
+    if (typeof content === 'string' && content.endsWith(note)) return content.slice(0, -note.length);
+    if (Array.isArray(content)) {
+      const last = content[content.length - 1] as { type?: unknown; text?: unknown } | null | undefined;
+      if (last?.type === 'text' && last.text === note.trimStart()) return content.slice(0, -1);
+    }
   }
   return content;
 }
@@ -138,7 +150,7 @@ function withoutNote(content: ResultContent): ResultContent {
 function rewriteResults(
   messages: BetaMessageParam[],
   ids: ReadonlySet<string>,
-  edit: (content: ResultContent) => ResultContent,
+  edit: (content: ResultContent, id: string) => ResultContent,
 ): BetaMessageParam[] {
   if (ids.size === 0) return messages;
   const seen = new Set<string>();
@@ -148,11 +160,12 @@ function rewriteResults(
     if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
     let newContent: unknown[] | null = null;
     for (let j = 0; j < msg.content.length; j++) {
-      const b = msg.content[j] as { type?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
+      const b = msg.content[j] as { type?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown } | null;
+      if (typeof b !== 'object' || b === null) continue;
       if (b.type !== 'tool_result' || typeof b.tool_use_id !== 'string' || b.is_error === true) continue;
       if (!ids.has(b.tool_use_id) || seen.has(b.tool_use_id)) continue;
       seen.add(b.tool_use_id);
-      const edited = edit(b.content as ResultContent);
+      const edited = edit(b.content as ResultContent, b.tool_use_id);
       if (edited === b.content) continue;
       newContent ??= [...msg.content];
       newContent[j] = { ...b, content: edited };
@@ -186,7 +199,7 @@ export function evictSavedArtifactBodies(
   onEvict?: (toolUseId: string, originalContent: string) => void,
 ): BetaMessageParam[] {
   const results = collectResults(messages);
-  const evicted = new Set<string>();
+  const evicted = new Map<string, string>();
   let out: BetaMessageParam[] | null = null;
 
   for (let i = 0; i < messages.length; i++) {
@@ -208,7 +221,7 @@ export function evictSavedArtifactBodies(
       if (result === undefined || !isSuccessfulSaveResult(result)) continue;
 
       onEvict?.(block.id, content);
-      evicted.add(block.id);
+      evicted.set(block.id, content.startsWith(EVICTED_PREFIX) ? LEGACY_EVICTION_NOTE : EVICTION_NOTE);
       const { content: _dropped, ...rest } = input as Record<string, unknown>;
       newContent ??= [...msg.content];
       newContent[j] = { ...block, input: rest };
@@ -220,7 +233,7 @@ export function evictSavedArtifactBodies(
     }
   }
 
-  return rewriteResults(out ?? messages, evicted, withNote);
+  return rewriteResults(out ?? messages, new Set(evicted.keys()), (c, id) => withNote(c, evicted.get(id)!));
 }
 
 /**
