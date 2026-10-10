@@ -858,6 +858,11 @@ export class TaskManager {
     return this.history.claimTriggerLease(id, holder, until, now);
   }
 
+  /** When a trigger's run lease runs out, or null when it is free — the earliest a run can start again. */
+  leaseUntil(id: string): string | null {
+    return this.history.triggerLeaseUntil(id);
+  }
+
   /** Extend this holder's lease; false when another holder took it over. */
   renewLease(id: string, holder: string, until: string): boolean {
     return this.history.renewTriggerLease(id, holder, until);

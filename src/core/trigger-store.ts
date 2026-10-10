@@ -970,6 +970,13 @@ export class TriggerStore {
     }).immediate();
   }
 
+  /** When the current lease runs out, or null when nobody holds one. A live holder renews it
+   *  every heartbeat, so this is the earliest a run can be started again, never a promise. */
+  leaseUntil(id: string): string | null {
+    const row = this.db.prepare('SELECT lease_until FROM triggers WHERE id = ?').get(id) as { lease_until: string | null } | undefined;
+    return row?.lease_until ?? null;
+  }
+
   /** Extend a lease this holder still has. False when it was taken over meanwhile. */
   renewLease(id: string, holder: string, until: string): boolean {
     return this.db.prepare('UPDATE triggers SET lease_until = ? WHERE id = ? AND lease_holder = ?')

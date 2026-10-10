@@ -2136,6 +2136,37 @@ describe('LynoxHTTPApi', () => {
       expect(lines[headerIdx + 1]!).toBe('hello world');
     });
 
+    it('an answer to a question the restart closed hears that the run is gone; one that timed out hears "expired"', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-closed-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const restarted = store.insertAskUser('s-restart', 'Which list?');
+      store.expireUnparked();
+      const timedOut = store.insertAskUser('s-ttl', 'Which list?');
+      store.expirePrompt(timedOut);
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      try {
+        const gone = await jsonFetch('/api/sessions/s-restart/reply', { method: 'POST', body: JSON.stringify({ promptId: restarted, answer: 'B' }) });
+        expect(gone.status).toBe(410);
+        const goneBody = await gone.json() as { error: string; code?: string };
+        expect(goneBody.code).toBe('process_restarted');
+        expect(goneBody.error).toContain('engine restarted');
+        expect(goneBody.error).toContain('Start it again');
+
+        const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
+        expect(expired.status).toBe(410);
+        const expiredBody = await expired.json() as { error: string; code?: string };
+        expect(expiredBody).toEqual({ error: 'Prompt expired' });
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it('reply returns 404 for no pending prompt', async () => {
       const res = await jsonFetch('/api/sessions/test/reply', {
         method: 'POST',
@@ -7038,6 +7069,18 @@ describe('LynoxHTTPApi', () => {
         // make this case look like the other.
         expect(body.code).toBeUndefined();
         expect(body.error).toContain('already running');
+      });
+    });
+
+    it('POST /api/triggers/:id/run names when a held lease lapses, as the earliest time to try again', async () => {
+      const leaseUntil = '2026-10-11T10:15:00.000Z';
+      await withLoop(() => Promise.resolve({ ok: false, reason: 'already_running', leaseUntil }), async () => {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code?: string; error?: string; leaseUntil?: string };
+        expect(body.code).toBeUndefined();
+        expect(body.leaseUntil).toBe(leaseUntil);
+        expect(body.error).toContain(`at the earliest at ${leaseUntil}`);
       });
     });
 

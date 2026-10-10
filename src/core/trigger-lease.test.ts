@@ -139,8 +139,26 @@ describe('the trigger run lease across a restart', () => {
     await b.loop.tick();
     await new Promise((r) => setImmediate(r));
     expect(b.dispatches()).toBe(0);
-    expect(await b.loop.runTriggerNow('trg-1')).toEqual({ ok: false, reason: 'already_running' });
+    // The refusal names when A's lease runs out: the earliest a start by hand can go through.
+    expect(await b.loop.runTriggerNow('trg-1')).toEqual({ ok: false, reason: 'already_running', leaseUntil: leaseRow(a).lease_until });
     expect(b.dispatches()).toBe(0);
+  });
+
+  // MUTATION: `#alreadyRunning` returns no `leaseUntil` → the first expectation fails.
+  it('a start by hand during a lost run\'s lease names the time it lapses, and goes through after it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    const p = boot(newDir());
+    seedCron(p);
+    // What a deploy leaves: the lease of a run whose process is gone, still within its TTL.
+    const until = new Date(T0 + 15 * MIN).toISOString();
+    expect(p.manager.claimLease('trg-1', 'gone-process', until, new Date(T0).toISOString())).toBe('claimed');
+    expect(await p.loop.runTriggerNow('trg-1')).toEqual({ ok: false, reason: 'already_running', leaseUntil: until });
+    expect(p.dispatches()).toBe(0);
+
+    vi.setSystemTime(T0 + 15 * MIN + 1);
+    expect(await p.loop.runTriggerNow('trg-1')).toEqual({ ok: true });
+    await vi.waitFor(() => expect(p.dispatches()).toBe(1));
   });
 
   // MUTATION: in WorkerLoop.tick, treat `interrupted` like `claimed` (drop the
