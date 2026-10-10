@@ -161,6 +161,20 @@ describe('the trigger run lease across a restart', () => {
     await vi.waitFor(() => expect(p.dispatches()).toBe(1));
   });
 
+  // MUTATION: drop the `ahead` check in `#alreadyRunning` → the refusal names a past time.
+  it('a run of this process whose lease lapsed still refuses a second start, without naming a past time', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(T0);
+    const p = boot(newDir());
+    seedCron(p);
+    await p.loop.tick();
+    await vi.waitFor(() => expect(p.dispatches()).toBe(1));
+    // No heartbeat renewed the lease (its timer is real, the clock is not): it lies behind us.
+    vi.setSystemTime(T0 + 20 * MIN);
+    expect(Date.parse(leaseRow(p).lease_until!)).toBeLessThan(Date.now());
+    expect(await p.loop.runTriggerNow('trg-1')).toEqual({ ok: false, reason: 'already_running' });
+  });
+
   // MUTATION: in WorkerLoop.tick, treat `interrupted` like `claimed` (drop the
   // `RESUMES_AFTER_LOSS` branch) → B dispatches a second agent turn.
   it('a lapsed lease of a lost agent run is recorded as interrupted, not run again — and the live run that lost it still runs once', async () => {
