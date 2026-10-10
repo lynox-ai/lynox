@@ -120,7 +120,9 @@ export class SecurityAudit {
 
   /**
    * Stop listening and close the connection. Idempotent. Without it every engine that shut
-   * down left its listeners on the process-wide channels, writing into a closed handle.
+   * down left its listeners on the process-wide channels and its connection open, so the
+   * events of a later engine in the same process were recorded once per engine that came
+   * before it.
    */
   close(): void {
     for (const [ch, fn] of this.subscriptions) ch.unsubscribe(fn);

@@ -1347,8 +1347,8 @@ export class Engine {
     }
 
     // Initialize security audit trail (subscribes to guard/security channels).
-    // Started with or without RunHistory: it opens its own connection and owns its own
-    // table, so a RunHistory that failed for a reason of its own must not take it along.
+    // Started with or without RunHistory: it opens its own connection and creates its
+    // table itself, so a RunHistory that failed for a reason of its own must not take it along.
     // When it cannot start, say so — running without it is not something to do in silence.
     try {
       const { SecurityAudit } = await import('./security-audit.js');
