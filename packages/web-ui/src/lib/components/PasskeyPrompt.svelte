@@ -28,7 +28,7 @@
 			});
 
 			if (!res.ok) return;
-			const data = await res.json() as { hasPasskeys?: boolean; supported?: boolean; error?: string };
+			const data = await res.json() as { hasPasskeys?: boolean; supported?: boolean; canRegister?: boolean; error?: string };
 
 			// Only show if no passkeys registered yet
 			if (data.error) return; // Not managed or unreachable
@@ -37,6 +37,8 @@
 			// Without this guard the prompt shows up on self-host and clicking
 			// "Set up" leads to a dead end (no /auth/passkey/register endpoint).
 			if (data.supported === false) return;
+			// Only the owner's own session may add a passkey (a mandate session may not).
+			if (data.canRegister !== true) return;
 			if (!data.hasPasskeys) {
 				visible = true;
 			}

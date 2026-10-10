@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import {
 	createSessionToken,
 	verifySessionToken,
+	isOwnerSession,
 	readSessionToken,
 	loginSession,
 	loginSessionFromBody,
@@ -396,5 +397,37 @@ describe('loginSessionFromBody (the CP success body of a code or link login)', (
 
 	it('gives no session for a mandate that has already ended', () => {
 		expect(loginSessionFromBody(SECRET, { valid: true, principal: { ...LOGIN, mandate_expires_at: '2000-01-01T00:00:00.000Z' } })).toBe('ended');
+	});
+});
+
+describe('isOwnerSession (who may create a way back in as the owner)', () => {
+	it('is true for the owner\'s session, which carries no principal', () => {
+		expect(isOwnerSession(createSessionToken(SECRET), SECRET)).toBe(true);
+	});
+
+	it('is false for a valid mandate session', () => {
+		const tok = createSessionToken(SECRET, mandateAt(Math.floor(Date.now() / 1000)));
+		expect(verifySessionToken(tok, SECRET)).toBe(true);
+		expect(isOwnerSession(tok, SECRET)).toBe(false);
+	});
+
+	it('is false for an owner token signed with another secret', () => {
+		expect(isOwnerSession(createSessionToken(SECRET), OTHER_SECRET)).toBe(false);
+	});
+
+	it('is false for an owner token past its 30 days', () => {
+		vi.useFakeTimers();
+		const t0 = Date.UTC(2026, 9, 10, 12, 0, 0);
+		vi.setSystemTime(t0);
+		const tok = createSessionToken(SECRET);
+		vi.setSystemTime(t0 + (SESSION_MAX_AGE_S + 1) * 1000);
+		expect(isOwnerSession(tok, SECRET)).toBe(false);
+	});
+
+	it('is false without a token or without a secret', () => {
+		expect(isOwnerSession(undefined, SECRET)).toBe(false);
+		expect(isOwnerSession('', SECRET)).toBe(false);
+		expect(isOwnerSession(createSessionToken(SECRET), undefined)).toBe(false);
+		expect(isOwnerSession(createSessionToken(SECRET), '')).toBe(false);
 	});
 });
