@@ -25,7 +25,7 @@ if(!BASE||!COOKIE){console.error('set LYNOX_BASE and LYNOX_COOKIE');process.exit
 const FW='https://api.fireworks.ai/inference/v1', MI='https://api.mistral.ai/v1';
 const MODELS=[
   {name:'kimi-k3',   id:'accounts/fireworks/models/kimi-k3',  base:FW},
-  {name:'glm-5p2',   id:'accounts/fireworks/models/glm-5p2',  base:FW},
+  {name:'glm-5p3',   id:'accounts/fireworks/models/glm-5p3',  base:FW}, // 5.2 withdrawn by the provider (404)
   {name:'mistral-medium', id:'mistral-medium-2604',           base:MI},
 ];
 // Jede Zelle bekaeme sonst einen Fakt, den eine fruehere Zelle schon gespeichert hat —

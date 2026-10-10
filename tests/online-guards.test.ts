@@ -13,6 +13,10 @@ import { catalogEntryKey } from '../src/core/llm/catalog.js';
 import { CASES } from './online/lazy-tool-cases.js';
 import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, MODEL_ENV, PRESETS_UNDER_TEST } from './online/provider-presets.js';
 import { FIREWORKS_HOST, pinnedSlots } from './online/preset-slots.js';
+import { fitnessRosterIds } from './online/fitness-roster.js';
+import { ALL_CANDIDATES } from '../scripts/model-fitness/models.js';
+import { CANDIDATES as REPLAY_CANDIDATES } from '../scripts/model-fitness/replay.js';
+import { JUDGE_MODEL } from '../scripts/model-fitness/judge.js';
 
 describe('lazy-tool-reachability matrix coverage', () => {
   // Keeps the matrix honest as LAZY_DEFERRED_TOOLS evolves — no hardcoded count.
@@ -31,6 +35,19 @@ describe('provider preset reachability coverage', () => {
       .map(catalogEntryKey)
       .filter((k) => !(k in REMOTE_PRESETS) && !(k in LOOPBACK_DEFAULT_MODEL));
     expect(untested).toEqual([]);
+  });
+});
+
+describe('fitness roster coverage', () => {
+  // The online roster check skips per host when it has nothing to call. An empty
+  // list for either host would mean the mapping lost the instruments, not that
+  // they stopped calling anyone.
+  const roster = fitnessRosterIds({ candidates: ALL_CANDIDATES, replay: REPLAY_CANDIDATES, judgeModel: JUDGE_MODEL });
+  it('reaches Fireworks and Mistral models of the run, the replay and the judge', () => {
+    expect(roster.filter(e => e.host === 'fireworks').length).toBeGreaterThan(0);
+    expect(roster.filter(e => e.host === 'mistral').length).toBeGreaterThan(0);
+    const users = new Set(roster.flatMap(e => e.usedBy));
+    expect([...users].sort()).toEqual(['judge.ts', 'replay.ts', 'run.ts']);
   });
 });
 

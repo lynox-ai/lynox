@@ -33,7 +33,7 @@ interface Candidate {
 // The main-slot candidates for the balanced/main floor (R1/R3), measured through their REAL
 // prod providers (anthropic / mistral). ministral-14b is the known-fail control — the replay
 // must reproduce it (inline) or the eval is not faithful. Fireworks-class open-weights are NOT
-// listed here: OpenRouter is a different host/version/quant than prod's Fireworks glm-5p2, which
+// listed here: OpenRouter is a different host/version/quant than prod's Fireworks GLM, which
 // would reintroduce exactly the fidelity gap this eval exists to kill — measure those through
 // the real qa-managed engine (tier_set swap) or with a real Fireworks key.
 // Exported so the suite can pin every Fireworks candidate id against MODEL_CAPABILITIES —
@@ -42,20 +42,21 @@ export const CANDIDATES: Candidate[] = [
   { label: 'ministral-14b (control)', provider: 'openai', modelId: 'ministral-14b-2512', apiBaseURL: MISTRAL_BASE, keyName: 'mistral', expect: 'inline' },
   { label: 'mistral-medium', provider: 'openai', modelId: 'mistral-medium-2604', apiBaseURL: MISTRAL_BASE, keyName: 'mistral', expect: 'escalate' },
   { label: 'haiku-4.5', provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001', keyName: 'anthropic', expect: 'escalate' },
-  // Fireworks glm-5p2 = the exact prod deep-slot model, via the REAL Fireworks endpoint (local
-  // dev key) — the faithful prod path, not an OpenRouter proxy.
-  { label: 'glm-5p2 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/glm-5p2', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  // Fireworks GLM = the balanced preset's main-slot model, via the REAL Fireworks endpoint
+  // (local dev key) — the faithful prod path, not an OpenRouter proxy. 5.3 since the provider
+  // withdrew glm-5p2.
+  { label: 'glm-5p3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/glm-5p3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   // Kimi K3 (Moonshot, 2.8T MoE, 1M ctx) — new main/deep candidate on the same real Fireworks
   // endpoint. `expect: 'escalate'` is the HYPOTHESIS this replay has to confirm, not a result.
   { label: 'kimi-k3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
-  // The 2026-08-09 picker-candidate wave (core #1162) — every entry the per-tier picker now
-  // offers must be measurable HERE before a preset may pin it (tier-presets.test.ts guard).
-  // All `expect: 'escalate'` = the same floor hypothesis as above, decided per body via --expect.
-  { label: 'deepseek-v4-flash-0731 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4-flash-0731', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
-  { label: 'qwen3.7-plus (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/qwen3p7-plus', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  // The picker-candidate wave (core #1162, 2026-08-09), minus what the provider has since
+  // withdrawn (qwen3p7-plus, kimi-k2p6, kimi-k2p7-code: 404 since late September) and with
+  // the fast slot's successor in place of deepseek-v4-flash-0731. Every model a preset pins
+  // must be measurable HERE (tests/model-fitness-replay.test.ts holds that, against the
+  // presets themselves). All `expect: 'escalate'` = the same floor hypothesis as above,
+  // decided per body via --expect.
+  { label: 'deepseek-v4p1-flash (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'gpt-oss-120b (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
-  { label: 'kimi-k2.6 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p6', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
-  { label: 'kimi-k2.7-code (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p7-code', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'minimax-m3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/minimax-m3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
 ];
 

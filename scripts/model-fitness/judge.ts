@@ -1,5 +1,5 @@
 /**
- * Independent LLM-as-judge — Kimi K2 (Moonshot) via Fireworks.
+ * Independent LLM-as-judge — Kimi K3 (Moonshot) via Fireworks.
  *
  * WHY independent: an LLM judge has a SELF-PREFERENCE bias — a Claude judge
  * scores Claude higher, a Mistral judge scores Mistral higher (rafael
@@ -7,8 +7,12 @@
  * ordinal. It is stated that way because the ordinal version went stale twice:
  * the roster grew past "Claude + Mistral", GLM became a candidate while the docs
  * still named it the judge, and comments counting "a third family" now undercount
- * a roster spanning six. Today: Kimi K2 (`kimi-k2p6`) over the Fireworks
- * OpenAI-compatible endpoint with FIREWORKS_API_KEY. Add a candidate from Kimi's
+ * a roster spanning six. Today: Kimi K3 (`kimi-k3`) over the Fireworks
+ * OpenAI-compatible endpoint with FIREWORKS_API_KEY. It was Kimi K2 (`kimi-k2p6`)
+ * until the provider withdrew that model; every judge call then answered 404, so
+ * each judge-scored case recorded a JudgeError instead of a score — loud, but no
+ * quality axis at all. The id is now also checked against the live endpoint
+ * (`tests/online/fitness-roster-served.test.ts`). Add a candidate from Kimi's
  * family and the judge moves again; `run.ts` prints the judge it used, so the
  * claim is checkable from a run rather than from this comment.
  *
@@ -28,7 +32,7 @@
  * signal for the subjective quality axis — the hard cases' objective state
  * assertions remain the primary, bias-free discriminator.
  */
-export const JUDGE_MODEL = 'accounts/fireworks/models/kimi-k2p6';
+export const JUDGE_MODEL = 'accounts/fireworks/models/kimi-k3';
 const JUDGE_BASE = 'https://api.fireworks.ai/inference/v1';
 
 /** True when an independent judge can run (FIREWORKS_API_KEY present). */
@@ -37,7 +41,7 @@ export function judgeAvailable(): boolean {
 }
 
 /** The judge model id + provider, for provenance in reports. */
-export const JUDGE_ID = `Kimi K2 via Fireworks (${JUDGE_MODEL}) — chosen because it is NOT in the candidate roster`;
+export const JUDGE_ID = `Kimi K3 via Fireworks (${JUDGE_MODEL}) — chosen because it is NOT in the candidate roster`;
 
 /** A failure of the JUDGE, not of the candidate. Tagged so the runner does not
  *  mistake the judge's rate limit for the candidate's and re-run a paid case. */
