@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { isDangerous, isCriticalTool, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, CRITICAL_BASH, DANGEROUS_BASH } from './permission-guard.js';
+import { describe, it, expect, vi } from 'vitest';
+import { isDangerous, isCriticalTool, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -3265,5 +3265,51 @@ describe('bash rules: one decision per rule, in a chat and unattended', () => {
     ['ls && rm -rf /', 'rm -rf /'],
   ] as const)('%s, in a chat, is named by the strictest rule: %s', (command, label) => {
     expect(chat(command)).toContain(label);
+  });
+});
+
+// The scan's shortcuts change only its cost, never a verdict; these pin that they are in place,
+// since a test of verdicts alone passes as well without them.
+describe('bash rule scan: the shortcuts behind the verdicts', () => {
+  it('reads a segment rule by rule only when the union of its list matches it', () => {
+    const rule = /\bneedle\b/;
+    let read = 0;
+    const counted = Object.assign(Object.create(rule) as RegExp, { test: (s: string) => { read++; return rule.test(s); } });
+    // Keep source and flags, so the union is built from the same rule.
+    Object.defineProperty(counted, 'source', { value: rule.source });
+    Object.defineProperty(counted, 'flags', { value: rule.flags });
+    const list = [{ pattern: counted, label: 'needle' }];
+    expect(_checkPatterns(['hay stack', 'more hay'], list)).toBeNull();
+    expect(read).toBe(0);
+    expect(_checkPatterns(['a needle here'], list)).toEqual({ label: 'needle' });
+    expect(read).toBe(1);
+  });
+
+  it('builds one union per flag set, each with that set\'s flags', () => {
+    const unions = _listUnions([{ pattern: /a/ }, { pattern: /b/i }, { pattern: /c/m }, { pattern: /d/i }]);
+    expect(unions?.map((u) => u.flags).sort()).toEqual(['', 'i', 'm']);
+    // A case-sensitive rule stays case-sensitive in its union.
+    expect(unions?.find((u) => u.flags === '')?.test('A')).toBe(false);
+  });
+
+  it('a chat reads DANGEROUS_BASH after CRITICAL_BASH without the rules CRITICAL_BASH already covers', () => {
+    expect(DANGEROUS_AFTER_CRITICAL_BASH.some((rule) => rule.unattended === 'block')).toBe(false);
+    expect(DANGEROUS_AFTER_CRITICAL_BASH).toEqual(DANGEROUS_BASH.filter((rule) => rule.unattended !== 'block'));
+    expect(DANGEROUS_AFTER_CRITICAL_BASH.length).toBeLessThan(DANGEROUS_BASH.length);
+  });
+
+  it('a chat check does not read a block rule rule by rule', () => {
+    const command = 'ssh user@host.example';
+    const sshAt = DANGEROUS_BASH.findIndex((rule) => rule.pattern.test(command));
+    const blocks = DANGEROUS_BASH.filter((rule) => rule.unattended === 'block');
+    // The witness only discriminates if a block rule stands before the rule it hits.
+    expect(DANGEROUS_BASH.findIndex((rule) => rule.unattended === 'block')).toBeLessThan(sshAt);
+    const spies = blocks.map((rule) => vi.spyOn(rule.pattern, 'test'));
+    try {
+      expect(isDangerous('bash', { command })).toContain(DANGEROUS_BASH[sshAt]!.label);
+      expect(spies.reduce((n, spy) => n + spy.mock.calls.length, 0)).toBe(0);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });

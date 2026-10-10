@@ -424,9 +424,9 @@ const UNATTENDED_ASK_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended === 
 /**
  * DANGEROUS_BASH without its `block` rules, for the chat scan that runs after CRITICAL_BASH found
  * nothing: a `block` rule matches only what CRITICAL_BASH matches, so it cannot hit there, and
- * scanning it would only cost time on a long command.
+ * scanning it would only cost time on a long command. Exported for tests.
  */
-const DANGEROUS_AFTER_CRITICAL_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended !== 'block');
+export const DANGEROUS_AFTER_CRITICAL_BASH = DANGEROUS_BASH.filter((rule) => rule.unattended !== 'block');
 
 const SENSITIVE_PATHS: RegExp[] = [
   /^\/etc\//, /^\/usr\//, /^\/sys\//, /^\/proc\//, /^\/root\//,
@@ -872,7 +872,8 @@ export function stripShellQuotes(cmd: string): string {
  * every segment is read rule by rule as before.
  */
 const listUnions = new WeakMap<ReadonlyArray<{ pattern: RegExp }>, RegExp[] | null>();
-function _listUnions(patterns: ReadonlyArray<{ pattern: RegExp }>): RegExp[] | null {
+/** Exported for tests. */
+export function _listUnions(patterns: ReadonlyArray<{ pattern: RegExp }>): RegExp[] | null {
   if (listUnions.has(patterns)) return listUnions.get(patterns)!;
   let unions: RegExp[] | null = null;
   if (patterns.every(({ pattern }) => !/[gy]/.test(pattern.flags) && !/\\[1-9]|\\k</.test(pattern.source))) {
@@ -892,7 +893,8 @@ function _listUnions(patterns: ReadonlyArray<{ pattern: RegExp }>): RegExp[] | n
   return unions;
 }
 
-function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string }>): { label: string } | null {
+/** Exported for tests. */
+export function _checkPatterns(segments: string[], patterns: ReadonlyArray<{ pattern: RegExp; label: string }>): { label: string } | null {
   const unions = _listUnions(patterns);
   for (const segment of segments) {
     // Only a segment some rule matches is read rule by rule, in list order, for the label.
