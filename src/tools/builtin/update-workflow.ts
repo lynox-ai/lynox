@@ -1,7 +1,7 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
-import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
@@ -178,8 +178,13 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     }
     forgetPipeline(planned.id);
 
+    // What a schedule can still do with it (PRD 3b-2 §4.3): a workflow whose only question tool
+    // is ask_user still runs on one, and asks its owner; any other interactive one cannot.
+    const scheduleNote = isSchedulableWorkflow({ mode: newMode, steps })
+      ? ' It asks its owner through ask_user, so a schedule still runs it and waits for the answers.'
+      : ' ⚠️ It may now ask for more than an answer (ask_secret / ask_human) and can no longer run on a cron/schedule.';
     const modeNote = newMode !== planned.mode
-      ? ` Mode changed ${planned.mode} → ${newMode}.${newMode === 'interactive' ? ' ⚠️ It is now interactive and can no longer run on a cron/schedule.' : ''}`
+      ? ` Mode changed ${planned.mode} → ${newMode}.${newMode === 'interactive' ? scheduleNote : ''}`
       : '';
     const confirmNote = wasConfirmed
       ? ' Its first-run-confirm was reset — re-confirm before the next scheduled run.'

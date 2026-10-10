@@ -98,6 +98,7 @@ import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
 import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from '../core/data-dir-erase.js';
+import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -6667,8 +6668,8 @@ export class LynoxHTTPApi {
       // Backfill `mode` for legacy rows the same way getPipeline does, so the
       // library agrees with the schedule handler on cron-eligibility (otherwise a
       // legacy autonomous workflow with no stored mode hides its Schedule button).
-      const { inferPipelineMode } = await import('../orchestrator/human-in-the-loop.js');
-      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; confirmedAt?: string; capabilityContract?: unknown }> = [];
+      const { inferPipelineMode, stepsThatAsk } = await import('../orchestrator/human-in-the-loop.js');
+      const workflows: Array<{ id: string; name: string; description: string; step_count: number; steps: Array<{ id: string; task: string }>; parameters: Array<{ name: string; description: string; type: string }>; created_at: string; mode?: string; schedulable: boolean; askingSteps: string[]; confirmedAt?: string; capabilityContract?: unknown }> = [];
       for (const row of rows) {
         let parsed: { template?: unknown; name?: unknown; goal?: unknown; steps?: unknown; parameters?: unknown; mode?: unknown; confirmedAt?: unknown; capabilityContract?: unknown };
         try {
@@ -6700,6 +6701,11 @@ export class LynoxHTTPApi {
                   }]
                 : [])
           : [];
+        const mode = typeof parsed.mode === 'string'
+          ? parsed.mode
+          : (Array.isArray(parsed.steps) ? inferPipelineMode(parsed.steps as import('../types/index.js').InlinePipelineStep[]) : 'autonomous');
+        // Read off the full stored steps (their declared tools too), not the card's id + task.
+        const fullSteps = Array.isArray(parsed.steps) ? parsed.steps as import('../types/index.js').InlinePipelineStep[] : [];
         workflows.push({
           id: row.id,
           name: typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : row.manifest_name,
@@ -6710,9 +6716,12 @@ export class LynoxHTTPApi {
           created_at: row.started_at,
           // Slice B2: the consent surface needs these to decide cron-eligibility
           // (autonomous + confirmed) and to render the resolved capability-contract.
-          mode: typeof parsed.mode === 'string'
-            ? parsed.mode
-            : (Array.isArray(parsed.steps) ? inferPipelineMode(parsed.steps as import('../types/index.js').InlinePipelineStep[]) : 'autonomous'),
+          mode,
+          // The one predicate every planning surface asks (PRD 3b-2 §4.3), so the Schedule button
+          // and the routes behind it cannot disagree; and the steps that may ask, which the
+          // schedule's confirmation names.
+          schedulable: isSchedulableWorkflow({ mode: mode === 'interactive' || mode === 'autonomous' ? mode : undefined, steps: fullSteps }),
+          askingSteps: mode === 'interactive' ? stepsThatAsk(fullSteps) : [],
           ...(typeof parsed.confirmedAt === 'string' ? { confirmedAt: parsed.confirmedAt } : {}),
           ...(parsed.capabilityContract !== undefined ? { capabilityContract: parsed.capabilityContract } : {}),
         });
@@ -6778,17 +6787,26 @@ export class LynoxHTTPApi {
       // a not-found id falls through to runGuardedSavedWorkflow's 404.)
       const { getPipeline } = await import('../tools/builtin/pipeline.js');
       const plannedForRun = getPipeline(params['id']!, history);
+      // A workflow that asks its owner runs only on its schedule (PRD 3b-2 §4.3): this route has
+      // no question channel, so a run started here would reach a question step with nobody to ask.
+      // Refused before the confirmation check, because such a workflow is confirmed once it is
+      // scheduled and would otherwise pass it.
+      if (plannedForRun && plannedForRun.mode === 'interactive' && isSchedulableWorkflow(plannedForRun)) {
+        errorResponse(res, 403, 'This workflow asks questions while it runs, so it runs only on its schedule.');
+        return;
+      }
       if (plannedForRun && !plannedForRun.confirmedAt) {
-        // The remedy depends on the MODE, because only an autonomous workflow can
+        // The remedy depends on the MODE, because only a schedulable workflow can
         // reach the PRODUCT route the autonomous branch names: this same file's
-        // `POST /api/tasks` refuses a non-autonomous workflow, and the library
-        // renders its Schedule button under `mode === 'autonomous'`. (The agent
+        // `POST /api/tasks` refuses any other (`isSchedulableWorkflow`), and the
+        // library renders its Schedule button under the same predicate. A
+        // schedulable interactive one was answered above. (The agent
         // tool `task_create` puts any id on a cron without checking either — it
         // fails at fire time instead — so the honest claim is "cannot be
         // scheduled through the surface a person uses", not "cannot be
         // scheduled".) `executePipeline` in pipeline.ts branches the same way and
         // for the same reason; `WorkerLoop.executePipeline` does not need to,
-        // because its mode check is a standalone `!== 'autonomous'` throw.
+        // because its mode check is a standalone throw.
         // On `mode` being present: every producer sets it and the SQLite read
         // backfills it (`backfillPlannedPipelineDefaults`), but `getPipeline`'s
         // direct and prefix hits return the stored object untouched — so this is
@@ -6800,7 +6818,7 @@ export class LynoxHTTPApi {
           res,
           403,
           plannedForRun.mode === 'interactive'
-            ? 'This workflow uses ask_user / ask_secret, so it cannot run unattended — an unattended run has no one to answer it. Run it from a chat instead; scheduling is not offered for an interactive workflow.'
+            ? 'This workflow uses ask_secret or another way to ask for more than an answer, so it cannot run unattended — an unattended run has no one to give it. Run it from a chat instead; scheduling is not offered for it.'
             : 'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
         );
         return;
@@ -7089,7 +7107,7 @@ export class LynoxHTTPApi {
       const { getPipeline } = await import('../tools/builtin/pipeline.js');
       const planned = getPipeline(params['id']!, history);
       if (!planned || planned.template !== true) { errorResponse(res, 404, 'Workflow not found'); return; }
-      if (planned.mode !== 'autonomous') { errorResponse(res, 400, `Workflow "${planned.id}" is interactive and cannot be scheduled.`); return; }
+      if (!isSchedulableWorkflow(planned)) { errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled.`); return; }
       const prepared = prepareWorkflowGrant(planned, {
         method: b['method'], host: b['host'], paths: b['paths'], params: b['params'], cron: scheduleCron, afterUntrusted: b['afterUntrusted'],
       }, engineDb);
@@ -7200,8 +7218,8 @@ export class LynoxHTTPApi {
         const { getPipeline, forgetPipeline } = await import('../tools/builtin/pipeline.js');
         const planned = getPipeline(pipelineId, history);
         if (!planned || planned.template !== true) { errorResponse(res, 404, `Workflow "${pipelineId}" not found.`); return; }
-        if (planned.mode !== 'autonomous') {
-          errorResponse(res, 400, `Workflow "${planned.id}" is interactive and cannot be scheduled — convert it to autonomous first.`); return;
+        if (!isSchedulableWorkflow(planned)) {
+          errorResponse(res, 400, `Workflow "${planned.id}" asks for more than an answer from its owner and cannot be scheduled — remove its ask_secret / ask_human steps first.`); return;
         }
         // The acceptance of a write grant, after its preview. Closed with the feature switch
         // like the preview: this is where the contract is written, and without a vault key

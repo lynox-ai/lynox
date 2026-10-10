@@ -1634,6 +1634,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.schedule_cron_label': { de: 'Cron-Zeitplan', en: 'Cron schedule' },
 	'workflow_library.schedule_cron_hint': { de: 'Standard-Cron, z.B. „0 9 * * *“ = täglich um 9 Uhr.', en: 'Standard cron, e.g. "0 9 * * *" = every day at 9am.' },
 	'workflow_library.schedule_cron_required': { de: 'Bitte einen Cron-Zeitplan angeben.', en: 'Please enter a cron schedule.' },
+	'workflow_library.schedule_asks_title': { de: 'Diese Schritte können dir während des Laufs eine Frage stellen. Der Lauf wartet dann bis zu 24 Stunden auf deine Antwort. Kommt keine, endet er, bevor die nächsten Schritte laufen:', en: 'These steps may ask you a question while the workflow runs. The run then waits up to 24 hours for your answer. If none comes, it ends before the next steps run:' },
 	'workflow_library.schedule_contract_title': { de: 'Dieser Workflow darf folgende ausgehende Aktionen durchführen:', en: 'This workflow may perform these outbound actions:' },
 	'workflow_library.schedule_confirm': { de: 'Bestätigen & planen', en: 'Confirm & schedule' },
 	'workflow_library.scheduled': { de: 'Workflow geplant.', en: 'Workflow scheduled.' },

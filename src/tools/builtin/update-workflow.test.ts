@@ -167,6 +167,18 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     );
     expect(out).toContain('autonomous → interactive');
     expect(getPipeline('wf-1', history)!.mode).toBe('interactive');
+    // PRD 3b-2 §4.3: a step asking through ask_user keeps the workflow schedulable.
+    expect(out).toContain('a schedule still runs it');
+    expect(out).not.toContain('can no longer run on a cron');
+  });
+
+  it('says a schedule can no longer run it once an edit adds ask_secret', async () => {
+    history.insertPlannedPipeline(makePlanned());
+    const out = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'add_step', step_id: 'step-key', value: 'Use ask_secret to get the API key' }] },
+      makeAgent(history),
+    );
+    expect(out).toContain('can no longer run on a cron/schedule');
   });
 
   // === Destructive-edit guard (U5) ===

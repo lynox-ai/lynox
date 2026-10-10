@@ -51,6 +51,28 @@ export function asksOnlyViaAskUser(steps: InlinePipelineStep[]): boolean {
   return used.length > 0 && used.every((name) => name === 'ask_user');
 }
 
+/** The ids of the steps that may ask the owner through `ask_user` — what the schedule's
+ *  confirmation names (PRD 3b-2 §4.3). */
+export function stepsThatAsk(steps: InlinePipelineStep[]): string[] {
+  return steps.filter((s) => stepHumanInTheLoopTools(s).includes('ask_user')).map((s) => s.id);
+}
+
+/**
+ * Whether a schedule may run the workflow (PRD 3b-2 §4.3): an autonomous one, or an interactive
+ * one whose only question tool is `ask_user` — its questions go to the owner while it runs. Every
+ * planning surface asks this one predicate, so a workflow that may ask for a secret stays
+ * unschedulable everywhere at once. An unknown mode is not schedulable.
+ */
+export function isSchedulableWorkflow(planned: { mode?: PipelineMode | undefined; steps: InlinePipelineStep[] }): boolean {
+  return planned.mode === 'autonomous' || (planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps));
+}
+
+/** A saved workflow's mode and whether a schedule may run it — what the engine hands the task
+ *  manager's scheduling check. An unknown mode reads as interactive and unschedulable. */
+export function pipelineScheduleOf(planned: { mode?: PipelineMode | undefined; steps: InlinePipelineStep[] }): { mode: PipelineMode; schedulable: boolean } {
+  return { mode: planned.mode ?? 'interactive', schedulable: isSchedulableWorkflow(planned) };
+}
+
 export function inferPipelineMode(steps: InlinePipelineStep[]): PipelineMode {
   for (const step of steps) {
     if (stepUsesHumanInTheLoopTool(step)) return 'interactive';

@@ -720,9 +720,26 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     // matched /ask_user \/ ask_secret/, which the interactive guard's own message
     // also contains — so it passed whether this gate answered or that one did,
     // and a mutant dropping the `&& !parentPromptUser` conjunct survived it.
-    expect(result).toMatch(/no unattended run to confirm/);
+    // A workflow that asks only through ask_user has an unattended run (its schedule), just
+    // not this one (PRD 3b-2 §4.3): the message says where it does run.
+    expect(result).toMatch(/this run has no way to reach them/);
     expect(result).not.toMatch(/requires a live chat session/);
     expect(result).not.toMatch(/Schedule it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...and one that may ask for a secret still has no unattended run to confirm', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-secret-worker', {
+      id: 'interactive-secret-worker', name: 'asks', goal: 'key',
+      steps: [{ id: 'k', task: 'ask_secret for the key' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-secret-worker' }, agent);
+    expect(result).toMatch(/no unattended run to confirm/);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
