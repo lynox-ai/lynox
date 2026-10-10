@@ -23,7 +23,7 @@ import { rememberTool } from '../tools/builtin/knowledge.js';
  * through different objects, and a mocked route test can only check that a method was called,
  * not that the entry is gone.
  */
-describe('PATCH /api/threads/:id { skip_extraction: true } purges the thread from memory (real engine)', () => {
+describe('PATCH /api/threads/:id { skip_extraction: true } removes what is stored under the thread id (real engine)', () => {
   // Built at RUNTIME, never a literal: a key-shaped fixture string is what the commit-time
   // secret scan looks for, and this repo is public.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
@@ -138,9 +138,9 @@ describe('PATCH /api/threads/:id { skip_extraction: true } purges the thread fro
 
     expect(status).toBe(500);
     expect(body['skip_extraction']).toBe(true);
-    expect(String(body['error'])).toContain('could not all be removed');
+    expect(String(body['error'])).toContain('ran into an error');
     expect(body['failed']).toEqual(['durable knowledge: disk I/O error']);
-    // The flag itself is stored: future writes stay off whatever the purge did.
+    // The flag itself is stored: future capture stays off whatever the purge did.
     expect(ts.getThread('t-durable-fails')?.skip_extraction).toBe(1);
     // And the legacy half still ran — one failing store does not skip the other.
     expect(stores().kl.getDb().getMemoryIdsByThread('t-durable-fails')).toEqual([]);

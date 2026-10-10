@@ -4760,12 +4760,12 @@ export class LynoxHTTPApi {
         if (session) {
           session.setSkipMemoryExtraction(skipExtraction);
         }
-        // Private mode: remove what this thread already stored. It is usually switched on
+        // Private mode: remove what is stored under this thread's id. It is usually switched on
         // AFTER the sensitive part was said, so the retroactive half is the half that counts.
         //
         // What is tied to this thread by its id, in both stores, each attempted on its own:
         // the legacy memories (with their engine.db stubs) and the durable entries. A failure
-        // is not swallowed. The flag is already stored, so future writes stay off either way;
+        // is not swallowed. The flag is already stored, so future capture stays off either way;
         // what the answer must not do is say "done" when one of these removals failed. The
         // 500 carries the stored state, so the page does not show private mode as off when it is on.
         if (skipExtraction) {
@@ -4792,7 +4792,7 @@ export class LynoxHTTPApi {
           if (failed.length > 0) {
             process.stderr.write(`[lynox:private] Purge incomplete for thread ${id.slice(0, 8)}: ${failed.join('; ')}\n`);
             jsonResponse(res, 500, {
-              error: 'Private mode is on, but what this chat already stored in memory could not all be removed.',
+              error: 'Private mode is on, but removing what is stored under this chat ran into an error.',
               skip_extraction: true,
               failed: failed.map(f => maskForClient(f)),
             });

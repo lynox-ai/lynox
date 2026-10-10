@@ -1,7 +1,7 @@
 /**
  * What the page shows after a private-mode toggle the server did not answer with 2xx.
  *
- * Switching private mode ON also removes what the chat already stored in memory. When that
+ * Switching private mode ON also removes what is stored under the chat's id. When that
  * removal fails, the server has still stored the flag and answers 500 with
  * `skip_extraction: true` — so rolling the switch back would show private mode as OFF while
  * it is on, and the user would think the chat is being remembered when it is not, or the
