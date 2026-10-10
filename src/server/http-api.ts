@@ -4821,7 +4821,34 @@ export class LynoxHTTPApi {
       // ever reclaim this thread's own run.
       this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
-      threadStore.deleteThread(params['id']!);
+      // What was learned in this chat stays; its source is marked as a deleted chat instead
+      // of pointing at a transcript that is gone. Marked before the delete. Each store is
+      // marked on its own, and a failure in either answers 500 with the chat still there;
+      // deleting again marks what is left and deletes it, and a row marked the first time
+      // keeps that stamp. Private mode is the switch that removes what a chat stored.
+      const id = params['id']!;
+      const failed: string[] = [];
+      const knowledgeLayer = engine.getKnowledgeLayer();
+      if (knowledgeLayer) {
+        try { knowledgeLayer.markThreadDeleted(id); } catch (err: unknown) {
+          failed.push(`memories: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      const knowledgeStore = engine.getKnowledgeStore();
+      if (knowledgeStore) {
+        try { knowledgeStore.markThreadDeleted(id); } catch (err: unknown) {
+          failed.push(`durable knowledge: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (failed.length > 0) {
+        process.stderr.write(`[lynox:thread-delete] Not deleted, marking the source failed for thread ${id.slice(0, 8)}: ${failed.join('; ')}\n`);
+        jsonResponse(res, 500, {
+          error: 'The chat was not deleted: marking what was learned in it as coming from a deleted chat ran into an error.',
+          failed: failed.map(f => maskForClient(f)),
+        });
+        return;
+      }
+      threadStore.deleteThread(id);
       // Extended debug capture: drop the thread's captured wire_snapshots too (the
       // runs stay — they are the cost ledger). Without this the redacted-but-personal
       // snapshots outlive their deleted thread with no other prune path.

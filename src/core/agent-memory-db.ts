@@ -312,6 +312,12 @@ const MIGRATIONS: string[] = [
    ALTER TABLE memories ADD COLUMN source_channel TEXT;
    ALTER TABLE memories ADD COLUMN source_untrusted INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE memories ADD COLUMN embedding_model TEXT;`,
+
+  // v7: when the conversation a memory came from was deleted. Deleting a chat keeps what was
+  // learned in it; `source_thread_id` keeps the id, and this says the transcript behind it is
+  // gone. NULL means the chat still exists or the memory never had one. Mirrors engine.db v28.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
+   ALTER TABLE memories ADD COLUMN source_thread_deleted_at TEXT;`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -585,6 +591,17 @@ export class AgentMemoryDb {
     return (this.db.prepare(
       'SELECT id FROM memories WHERE source_thread_id = ?',
     ).all(threadId) as Array<{ id: string }>).map(r => r.id);
+  }
+
+  /**
+   * Mark every memory written in one conversation as coming from a chat that was deleted.
+   * The memories stay and keep their `source_thread_id`; this stamps when the transcript
+   * behind it went. An already-marked memory keeps its first stamp. Returns how many it marked.
+   */
+  markThreadDeleted(threadId: string): number {
+    return this.db.prepare(
+      "UPDATE memories SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ? AND source_thread_deleted_at IS NULL",
+    ).run(threadId).changes;
   }
 
   /**
