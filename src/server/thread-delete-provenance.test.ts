@@ -44,9 +44,17 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     return { ts, ks, kl };
   }
 
+  /** The stores' own connections, for reading the legacy column and planting an earlier stamp. */
+  function legacyDb(): Database.Database {
+    return (stores().kl.getDb() as unknown as { db: Database.Database }).db;
+  }
+  function durableDb(): Database.Database {
+    return (stores().ks as unknown as { db: Database.Database }).db;
+  }
+
   /** The legacy row's marker. Read off the table: no store method returns this column. */
   function legacyMarker(memoryId: string): string | null | undefined {
-    const raw = (stores().kl.getDb() as unknown as { db: Database.Database }).db;
+    const raw = legacyDb();
     const row = raw.prepare('SELECT source_thread_deleted_at AS at FROM memories WHERE id = ?').get(memoryId) as { at: string | null } | undefined;
     return row === undefined ? undefined : row.at;
   }
@@ -136,7 +144,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(legacyMarker(kept.legacy)).toBeNull();
   });
 
-  it('a failed marking answers 500 and leaves the chat in place; deleting again finishes', async () => {
+  it('a failed durable marking answers 500 and leaves the chat; the retry marks the rest and keeps the first stamp', async () => {
     const { ts, ks } = stores();
     const seeded = seedThread('t-mark-fails');
     vi.spyOn(ks, 'markThreadDeleted').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
@@ -146,25 +154,41 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(first.status).toBe(500);
     expect(first.body['failed']).toEqual([expect.stringContaining('durable knowledge')]);
     expect(ts.getThread('t-mark-fails')).toBeDefined();
-    expect(ks.getEntry(seeded.durable[0]!)?.sourceThreadDeletedAt).toBeNull();
+    // Each store is marked on its own: the legacy half went through, the durable half did not.
+    expect(legacyMarker(seeded.legacy)).not.toBeNull();
+    for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBeNull();
+    // An earlier stamp the retry must not move.
+    const FIRST = '2000-01-01 00:00:00';
+    legacyDb().prepare('UPDATE memories SET source_thread_deleted_at = ? WHERE id = ?').run(FIRST, seeded.legacy);
 
     const second = await deleteChat('t-mark-fails');
 
     expect(second.status).toBe(200);
     expect(ts.getThread('t-mark-fails')).toBeUndefined();
-    for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).not.toBeNull();
-    expect(legacyMarker(seeded.legacy)).not.toBeNull();
+    for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).toMatch(/^\d{4}-/);
+    expect(legacyMarker(seeded.legacy)).toBe(FIRST);
   });
 
-  it('a failed legacy marking answers 500 too, and leaves the chat in place', async () => {
-    const { ts, kl } = stores();
-    seedThread('t-legacy-fails');
+  it('a failed legacy marking answers 500 and leaves the chat; the retry keeps the durable first stamp', async () => {
+    const { ts, ks, kl } = stores();
+    const seeded = seedThread('t-legacy-fails');
     vi.spyOn(kl, 'markThreadDeleted').mockImplementationOnce(() => { throw new Error('database is locked'); });
 
-    const { status, body } = await deleteChat('t-legacy-fails');
+    const first = await deleteChat('t-legacy-fails');
 
-    expect(status).toBe(500);
-    expect(body['failed']).toEqual([expect.stringContaining('memories')]);
+    expect(first.status).toBe(500);
+    expect(first.body['failed']).toEqual([expect.stringContaining('memories')]);
     expect(ts.getThread('t-legacy-fails')).toBeDefined();
+    expect(legacyMarker(seeded.legacy)).toBeNull();
+    for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).not.toBeNull();
+    const FIRST = '2000-01-01 00:00:00';
+    durableDb().prepare('UPDATE knowledge_entries SET source_thread_deleted_at = ? WHERE source_thread_id = ?').run(FIRST, 't-legacy-fails');
+
+    const second = await deleteChat('t-legacy-fails');
+
+    expect(second.status).toBe(200);
+    expect(ts.getThread('t-legacy-fails')).toBeUndefined();
+    expect(legacyMarker(seeded.legacy)).toMatch(/^\d{4}-/);
+    for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBe(FIRST);
   });
 });

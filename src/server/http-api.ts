@@ -4822,9 +4822,10 @@ export class LynoxHTTPApi {
       this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       // What was learned in this chat stays; its source is marked as a deleted chat instead
-      // of pointing at a transcript that is gone. Marked before the delete, and a failure
-      // answers 500 with the chat still there: the marking is idempotent, so deleting again
-      // finishes it. Private mode is the switch that removes what a chat stored.
+      // of pointing at a transcript that is gone. Marked before the delete. Each store is
+      // marked on its own, and a failure in either answers 500 with the chat still there;
+      // deleting again marks what is left and deletes it, and a row marked the first time
+      // keeps that stamp. Private mode is the switch that removes what a chat stored.
       const id = params['id']!;
       const failed: string[] = [];
       const knowledgeLayer = engine.getKnowledgeLayer();

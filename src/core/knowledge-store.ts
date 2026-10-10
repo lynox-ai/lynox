@@ -1192,12 +1192,13 @@ export class KnowledgeStore {
    * Deleting a chat keeps what was learned in it; only private mode removes it
    * ({@link deleteByThread}). The entries keep their `source_thread_id`, and this stamps when
    * the transcript behind it went, so a reader can tell "chat deleted" from "chat exists" and
-   * from "never had one" (NULL id). Every status, like {@link deleteByThread}. Returns how many
-   * entries it marked.
+   * from "never had one" (NULL id). Every status, like {@link deleteByThread}. An entry already
+   * marked keeps its first stamp, so a retry or a second delete of the same id does not move it.
+   * Returns how many entries it marked.
    */
   markThreadDeleted(threadId: string): number {
     return this.db.prepare(
-      "UPDATE knowledge_entries SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ?",
+      "UPDATE knowledge_entries SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ? AND source_thread_deleted_at IS NULL",
     ).run(threadId).changes;
   }
 

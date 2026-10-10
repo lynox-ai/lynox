@@ -596,11 +596,11 @@ export class AgentMemoryDb {
   /**
    * Mark every memory written in one conversation as coming from a chat that was deleted.
    * The memories stay and keep their `source_thread_id`; this stamps when the transcript
-   * behind it went. Returns how many it marked.
+   * behind it went. An already-marked memory keeps its first stamp. Returns how many it marked.
    */
   markThreadDeleted(threadId: string): number {
     return this.db.prepare(
-      "UPDATE memories SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ?",
+      "UPDATE memories SET source_thread_deleted_at = datetime('now') WHERE source_thread_id = ? AND source_thread_deleted_at IS NULL",
     ).run(threadId).changes;
   }
 
