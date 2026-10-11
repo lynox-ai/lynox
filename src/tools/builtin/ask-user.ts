@@ -47,7 +47,7 @@ const DISMISSED_RESULT =
   'This question got no answer: the user closed it, it expired, or it could not be asked. Do not act on any of the options '
   + `or on an assumed answer. ${AFTER_NO_ANSWER}`;
 /** One question of a batch that got no answer; the batch result ends with the instruction once. */
-const DISMISSED_IN_BATCH = '(no answer)';
+export const DISMISSED_IN_BATCH = '(no answer)';
 const DISMISSED_BATCH_NOTE =
   'The questions marked "(no answer)" got no answer. Do not act on an '
   + `assumed answer to those. ${AFTER_NO_ANSWER}`;

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { InputRequiredError } from '../../core/input-required.js';
-import { askUserTool } from './ask-user.js';
+import { readFileSync } from 'node:fs';
+import { askUserTool, DISMISSED_IN_BATCH } from './ask-user.js';
 import type { IAgent } from '../../types/index.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isPromptText, promptSegments } from '../../core/prompt-value.js';
@@ -76,7 +77,7 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
  *  says not to act on an assumed answer. */
 function expectClosedResult(result: string): void {
   expect(result).not.toContain('__dismissed__');
-  expect(result).toMatch(/This question got no answer/);
+  expect(result).toMatch(/This question got no answer: the user closed it, it expired, or it could not be asked\./);
   expect(result).toMatch(/Do not act on any of the options/);
   // A choice between asking and waiting, never an order to ask again (a flow may say move on).
   expect(result).toMatch(/Ask briefly what they want, or wait for their next message\./);
@@ -119,6 +120,7 @@ describe('askUserTool', () => {
       const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
       expect(result.split('\n').slice(0, 2)).toEqual(['First?: (no answer)', 'Second?: B']);
       expect(result).toMatch(/Do not act on an assumed answer/);
+      expect(result).toMatch(/Ask briefly what they want, or wait for their next message\./);
       expect(result).not.toContain('__dismissed__');
     });
 
@@ -447,5 +449,17 @@ describe('askUserTool', () => {
     await expect(
       askUserTool.handler({} as Parameters<typeof askUserTool.handler>[0], agent),
     ).rejects.toThrow(/provide either `question`.*or a non-empty `questions`/);
+  });
+});
+
+// The onboarding prompt tells the model what to do with skipped questions by naming how a
+// skipped one reads in the batch result. If the two drift apart, the rule never applies.
+describe('the onboarding prompt names the batch marker the model sees', () => {
+  it('quotes the marker in its "do not re-ask" rule, not the internal value', () => {
+    const view = readFileSync(new URL('../../../packages/web-ui/src/lib/components/ChatView.svelte', import.meta.url), 'utf8');
+    const rule = view.split('\n').find((line) => line.includes('do NOT re-ask'));
+    expect(rule).toBeDefined();
+    expect(rule).toContain(`"${DISMISSED_IN_BATCH}"`);
+    expect(rule).not.toContain('__dismissed__');
   });
 });

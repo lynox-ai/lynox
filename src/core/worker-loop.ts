@@ -1768,8 +1768,8 @@ export class WorkerLoop {
     // §0 A7 — did every question this run asked actually get an answer?
     //
     // `DISMISSED_ANSWER` is a RETURN VALUE, not an exception: an unanswered
-    // question hands the agent the string `'__dismissed__'` and it carries on
-    // reasoning as if that were a reply. Whatever it then produces was built on
+    // question hands the agent a result instead of a reply, and it carries on
+    // reasoning from there. Whatever it then produces was built on
     // an answer nobody gave, and reporting that as `success` is the failure this
     // whole arc started from — a trigger that says it did its job after asking
     // something and hearing nothing.

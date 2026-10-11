@@ -95,6 +95,8 @@ describe('planTaskTool', () => {
     expect(result).not.toContain('__dismissed__');
     expect(parsed.feedback).toMatch(/The plan got no answer/);
     expect(parsed.feedback).toMatch(/do not carry out the plan or any part of it/);
+    expect(parsed.feedback).toMatch(/it expired, or it could not be asked/);
+    expect(parsed.feedback).toMatch(/Ask briefly what they want, or wait for their next message\./);
   });
 
   it('should return rejected on Cancel', async () => {
