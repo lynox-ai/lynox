@@ -152,6 +152,7 @@
 							<option value={v.id}>{v.id}{v.language ? ' (' + v.language + ')' : ''}</option>
 						{/each}
 					</select>
+					<span class="block text-xs text-text-muted mt-1">{t('voice.tts_voice_hint')}</span>
 				</label>
 			{/if}
 		</section>

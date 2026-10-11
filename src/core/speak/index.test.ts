@@ -360,6 +360,18 @@ describe('the voice is resolved from the requested language, at ONE decision poi
     expect(list).not.toHaveBeenCalled();
   });
 
+  it('a chosen voice wins even where the catalogue has a voice for the language', async () => {
+    // The test above has an empty catalogue, so it cannot tell "the chosen voice wins" from
+    // "nothing else matched". Here a French voice exists and the chosen English one is read.
+    vi.spyOn(facade.mistralVoxtralTtsProvider, 'listVoices')
+      .mockResolvedValue([{ id: 'fr_aa', language: 'fr' }]);
+    const { voiceOf } = captureVoice();
+
+    await facade.speak('bonjour', { voice: 'en_chosen_voice', voiceLanguage: 'fr' });
+
+    expect(voiceOf()).toBe('en_chosen_voice');
+  });
+
   it('an EMPTY voice is not a decision — it must not suppress selection', async () => {
     // `voice: ''` used to pass `opts.voice !== undefined` and both skip the catalogue and
     // reach the provider, because `?? DEFAULT_VOICE` keeps an empty string. Unreachable
