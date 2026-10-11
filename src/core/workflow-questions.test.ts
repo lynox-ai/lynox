@@ -218,17 +218,32 @@ describe('how the wait ends (§4.5)', () => {
     expect(h.scopeMember.abort).not.toHaveBeenCalled();
   });
 
-  it('a question the store refuses ends the run unanswered, and leaves no message in the thread', async () => {
-    // The owner's own chat in the run's thread holds the session's one open slot.
+  it('a question the store refuses fails the step, marks nothing, and leaves no message in the thread', async () => {
+    // The owner's own chat in the run's thread holds the session's one open slot. Nobody waited,
+    // so the run is not one whose question went unanswered.
     const h = makeHarness();
     h.prompts.insertAskUser(RUN_ID, 'A question of the owner\'s own chat');
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      await expect(h.q.ask('Which list?')).resolves.toBe('__dismissed__');
+      await expect(h.q.ask('Which list?')).rejects.toThrow('could not be put to the owner');
     } finally { write.mockRestore(); }
-    expect(h.q.unanswered).toBe(true);
-    expect(h.scopeMember.abort).toHaveBeenCalledTimes(1);
+    expect(h.q.unanswered).toBe(false);
+    expect(h.scopeMember.abort).not.toHaveBeenCalled();
     expect(h.threads.getMessages(RUN_ID)).toEqual([]);
+    expect(h.notified).toHaveLength(0);
+  });
+
+  it('a database closed before the question is stored is the teardown: no answer, nothing marked', async () => {
+    const h = makeHarness();
+    h.history.close();
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let answer: Promise<string>;
+    try {
+      answer = h.q.ask('After the close?');
+      expect(await stillPending(answer.catch((err: unknown) => `REJECTED ${String(err)}`))).toBe(true);
+    } finally { write.mockRestore(); }
+    expect(h.q.unanswered).toBe(false);
+    expect(h.scopeMember.abort).not.toHaveBeenCalled();
     expect(h.notified).toHaveLength(0);
   });
 

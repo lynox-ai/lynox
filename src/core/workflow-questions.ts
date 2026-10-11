@@ -122,11 +122,14 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
         handRun: deps.handRun,
       });
     } catch (err: unknown) {
-      // The question could not be put to the owner — e.g. a question of the owner's own chat
-      // in the run's thread holds the session's one open slot. Not an answer: carrying on would
-      // let the step act on a guess, so the run ends as one whose question went unanswered.
+      // A database the engine already closed is the teardown, as after the wait.
+      if (!store.isOpen()) return neverSettles();
+      // Otherwise the question could not be put to the owner — e.g. a question of the owner's
+      // own chat in the run's thread holds the session's one open slot. Nobody waited, so this
+      // is not an unanswered question: the step's call fails, as it does when the prompt budget
+      // is spent, and nothing reaches the thread.
       process.stderr.write(`[lynox:worker] asking a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      return this.#endUnanswered();
+      throw new Error('The question could not be put to the owner, so there is no answer. Do not guess one.');
     }
     // Written only once the question exists, so the thread never shows one nobody can answer.
     this.#writeToThread(offBoxText);
