@@ -1917,7 +1917,8 @@ export class WorkerLoop {
         // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
         // `promptId` rides along so a client can settle this exact row.
         data: { threadId: session.sessionId, promptId },
-        inquiry: { question: offBoxQuestion, options: inquiryOptions(options) },
+        // The options leave the box too (the mail channel lists them), so they are masked like the body.
+        inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       });
       try {
         const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
