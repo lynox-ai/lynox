@@ -104,7 +104,7 @@ function multipartNamesMethod(body: string): boolean {
  * and as a form. A value from a parser the Content-Type names is `declared`, and one that is not
  * a method is refused like any other override; a value only the other parser finds counts when
  * it is a method. The form reading is left out only for a body declared as JSON alone that parses
- * as a JSON object: no server reads that as a form. `unreadable` is set when a server may read an
+ * as JSON: no server reads that as a form. `unreadable` is set when a server may read an
  * override this module cannot: a body that looks like JSON (by its type or its first character),
  * does not parse and holds a `"_method":` key, or a multipart body with a part named `_method`.
  * The caller gates such a request as the strongest method.
@@ -115,10 +115,8 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
     .map(([, value]) => value).join(', ').toLowerCase();
   if (contentType.includes('multipart/')) return { declared: [], other: [], unreadable: multipartNamesMethod(body) };
   let json: string[] | null;
-  let jsonObject = false;
   try {
     const parsed: unknown = JSON.parse(body);
-    jsonObject = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
     json = parsed === null || typeof parsed !== 'object'
       ? []
       : Object.entries(parsed)
@@ -129,7 +127,7 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
   }
   const jsonDeclared = contentType.includes('json');
   const formDeclared = contentType.includes('application/x-www-form-urlencoded');
-  const form = jsonDeclared && !formDeclared && jsonObject
+  const form = jsonDeclared && !formDeclared && json !== null
     ? []
     : [...new URLSearchParams(body)].filter(([name]) => formFieldName(name) === '_method').map(([, value]) => value);
   const looksJson = jsonDeclared || /^\s*[[{"]/.test(body);

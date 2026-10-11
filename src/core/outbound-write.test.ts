@@ -70,6 +70,8 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     ['NDJSON lines that hold a method value', { 'Content-Type': 'application/x-ndjson' }, '{"http.request.method":"DELETE"}\n{"b":1}', 'POST'],
     ['text in quotes that mentions the word', { 'Content-Type': 'text/plain' }, '"Quote" about the scientific method', 'POST'],
     ['JSON object whose string holds a form override', JSON_T, '{"note":"a&_method=DELETE&b"}', 'POST'],
+    ['JSON array whose string holds a form override', JSON_T, '["a&_method=DELETE&b"]', 'POST'],
+    ['form type first, then JSON: the form reading counts', { 'Content-Type': 'application/x-www-form-urlencoded; v=/json' }, '{"note":"a&_method=DELETE&b"}', 'DELETE'],
   ] as const)('%s', (_k, headers, body, want) => {
     expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
   });
