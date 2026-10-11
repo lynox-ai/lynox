@@ -741,6 +741,17 @@ describe('expireUnparked — the reason a restart leaves on the question', () =>
     expect(store.getById(parked)).toMatchObject({ status: 'pending', closed_reason: null });
   });
 
+  it('a question whose TTL ran out before the sweep is closed without the restart reason', () => {
+    // The boot sweep runs before the first TTL sweep: a question that timed out during the
+    // downtime expired, and an answer to it must not hear that the engine restarted.
+    const lapsed = store.insertAskUser('s-lapsed', 'q');
+    db.prepare("UPDATE pending_prompts SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 3_000).toISOString(), lapsed);
+    const live = store.insertAskUser('s-live', 'q');
+    expect(store.expireUnparked()).toBe(2);
+    expect(store.getById(lapsed)).toMatchObject({ status: 'expired', closed_reason: null });
+    expect(store.getById(live)).toMatchObject({ status: 'expired', closed_reason: 'process_restarted' });
+  });
+
   it('a question closed on its own clock, or withdrawn, carries no reason', () => {
     const timedOut = store.insertAskUser('s-ttl', 'q');
     db.prepare("UPDATE pending_prompts SET expires_at = ? WHERE id = ?").run(new Date(Date.now() - 3_000).toISOString(), timedOut);

@@ -66,6 +66,9 @@ describe('the Run-now refusal reaches its owner', () => {
     const branch = ROUTE.slice(start, ROUTE.indexOf('return;', start));
     const answers = [...branch.matchAll(/errorResponse\(res, 409, (?:'[^']*'|`[^`]*`)(?:, ([^,)]+))?/g)];
     expect(answers.length, 'the branch still answers with a 409').toBeGreaterThan(0);
+    // Every answer in the branch has to be one the pattern read: a form it cannot match (a
+    // message in a variable, an apostrophe in a quoted one) would otherwise pass unchecked.
+    expect(answers.length, 'an errorResponse in the branch has a form this check cannot read').toBe(branch.split('errorResponse(').length - 1);
     for (const m of answers) expect(m[1] === undefined || m[1].trim() === 'undefined', `a 409 in the already-running branch stamps a code: ${m[0]}`).toBe(true);
   });
 });

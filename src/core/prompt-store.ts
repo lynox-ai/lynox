@@ -897,7 +897,10 @@ export class PromptStore {
   private _getExpireUnparkedStmt(): Database.Statement {
     return (this._stmtExpireUnparked ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET status = 'expired', closed_reason = 'process_restarted'
+      SET status = 'expired',
+          -- A question whose own TTL already ran out (during downtime, or in the minutes before
+          -- the TTL sweep's next tick) expired; the restart is not why it is closed.
+          closed_reason = CASE WHEN ${NOT_EXPIRED} THEN 'process_restarted' ELSE NULL END
       WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }
