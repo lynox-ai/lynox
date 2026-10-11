@@ -134,6 +134,7 @@ describe('which tool calls write outside the instance (ToolEntry.outwardWrite)',
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'POST' })).toBe('POST');
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } })).toBe('DELETE');
     expect(label('http_request', { url: 'https://a.example.invalid/?_method=PUT', method: 'GET' })).toBe('PUT');
+    expect(label('http_request', { url: 'https://a.example.invalid/', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"DELETE"}' }), 'a body field').toBe('DELETE');
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'GET', headers: { 'X-HTTP-Method-Override': 'BREW' } }), 'an override that is not a method counts as a write').toBe('OVERRIDE');
   });
 });

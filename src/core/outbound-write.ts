@@ -40,19 +40,68 @@ const KNOWN_METHODS = new Set([
   'MERGE', 'MKACTIVITY', 'CHECKOUT', 'PURGE', 'LINK', 'UNLINK', 'NOTIFY', 'SUBSCRIBE', 'UNSUBSCRIBE', 'M-SEARCH',
 ]);
 
+/** A value no override may hold: a `_method` field in a JSON body that is not a string. */
+const NOT_A_METHOD = '\0';
+
+/**
+ * A `_method` spelled so that a server's parser may read it: plain, percent-encoded, or as a
+ * JSON escape. Only consulted for a body this module does not parse.
+ */
+const MENTIONS_METHOD_FIELD = /(?:_|%5f|\\u005f)method/i;
+
+/**
+ * The `_method` fields of a request body, as a server that parses the body may read them
+ * (Rack's MethodOverride and Laravel read the form or the JSON body; Express's method-override
+ * reads whatever its body parser produced). Only top-level fields count: a server reads the
+ * override from the top level, and a field of that name inside a nested object, or a form key
+ * such as `data[_method]`, is ordinary data.
+ *
+ * Which parser applies is read from the Content-Type. A form or JSON body is parsed; without a
+ * declared type, or with another one, the body is read both ways. `unreadable` is set when the
+ * body mentions `_method` and cannot be parsed here — multipart, or JSON that does not parse —
+ * and the caller then gates the request as the strongest method rather than as what it says.
+ */
+function bodyOverrides(body: string, headers: Record<string, string>): { values: string[]; unreadable: boolean } {
+  const contentType = Object.entries(headers).find(([name]) => name.trim().toLowerCase() === 'content-type')?.[1] ?? '';
+  const media = contentType.split(';')[0]!.trim().toLowerCase();
+  const fromForm = (): string[] =>
+    [...new URLSearchParams(body)].filter(([name]) => name.toLowerCase() === '_method').map(([, value]) => value);
+  const fromJson = (): string[] | null => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.entries(parsed)
+      .filter(([name]) => name.toLowerCase() === '_method')
+      .map(([, value]) => (typeof value === 'string' ? value : NOT_A_METHOD));
+  };
+  if (media === 'application/x-www-form-urlencoded') return { values: fromForm(), unreadable: false };
+  if (media === 'application/json' || media.endsWith('+json')) {
+    const values = fromJson();
+    return values === null ? { values: [], unreadable: MENTIONS_METHOD_FIELD.test(body) } : { values, unreadable: false };
+  }
+  if (media.startsWith('multipart/')) return { values: [], unreadable: MENTIONS_METHOD_FIELD.test(body) };
+  return { values: [...(fromJson() ?? []), ...fromForm()], unreadable: false };
+}
+
 /**
  * The method a write is gated as. Every override form the request carries is read — the
- * three header names and a `_method` query parameter — and the strongest one wins over the
- * method when it is at least as strong: POST with an override DELETE is a DELETE, POST with
- * an override PATCH is asked as a PATCH, and POST with an override GET stays a POST. A server
- * that ignores the override loses nothing by this; one that honours it is gated on what it does.
+ * three header names, a `_method` query parameter and a top-level `_method` field of the body —
+ * and the strongest one wins over the method when it is at least as strong: POST with an
+ * override DELETE is a DELETE, POST with an override PATCH is asked as a PATCH, and POST with an
+ * override GET stays a POST. A server that ignores the override loses nothing by this; one that
+ * honours it is gated on what it does. A body that mentions `_method` and cannot be parsed here
+ * is gated as a DELETE: what a server reads from it is not known.
  *
  * `null` when an override carries something that is not a method token: the value would
  * otherwise reach the question, the refusals and the approval key verbatim (any words, or a
  * resolved secret in upper case, which no exact-match mask finds). The caller refuses the
  * request without naming the value.
  */
-export function effectiveWriteMethod(method: string, headers: Record<string, string>, url: string): string | null {
+export function effectiveWriteMethod(method: string, headers: Record<string, string>, url: string, body?: string): string | null {
   let effective = method.trim().toUpperCase();
   // The schema offers six methods, but nothing below may rely on the model having kept to it.
   if (!KNOWN_METHODS.has(effective)) return null;
@@ -65,6 +114,11 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
       if (name.toLowerCase() === '_method') candidates.push(value);
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
+  if (body !== undefined && body !== '') {
+    const fromBody = bodyOverrides(body, headers);
+    candidates.push(...fromBody.values);
+    if (fromBody.unreadable) candidates.push('DELETE');
+  }
   for (const raw of candidates) {
     const m = raw.trim().toUpperCase();
     if (m === '') continue;

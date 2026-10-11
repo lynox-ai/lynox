@@ -23,6 +23,40 @@ describe('effectiveWriteMethod', () => {
   });
 });
 
+describe('effectiveWriteMethod reads a top-level `_method` field of the body', () => {
+  const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  const JSON_T = { 'content-type': 'application/json; charset=utf-8' };
+  const MULTI = { 'Content-Type': 'multipart/form-data; boundary=b' };
+  it.each([
+    ['form field', FORM, 'name=a&_method=DELETE', 'DELETE'],
+    ['form field, percent-encoded name', FORM, '%5Fmethod=delete', 'DELETE'],
+    ['form field asking for less', FORM, '_method=GET', 'POST'],
+    ['form key nested in brackets', FORM, 'data[_method]=DELETE', 'POST'],
+    ['form value that mentions it', FORM, 'note=_method%3DDELETE', 'POST'],
+    ['JSON field', JSON_T, '{"_method":"PATCH"}', 'PATCH'],
+    ['JSON field, escaped name', JSON_T, '{"_\\u006dethod":"DELETE"}', 'DELETE'],
+    ['JSON field nested', JSON_T, '{"item":{"_method":"DELETE"}}', 'POST'],
+    ['JSON array at the top', JSON_T, '[{"_method":"DELETE"}]', 'POST'],
+    ['JSON +json media type', { 'Content-Type': 'application/vnd.api+json' }, '{"_method":"DELETE"}', 'DELETE'],
+    ['JSON that does not parse and mentions it', JSON_T, '{"_method":"DELETE",', 'DELETE'],
+    ['JSON that does not parse and does not mention it', JSON_T, '{"a":1,', 'POST'],
+    ['multipart that mentions it', MULTI, '--b\r\nContent-Disposition: form-data; name="_method"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart that does not', MULTI, '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nx\r\n--b--', 'POST'],
+    ['no type, JSON body', {}, '{"_method":"DELETE"}', 'DELETE'],
+    ['no type, form body', {}, '_method=DELETE', 'DELETE'],
+    ['no type, text that mentions it', {}, 'set _method to DELETE', 'POST'],
+    ['empty body', JSON_T, '', 'POST'],
+  ] as const)('%s', (_k, headers, body, want) => {
+    expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
+  });
+
+  it('refuses a body override that is not a method, a string or not', () => {
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, '{"_method":5}')).toBeNull();
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, '{"_method":"Looks safe"}')).toBeNull();
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/x-www-form-urlencoded' }, U, '_method=my-secret-value')).toBeNull();
+  });
+});
+
 describe('retargetingHeader', () => {
   it('finds each header a server or proxy routes on, whatever its case, and no other', () => {
     for (const name of ['HoSt', 'X-Host', 'x-forwarded-host', 'Forwarded', 'X-Original-URL', 'x-rewrite-url']) {

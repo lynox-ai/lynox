@@ -1370,6 +1370,14 @@ describe('isDangerous', () => {
         .toContain('HTTP DELETE [BLOCKED');
     });
 
+    it('BLOCKS a POST whose top-level body field `_method` says DELETE, as a DELETE; a nested one is not', () => {
+      const url = 'https://api.example.com/item/1';
+      expect(isDangerous('http_request', { method: 'POST', url, headers: { 'Content-Type': 'application/json' }, body: '{"_method":"DELETE"}' }, 'autonomous'))
+        .toContain('HTTP DELETE [BLOCKED');
+      expect(isDangerous('http_request', { method: 'POST', url, headers: { 'Content-Type': 'application/json' }, body: '{"item":{"_method":"DELETE"}}' }, 'autonomous'))
+        .not.toContain('DELETE');
+    });
+
     it('ALLOWS http_request GET in autonomous mode', () => {
       const result = isDangerous('http_request', { method: 'GET', url: 'https://api.example.com/data' }, 'autonomous');
       expect(result).toBeNull();
