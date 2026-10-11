@@ -10603,8 +10603,14 @@ export class LynoxHTTPApi {
           memoryData[ns] = await memory.load(ns);
         }
         exportData['memory'] = memoryData;
+        // Every scope, not only the current one: `memory` above is the current scope and stays
+        // for compatibility, but `memory_store` and the extraction also write into user and
+        // context scopes, and an Art. 15 answer that shows one directory of several looks
+        // complete while it is not.
+        exportData['memory_scopes'] = await memory.exportAllScopes();
       } else {
         exportData['memory'] = {};
+        exportData['memory_scopes'] = {};
       }
 
       // Knowledge graph (entities + relations)

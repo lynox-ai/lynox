@@ -387,6 +387,41 @@ export class Memory implements IMemory {
     this.cache.clear();
   }
 
+  /**
+   * Every scope's memory as it lies on disk, keyed by scope directory and then by file name
+   * without `.txt` — what an Art. 15 export owes. Scopes are separate directories
+   * (`global`, `<contextId>`, `user-<id>`), and `memory_store` and the extraction write into
+   * any of them, so reading only the default scope answered for one directory of many.
+   * Listed from the directory rather than from the scopes this process knows: a scope written
+   * by an earlier run, or from another context, is still held. A scope with no content is left
+   * out. With flat files off nothing is stored, and the answer is empty.
+   */
+  async exportAllScopes(): Promise<Record<string, Record<string, string>>> {
+    const out: Record<string, Record<string, string>> = {};
+    let dirs: string[];
+    try {
+      dirs = (await fs.readdir(this.baseDir, { withFileTypes: true })).filter(d => d.isDirectory()).map(d => d.name).sort();
+    } catch {
+      return out;
+    }
+    for (const dir of dirs) {
+      let files: string[];
+      try {
+        files = (await fs.readdir(path.join(this.baseDir, dir), { withFileTypes: true }))
+          .filter(f => f.isFile() && f.name.endsWith('.txt')).map(f => f.name).sort();
+      } catch {
+        continue;
+      }
+      const scope: Record<string, string> = {};
+      for (const file of files) {
+        const content = await fs.readFile(path.join(this.baseDir, dir, file), 'utf-8').catch(() => '');
+        if (content !== '') scope[file.slice(0, -'.txt'.length)] = content;
+      }
+      if (Object.keys(scope).length > 0) out[dir] = scope;
+    }
+    return out;
+  }
+
   // === Scope-aware methods ===
 
   private _scopeDir(scope: MemoryScopeRef): string {
