@@ -3223,6 +3223,17 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('a promptId of another kind of question is a 409 and leaves it open', async () => {
+      await withStore(async (sid, ps) => {
+        const secret = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'connected', promptId: secret }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(secret)?.status).toBe('pending');
+      });
+    });
+
     it('a named question that expired is a 410 and leaves the newer open one alone', async () => {
       await withStore(async (sid, ps) => {
         const old = ps.insertConnectMail(sid, 'q', payload);

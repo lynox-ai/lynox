@@ -1844,8 +1844,8 @@ export class LynoxHTTPApi {
    * exactly one question: when it is given, only that question is settled, and one that is
    * unknown, belongs to another session, is of another kind or is no longer open is reported
    * as such. It is never replaced by whatever question the session has open now, which may be
-   * a newer one the client has not seen. Only a body without a promptId settles the session's
-   * open question of that kind.
+   * a newer one the client has not seen. Only a body without a promptId (or with an empty one)
+   * settles the session's open question of that kind.
    */
   private _settleNamedPrompt(
     res: ServerResponse,
