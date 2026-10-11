@@ -75,8 +75,8 @@ export interface DataDirEntry {
    * The entry holds a credential, a key, or content the agent must not read around its own
    * tools (the vault, a private key, conversation history, an unredacted capture). REQUIRED,
    * so a new entry cannot land without the decision: the bash guard's secret-file rule
-   * (`LYNOX_SECRET_FILES` in `tools/permission-guard.ts`) is derived from it. It used to be a
-   * hand-kept name list, and the push key `vapid-keys.json` sat outside it.
+   * (`LYNOX_SECRET_FILES` in `tools/permission-guard.ts`) is built from it together with the
+   * older hand-kept names. The hand-kept list alone missed the push key `vapid-keys.json`.
    */
   readonly secret: boolean;
 }
