@@ -15,6 +15,9 @@ const { appendBoundedJsonl, quiesceBoundedJsonl, isBoundedJsonlQuiesced } = awai
 describe('quiesceBoundedJsonl with a hung write', () => {
   it('stops waiting after the bound and keeps the hold', async () => {
     void appendBoundedJsonl('hung-sink.jsonl', { seq: 1 });
+    // Let the write get past its check and into the hung call; a hold taken earlier would
+    // simply drop it, and the bound would never be needed.
+    await new Promise((r) => setTimeout(r, 20));
     const started = Date.now();
     const resume = await quiesceBoundedJsonl(50);
     expect(Date.now() - started).toBeLessThan(2_000);
