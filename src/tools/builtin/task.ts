@@ -517,14 +517,16 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
     try {
       // The create path refuses a firing trigger whose title or description reads like an
       // instruction (`task_create`, `willFire`); an edit of an existing trigger writes the same
-      // fields into the same run prompt, so it gets the same scan. Only the text being written is
-      // scanned: what the row holds already was either scanned when the agent wrote it or typed
-      // by a human on the Triggers page. A TODO fires nothing and stays unscanned, as on create.
+      // fields into the same run prompt, so it gets the same scan. The scan reads the title and
+      // description as they will stand after the edit, together, because the run prompt joins them:
+      // a pattern split across two calls (half in the title now, half in the description later)
+      // passes a scan of the written text alone. A TODO fires nothing and stays unscanned, as on
+      // create.
       // Runs before the mandate mark below, so a refused edit changes nothing.
       if (input.title !== undefined || input.description !== undefined) {
         const target = managerRef.getTrigger(input.task_id, scopeFilter);
         if (target) {
-          const scan = detectInjectionAttempt(`${input.title ?? ''}\n${input.description ?? ''}`);
+          const scan = detectInjectionAttempt(`${input.title ?? target.title}\n${input.description ?? target.description ?? ''}`);
           if (scan.detected) {
             return `Error: refused to update this trigger — its new title/description matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, edit it on the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
           }
