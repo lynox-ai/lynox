@@ -182,6 +182,9 @@ describe('bounded-jsonl-log — retention + best-effort', () => {
     resume();
     resume();                                      // a second call must not release a second hold
     expect(isBoundedJsonlQuiesced()).toBe(false);
+    const next = await quiesceBoundedJsonl();
+    expect(isBoundedJsonlQuiesced()).toBe(true);   // a released-twice counter would read 0 here
+    next();
     await appendBoundedJsonl(FILE, { seq: 3 });
     expect((await readFile(join(dir, FILE), 'utf8')).trim()).toBe('{"seq":3}');
   });
