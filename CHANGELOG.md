@@ -1,5 +1,502 @@
 # Changelog
 
+## 2.15.4 — 2026-10-12
+
+### Added: access for a person the owner lets in, not active
+
+- This release contains the engine side of time-limited access for a second
+  person, alongside the owner. Such a login exists only when the hosting
+  control plane answers a login with it; a self-hosted instance never gets
+  one. Without such a login every request acts as the owner and behaves as
+  before. (#1605, #1609, #1616, #1624)
+- A session for such a person is carried in the signed session cookie. It
+  ends at most 15 minutes after login or when the access ends, whichever is
+  first, and is not renewed. The web UI's login requests to the control plane
+  carry a `principal_version`; a login answer whose principal the web UI
+  cannot read is refused rather than taken as the owner, and one whose access
+  has already ended gives no session. The engine stores when each access ends
+  and refuses a session whose access ends before the session would. (#1616,
+  #1653)
+- Every write route a user session can reach declares what such a session may
+  do there; the admin routes are closed to it. Among others, the routes that
+  change the configuration, memory, knowledge or onboarding progress; store or
+  delete a secret; connect or disconnect Google; add or remove a mail account
+  and act on the inbox; confirm a schedule or grant a workflow unattended
+  writes; run, rename or delete a workflow from the library; approve, resume,
+  confirm the probe of or undo a bulk run; take back a merge; save or delete
+  an artifact; delete a contact, an API profile or files; create a backup; or
+  erase all data (`DELETE /api/data`) answer such a session 403. (#1605,
+  #1641, #1642)
+- Conversations, runs, questions waiting for an answer, to-dos, schedules and
+  API profiles record who made them. Such a session may keep to-dos of its
+  own. A run such a person started is not retried. (#1605, #1638, #1644, #1652)
+- A schedule such a person created or last changed does not run, whatever its
+  effect, until the owner confirms it. They may start such a schedule by hand,
+  once per request, without changing its next run. (#1605, #1609)
+- A turn such a person starts gets only a fixed set of the engine's built-in
+  tools: no shell, no file tools and no plugin or MCP tools. This applies to
+  every agent the turn builds, including sub-agents and workflow steps. Such a
+  turn resolves no `secret:` reference at all; a secret reaches a request only
+  through an API profile, which attaches it. In such a session no
+  `http_request` write approval is kept: each write that no capability
+  contract covers is asked about on its own, a write to an account connected
+  through a built-in sign-in preset is refused, and the session is told to
+  propose the change to the owner instead, and a write whose body the
+  question cannot show (over 64 KiB, or holding a stored secret in an escaped
+  or encoded form) is refused. (#1624, #1638, #1639, #1651, #1674)
+- An API profile such a person set up reads a stored secret of the owner's
+  only after the owner released that name to exactly that profile. Saving
+  such a profile records which of the owner's names it asks for; the owner
+  sees the open requests in `api_setup` answers and releases one with
+  `api_setup` `release_secret`, which asks the owner in person and names the
+  hosts the value goes to. It is refused in a run without a person present.
+  `withdraw_release` takes a release back. A release ends when the profile's
+  destination or authority changes, when the access ends, and does not count
+  for another person's access. Only credentials the engine attaches can be
+  released; provider keys, infrastructure secrets, values from the engine's
+  environment, connection tokens, names a built-in provider's profile reads
+  and names a profile from another person's access reads cannot. (#1674)
+- Such a person can set up and connect accounts of their own through a
+  built-in sign-in preset. Their tokens go only to that profile's own token
+  names, and a connection stops working when the access ends. Once the access
+  has ended, the owner's `api_setup` answers name such connections, and the
+  owner can take one over with `api_setup` `adopt_connection`, which asks
+  first. (#1657, #1663, #1665)
+- Each write such a person makes outside the instance, each schedule they
+  start by hand and each schedule they delete is recorded in an append-only
+  log before the act. When that record cannot be written, the act does not run; a request to the API then answers
+  503. The owner's acts are not recorded there,
+  except releasing a stored secret to such a profile or taking a release
+  back. (#1641, #1674)
+
+### Changed: erasing all data
+
+- `GET /api/export` now includes threads without messages and no longer stops
+  at 200 threads; if the thread list may be incomplete, the answer says so with
+  `threads_may_be_incomplete: true`. Before, it stopped at 200 threads without
+  saying so. (#1596)
+- `DELETE /api/data` now empties every table of `history.db` (runs, tool
+  calls, answers to questions, request snapshots, the security log) except its
+  migration ledger and one backfill marker, every table of `agent-memory.db`
+  (including retired memories) except its migration ledger, and every thread,
+  including threads without messages. Before, memories were only marked
+  inactive, the run records stayed, and so did threads without messages and
+  threads past the first 200. What the daily and monthly spend limits and the
+  hourly and daily limits of the `http_request` and mail-send tools count
+  starts again from zero with them. (#1596, #1606, #1615)
+- Vault entries written after start-up, such as mail credentials and Google
+  tokens, are erased too. (#1628)
+- Mail state, push-notification subscriptions and the memory files of every
+  scope are erased as well. (#1631)
+- The erasure also removes the files the instance keeps in its data directory
+  and its local backups, and the backups lynox wrote to a configured backup
+  directory outside it; other files there are left alone. It keeps files that
+  hold no user content: the vault key, the
+  HTTP secret, the login token, `.env`, the push identity, plugins, and a few
+  markers and caches. The data directory is scanned first: an entry the
+  instance does not know stops the erasure before anything is deleted, and so
+  does a link, or an entry on another filesystem, among the entries it would
+  remove. Unknown
+  entries can be confirmed by sending the reported `unknown` list back
+  unchanged as `remove_unknown`; if any of them changed in the meantime, none
+  is removed. The 409 answer that reports unknown entries also lists what the
+  erasure removes and what it empties in place. (#1631)
+- It answers 409 and deletes nothing while a mail account is set up, Google
+  is connected or being connected, an API sign-in is in progress, the inbox is
+  working, or a backup or restore runs. Each such answer has a `code` and says what to do.
+  Remove mail accounts and disconnect Google before erasing. (#1631)
+- Running chats are stopped before the erasure starts. A chat request during
+  an erasure answers 409, and one that an erasure overtook answers 410. If a
+  chat does not stop within five seconds, nothing is erased and the request
+  answers 409 (`runs_did_not_stop`). A second erasure at the same time answers
+  409 (`erasure_in_progress`). While an erasure runs, connecting Google or an
+  API account, adding a mail account, backing up and restoring answer 409 as
+  well.
+  (#1623, #1631)
+- The answer now says when part of the erasure failed: a
+  failed store gives HTTP 500 with `deleted: false` and the list of failed
+  stores, and a store that could not be opened while its file exists counts as
+  failed. When every store was erased but a later step failed, the answer is
+  HTTP 500 with `deleted: true` and a `degraded` list. (#1596, #1627, #1628, #1631)
+- Every database that holds user data now overwrites deleted rows on disk.
+  After an erasure, each database is rebuilt without its free pages and its
+  write-ahead log is emptied. (#1621, #1631)
+- After an erasure, contact reads work again without a restart. (#1596)
+- The route is still refused (403) on hosted instances, and only the owner may
+  call it. (#1641)
+
+### Changed: debug captures are deleted after seven days
+
+- The extended debug capture now keeps each snapshot for seven days. On every
+  start, and hourly while it runs, the engine deletes `wire_snapshots` rows
+  older than that (by capture time) from `history.db`, and capture files older
+  than that (by modification time) from the two developer capture directories
+  (`LYNOX_DEBUG_WIRE_SINK` and `LYNOX_DEBUG_WIRE_RAW_SINK`, by default
+  `wire-sink` and `wire-sink-raw` in the data directory). This runs whether
+  capture is switched on or not. A capture directory is cleaned only when it
+  is a real directory with mode 700, and only files with the capture's own
+  file name pattern are removed. A backup that already holds a snapshot keeps
+  it until the backup is deleted. The settings text says so. (#1649)
+
+### Changed: disconnecting Google deletes lynox's Drive backups
+
+- `POST /api/google/revoke` deletes the backup files lynox uploaded to Google
+  Drive before it revokes, when the request is sent as `application/json` with
+  `{"delete_drive_backups": true}`. Without that body it only revokes, as
+  before. Only files that the connected Google client created and the user
+  owns, in dated backup folders under `lynox-backups`, are deleted; backups
+  uploaded through another Google client stay, and folders are kept, so copies
+  the user placed there stay. The answer has a new `drive_backups` field with
+  the status, the number of files deleted, the number of folders kept and the
+  reasons anything may remain. The disconnect goes ahead either way, and a
+  backup made while it runs is kept locally but not uploaded to Drive. (#1637)
+- The Disconnect button in Settings now asks first, names the Drive step when
+  the connection can reach Drive, and sends that body; afterwards a notice
+  says how many backup files were deleted, or that some may be left. (#1637)
+- Drive backups are written only into a `lynox-backups` folder that the user
+  owns and that this app created, and only that folder is listed for restore.
+  When there is none, a new one is created. Backups in another
+  `lynox-backups` folder no longer appear in the restore list. (#1670)
+- The agent's Google Drive upload can no longer create folders. (#1637)
+- A Google connection brokered by the hosting control plane is revoked at
+  Google through the control plane on disconnect. Without a confirmation from
+  the control plane the engine revokes directly, as before. (#1668)
+
+### Changed: mail
+
+- The API hosts of SendGrid, Mailgun, Postmark, Resend and Brevo are treated
+  like a mail provider's API: no capability contract grants a request to them,
+  and a bulk run refuses to write to them. (#1587)
+- `mail_read` and `mail_triage` keep every header value the sender wrote on
+  one line. In `mail_read`, the Message-ID and attachment names and types are
+  listed in the header block, the body is in a block of its own, blocks are
+  labelled by account and message number instead of the sender's address, and
+  a subject made only of line breaks shows as "(no subject)". (#1608, #1620)
+- The mail tools accept a mail address as the account; when an address
+  matches more than one account, the error lists them. Send, mass-send and
+  reply confirmations show the address a mail goes out from first, then the
+  account id when it differs; for Gmail, that is the connected Google
+  account's address. When it cannot be read, nothing is sent. (#1659, #1664)
+- Scheduled mail refuses a receive-only account when it is sent, as an
+  immediate send does, and a send from an account with no stored configuration
+  is refused. (#1654, #1655)
+- Reply-all leaves out the address the reply is sent from, and adds an
+  explicit cc recipient who was already on the message only once.
+  (#1667, #1671)
+- A long encoded Subject is folded onto lines of at most 76 characters when
+  sent through the Gmail API. (#1673)
+
+### Changed: web requests that write, API profiles and the workflow grant
+
+- An approval of an `http_request` write now covers one method and one host,
+  and lapses when outside content other than that host's own answer enters
+  the conversation. Before, it covered a host for the whole session. A `DELETE`,
+  and a write to a path the engine knows sends or issues something, is asked
+  each time, and no
+  capability contract grants the latter. Method overrides in headers or a
+  `_method` query parameter count as the method; a write may not set a header
+  that re-targets it; a write's redirect is followed only where the approval
+  covers it. The question names the path, the query keys and the body fields,
+  and on the instance shows the body's values, masked, up to 64 KiB; a body
+  that holds a stored secret in an escaped or encoded form is not shown.
+  Notifications carry only the field names. Several questions are asked one
+  after another. (#1639, #1648, #1651)
+- A changed `network_policy`, `network_allowed_hosts` or `enforce_https`
+  applies to the tools without a restart. (#1590)
+- An OAuth2 profile can name the header its access token is sent in with
+  `auth.header_name`; the token is then sent as it is, without `Bearer`.
+  Unset, or set to `Authorization`, it stays `Authorization: Bearer`. A
+  profile that already names another header now sends its token there, and
+  one whose `auth.header_name` is not a valid header name sends no token until
+  it is corrected. (#1618)
+- An OAuth2 profile whose id would store its tokens under the name of one of
+  the instance's own credentials is refused when saved and is not loaded at
+  start-up. The start-up message says that the profile and its vault entries
+  are kept and how to delete it. `fetch_token` refuses such names before doing
+  anything. The count of profiles loaded from connections counts only the
+  ones registered. (#1603, #1610, #1613, #1614)
+- A profile that uses a built-in sign-in preset saves without `vault_keys`,
+  endpoints, guidelines or avoid rules and cannot be switched off that
+  preset; `api_setup` `view`
+  shows the scopes it may ask for. A missing `schema_version` is read as 2,
+  and a scope that is not text is refused. `api_setup` describes the presets,
+  and the catalogue lists the authorization-code flow as supported through a
+  preset. (#1630, #1643, #1645, #1646, #1647)
+- `api_setup` `delete` asks before it deletes a profile and names the tokens
+  the vault loses; with no one to ask, nothing is deleted, and in autonomous
+  mode it is blocked. (#1650)
+- `fetch_token` no longer quotes the token endpoint's answer: a failed
+  exchange is described by its field names and OAuth error code. (#1640,
+  #1663)
+- `api_setup` `bootstrap` reports a failed fetch or extraction by its kind,
+  field and rule, without repeating text from the remote page or server.
+  (#1586, #1600)
+- Wrapped external content can no longer open a data block of its own, and
+  the injection check on tool results exempts only the block closers the same
+  tool call produced. (#1626, #1634)
+- The injection check also recognises role lines that start after a vertical
+  tab, form feed or Unicode line break. (#1662)
+- A numeric workflow parameter too large to represent is refused. (#1594)
+- The workflow write grant still ships switched off. Where it is switched on,
+  a request under a grant may set only `content-type`, `accept`,
+  `accept-language`, `idempotency-key`, `if-match`, `if-none-match` and
+  `*-version` headers; a parameter value that is exactly the accepted one is
+  inserted into step instructions as plain text, not marked as outside data;
+  a grant whose values or parameter names hold invisible characters is
+  refused, and a scheduled run whose stored grant holds one runs without it,
+  with a note. A grant name keeps only visible characters, at most 120 of
+  them; a name without a letter or digit is left out. (#1594, #1619, #1622)
+
+### Changed: what an unattended bash call may do without asking
+
+- In autonomous mode, a bash call is now asked about, not run, when it passes
+  code inline to an interpreter (`node -e`, `python -c`, `sh -c`, input piped
+  to an interpreter and similar), sends data over HTTP (`curl` with `-d`,
+  `-F`, `--json` or `-X POST|PUT|PATCH`, `wget` with `--post-…`, `--body-…`
+  or `--method`), or writes into the lynox data directory outside
+  `workspace/`. (#1585)
+- A `curl` call that sets any method but `GET`, `HEAD` or `OPTIONS` is now
+  asked about however the method is written (`--request DELETE`,
+  `--request=DELETE`, `-sX DELETE`, and methods such as `PURGE`), in a chat
+  and in autonomous mode. So is a `curl` config file (`-K`, `--config`). The
+  new check reads `-X` case-sensitively, as curl does, so the proxy option
+  `-x` is not taken for a method. `-X DELETE`, also written `-XDELETE`, stays
+  blocked in autonomous mode. (#1683)
+- The secret-file paths are also recognised when written with empty or `.`
+  segments, such as `.lynox//vault.db`. (#1601)
+- Each unattended bash call is now recorded in the local security log with
+  whether a fixed grammar of read-only commands covers it. The record holds
+  the program name when it is on that grammar's list (otherwise `other`), a
+  reason word and what the guard decided; no arguments or paths. It does not
+  change any decision. It is not part of the aggregate the instance reports.
+  (#1607)
+
+### Added: scheduled and background work
+
+- A new setting, `background_model`, chooses the model for background runs
+  and watch analyses through `PUT /api/config` (`null` clears it). It is held
+  to the model blocklist and the `max_tier` ceiling and answers 400 when it
+  cannot run; on a managed plan with the operator's key it cannot be changed
+  (403). Without it, background runs use the model they used before.
+  (#1629, #1632)
+- A scheduled agent task can have its own model tier (`fast`, `balanced`,
+  `deep`) through `PATCH /api/tasks/:id` with `modelTier`; `null` clears it.
+  Only agent tasks and watches take one; on a managed plan with the operator's
+  key it cannot be set (403). (#1633)
+- Lowering the model tier ceiling now applies to open conversations from
+  their next turn, and raising it gives the tier back. (#1593)
+- `POST /api/tasks/:id/stop` asks a running scheduled or background task to
+  stop. It answers 202 and says what the stop reached. A bulk write or undo
+  stops before its next target, an atomic one is rolled back, and a workflow
+  ends its running step and starts no further one. It answers 409 when the
+  task is not running, when a short id matches more than one task, or when
+  nothing in the task's current phase can be interrupted: always for a backup
+  or a notification, and for an agent task or watch until its model run has
+  started. Pause the schedule with `PATCH {enabled:false}` instead. (#1500,
+  #1669)
+- A stopped run is recorded as `stopped`, not as a failure: it is not retried
+  or escalated, a recurring schedule keeps its status, and a one-time task is
+  closed. The assistant's task list says the owner stopped it. (#1500, #1669)
+- When a scheduled agent task that still needs confirmation comes due, the
+  owner gets one notification saying where to review it. More than three at
+  once are summarised. A task stored with an empty confirmation is treated as
+  unconfirmed. (#1652, #1656)
+- Each trigger records whether its last escalation reached anyone. (#1666)
+
+### Changed: a run that needs an answer and has no one to ask stops
+
+- When a run asks a question and has no way to reach a person, it now ends
+  instead of carrying on without the answer. The conversation shows a note
+  saying so. Before, the question tool returned a sentence the model worked
+  around, and a missing prompt store answered "no" for the user. (#1604)
+- The Google Calendar, Drive and Sheets tools and `mail_reply` pass such a
+  stop on instead of returning it as text. Sub-agents pass it up.
+- A question asked by a run started by hand keeps that origin across a
+  restart. (#1644)
+
+### Changed: Claude Sonnet 5 price
+
+- Claude Sonnet 5 is priced at $2 per million input tokens and $10 per
+  million output tokens, $4 for a one-hour cache write and $0.20 for a cache
+  read. The cost figures and the web UI's estimates used $3 and $15 before.
+  (#1676)
+
+### Changed: web UI
+
+- The workflow library shows its card actions on touch screens and narrow
+  windows, with buttons large enough to tap. (#1595, #1597)
+- The chat keeps streaming through an engine error the engine recovers from.
+  (#1611)
+- The Triggers view shows a stopped run muted, and the outcome of each
+  trigger's last escalation. (#1500, #1666)
+- Disconnecting Google asks first; see above. (#1637)
+
+### Fixed: other
+
+- A refused sub-agent fan-out no longer counts against the session budget.
+  When the refusal suggests a budget figure, the figure is one the engine
+  would admit for the whole batch. A sub-agent's name may contain only
+  visible characters and spaces. (#1598, #1602, #1612)
+- A question past its expiry now expires on time. Before, it stayed open and
+  answerable until the UTC date changed, up to a day past its 24-hour limit.
+  (#1684)
+- `artifact_save` refuses content that holds the placeholder the engine puts
+  in place of a saved artifact's body. Nothing is saved, and an existing
+  artifact keeps its content. Before, a model could copy the placeholder into
+  a new save, and the file then held only the placeholder. The web UI shows no
+  artifact card for a refused save. `write_file` and `edit_file` refuse the
+  same placeholder when they write it into the artifacts directory. (#1677,
+  #1682)
+- Switching a chat to private mode now also deletes the durable knowledge
+  entries captured in that chat, whatever their status, and a profile line
+  seeded from them. Before, only the chat's memories were removed, and a
+  failed removal still answered as done. Now `PATCH /api/threads/:id` answers
+  500 with `skip_extraction: true` when a removal fails; private mode stays
+  on, switching it on again retries, and the web UI says so instead of
+  showing private mode as off. (#1672)
+- In a private chat, `remember`, `memory_block_edit`, `memory_store` and
+  `memory_update` refuse to store anything, also when a sub-agent started
+  with `spawn_agent` from that chat calls them. Such a sub-agent no longer
+  captures memory when the chat it came from does not, whether because of
+  private mode or `memory_extraction: false`. (#1672)
+- Entity extraction no longer sets a temperature, so it no longer fails when
+  the fast slot holds a model that accepts only its default sampling, such as
+  Claude Sonnet 5. (#1679)
+- A named-agent workflow step and the steps of a nested pipeline now run with
+  the engine's tool context: their guard decisions reach the audit trail,
+  their helper model calls are metered, and the API profiles are used for the
+  check on where a secret may be sent. The inline steps of a nested pipeline
+  also run under the engine's network egress policy. (#1680)
+- When a schedule is deleted while one of its runs is in flight, the run now
+  ends normally instead of failing to record its result and logging a lost
+  lease on every heartbeat. A failed run that will not be retried now goes to
+  the notification channels in cases that were reported nowhere before: its
+  schedule was deleted, it ran on a cron or watch schedule with retries set,
+  or its one-time task was completed, disabled, parked or marked failed during
+  the run. (#1685)
+- The security log now starts at boot even when run history fails to start,
+  and says so on stderr when it cannot start itself. It is closed when the
+  engine shuts down. (#1675)
+- Error reports mask the values of query parameters named like credentials,
+  whatever their length, and the text of user feedback. (#1591)
+
+### Changed — BREAKING (library consumers)
+
+- `IAgent` has a new required read-only member, `principal`, the identity
+  that started the turn. An `IAgent` implemented outside this package needs it
+  to compile. `AgentConfig` gains an optional `principal`, `Agent` exposes
+  `principal`, and `IAgent` gains the optional `noteForeignContent`,
+  `approvalEpoch` and `approvalBatch`. (#1624, #1639)
+- `ToolContext` has three new required members, `auditLog`, `mandateEnds` and
+  `secretReleases` (each may be `null`); `createToolContext` sets all three to
+  `null`. A `ToolContext` built by hand needs them. (#1641, #1663, #1674)
+- `SessionCounters` no longer has `approvedOutboundDomains` or
+  `pendingOutboundPrompts`; it gains the optional `untrustedEpoch` and
+  `approvedWrites`. (#1639)
+- `NotificationChannel.send` now resolves to `'delivered' | 'skipped' |
+  'failed'` instead of a boolean. A channel that still returns `true` is read
+  as `skipped` and `false` as `failed`. `NotificationRouter.notify` resolves to
+  what each channel did instead of `void`. (#1666)
+- `RunHistory.vacuum()` is renamed `scrubFreedPages()`. It now runs `VACUUM`,
+  a full rewrite of the file, and throws when another connection blocks the
+  WAL checkpoint; `resetDatabase()` does the same.
+  `RunHistory.clearLegacyVerbDefs()` is removed. For an erasure use
+  `RunHistory.deleteAllData()`, which empties every table but the migration
+  ledger and one backfill marker; there is no replacement for the narrower
+  delete. (#1606, #1621)
+- `WorkerLoop.runTriggerNow()` can return the reason `awaits_owner_stamp`,
+  which an exhaustive `switch` over its result must handle. (#1605)
+- Additive: `WorkerLoop.stopTask()`; `TriggerRecord` gains optional
+  `created_by`, `edited_by`, `confirmed_by`, `model_tier`,
+  `last_escalation_at` and `last_escalation_outcome`; `TaskRecord` and
+  `ApiProfile` gain optional `created_by`; `TaskManager.recordTaskRun` accepts
+  `'stopped'` and now returns whether it scheduled a retry (was `void`);
+  `TaskUpdateParams.modelTier`; the object `Engine.getSecurityAudit()` returns
+  gains `close()`;
+  `LynoxUserConfig.background_model`; `runManifest` options accept optional
+  `principal`, `isAcceptedParam` and `stopSignal`; `spawnPipeline` accepts an
+  optional last argument, the parent `ToolContext`; `Engine` gains
+  `getAuditLog()`, `getMandateEnds()` and `getSecretReleases()`;
+  `RunHistory.pruneExpiredWireSnapshots()`; and further optional members and
+  methods. (#1500, #1605, #1621, #1622, #1623, #1624, #1628, #1629, #1633,
+  #1638, #1641, #1648, #1649, #1652, #1653, #1666, #1669, #1672, #1674,
+  #1675, #1680, #1685)
+
+### Internal
+
+- The gate-record CI check fails with its own message when it cannot compute
+  the diff of a merged pull request. (#1584)
+- A system prompt example uses a neutral admin path. (#1636)
+- Tests and the exfiltration evaluation harness. (#1588, #1617, #1625,
+  #1660, #1661)
+- The model-fitness rosters and judge no longer call Fireworks models the
+  provider has withdrawn or a Mistral id that now answers with a different
+  model, and an online test checks that their Fireworks and Mistral models are
+  still served under their own names. (#1678)
+
+### Upgrade and rollback
+
+On first start `engine.db` moves from schema **19** to **27** and `history.db`
+from **56** to **58**. Every step is additive: `engine.db` gains columns on
+`triggers` (who created, changed and confirmed a schedule, its model tier, its
+confirmation reminder, its last escalation) and on `tasks` (`created_by`), and
+the tables `audit_log`, `mandate_ends`, `secret_release_requests` and
+`secret_releases`; `history.db` gains `created_by` on `threads`,
+`pending_prompts`, `active_runs` and `tasks`, and `pending_prompts.hand_run`.
+Every schedule already confirmed is marked as confirmed by the owner. There is
+no down path. `agent-memory.db` and the mail state do not change. 2.15.3 opens
+both databases at the new versions and ignores the new columns and tables;
+this was walked on a staging instance.
+
+On first start, and then hourly, debug captures older than seven days are
+deleted: `wire_snapshots` rows in `history.db` and capture files in the
+capture directories (see above). There is no switch; copy them away before
+upgrading if you need them. Also from the first start: each scheduled agent
+task that still awaits confirmation and is already due is reported to the
+owner once (more than three at once arrive as one summary); an OAuth2
+profile whose id would store its tokens under one of
+the instance's own credential names is not loaded (it stays on disk); an
+OAuth2 profile that names a header other than `Authorization` in
+`auth.header_name` sends its token there; stored contracts and bulk runs that
+write to the sending services named above are refused; and unattended bash
+calls of the kinds listed above stop to ask.
+
+Rolling back to 2.15.3:
+
+1. Clear `background_model` first, with `PUT /api/config` and
+   `{"background_model": null}`. 2.15.3 ignores the whole `config.json` when
+   it holds a key 2.15.3 does not know, and its next settings save writes a
+   config that keeps none of the earlier settings.
+2. A schedule that a person the owner let in created or changed is held until
+   the owner confirms it. 2.15.3 holds only an unconfirmed agent schedule;
+   every other kind, such as a notification, or a workflow schedule whose
+   workflow is confirmed, runs. Confirm or delete such schedules
+   before rolling back. 2.15.3 also does not know the owner's releases of
+   stored secrets to such a person's API profiles, nor that such access ended:
+   every profile again reads the stored secrets it names under 2.15.3's rules,
+   whoever set it up and whether or not the owner released them, and a
+   connection such a person made works again. Review or delete those
+   profiles before
+   rolling back. None of this applies where nobody was ever let in.
+3. `DELETE /api/data` returns to the earlier, partial erasure.
+4. A trigger's `model_tier` is ignored and the trigger runs on the default
+   background model. An OAuth2 profile that sends its token under its own
+   header sends it as `Authorization: Bearer` again, and an OAuth2 profile
+   refused for its token names is loaded again; delete it first if you do not
+   want it back. A scheduled agent task stored with an empty confirmation runs
+   again without one. Backups 2.15.4 uploaded into a new `lynox-backups`
+   folder in Drive can be missing from 2.15.3's restore list, which takes the
+   first folder of that name. The unattended bash questions and the refusal of
+   the sending-service hosts are gone, and a changed network policy needs a
+   restart again. The assistant's task list reports a task recorded as
+   stopped as a failed run. Claude Sonnet 5 is priced at $3 and $15 again.
+   What 2.15.4 deleted stays deleted: debug captures, Drive backups deleted on
+   disconnect, and files an erasure removed.
+
+Library consumers need the changes listed under BREAKING above.
+
+An export from 2.15.0 or later must not be restored onto an instance running 2.14.x or older: those versions restore only the parts they know and report success, silently dropping merge ledgers, `apis/` and `workspace/`. Upgrade the target first.
+
 ## 2.15.3 — 2026-10-08
 
 ### Added: a reviewed write grant for saved workflows, switched off
