@@ -20,7 +20,7 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
-import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
+import type { TriggerRecord, TriggerEffect, PromptText, PromptMeta, BulkWriteEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -1768,8 +1768,8 @@ export class WorkerLoop {
     // §0 A7 — did every question this run asked actually get an answer?
     //
     // `DISMISSED_ANSWER` is a RETURN VALUE, not an exception: an unanswered
-    // question hands the agent the string `'__dismissed__'` and it carries on
-    // reasoning as if that were a reply. Whatever it then produces was built on
+    // question hands the agent a result instead of a reply, and it carries on
+    // reasoning from there. Whatever it then produces was built on
     // an answer nobody gave, and reporting that as `success` is the failure this
     // whole arc started from — a trigger that says it did its job after asking
     // something and hearing nothing.
@@ -1798,7 +1798,7 @@ export class WorkerLoop {
     // The owner's stop handle, attached to the SAME captured entry the prompt wiring
     // below uses — so a stop reaches this run whether it is computing or parked.
     WorkerLoop.attachSession(active, session);
-    session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+    session.promptUser = async (rawQuestion: string | PromptText, options?: string[], meta?: PromptMeta): Promise<string> => {
       // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
       // null and is assigned during init (engine.ts:1101), and is set back to
       // null if that init fails — so a store captured when the task started
@@ -1816,6 +1816,12 @@ export class WorkerLoop {
       // only AFTER this inserted a row and pushed a high-priority question at a
       // user whose task is gone. Refuse before either side effect.
       if (active?.controller.signal.aborted === true) { questionWentUnanswered = true; return DISMISSED_ANSWER; }
+      // The prompt's own signal: the run's, joined with that of the tool call that asks
+      // (`Agent._promptSignal`). It aborts when the engine stopped waiting for the call (its tool
+      // timeout); a question nobody awaits any more is not raised, and one already raised is
+      // drained below, as the HTTP path withdraws it.
+      const promptSignal = meta?.signal;
+      if (promptSignal?.aborted === true) { questionWentUnanswered = true; return DISMISSED_ANSWER; }
       if (!promptStore) {
         // No store: no durable park and no way to answer. The canonical marker
         // is the honest outcome — hanging would be worse, and a prose sentence
@@ -1898,7 +1904,9 @@ export class WorkerLoop {
         inquiry: { question: offBoxQuestion, options },
       });
       try {
-        const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
+        const taskSignal = active?.controller.signal;
+        const waitSignal = taskSignal && promptSignal ? AbortSignal.any([taskSignal, promptSignal]) : taskSignal ?? promptSignal;
+        const outcome = await promptStore.waitForSettled(promptId, waitSignal);
         if (outcome.status === 'answered') return outcome.row.answer ?? DISMISSED_ANSWER;
         // An ABORTED wait leaves the row `pending` — `waitForSettled` resolves
         // off the signal without touching it. Two consequences, both real: the

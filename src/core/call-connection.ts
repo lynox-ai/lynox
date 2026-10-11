@@ -66,6 +66,12 @@ export interface CallSlot {
    *  `http_request` result after that may carry server bytes even when it is an error,
    *  so it counts as foreign content unless it is an answer reported for one host. */
   contactedNetwork?: boolean | undefined;
+  /** Aborted when the engine stops waiting for this call (its tool timeout). A question the
+   *  call raised carries this signal, so it is withdrawn with the call instead of staying open
+   *  and holding the session's one pending prompt. */
+  abort?: AbortController | undefined;
+  /** How many questions this call is waiting on right now. */
+  awaitingAnswers?: number | undefined;
 }
 
 const slotStorage = new AsyncLocalStorage<CallSlot>();
@@ -88,6 +94,20 @@ export function runInCallSlot<T>(slot: CallSlot, fn: () => T): T {
 export function noteOwnWrapped(block: string): void {
   const slot = slotStorage.getStore();
   if (slot) (slot.wrapped ??= []).push(block);
+}
+
+/** The current call's abort signal; `undefined` outside a slot or for a slot without one. */
+export function currentCallSignal(): AbortSignal | undefined {
+  return slotStorage.getStore()?.abort?.signal;
+}
+
+/** Count `answer` as a question the current call waits on until it settles; outside a slot it
+ *  is returned as is. */
+export function trackCallAnswer<T>(answer: Promise<T>): Promise<T> {
+  const slot = slotStorage.getStore();
+  if (!slot) return answer;
+  slot.awaitingAnswers = (slot.awaitingAnswers ?? 0) + 1;
+  return answer.finally(() => { slot.awaitingAnswers = (slot.awaitingAnswers ?? 1) - 1; });
 }
 
 /** Mark the current call as one that tried to reach the network; outside a slot a no-op. */
