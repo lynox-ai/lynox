@@ -23,6 +23,76 @@ describe('effectiveWriteMethod', () => {
   });
 });
 
+describe('effectiveWriteMethod reads a top-level `_method` field of the body', () => {
+  const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  const JSON_T = { 'content-type': 'application/json; charset=utf-8' };
+  const MULTI = { 'Content-Type': 'multipart/form-data; boundary=b' };
+  it.each([
+    ['form field', FORM, 'name=a&_method=DELETE', 'DELETE'],
+    ['form field, percent-encoded name', FORM, '%5Fmethod=delete', 'DELETE'],
+    ['form field asking for less', FORM, '_method=GET', 'POST'],
+    ['form key nested in brackets', FORM, 'data[_method]=DELETE', 'POST'],
+    ['form value that mentions it', FORM, 'note=_method%3DDELETE', 'POST'],
+    ['JSON field', JSON_T, '{"_method":"PATCH"}', 'PATCH'],
+    ['JSON field, escaped name', JSON_T, '{"_\\u006dethod":"DELETE"}', 'DELETE'],
+    ['JSON field nested', JSON_T, '{"item":{"_method":"DELETE"}}', 'POST'],
+    ['JSON field that only ends in method', JSON_T, '{"payment_method":"DELETE"}', 'POST'],
+    ['JSON array at the top', JSON_T, '[{"_method":"DELETE"}]', 'POST'],
+    ['JSON +json media type', { 'Content-Type': 'application/vnd.api+json' }, '{"_method":"DELETE"}', 'DELETE'],
+    ['JSON that does not parse and mentions it', JSON_T, '{"_method":"DELETE",', 'DELETE'],
+    ['JSON that does not parse and does not mention it', JSON_T, '{"a":1,', 'POST'],
+    ['multipart that mentions it', MULTI, '--b\r\nContent-Disposition: form-data; name="_method"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart that does not', MULTI, '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nx\r\n--b--', 'POST'],
+    ['no type, JSON body', {}, '{"_method":"DELETE"}', 'DELETE'],
+    ['no type, form body', {}, '_method=DELETE', 'DELETE'],
+    ['no type, text that mentions it', {}, 'set _method to DELETE', 'POST'],
+    ['empty body', JSON_T, '', 'POST'],
+    ['form key PHP reads as _method', FORM, '.method=DELETE', 'DELETE'],
+    ['form key with a leading space, which PHP drops', FORM, '+method=DELETE', 'POST'],
+    ['form key as an array', FORM, '_method[]=DELETE', 'DELETE'],
+    ['form key as an indexed array', FORM, '_method[0]=delete', 'DELETE'],
+    ['form key in capitals', FORM, '_METHOD=DELETE', 'DELETE'],
+    ['form key with an unclosed bracket, which PHP reads as _method_x', FORM, '_method[x=DELETE', 'POST'],
+    ['JSON with a stray close tag a repair strips before sending', JSON_T, '{"_method":"DELETE"}</body>', 'DELETE'],
+    ['JSON-like type a server reads as JSON', { 'Content-Type': 'application/json-seq' }, '{"_method":"DELETE"}</body>', 'DELETE'],
+    ['JSON that does not parse, method name escaped', JSON_T, '{"_\\u006dethod":"DELETE"}</body>', 'DELETE'],
+    ['no type, JSON that does not parse', {}, '{"_method":"DELETE"', 'DELETE'],
+    ['form type whose parameter names JSON', { 'Content-Type': 'application/x-www-form-urlencoded; v=/json' }, '{"_method":"DELETE"}', 'DELETE'],
+    ['two types, a JSON string the form read splits', { 'Content-Type': 'application/x-www-form-urlencoded,application/vnd.x+json' }, '"&_method=DELETE&"', 'DELETE'],
+    ['two Content-Type headers', { 'content-type': 'text/plain', 'Content-Type': 'application/json' }, '{"_method":"DELETE"', 'DELETE'],
+    ['multipart name in RFC 2231 form', MULTI, "--b\r\nContent-Disposition: form-data; name*=utf-8''_%6Dethod\r\n\r\nDELETE\r\n--b--", 'DELETE'],
+    ['multipart that mentions it only in a file', MULTI, '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nuse _method=DELETE\r\n--b--', 'POST'],
+    ['no type, a non-method only the other parser finds', {}, '_method=Looks+safe', 'POST'],
+    ['multipart name in numbered RFC 2231 pieces', MULTI, '--b\r\nContent-Disposition: form-data; name*0="_me"; name*1="thod"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart header folded onto a second line', MULTI, '--b\r\nContent-Disposition: form-data;\r\n name="_method"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart part with a longer name', MULTI, '--b\r\nContent-Disposition: form-data; name="payment_method"\r\n\r\npm_1\r\n--b--', 'POST'],
+    ['multipart name with a backslash escape', MULTI, '--b\r\nContent-Disposition: form-data; name="\\_m\\ethod"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart name pieces out of order', MULTI, '--b\r\nContent-Disposition: form-data; name*1="thod"; name*0="_me"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['form type listed before a multipart type', { 'Content-Type': 'application/x-www-form-urlencoded, multipart/form-data; boundary=b' }, '_method=DELETE', 'DELETE'],
+    ['multipart file whose name mentions it', MULTI, '--b\r\nContent-Disposition: form-data; name="file"; filename="methodology.pdf"\r\n\r\nx\r\n--b--', 'POST'],
+    ['NDJSON lines that hold a method value', { 'Content-Type': 'application/x-ndjson' }, '{"http.request.method":"DELETE"}\n{"b":1}', 'POST'],
+    ['text in quotes that mentions the word', { 'Content-Type': 'text/plain' }, '"Quote" about the scientific method', 'POST'],
+    ['JSON object whose string holds a form override', JSON_T, '{"note":"a&_method=DELETE&b"}', 'POST'],
+    ['JSON array whose string holds a form override', JSON_T, '["a&_method=DELETE&b"]', 'POST'],
+    ['form type first, then JSON: the form reading counts', { 'Content-Type': 'application/x-www-form-urlencoded; v=/json' }, '{"note":"a&_method=DELETE&b"}', 'DELETE'],
+  ] as const)('%s', (_k, headers, body, want) => {
+    expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
+  });
+
+  it('reads no body for a GET or a HEAD, which send none', () => {
+    expect(effectiveWriteMethod('GET', { 'content-type': 'application/json' }, U, '{"_method":"DELETE"}')).toBe('GET');
+    expect(effectiveWriteMethod('head', { 'content-type': 'application/json' }, U, '{"_method":"DELETE"}')).toBe('HEAD');
+  });
+
+  it('refuses a body override that is not a method, a string or not', () => {
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, '{"_method":5}')).toBeNull();
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, '{"_method":"Looks safe"}')).toBeNull();
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/x-www-form-urlencoded' }, U, '_method=my-secret-value')).toBeNull();
+    expect(effectiveWriteMethod('POST', { 'Content-Type': 'application/vnd.api+json' }, U, '{"_method":"Looks safe"}'), 'a +json type').toBeNull();
+    expect(effectiveWriteMethod('POST', { 'content-type': 'text/plain', 'Content-Type': 'application/json' }, U, '{"_method":"Looks safe"}'), 'the second of two types').toBeNull();
+  });
+});
+
 describe('retargetingHeader', () => {
   it('finds each header a server or proxy routes on, whatever its case, and no other', () => {
     for (const name of ['HoSt', 'X-Host', 'x-forwarded-host', 'Forwarded', 'X-Original-URL', 'x-rewrite-url']) {

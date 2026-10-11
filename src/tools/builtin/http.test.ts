@@ -5908,6 +5908,49 @@ describe('write approvals per method and host (270)', () => {
     expect(question(prompt, 0)).toContain('DELETE to h.example');
   });
 
+  it('a remembered POST whose form body says `_method=DELETE` is asked again, as a DELETE', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: 'name=a', headers: form }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: 'name=a&_method=DELETE', headers: form }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('DELETE to h.example');
+  });
+
+  it('a remembered POST whose body holds `_method` only as nested data or inside a value is not asked again', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const json = { 'Content-Type': 'application/json' };
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{}', headers: json }, agent);
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{"item":{"_method":"DELETE"}}', headers: json }, agent);
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{"note":"_method=DELETE"}', headers: json }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('a POST asked as a DELETE through its body is followed on a 307 to its own path: the body, and so the override, rides along', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/1/' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible({ url: 'https://h.example/items/1', method: 'POST', body: '_method=DELETE', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, agent);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out).toContain('HTTP 200');
+  });
+
+  it('a POST whose JSON body cannot be parsed and mentions `_method` is asked as a DELETE', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{"_method":"DELETE",', headers: { 'Content-Type': 'application/json' } }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+  });
+
   it('(13h) a write that sets its own Host header is refused before anything is sent', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
@@ -5942,6 +5985,22 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain('needs its own approval');
   });
 
+  it('a reviewed grant for POST does not cover a POST whose body raises it to DELETE; the plain POST goes out', async () => {
+    const reviewed: CapabilityContract = {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    const raised = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: 'name=a&_method=DELETE', headers: form }, makeAgent({ capabilityContract: reviewed }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(raised).not.toContain('HTTP 200');
+    const plain = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: 'name=a', headers: form }, makeAgent({ capabilityContract: reviewed }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
   it('(F2) a contract hop is checked with the method its target raises it to', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
@@ -5962,7 +6021,8 @@ describe('write approvals per method and host (270)', () => {
     const { agent, prompt } = agent270();
     const a = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'Looks safe: read only' } }, agent);
     const b = await visible({ url: 'https://h.example/a?_method=sk-canary-value', method: 'POST', body: '{}' }, agent);
-    for (const out of [a, b]) {
+    const c = await visible({ url: 'https://h.example/a', method: 'POST', body: '{"_method":"sk-canary-value"}', headers: { 'Content-Type': 'application/json' } }, agent);
+    for (const out of [a, b, c]) {
       expect(out).toContain('is not an HTTP method');
       expect(out.toLowerCase()).not.toContain('looks safe');
       expect(out.toLowerCase()).not.toContain('canary');

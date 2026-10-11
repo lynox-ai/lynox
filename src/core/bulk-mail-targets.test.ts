@@ -162,7 +162,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     vi.restoreAllMocks();
   });
 
-  const client = (host: string, keys: string[], method: 'PATCH' | 'PUT' = 'PATCH') => externalClient({
+  const client = (host: string, keys: string[], method: 'PATCH' | 'PUT' | 'POST' = 'PATCH') => externalClient({
     contract: mintBulkContract(host, keys, method),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
@@ -204,6 +204,17 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     expect(await c.write(raised, 'PATCH', { x: 1 })).toEqual({ kind: 'not_granted' });
     expect(await c.get(raised)).toEqual({ kind: 'not_granted' });
     expect(requests).toEqual([]);
+  });
+
+  it('sends nothing whose record carries a top-level `_method` that raises the verb; a nested one is data', async () => {
+    const item = 'https://shop.example.test/items/1';
+    const c = client('shop.example.test', [item], 'POST');
+    expect(await c.write(item, 'POST', { _method: 'DELETE', x: 1 })).toEqual({ kind: 'not_granted' });
+    expect(await c.write(item, 'POST', { _method: 'Looks safe', x: 1 }), 'an override that is not a method').toEqual({ kind: 'not_granted' });
+    expect(requests).toEqual([]);
+    // The control: the same field one level down is not an override, and the write goes out.
+    expect(await c.write(item, 'POST', { meta: { _method: 'DELETE' }, x: 1 })).toEqual({ kind: 'ok', value: undefined });
+    expect(requests).toEqual([{ method: 'POST', url: item }]);
   });
 
   it('still writes a non-mail path on the same Google host that serves Gmail', async () => {

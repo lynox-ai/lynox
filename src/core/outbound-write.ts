@@ -40,19 +40,123 @@ const KNOWN_METHODS = new Set([
   'MERGE', 'MKACTIVITY', 'CHECKOUT', 'PURGE', 'LINK', 'UNLINK', 'NOTIFY', 'SUBSCRIBE', 'UNSUBSCRIBE', 'M-SEARCH',
 ]);
 
+/** A value no override may hold: a `_method` field in a JSON body that is not a string. */
+const NOT_A_METHOD = '\0';
+
+/**
+ * A form key as a server's parser may read it: PHP drops leading spaces from a name and turns
+ * every other `.` and space into `_` (so `.method` reaches Laravel as `_method`), and PHP and
+ * Express's `qs` read `_method[]` or `_method[0]` as a `_method` field. A key whose brackets
+ * follow another name, such as `data[_method]`, is that other field.
+ */
+function formFieldName(key: string): string {
+  const base = /^([^[]+)\[.*\]$/.exec(key)?.[1] ?? key;
+  return base.trimStart().replace(/[. ]/g, '_').toLowerCase();
+}
+
+/** `text` with its `%XX` escapes read, the way a form or multipart parser reads a name. */
+function percentDecoded(text: string): string {
+  return text.replace(/%([0-9a-f]{2})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/**
+ * Whether a body that does not parse as JSON holds `_method` as a key: `"_method":`, once its
+ * `\uXXXX` escapes are read. A value or a longer name that only contains the word is not one.
+ */
+function namesMethodKey(body: string): boolean {
+  const unescaped = body.replace(/\\u([0-9a-f]{4})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+  return /"_method"\s*:/i.test(unescaped);
+}
+
+/**
+ * Whether a multipart body has a part whose name a server may read as `_method`. Folded header
+ * lines are joined first. Each `name` parameter counts on its own, plain, quoted (with its
+ * backslash escapes read) or in its RFC 2231 form (`name*=utf-8''_%6Dethod`), and so do the
+ * numbered pieces of one (`name*0`, `name*1`) put together in their order. `filename` is not a name.
+ */
+function multipartNamesMethod(body: string): boolean {
+  const unfolded = body.replace(/\r?\n[ \t]+/g, ' ');
+  for (const line of unfolded.split(/\r?\n/)) {
+    if (!/^\s*content-disposition\s*:/i.test(line)) continue;
+    const names: string[] = [];
+    const pieces: [number, string][] = [];
+    for (const match of line.matchAll(/;\s*name(\*(\d+)?\*?)?\s*=\s*("(?:[^"\\]|\\.)*"|[^;]*)/gi)) {
+      let value = match[3]!.trim();
+      if (value.startsWith('"')) value = value.slice(1, -1).replace(/\\(.)/g, '$1');
+      if (match[1]?.endsWith('*')) value = value.replace(/^[^']*'[^']*'/, '');
+      value = percentDecoded(value);
+      if (match[2] === undefined) names.push(value);
+      else pieces.push([Number(match[2]), value]);
+    }
+    if (pieces.length > 0) names.push(pieces.sort(([a], [b]) => a - b).map(([, piece]) => piece).join(''));
+    if (names.some((name) => formFieldName(name) === '_method')) return true;
+  }
+  return false;
+}
+
+/**
+ * The `_method` fields of a request body, as a server that parses the body may read them
+ * (Rack's MethodOverride and Laravel read the form or the JSON body; Express's method-override
+ * reads whatever its body parser produced). Only top-level fields count: a field of that name
+ * inside a nested object, or a form key such as `data[_method]`, is ordinary data.
+ *
+ * Servers do not agree on which parser a Content-Type selects, so the body is read both as JSON
+ * and as a form. A value from a parser the Content-Type names is `declared`, and one that is not
+ * a method is refused like any other override; a value only the other parser finds counts when
+ * it is a method. The form reading is left out only for a body declared as JSON alone that parses
+ * as JSON: no server reads that as a form. `unreadable` is set when a server may read an
+ * override this module cannot: a body that looks like JSON (by its type or its first character),
+ * does not parse and holds a `"_method":` key, or a body under a multipart type with a part named
+ * `_method`.
+ * The caller gates such a request as the strongest method.
+ */
+function bodyOverrides(body: string, headers: Record<string, string>): { declared: string[]; other: string[]; unreadable: boolean } {
+  const contentType = Object.entries(headers)
+    .filter(([name]) => name.trim().toLowerCase() === 'content-type')
+    .map(([, value]) => value).join(', ').toLowerCase();
+  let json: string[] | null;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    json = parsed === null || typeof parsed !== 'object'
+      ? []
+      : Object.entries(parsed)
+        .filter(([name]) => name.toLowerCase() === '_method')
+        .map(([, value]) => (typeof value === 'string' ? value : NOT_A_METHOD));
+  } catch {
+    json = null;
+  }
+  const jsonDeclared = contentType.includes('json');
+  const formDeclared = contentType.includes('application/x-www-form-urlencoded');
+  const form = jsonDeclared && !formDeclared && json !== null
+    ? []
+    : [...new URLSearchParams(body)].filter(([name]) => formFieldName(name) === '_method').map(([, value]) => value);
+  const looksJson = jsonDeclared || /^\s*[[{"]/.test(body);
+  return {
+    declared: [...(jsonDeclared ? json ?? [] : []), ...(formDeclared ? form : [])],
+    other: [...(jsonDeclared ? [] : json ?? []), ...(formDeclared ? [] : form)],
+    // A multipart type may follow a form type (`application/x-www-form-urlencoded, multipart/…`),
+    // and a server that takes the first one reads the form: the multipart check is added to the
+    // two readings, not put in their place.
+    unreadable: (looksJson && json === null && namesMethodKey(body)) ||
+      (contentType.includes('multipart/') && multipartNamesMethod(body)),
+  };
+}
+
 /**
  * The method a write is gated as. Every override form the request carries is read — the
- * three header names and a `_method` query parameter — and the strongest one wins over the
- * method when it is at least as strong: POST with an override DELETE is a DELETE, POST with
- * an override PATCH is asked as a PATCH, and POST with an override GET stays a POST. A server
- * that ignores the override loses nothing by this; one that honours it is gated on what it does.
+ * three header names, a `_method` query parameter and a top-level `_method` field of the body —
+ * and the strongest one wins over the method when it is at least as strong: POST with an
+ * override DELETE is a DELETE, POST with an override PATCH is asked as a PATCH, and POST with an
+ * override GET stays a POST. A server that ignores the override loses nothing by this; one that
+ * honours it is gated on what it does. A body whose override a server may read but this module
+ * cannot is gated as a DELETE (see `bodyOverrides`).
  *
  * `null` when an override carries something that is not a method token: the value would
  * otherwise reach the question, the refusals and the approval key verbatim (any words, or a
  * resolved secret in upper case, which no exact-match mask finds). The caller refuses the
  * request without naming the value.
  */
-export function effectiveWriteMethod(method: string, headers: Record<string, string>, url: string): string | null {
+export function effectiveWriteMethod(method: string, headers: Record<string, string>, url: string, body?: string): string | null {
   let effective = method.trim().toUpperCase();
   // The schema offers six methods, but nothing below may rely on the model having kept to it.
   if (!KNOWN_METHODS.has(effective)) return null;
@@ -65,6 +169,13 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
       if (name.toLowerCase() === '_method') candidates.push(value);
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
+  // A GET or HEAD sends no body, so nothing in one can override it.
+  if (body !== undefined && !isRead(effective)) {
+    const fromBody = bodyOverrides(body, headers);
+    candidates.push(...fromBody.declared);
+    candidates.push(...fromBody.other.filter((value) => KNOWN_METHODS.has(value.trim().toUpperCase())));
+    if (fromBody.unreadable) candidates.push('DELETE');
+  }
   for (const raw of candidates) {
     const m = raw.trim().toUpperCase();
     if (m === '') continue;

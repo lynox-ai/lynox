@@ -2121,7 +2121,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   undo: (input) => undoClassFor(input.method ?? 'GET'),
   // The effective method, overrides included; one that is not a method counts as a write.
   outwardWrite: (input) => {
-    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url) ?? 'OVERRIDE';
+    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, typeof input.body === 'string' ? input.body : undefined) ?? 'OVERRIDE';
     return method === 'GET' || method === 'HEAD' ? null : method;
   },
   definition: {
@@ -2226,10 +2226,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // The method this call is gated as: the strongest of the method and any override form the
     // request carries (`outbound-write.ts`). It is what is sent that stays `method`; every gate
     // below that asks "is this a write, and which one" reads `gatedMethod`.
-    const effective = effectiveWriteMethod(method, headers, input.url);
+    const effective = effectiveWriteMethod(method, headers, input.url, typeof input.body === 'string' ? input.body : undefined);
     if (effective === null) {
       // The value is not repeated: it is whatever the request put there.
-      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header or a `_method` query parameter), is not an HTTP method. Send the request with a method name, or without the override.');
+      blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
     }
     const gatedMethod = effective;
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
@@ -2707,15 +2707,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
             // The hop's own method, with the override forms its target may carry: a
-            // `?_method=` in a Location raises it like one in the request.
-            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl);
+            // `?_method=` in a Location raises it like one in the request. The body rides along
+            // on a hop that keeps its method (307/308); for a hop turned into a GET none is read.
+            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, typeof input.body === 'string' ? input.body : undefined);
             return hop !== null &&
               contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
               !isOutboundEffectWrite(nextUrl, hop);
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
-              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl);
+              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, typeof input.body === 'string' ? input.body : undefined);
               if (hop === null) return 'consent';
               if (!isWriteMethod(hop)) return true;
               // Another write than the one asked (a Location with `?_method=DELETE`) needs
