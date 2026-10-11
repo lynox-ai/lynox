@@ -5985,6 +5985,22 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain('needs its own approval');
   });
 
+  it('a reviewed grant for POST does not cover a POST whose body raises it to DELETE; the plain POST goes out', async () => {
+    const reviewed: CapabilityContract = {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    const raised = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: 'name=a&_method=DELETE', headers: form }, makeAgent({ capabilityContract: reviewed }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(raised).not.toContain('HTTP 200');
+    const plain = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: 'name=a', headers: form }, makeAgent({ capabilityContract: reviewed }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
   it('(F2) a contract hop is checked with the method its target raises it to', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
