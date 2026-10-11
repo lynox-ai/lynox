@@ -438,9 +438,27 @@ describe('Task Tools', () => {
         { title: 'Asks', assignee: 'lynox', workflow_id: id, schedule: '0 2 * * *' },
         makeAgent(),
       );
-      // A schedulable one passes the mode gate and reaches the next one: the confirmation.
+      // A schedulable one passes the mode gate and is sent to the library, whose confirmation names the steps that ask.
       expect(result.includes('only question tool is ask_user')).toBe(refusedAsUnschedulable);
-      expect(result.includes('has not been confirmed')).toBe(!refusedAsUnschedulable);
+      expect(result.includes('its confirmation names the steps that ask')).toBe(!refusedAsUnschedulable);
+    });
+
+    it('sends a confirmed workflow that asks its owner to the library, and creates no task', async () => {
+      // An old template carries a `confirmedAt` from its content migration, whatever its mode:
+      // the owner never saw which steps ask, so the stamp alone does not let an agent schedule it.
+      history.insertPlannedPipeline({
+        id: 'wf-asks-confirmed', name: 'Asks', goal: 'ask', steps: [{ id: 'pick', task: 'ask_user which list' }],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-07-01T00:00:00.000Z', template: true,
+        mode: 'interactive',
+      } as Parameters<typeof history.insertPlannedPipeline>[0]);
+      history.setWorkflowConfirmedAt('wf-asks-confirmed', '2026-07-01T00:00:00.000Z');
+      const result = await taskCreateTool.handler(
+        { title: 'Asks confirmed', assignee: 'lynox', workflow_id: 'wf-asks-confirmed', schedule: '0 2 * * *' },
+        makeAgent(),
+      );
+      expect(result).toContain('its confirmation names the steps that ask');
+      expect(result).not.toContain('Workflow task created');
+      expect(tm.listTriggers().find((t) => t.title === 'Asks confirmed')).toBeUndefined();
     });
 
     it('refuses a workflow that is not in the library, naming the save step', async () => {

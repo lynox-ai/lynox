@@ -417,6 +417,11 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
             ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
               ? 'is not a saved workflow. Save it to the workflow library first; scheduling it from there confirms it and creates the task.'
+              // A workflow that asks its owner is scheduled only where the confirmation names
+              // the steps that ask: the library. A `confirmedAt` alone does not show that the
+              // owner saw them (an old template carries one from its content migration).
+              : planned.mode === 'interactive'
+                ? 'asks its owner while it runs. Ask the user to schedule it from the workflow library: its confirmation names the steps that ask, and it creates the task. Do not create it here.'
               : !planned.confirmedAt
                 ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
                 : null;
