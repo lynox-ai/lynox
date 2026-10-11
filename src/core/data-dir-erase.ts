@@ -29,6 +29,12 @@ import { DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
 
 /** SQLite sidecars that belong to the database they extend — only a `sqlite` entry has them. */
 const SIDECAR = /^(.+?)(-wal|-shm|-journal)$/;
+/**
+ * The one kept generation of a size-rotated measurement log (`bounded-jsonl-log.ts`
+ * renames `<name>.jsonl` to `<name>.jsonl.1`). It holds the same records as its live file,
+ * so it follows that file's decision — only when the live name is declared.
+ */
+const ROTATED = /^(.+\.jsonl)\.1$/;
 /** `atomic-write.ts`: `${filePath}.${pid}.${uuid8}.tmp`, left behind by a crash between write and rename. */
 const ATOMIC_TEMP = /^(.+)\.\d+\.[0-9a-f]{8}\.tmp$/;
 /**
@@ -70,6 +76,8 @@ export function classifyEntry(name: string): EntryClass {
     if (BY_NAME.get(base)?.kind === 'sqlite') return { kind: 'sidecar', of: base };
     if (isResidue(base)) return { kind: 'residue' };
   }
+  const rotated = ROTATED.exec(name);
+  if (rotated && BY_NAME.get(rotated[1]!)?.kind === 'file') return { kind: 'sidecar', of: rotated[1]! };
   const temp = ATOMIC_TEMP.exec(name);
   if (temp && BY_NAME.has(temp[1]!)) return { kind: 'temp', of: temp[1]! };
   return { kind: 'unknown' };

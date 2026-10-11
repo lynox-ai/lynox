@@ -17,8 +17,10 @@
  * write a new store; the first version of the scanner caught ONE of them, and
  * `agent-memory.db` could be deleted from this table with every test still green. It now
  * catches SIX — literal, const, template, concat, a variable aliased from the data dir, and
- * `${dir}/${CONST}` (the shape already in the tree). Two still evade it: a helper that
- * takes the name as a parameter, and a spread argument. Both need dataflow analysis.
+ * `${dir}/${CONST}` (the shape already in the tree). Two still evade it in general: a helper
+ * that takes the name as a parameter, and a spread argument. Both need dataflow analysis.
+ * The one such helper in the tree, the bounded JSONL sink, is read by its call name — six
+ * measurement logs had reached the data dir undeclared through it.
  *
  * It also asserts the REVERSE — every row here must be findable in the source unless it
  * carries `sourceInvisible` — so a recall drop shows up as a failing test instead of a
@@ -182,6 +184,35 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   {
     name: 'wire-sink-raw-on', kind: 'file', secret: false, backup: false, migrate: false, erase: keep('an arming marker for the raw debug capture; the capture itself is removed'),
     why: 'arming marker for the raw debug capture',
+  },
+  // ── Opt-in measurement logs (`bounded-jsonl-log.ts`) ──────────────────────
+  // Per-container telemetry: ids, hashes and enums, but thread and subject ids are personal
+  // references, so the erasure removes them — with their `.1` rotation, which
+  // `data-dir-erase.ts` treats as part of the live file. Neither backed up nor migrated:
+  // they describe this container's measurement window, not the user's data.
+  {
+    name: 'capture-telemetry.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    why: 'opt-in measurement log of this container (`capture-telemetry.ts`); a measurement window does not travel with the data',
+  },
+  {
+    name: 'context-cost.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    why: 'opt-in measurement log of this container (`context-cost-log.ts`); a measurement window does not travel with the data',
+  },
+  {
+    name: 'memory-write.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    why: 'opt-in measurement log of this container (`memory-write-log.ts`); a measurement window does not travel with the data',
+  },
+  {
+    name: 'memory-write-decision.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    why: 'opt-in measurement log of this container (`memory-write-decision-log.ts`); a measurement window does not travel with the data',
+  },
+  {
+    name: 'retrieval-shadow.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    why: 'opt-in measurement log of this container (`retrieval-shadow-log.ts`); a measurement window does not travel with the data',
+  },
+  {
+    name: 'untrusted-cause.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    why: 'opt-in measurement log of this container (`untrusted-cause-log.ts`); a measurement window does not travel with the data',
   },
   {
     // Written by the container entrypoint (`entrypoint-webui.sh`), which no source scan

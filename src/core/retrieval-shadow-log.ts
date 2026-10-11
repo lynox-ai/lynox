@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { appendBoundedJsonl } from './bounded-jsonl-log.js';
 import type { ProvenanceKind } from '../types/index.js';
 
@@ -18,11 +19,11 @@ import type { ProvenanceKind } from '../types/index.js';
  *  - Best-effort: a logging failure must NEVER surface into the agent run — every
  *    error is swallowed.
  *  - Deploy-safe path: written next to `agent-memory.db` in the persistent data dir
- *    (env `LYNOX_DATA_DIR`/`LYNOX_DIR`, else `~/.lynox`), writable in the managed
- *    read-only container.
- *  - Privacy: the query is stored only as a 16-char sha256 prefix (never raw text),
- *    but `threadId`/`subjectId` are plaintext. The sink is per-container, OUTSIDE
- *    backups and the migration export. Its retention is bounded by the shared
+ *    (`getLynoxDir()`), writable in the managed read-only container.
+ *  - Privacy: the query is stored only as a salted 16-char HMAC prefix (never raw text,
+ *    see `shadowQueryHash`), but `threadId`/`subjectId` are plaintext. The sink is
+ *    per-container, OUTSIDE backups and the migration export, and the erasure removes it
+ *    (`DATA_DIR_INVENTORY`). Its retention is bounded by the shared
  *    size-rotation in `bounded-jsonl-log.ts` (≤ 2× cap on disk), so enabling it
  *    fleet-wide on customer data cannot grow an unbounded plaintext file.
  */
@@ -50,11 +51,8 @@ export interface RetrievalShadowLogEntry {
   /** Thread id the retrieval belongs to, if known. */
   readonly threadId: string | undefined;
   /**
-   * 16-char sha256 prefix of the query — a GROUPING key to correlate repeat
-   * queries, NOT a privacy boundary: it is unsalted, so a low-entropy query is
-   * dictionary-reversible and collides identically across containers. That is
-   * strictly less identifying than the threadId/subjectId this record already
-   * carries in plaintext; the retention bound (not the hash) is the control.
+   * `shadowQueryHash(query)` — a GROUPING key that correlates repeat queries within one
+   * process, nothing more.
    */
   readonly queryHash: string;
   /** Embedding model identity — the FLOOR binds to it (§1.7), so the distribution must record it. */
@@ -63,6 +61,23 @@ export interface RetrievalShadowLogEntry {
   readonly embeddingProvider: string;
   /** Every scored, scope-filtered candidate this retrieval considered. */
   readonly candidates: readonly RetrievalShadowCandidate[];
+}
+
+/**
+ * Salt for `shadowQueryHash`, drawn per process and never written anywhere.
+ *
+ * The hash was a plain sha256 prefix, and a query is often a name: anyone holding the
+ * file and a list of candidate names could read back who was looked up, and that survived
+ * the erasure of the person it named. Keyed with a salt nothing persists, the hash still
+ * groups repeat queries within a process — the only use it has — and reveals nothing
+ * after a restart. The price is that grouping does not span restarts or containers, which
+ * no reader of this log needs.
+ */
+const QUERY_HASH_SALT = randomBytes(32);
+
+/** 16-hex-char HMAC-SHA256 of the query under the per-process salt. */
+export function shadowQueryHash(query: string): string {
+  return createHmac('sha256', QUERY_HASH_SALT).update(query).digest('hex').slice(0, 16);
 }
 
 /**

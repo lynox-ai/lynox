@@ -96,6 +96,13 @@ function scanDataDirNames(): Map<string, string[]> {
       // join(<dirish>, '<name>') / join(<dirish>, CONST)
       if (ts.isCallExpression(node)) {
         const callee = node.expression.getText();
+        // The bounded JSONL sink joins the data dir with a name it receives as a PARAMETER,
+        // which no path shape above can see — six measurement logs reached the data dir
+        // undeclared that way. Its two entry points are read by name instead.
+        if (/(^|\.)(appendBoundedJsonl|scanBoundedJsonl)$/.test(callee)) {
+          const lit = literalOf(node.arguments[0]);
+          if (lit !== null) record(lit, node);
+        }
         if (/(^|\.)(join|resolve)$/.test(callee)) {
           const [base, second] = node.arguments;
           if (base && second && isDirish(base)) {

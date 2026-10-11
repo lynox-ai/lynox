@@ -166,8 +166,9 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
         writeFileSync(path, m);
       }
     }
-    // The engine's own residue, and a crash-left atomic temp of the config.
-    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp']) {
+    // The engine's own residue, a crash-left atomic temp of the config, and the rotated
+    // generation of a measurement log.
+    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp', 'retrieval-shadow.jsonl.1']) {
       writeFileSync(join(dir, name), mark(name));
     }
     // The stores held open: mail-state, push, flat-file memory (and its cache), artifacts.
@@ -212,7 +213,7 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
       if (st.isDirectory()) expect(readdirSync(path), `${name} kept content`).toEqual([]);
       else expect(readFileSync(path, 'utf8'), `${name} survived`).not.toBe(m);
     }
-    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp']) {
+    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp', 'retrieval-shadow.jsonl.1']) {
       expect(existsSync(join(dir, name)), `${name} survived`).toBe(false);
     }
     for (const [name, bytes] of before) expect(readFileSync(join(dir, name), 'utf8'), `${name} was changed`).toBe(bytes);

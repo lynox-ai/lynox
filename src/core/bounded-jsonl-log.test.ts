@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendBoundedJsonl } from './bounded-jsonl-log.js';
+import { setDataDir } from './config.js';
 
 /**
  * The shared size-rotation that bounds the opt-in telemetry sinks
@@ -151,5 +152,21 @@ describe('bounded-jsonl-log — retention + best-effort', () => {
     // the cap on every FUTURE successful rotate) — the data was never lost or thrown away.
     const live = await readFile(join(dir, FILE), 'utf8');
     expect(live.trim().split('\n').length).toBe(12);
+  });
+
+  // An instance started with `--data-dir` sets the override and no env var. The sink used
+  // to read the env itself and wrote into `~/.lynox` there, outside the directory the
+  // erasure clears.
+  it('writes under a --data-dir override, not under LYNOX_DATA_DIR', async () => {
+    const override = await mkdtemp(join(tmpdir(), 'lynox-bjl-override-'));
+    setDataDir(override);
+    try {
+      await appendBoundedJsonl(FILE, { seq: 1 });
+      expect((await readFile(join(override, FILE), 'utf8')).trim()).toBe('{"seq":1}');
+      await expect(stat(join(dir, FILE))).rejects.toThrow();
+    } finally {
+      setDataDir(null as unknown as string);
+      await rm(override, { recursive: true, force: true }).catch(() => {});
+    }
   });
 });
