@@ -108,7 +108,13 @@ export function deriveSourceEffect(intent: {
  *
  * Engine wires this at startup; tests / headless CLI can leave it unset.
  */
-type PipelineModeLookup = (pipelineId: string) => PipelineMode | null | undefined;
+type PipelineModeLookup = (pipelineId: string) => PipelineSchedule | null | undefined;
+
+/** A saved pipeline's mode, and whether a schedule may run it (`isSchedulableWorkflow`). */
+export interface PipelineSchedule {
+  mode: PipelineMode;
+  schedulable: boolean;
+}
 let pipelineModeLookup: PipelineModeLookup | undefined;
 
 /** Wire the pipeline-mode lookup. Called by Engine bootstrap. */
@@ -281,18 +287,18 @@ export class TaskManager {
 
     if (willBeTrigger) {
       // Reject any pipeline destined for background execution (cron, explicit
-      // nextRunAt, or lynox auto-trigger above) whose mode is not 'autonomous'.
+      // nextRunAt, or lynox auto-trigger above) that a schedule may not run.
       // All three paths detach execution from the calling session and end up at
-      // WorkerLoop, where ask_user has no live session to route back to. When
-      // the lookup is unwired (tests / headless CLI) the WorkerLoop hard gate
-      // is the backstop.
+      // WorkerLoop, where only `ask_user` has somewhere to go: the run's own
+      // question channel to the owner (PRD 3b-2 §4.3). When the lookup is
+      // unwired (tests / headless CLI) the WorkerLoop hard gate is the backstop.
       const willRunInBackground = Boolean(params.scheduleCron) || Boolean(resolvedNextRunAt);
       if (willRunInBackground && params.pipelineId && pipelineModeLookup) {
-        const mode = pipelineModeLookup(params.pipelineId);
-        if (mode && mode !== 'autonomous') {
+        const found = pipelineModeLookup(params.pipelineId);
+        if (found && !found.schedulable) {
           throw new Error(
-            `Cannot schedule pipeline "${params.pipelineId}": mode is '${mode}', but only 'autonomous' pipelines run via WorkerLoop (cron / nextRunAt / assignee=lynox). ` +
-            `Remove ask_user/ask_secret steps or invoke the pipeline manually from a chat session.`,
+            `Cannot schedule pipeline "${params.pipelineId}": mode is '${found.mode}', and only an 'autonomous' pipeline, or an interactive one whose only question tool is ask_user, runs via WorkerLoop (cron / nextRunAt / assignee=lynox). ` +
+            `Remove its ask_secret / ask_human steps or invoke the pipeline manually from a chat session.`,
           );
         }
       }
@@ -856,6 +862,11 @@ export class TaskManager {
   /** Take a trigger's run lease before running it (engine.db v16). */
   claimLease(id: string, holder: string, until: string, now: string): 'claimed' | 'interrupted' | 'held' | 'not_found' {
     return this.history.claimTriggerLease(id, holder, until, now);
+  }
+
+  /** When a trigger's run lease runs out, or null when it is free — the earliest a run can start again. */
+  leaseUntil(id: string): string | null {
+    return this.history.triggerLeaseUntil(id);
   }
 
   /** Extend this holder's lease; false when another holder took it over. */

@@ -1650,21 +1650,21 @@ export class Engine {
       this._taskManager = new TaskManager(this.runHistory);
       this._toolContext.taskManager = this._taskManager;
       // Wire the pipeline-mode lookup so TaskManager can refuse to schedule
-      // interactive pipelines. Lazy-imported to avoid a tools→core cycle.
+      // pipelines it may not run. Lazy-imported to avoid a tools→core cycle.
       // Fail-closed: if the import or wiring fails, install a lookup that
-      // marks every pipeline as 'interactive' so the scheduler refuses
-      // them all rather than silently letting interactive pipelines onto
-      // the cron.
+      // marks every pipeline unschedulable so the scheduler refuses them all
+      // rather than silently letting an asking pipeline onto the cron.
       const runHistoryRef = this.runHistory;
       try {
         const { getPipeline } = await import('../tools/builtin/pipeline.js');
+        const { pipelineScheduleOf } = await import('../orchestrator/human-in-the-loop.js');
         setPipelineModeLookup((pipelineId: string) => {
           const planned = getPipeline(pipelineId, runHistoryRef);
-          return planned?.mode ?? null;
+          return planned ? pipelineScheduleOf(planned) : null;
         });
       } catch (err) {
         console.error('[engine] Failed to wire pipeline-mode lookup; refusing all scheduled pipelines:', err);
-        setPipelineModeLookup(() => 'interactive');
+        setPipelineModeLookup(() => ({ mode: 'interactive', schedulable: false }));
       }
     }
 

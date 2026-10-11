@@ -1433,6 +1433,24 @@ describe('LynoxHTTPApi', () => {
       expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
     });
 
+    // PRD 3b-2 §4.3: a workflow whose only question tool is ask_user is scheduled and confirmed
+    // like an autonomous one; one that may ask for a secret is not, and nothing is stamped.
+    it('schedules and confirms an interactive workflow that asks only through ask_user', async () => {
+      storeWf({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which month' }] });
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: { month: '2026-06' } }) });
+      expect(res.status).toBe(201);
+      expect(mockSetWorkflowConfirmedAt).toHaveBeenCalledWith('wf-sched', expect.any(String));
+      expect(mockTaskCreatePipeline).toHaveBeenCalledWith(expect.objectContaining({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *' }));
+    });
+
+    it('rejects an interactive workflow that may ask for a secret, without stamping the confirm', async () => {
+      storeWf({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which month' }, { id: 'k', task: 'ask_secret for the key' }] });
+      const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: { month: '2026-06' } }) });
+      expect(res.status).toBe(400);
+      expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled();
+      expect(mockTaskCreatePipeline).not.toHaveBeenCalled();
+    });
+
     it('rejects a missing required param without stamping the confirm (400)', async () => {
       storeWf();
       const res = await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: '0 9 * * *', params: {} }) });
@@ -1528,6 +1546,18 @@ describe('LynoxHTTPApi', () => {
 
       describe('switch on', () => {
         beforeEach(() => { vi.stubEnv('LYNOX_FEATURE_WORKFLOW_REVIEWED_GRANT', '1'); });
+
+        // PRD 3b-2 §4.3: the preview asks the same predicate as the schedule route.
+        it.each([
+          ['only ask_user', 200, 'post, then ask_user which month'],
+          ['ask_secret', 400, 'post, then ask_secret for the key'],
+        ] as const)('the preview of an interactive workflow that asks through %s answers %i', async (_label, status, task) => {
+          storeWf({ mode: 'interactive', steps: [{ id: 's', task, input_template: { url: 'https://api.example.com/v1/reports', body: '{{params.month}}' } }] });
+          await withGrantServices(async () => {
+            const res = await jsonFetch('/api/workflows/wf-sched/grant-preview', { method: 'POST', body: JSON.stringify({ ...GRANT, params: VALUES, scheduleCron: CRON }) });
+            expect(res.status).toBe(status);
+          });
+        });
 
         it('the preview lists one line per enforced method and URL, the values, the binding and the checksum', async () => {
           await withGrantServices(async () => {
@@ -2134,6 +2164,48 @@ describe('LynoxHTTPApi', () => {
       expect(lines[headerIdx]!.endsWith(']')).toBe(true);
       // The body follows IMMEDIATELY — nothing was smuggled in between.
       expect(lines[headerIdx + 1]!).toBe('hello world');
+    });
+
+    it('an answer to a question the restart closed hears that the run is gone; one that timed out hears "expired"', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-reply-closed-'));
+      const history = new RunHistory(join(dir, 'history.db'));
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const store = new PromptStore(history.getDb());
+      const restarted = store.insertAskUser('s-restart', 'Which list?');
+      store.expireUnparked();
+      const timedOut = store.insertAskUser('s-ttl', 'Which list?');
+      store.expirePrompt(timedOut);
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const original = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => store;
+      try {
+        const gone = await jsonFetch('/api/sessions/s-restart/reply', { method: 'POST', body: JSON.stringify({ promptId: restarted, answer: 'B' }) });
+        expect(gone.status).toBe(410);
+        const goneBody = await gone.json() as { error: string; code?: string };
+        expect(goneBody.code).toBe('process_restarted');
+        expect(goneBody.error).toContain('engine restarted');
+        expect(goneBody.error).toContain('Start it again');
+
+        // The two other answer routes give the same answer for a question the restart closed.
+        const tabs = store.insertAskUserTabs('s-tabs', [{ question: 'Which list?' }]);
+        const mail = store.insertConnectMail('s-mail', 'Connect the office mailbox?', '{}');
+        store.expireUnparked();
+        const tabsRes = await jsonFetch('/api/sessions/s-tabs/reply-tabs', { method: 'POST', body: JSON.stringify({ promptId: tabs, answers: ['B'] }) });
+        expect(tabsRes.status).toBe(410);
+        expect((await tabsRes.json() as { code?: string }).code).toBe('process_restarted');
+        const mailRes = await jsonFetch('/api/sessions/s-mail/mail-connected', { method: 'POST', body: JSON.stringify({ promptId: mail, status: 'connected' }) });
+        expect(mailRes.status).toBe(410);
+        expect((await mailRes.json() as { code?: string }).code).toBe('process_restarted');
+
+        const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
+        expect(expired.status).toBe(410);
+        const expiredBody = await expired.json() as { error: string; code?: string };
+        expect(expiredBody).toEqual({ error: 'Prompt expired' });
+      } finally {
+        engineRef.getPromptStore = original;
+        history.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it('reply returns 404 for no pending prompt', async () => {
@@ -7041,6 +7113,18 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('POST /api/triggers/:id/run names when a held lease lapses, as the earliest time to try again', async () => {
+      const leaseUntil = '2026-10-11T10:15:00.000Z';
+      await withLoop(() => Promise.resolve({ ok: false, reason: 'already_running', leaseUntil }), async () => {
+        const res = await jsonFetch('/api/triggers/trg-1/run', { method: 'POST' });
+        expect(res.status).toBe(409);
+        const body = await res.json() as { code?: string; error?: string; leaseUntil?: string };
+        expect(body.code).toBeUndefined();
+        expect(body.leaseUntil).toBe(leaseUntil);
+        expect(body.error).toContain(`at the earliest at ${leaseUntil}`);
+      });
+    });
+
     it('POST /api/tasks stamps confirmedAt on the created row (human consent path)', async () => {
       await jsonFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ title: 'Immediate', assignee: 'lynox' }) });
       // the human HTTP create route supplies confirmedAt; the agent task_create tool never does.
@@ -8112,6 +8196,43 @@ describe('LynoxHTTPApi', () => {
       expect(body.error).toContain('chat');
       expect(body.error).not.toContain('schedule it');
       expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+    });
+
+    // PRD 3b-2 §4.3: this route has no question channel, so a workflow that asks its owner runs
+    // only on its schedule — refused whether it is confirmed (it is, once scheduled) or not.
+    it.each([
+      ['confirmed', { confirmedAt: '2026-07-01T00:00:00Z' }],
+      ['not confirmed', {}],
+    ])('POST /api/workflows/:id/run refuses a %s workflow that asks its owner, and does not start it', async (_label, over) => {
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-asks', name: 'Asks', template: true, mode: 'interactive',
+        steps: [{ id: 'pick', task: 'ask_user which list' }], ...over,
+      });
+      const res = await jsonFetch('/api/workflows/wf-asks/run', { method: 'POST' });
+      expect(res.status).toBe(403);
+      const body = JSON.parse(await res.text()) as { error: string };
+      expect(body.error).toBe('This workflow asks questions while it runs, so it runs only on its schedule.');
+      expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('GET /api/workflows/library says which workflows a schedule may run, and which steps ask', async () => {
+      const row = (id: string, steps: unknown[], mode?: string): Record<string, unknown> => ({
+        id, manifest_name: id, step_count: steps.length, started_at: '2026-05-21T00:00:00Z',
+        manifest_json: JSON.stringify({ template: true, name: id, goal: 'g', steps, ...(mode ? { mode } : {}) }),
+      });
+      mockHistoryGetPlannedPipelines.mockReturnValue([
+        row('auto', [{ id: 's1', task: 'gather' }], 'autonomous'),
+        row('asks', [{ id: 's1', task: 'gather' }, { id: 'pick', task: 'ask_user which list' }], 'interactive'),
+        row('secret', [{ id: 'pick', task: 'ask_user which list' }, { id: 'k', task: 'ask_secret for the key' }], 'interactive'),
+      ]);
+      const res = await jsonFetch('/api/workflows/library');
+      const body = await res.json() as { workflows: Array<{ id: string; schedulable: boolean; askingSteps: string[] }> };
+      const byId = Object.fromEntries(body.workflows.map((w) => [w.id, { schedulable: w.schedulable, askingSteps: w.askingSteps }]));
+      expect(byId).toEqual({
+        auto: { schedulable: true, askingSteps: [] },
+        asks: { schedulable: true, askingSteps: ['pick'] },
+        secret: { schedulable: false, askingSteps: ['pick'] },
+      });
     });
 
     it('POST /api/workflows/:id/run still names scheduling for an AUTONOMOUS one', async () => {

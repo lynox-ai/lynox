@@ -40,7 +40,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopToolsWithout, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, StepTimeout, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { applyPluginToolGate } from '../core/session.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
@@ -678,15 +678,27 @@ describe('spawnInline thinking gating', () => {
   });
 });
 
-describe('stripHumanInTheLoopTools', () => {
-  it('drops ask_user / ask_secret entries', () => {
-    const tools: ToolEntry[] = [
-      { definition: { name: 'bash', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'ok' },
-      { definition: { name: 'ask_user', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 'q' },
-      { definition: { name: 'ask_secret', description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => 's' },
-    ];
-    const stripped = stripHumanInTheLoopTools(tools);
-    expect(stripped.map(t => t.definition.name)).toEqual(['bash']);
+describe('stripHumanInTheLoopToolsWithout — which human-in-the-loop tools a step keeps', () => {
+  const hitl = (): ToolEntry[] => ['bash', 'ask_user', 'ask_secret', 'ask_human'].map(name => (
+    { definition: { name, description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => name }
+  ));
+  const names = (handles: SubAgentPromptHandles | undefined): string[] =>
+    stripHumanInTheLoopToolsWithout(hitl(), handles).map(t => t.definition.name);
+  const fn = async () => 'x';
+
+  it('no channel: all three go', () => {
+    expect(names(undefined)).toEqual(['bash']);
+  });
+  it('the question channel alone keeps ask_user, never ask_secret', () => {
+    expect(names({ parentAskUserPrompt: fn })).toEqual(['bash', 'ask_user']);
+  });
+  it('promptUser keeps all three, as before — with or without promptSecret', () => {
+    expect(names({ parentPromptUser: fn, parentPromptSecret: async () => 'saved' as const })).toEqual(['bash', 'ask_user', 'ask_secret', 'ask_human']);
+    // Without promptSecret, ask_secret answers with a pointer to Settings; the step keeps it.
+    expect(names({ parentPromptUser: fn })).toEqual(['bash', 'ask_user', 'ask_secret', 'ask_human']);
+  });
+  it('the question channel with promptSecret beside it still keeps only ask_user', () => {
+    expect(names({ parentAskUserPrompt: fn, parentPromptSecret: async () => 'saved' as const })).toEqual(['bash', 'ask_user']);
   });
 });
 
@@ -748,6 +760,16 @@ describe('buildSubAgentPromptCallbacks', () => {
     expect(budget.usedCount).toBe(0);
   });
 
+  it('passes the question channel on as its own callback, tagged and budgeted, and never as promptUser', async () => {
+    const budget = new PromptBudget(1);
+    const parent = vi.fn(async () => 'B');
+    const cbs = buildSubAgentPromptCallbacks(step, { parentAskUserPrompt: parent, promptBudget: budget });
+    expect(cbs.promptUser).toBeUndefined();
+    await expect(cbs.askUserPrompt!('Which list?')).resolves.toBe('B');
+    expect(parent).toHaveBeenCalledWith('Which list?', undefined, { stepId: 'vote', stepTask: 'Welche Tagline?' });
+    await expect(cbs.askUserPrompt!('Again?')).rejects.toBeInstanceOf(PromptBudgetExceededError);
+  });
+
   it('consumes budget on promptTabs success', async () => {
     const budget = new PromptBudget(2);
     const cbs = buildSubAgentPromptCallbacks(step, {
@@ -798,6 +820,120 @@ describe('spawnInline + parentPrompt propagation', () => {
     expect(tools.find(t => t.definition.name === 'ask_user')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'ask_secret')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'ask_human')).toBeUndefined();
+  });
+
+  it('with the question channel alone: ask_user stays, ask_secret goes, and the step has no promptUser — both runtimes', async () => {
+    const parentAskUserPrompt = vi.fn(async () => 'B');
+    const hitl: ToolEntry[] = ['ask_user', 'ask_secret'].map(name => (
+      { definition: { name, description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => name }
+    ));
+    await spawnInline(
+      { id: 'scheduled', agent: 'scheduled', runtime: 'inline', task: 'ask' }, {}, mockConfig, [...mockParentTools, ...hitl],
+      undefined, undefined, undefined, { parentAskUserPrompt },
+    );
+    const inline = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const inlineTools = (inline['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(inlineTools).toContain('ask_user');
+    expect(inlineTools).not.toContain('ask_secret');
+    expect(inline['promptUser']).toBeUndefined();
+    await (inline['askUserPrompt'] as (q: string) => Promise<string>)('Which list?');
+    expect(parentAskUserPrompt).toHaveBeenCalledWith('Which list?', undefined, expect.objectContaining({ stepId: 'scheduled' }));
+
+    const agentTools = ['ask_user', 'ask_secret'].map(name => ({ name, description: '', input_schema: { type: 'object' as const, properties: {} }, execute: async () => name }));
+    await spawnViaAgent(
+      { id: 'a', agent: 'a', runtime: 'agent' }, { name: 'a', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: agentTools },
+      {}, mockConfig, undefined, 'run-1', undefined, undefined, { parentAskUserPrompt },
+    );
+    const named = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const namedTools = (named['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(namedTools).toContain('ask_user');
+    expect(namedTools).not.toContain('ask_secret');
+    expect(named['promptUser']).toBeUndefined();
+    expect(named['askUserPrompt']).toBeTypeOf('function');
+  });
+
+  // PRD 3b-2 G5 (a): a scheduled step's question holds its time limit; nothing else does.
+  describe('the step time limit and a question of a scheduled step', () => {
+    afterEach(() => { vi.useRealTimers(); mockSend.mockReset(); mockSend.mockResolvedValue('mock result'); });
+
+    /** The step's agent config, read inside `send`, where the run is. */
+    const lastAgentConfig = (): Record<string, unknown> => vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const answerAfter = (ms: number) => vi.fn(() => new Promise<string>((resolve) => { setTimeout(() => resolve('B'), ms); }));
+
+    it.each(['inline', 'agent'] as const)('a question waiting past the limit does not time the %s step out', async (runtime) => {
+      vi.useFakeTimers();
+      const parentAskUserPrompt = answerAfter(5_000);
+      mockSend.mockImplementationOnce(async () => {
+        const ask = lastAgentConfig()['askUserPrompt'] as (q: string) => Promise<string>;
+        return `answered ${await ask('Which list?')}`;
+      });
+      const run = runtime === 'inline'
+        ? spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 'ask', timeout_ms: 1_000 }, {}, mockConfig, mockParentTools,
+          undefined, undefined, undefined, { parentAskUserPrompt })
+        : spawnViaAgent({ id: 's', agent: 's', runtime: 'agent', timeout_ms: 1_000 }, { name: 's', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] },
+          {}, mockConfig, undefined, 'run-1', undefined, undefined, { parentAskUserPrompt });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(run).resolves.toMatchObject({ result: 'answered B' });
+      const agent = vi.mocked(Agent).mock.results.at(-1)!.value as { abort: ReturnType<typeof vi.fn> };
+      expect(agent.abort).not.toHaveBeenCalled();
+    });
+
+    it('control: a step that hangs without asking still times out', async () => {
+      vi.useFakeTimers();
+      mockSend.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { setTimeout(() => reject(new Error('aborted')), 5_000); }));
+      const run = spawnInline({ id: 'hangs', agent: 'hangs', runtime: 'inline', task: 'work', timeout_ms: 1_000 }, {}, mockConfig, mockParentTools,
+        undefined, undefined, undefined, { parentAskUserPrompt: answerAfter(0) });
+      const settled = expect(run).rejects.toThrow('Step "hangs" timed out after 1000ms');
+      await vi.advanceTimersByTimeAsync(5_000);
+      await settled;
+    });
+  });
+
+  describe('StepTimeout', () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('runs outside a hold, stops during one, and goes on with what was left', () => {
+      vi.useFakeTimers();
+      const fire = vi.fn();
+      const t = new StepTimeout(1_000);
+      t.start(fire);
+      vi.advanceTimersByTime(600);
+      t.hold();
+      vi.advanceTimersByTime(10_000);
+      expect(fire).not.toHaveBeenCalled();
+      t.release();
+      vi.advanceTimersByTime(399);
+      expect(fire).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(fire).toHaveBeenCalledTimes(1);
+      expect(t.fired).toBe(true);
+    });
+
+    it('holds nest: the limit runs again only when the last hold ends', () => {
+      vi.useFakeTimers();
+      const fire = vi.fn();
+      const t = new StepTimeout(1_000);
+      t.start(fire);
+      t.hold(); t.hold();
+      t.release();
+      vi.advanceTimersByTime(5_000);
+      expect(fire).not.toHaveBeenCalled();
+      t.release();
+      vi.advanceTimersByTime(1_000);
+      expect(fire).toHaveBeenCalledTimes(1);
+    });
+
+    it('a cleared limit does not fire, and a release after it does not re-arm it', () => {
+      vi.useFakeTimers();
+      const fire = vi.fn();
+      const t = new StepTimeout(1_000);
+      t.start(fire);
+      t.hold();
+      t.clear();
+      t.release();
+      vi.advanceTimersByTime(5_000);
+      expect(fire).not.toHaveBeenCalled();
+    });
   });
 
   it('keeps ask_user in sub-agent tools when parentPromptUser is present', async () => {

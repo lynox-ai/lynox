@@ -9,7 +9,7 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
@@ -709,6 +709,15 @@ export async function runSavedWorkflow(
      *  Absent for every caller with no stop to deliver. */
     stopSignal?: AbortSignal | undefined;
     abortScope?: import('../../types/config.js').AbortScope | undefined;
+    /**
+     * The question channel of a scheduled run (PRD 3b-2 §4.1): `parentAskUserPrompt` alone, never
+     * `parentPromptUser`, so a step may ask its owner and no consent gate in it can use the
+     * channel. With it, an interactive workflow whose only question tool is `ask_user` runs.
+     * Absent for every other caller, which keeps refusing interactive workflows.
+     */
+    parentPrompt?: SubAgentPromptHandles | undefined;
+    /** The channel's state the runner reads: see `RunManifestOptions.questionWait`. */
+    questionWait?: import('../../core/workflow-questions.js').WorkflowQuestionWait | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   if (!runHistory) {
@@ -722,7 +731,10 @@ export async function runSavedWorkflow(
   if (!planned.template) {
     return { ok: false, error: `Workflow "${planned.id}" is not a saved workflow.` };
   }
-  if (planned.mode === 'interactive') {
+  // A run with the question channel may ask through `ask_user`, and through nothing else: the
+  // channel reaches no consent gate, and `ask_secret` stays out of a scheduled run (G2).
+  const asksItsOwner = runtime?.parentPrompt?.parentAskUserPrompt !== undefined && asksOnlyViaAskUser(planned.steps);
+  if (planned.mode === 'interactive' && !asksItsOwner) {
     return {
       ok: false,
       error: `Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and must be run from a chat session.`,
@@ -826,6 +838,10 @@ export async function runSavedWorkflow(
       // The stop seam: undefined for every caller that has no stop to deliver.
       stopSignal: runtime?.stopSignal,
       abortScope: runtime?.abortScope,
+      // The question channel, only for a run that may ask (above). Its steps get `ask_user` and
+      // keep `ask_secret` out, because the handles carry no `parentPromptUser`/`parentPromptSecret`.
+      parentPrompt: asksItsOwner ? { parentAskUserPrompt: runtime?.parentPrompt?.parentAskUserPrompt } : undefined,
+      questionWait: asksItsOwner ? runtime?.questionWait : undefined,
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
@@ -878,10 +894,20 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // (autonomy undefined) still prompts on each dangerous step, so the in-chat path
   // stays open, matching how run_workflow was always the safe way to trial an
   // imported workflow.
+  // Three answers, one per kind (PRD 3b-2 §4.3): an interactive workflow whose only question tool
+  // is ask_user does have an unattended run — its schedule, where the questions reach the owner —
+  // but not here, where its questions would have nobody to reach.
+  // A workflow that asks its owner runs only on its schedule, confirmed or not: scheduling it
+  // stamps `confirmedAt`, and a worker session that called it here would hand its steps the
+  // full `promptUser` — the channel the consent gates read — instead of the question channel.
+  if (deps.autonomy === 'autonomous' && planned.mode === 'interactive' && isSchedulableWorkflow(planned)) {
+    return `Error: Workflow "${planned.id}" asks its owner while it runs, and only its schedule gives those questions their own channel to the owner. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`;
+  }
   if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
-    return planned.mode === 'interactive'
-      ? `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`
-      : `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
+    if (planned.mode !== 'interactive') {
+      return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
+    }
+    return `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
@@ -1233,6 +1259,10 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     // confirmedAt consent gate for `autonomy==='autonomous'` (an unconfirmed
     // imported workflow can't be run headless via this tool). For inline runs the
     // contract is "always interactive" by definition.
+    //
+    // ⚠ A step of a scheduled workflow has only `agent.askUserPrompt`, which is deliberately not
+    // passed on here: a workflow it starts gets no question channel and refuses an interactive
+    // workflow as before (PRD 3b-2, the channel is the run's own and not inherited).
     const parentPrompt = (agent.promptUser || agent.promptTabs || agent.promptSecret)
       ? {
           parentPromptUser: agent.promptUser,

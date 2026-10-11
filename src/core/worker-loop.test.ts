@@ -1572,7 +1572,7 @@ describe('WorkerLoop', () => {
         sessionId: 'thread-worker-test',
         _recreateAgent: vi.fn(),
         promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
-        run: vi.fn(async () => { answer = await session.promptUser!('Approve this?', ['Yes', 'No']); return 'Done.'; }),
+        run: vi.fn(async () => { answer = await session.promptUser!('Approve this?', ['Yes', 'No', '\x00']); return 'Done.'; }),
       };
       const task = makeTask();
       const engine = makeEngine({
@@ -1580,6 +1580,8 @@ describe('WorkerLoop', () => {
         session: session as unknown as Session,
         promptStore: store,
       });
+      // A vault that knows "Yes" as a secret: the options leave the box masked, like the body.
+      vi.mocked(engine.getSecretStore).mockReturnValue({ maskAll: (t: string) => t.replace('Yes', 'Y***') } as unknown as ReturnType<Engine['getSecretStore']>);
       const router = makeNotificationRouter();
       const loop = new WorkerLoop(engine, router, 60_000);
       await loop.tick();
@@ -1591,7 +1593,8 @@ describe('WorkerLoop', () => {
       // and now carries the prompt id so a client can settle this exact row.
       expect(router.notify).toHaveBeenCalledWith(
         expect.objectContaining({
-          inquiry: expect.objectContaining({ question: 'Approve this?' }) as { question: string },
+          // Without the free-text marker: it is for the owner's dialog, not for a mail or a push.
+          inquiry: { question: 'Approve this?', options: ['Y***', 'No'] },
           data: expect.objectContaining({
             threadId: 'thread-worker-test',
             promptId: store.getPending('thread-worker-test')!.id,
@@ -1603,7 +1606,7 @@ describe('WorkerLoop', () => {
       const pending = loop.getTaskPendingInput(task.id);
       expect(pending).toBeDefined();
       expect(pending!.question).toBe('Approve this?');
-      expect(pending!.options).toEqual(['Yes', 'No']);
+      expect(pending!.options).toEqual(['Yes', 'No', '\x00']); // the row keeps the marker for the owner's dialog
 
       loop.stop();
       for (let i = 0; i < 200 && answer === undefined; i++) {
@@ -2302,7 +2305,13 @@ describe('WorkerLoop', () => {
   // An interactive pipeline that somehow got onto a schedule (legacy data,
   // sync from another instance) must be rejected at the boundary so it
   // can't hang waiting for a non-existent live session.
-  it('executePipeline refuses an interactive PlannedPipeline', async () => {
+  // PRD 3b-2 §4.3: an interactive workflow whose only question tool is `ask_user` may run on a
+  // schedule; one that may ask for a secret (or ask a human any other way) stays refused.
+  it.each([
+    ['ask_secret', 'ask_secret for the API key'],
+    ['ask_user and ask_secret', 'ask_user which option, then ask_secret for the key'],
+    ['ask_human', 'ask_human to sign off'],
+  ])('executePipeline refuses an interactive PlannedPipeline that uses %s', async (_label, stepTask) => {
     // Doubles as the ORDER guard, and that is load-bearing: the fixture below
     // carries NO `confirmedAt`, so both guards in executePipeline are armed and
     // only their order decides the outcome. The mode guard throws; the consent
@@ -2320,7 +2329,7 @@ describe('WorkerLoop', () => {
       id: 'pipeline-interactive',
       name: 'asks-user',
       goal: 'pick a tagline',
-      steps: [{ id: 'q', task: 'ask_user which option' }],
+      steps: [{ id: 'q', task: stepTask }],
       reasoning: 'interactive',
       estimatedCost: 0,
       createdAt: '2026-01-01T00:00:00.000Z',
@@ -2351,7 +2360,35 @@ describe('WorkerLoop', () => {
     await expect(
       (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
         .executePipeline(task, ...NO_STOP()),
-    ).rejects.toThrow(/only runs 'autonomous' pipelines/);
+    ).rejects.toThrow(/may ask for more than an answer \(ask_secret \/ ask_human\), which a scheduled run has nobody to give/);
+  });
+
+  it('executePipeline lets an interactive PlannedPipeline that asks only through ask_user past the mode gate', async () => {
+    // The same fixture without `confirmedAt`: past the mode gate, the consent gate takes it and
+    // switches the schedule off, which is what shows the mode gate let it through.
+    vi.useRealTimers();
+    const task = makeTask({ id: 'pipe-asks', pipeline_id: 'pipeline-asks', effect: 'run_workflow' });
+    const planned = JSON.stringify({
+      id: 'pipeline-asks', name: 'asks-user', goal: 'pick a tagline',
+      steps: [{ id: 'q', task: 'ask_user which option' }],
+      reasoning: 'interactive', estimatedCost: 0, createdAt: '2026-01-01T00:00:00.000Z',
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+    });
+    const tm = makeTaskManager();
+    const engine = {
+      getTaskManager: vi.fn(() => tm),
+      getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
+      getSecretStore: vi.fn(() => null), getContext: vi.fn(() => null), getHooks: vi.fn(() => []),
+      getToolContext: vi.fn(() => ({ tools: [] })), getMemory: vi.fn(() => null),
+      getRunHistory: vi.fn(() => ({
+        getPlannedPipeline: vi.fn(() => ({ id: 'pipeline-asks', manifest_json: planned })),
+        getPipelineRunManifest: vi.fn(() => null),
+      })),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    await (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
+      .executePipeline(task, ...NO_STOP());
+    expect(tm.setEnabled).toHaveBeenCalledWith('pipe-asks', false);
   });
 
   // ---- effect: 'notify' branch (Phase-4 standalone reminders) ----

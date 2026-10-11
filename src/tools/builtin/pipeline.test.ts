@@ -720,9 +720,60 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     // matched /ask_user \/ ask_secret/, which the interactive guard's own message
     // also contains — so it passed whether this gate answered or that one did,
     // and a mutant dropping the `&& !parentPromptUser` conjunct survived it.
-    expect(result).toMatch(/no unattended run to confirm/);
+    // A workflow that asks only through ask_user has an unattended run (its schedule), just
+    // not this one (PRD 3b-2 §4.3): the message says where it does run.
+    expect(result).toMatch(/only its schedule gives those questions their own channel/);
     expect(result).not.toMatch(/requires a live chat session/);
     expect(result).not.toMatch(/Schedule it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...also once its schedule confirmed it: a worker never runs an asking workflow with its own prompter', async () => {
+    // Scheduling stamps `confirmedAt`. Gating on it alone let a run_agent worker run a scheduled
+    // asking workflow here, its steps holding the worker's full promptUser.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-worker-confirmed', {
+      id: 'interactive-worker-confirmed', name: 'asks', goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+      confirmedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-worker-confirmed' }, agent);
+    expect(result).toMatch(/only its schedule gives those questions their own channel/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...while an interactive chat still runs the same confirmed workflow', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-chat-confirmed', {
+      id: 'interactive-chat-confirmed', name: 'asks', goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+      confirmedAt: '2026-10-01T00:00:00.000Z',
+    });
+    mockRunManifest.mockClear();
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-chat-confirmed' }, agent);
+    expect(result).not.toMatch(/only its schedule gives those questions their own channel/);
+    expect(mockRunManifest).toHaveBeenCalled();
+  });
+
+  it('...and one that may ask for a secret still has no unattended run to confirm', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-secret-worker', {
+      id: 'interactive-secret-worker', name: 'asks', goal: 'key',
+      steps: [{ id: 'k', task: 'ask_secret for the key' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-secret-worker' }, agent);
+    expect(result).toMatch(/no unattended run to confirm/);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
@@ -1273,6 +1324,46 @@ describe('runSavedWorkflow', () => {
     const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig);
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/interactive/);
+  });
+
+  // PRD 3b-2 §4.1/§4.3: a scheduled run hands its question channel in. An interactive workflow
+  // then runs when `ask_user` is its only question tool, and its steps get the channel alone.
+  describe('the question channel of a scheduled run', () => {
+    const channel = { parentAskUserPrompt: async (): Promise<string> => 'B' };
+    const wait = { unanswered: false, pausedMs: (): number => 0 };
+
+    it('runs an interactive workflow that asks only through ask_user, and hands on the channel alone', async () => {
+      const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which list' }] });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      // A caller that passed `parentPromptUser` too still hands on only the channel.
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, {
+        parentPrompt: { ...channel, parentPromptUser: async () => 'Allow' }, questionWait: wait,
+      });
+      expect(result.ok).toBe(true);
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toEqual({ parentAskUserPrompt: channel.parentAskUserPrompt });
+      expect(ctx['questionWait']).toBe(wait);
+    });
+
+    it.each([
+      ['ask_secret', 'ask_secret for the key'],
+      ['ask_user beside ask_secret', 'ask_user which list, then ask_secret for the key'],
+    ])('still refuses an interactive workflow that uses %s', async (_label, task) => {
+      const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'k', task }] });
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { parentPrompt: channel, questionWait: wait });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/interactive/);
+      expect(mockRunManifest).not.toHaveBeenCalled();
+    });
+
+    it('an autonomous workflow gets no channel even when one is handed in', async () => {
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { parentPrompt: channel, questionWait: wait });
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toBeUndefined();
+      expect(ctx['questionWait']).toBeUndefined();
+    });
   });
 
   it('returns an error when run history is unavailable', async () => {

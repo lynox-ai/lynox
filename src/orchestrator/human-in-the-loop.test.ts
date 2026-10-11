@@ -5,6 +5,10 @@ import {
   findAutonomousViolations,
   isHumanInTheLoopTool,
   stepUsesHumanInTheLoopTool,
+  asksOnlyViaAskUser,
+  isSchedulableWorkflow,
+  pipelineScheduleOf,
+  stepsThatAsk,
 } from './human-in-the-loop.js';
 import type { InlinePipelineStep } from '../types/index.js';
 
@@ -102,5 +106,47 @@ describe('findAutonomousViolations', () => {
 
   it('returns empty when no violations', () => {
     expect(findAutonomousViolations([mkStep('a', 'No HITL here.')])).toEqual([]);
+  });
+});
+
+describe('asksOnlyViaAskUser (PRD 3b-2 §4.3)', () => {
+  it('holds for a workflow whose only question tool is ask_user', () => {
+    expect(asksOnlyViaAskUser([mkStep('a', 'gather data'), mkStep('b', 'ask_user which list')])).toBe(true);
+    expect(asksOnlyViaAskUser([{ id: 'c', task: 'pick', tools: ['ask_user', 'bash'] }])).toBe(true);
+  });
+
+  it('fails for a workflow that asks for a secret or a human any other way, in any step', () => {
+    expect(asksOnlyViaAskUser([mkStep('a', 'ask_user which list'), mkStep('b', 'ask_secret for the key')])).toBe(false);
+    // Both in one step's prose: the first match alone would read as ask_user.
+    expect(asksOnlyViaAskUser([mkStep('a', 'ask_user which list, then ask_secret for the key')])).toBe(false);
+    expect(asksOnlyViaAskUser([{ id: 'c', task: 'pick', tools: ['ask_user', 'ask_human'] }])).toBe(false);
+    expect(asksOnlyViaAskUser([{ id: 'd', task: 'x', tool: 'ask_secret' }])).toBe(false);
+  });
+
+  it('fails for a workflow that asks nothing', () => {
+    expect(asksOnlyViaAskUser([mkStep('a', 'gather data')])).toBe(false);
+  });
+});
+
+describe('which workflows a schedule may run (PRD 3b-2 §4.3)', () => {
+  const asks = [mkStep('a', 'gather'), mkStep('pick', 'ask_user which list')];
+  const secret = [mkStep('pick', 'ask_user which list'), mkStep('k', 'ask_secret for the key')];
+
+  it('an autonomous workflow, or an interactive one that asks only through ask_user', () => {
+    expect(isSchedulableWorkflow({ mode: 'autonomous', steps: [mkStep('a', 'gather')] })).toBe(true);
+    expect(isSchedulableWorkflow({ mode: 'interactive', steps: asks })).toBe(true);
+    expect(isSchedulableWorkflow({ mode: 'interactive', steps: secret })).toBe(false);
+    expect(isSchedulableWorkflow({ mode: undefined, steps: asks })).toBe(false);
+  });
+
+  it('pipelineScheduleOf hands the task manager the mode and the verdict', () => {
+    expect(pipelineScheduleOf({ mode: 'interactive', steps: asks })).toEqual({ mode: 'interactive', schedulable: true });
+    expect(pipelineScheduleOf({ mode: 'interactive', steps: secret })).toEqual({ mode: 'interactive', schedulable: false });
+    expect(pipelineScheduleOf({ mode: undefined, steps: [] })).toEqual({ mode: 'interactive', schedulable: false });
+  });
+
+  it('stepsThatAsk names the steps that may ask through ask_user', () => {
+    expect(stepsThatAsk(asks)).toEqual(['pick']);
+    expect(stepsThatAsk([{ id: 'd', task: 'pick', tools: ['ask_user'] }, mkStep('k', 'ask_secret for the key')])).toEqual(['d']);
   });
 });

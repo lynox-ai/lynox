@@ -32,6 +32,47 @@ export function stepUsesHumanInTheLoopTool(step: InlinePipelineStep): string | u
   return undefined;
 }
 
+/** Every human-in-the-loop tool a step uses, by the same reading as {@link stepUsesHumanInTheLoopTool}. */
+function stepHumanInTheLoopTools(step: InlinePipelineStep): string[] {
+  if (step.tool !== undefined && HITL_SET.has(step.tool)) return [step.tool];
+  if (step.tools) return step.tools.filter((name) => HITL_SET.has(name));
+  const haystack = step.task ?? '';
+  return HITL_REGEXES.filter(([, re]) => re.test(haystack)).map(([name]) => name);
+}
+
+/**
+ * Whether a workflow's only way to reach a human is `ask_user` (PRD 3b-2 §4.3, G2): it asks at
+ * least once, and no step uses `ask_secret` or `ask_human`. That is the interactive workflow a
+ * schedule may run, with its questions going to the owner; one that may ask for a secret stays
+ * unschedulable. A property derived from the steps, not a third mode.
+ */
+export function asksOnlyViaAskUser(steps: InlinePipelineStep[]): boolean {
+  const used = steps.flatMap(stepHumanInTheLoopTools);
+  return used.length > 0 && used.every((name) => name === 'ask_user');
+}
+
+/** The ids of the steps that may ask the owner through `ask_user` — what the schedule's
+ *  confirmation names (PRD 3b-2 §4.3). */
+export function stepsThatAsk(steps: InlinePipelineStep[]): string[] {
+  return steps.filter((s) => stepHumanInTheLoopTools(s).includes('ask_user')).map((s) => s.id);
+}
+
+/**
+ * Whether a schedule may run the workflow (PRD 3b-2 §4.3): an autonomous one, or an interactive
+ * one whose only question tool is `ask_user` — its questions go to the owner while it runs. Every
+ * planning surface asks this one predicate, so a workflow that may ask for a secret stays
+ * unschedulable everywhere at once. An unknown mode is not schedulable.
+ */
+export function isSchedulableWorkflow(planned: { mode?: PipelineMode | undefined; steps: InlinePipelineStep[] }): boolean {
+  return planned.mode === 'autonomous' || (planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps));
+}
+
+/** A saved workflow's mode and whether a schedule may run it — what the engine hands the task
+ *  manager's scheduling check. An unknown mode reads as interactive and unschedulable. */
+export function pipelineScheduleOf(planned: { mode?: PipelineMode | undefined; steps: InlinePipelineStep[] }): { mode: PipelineMode; schedulable: boolean } {
+  return { mode: planned.mode ?? 'interactive', schedulable: isSchedulableWorkflow(planned) };
+}
+
 export function inferPipelineMode(steps: InlinePipelineStep[]): PipelineMode {
   for (const step of steps) {
     if (stepUsesHumanInTheLoopTool(step)) return 'interactive';

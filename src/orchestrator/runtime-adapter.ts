@@ -314,6 +314,9 @@ export function createStepStreamHandler(opts: {
  */
 export interface SubAgentPromptHandles {
   parentPromptUser?: PromptUserFn | undefined;
+  /** The question channel of `ask_user` alone (`Agent.askUserPrompt`), for a step of a
+   *  scheduled workflow: the step may ask, but no consent gate in it can use the channel. */
+  parentAskUserPrompt?: PromptUserFn | undefined;
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
   promptBudget?: PromptBudget | undefined;
@@ -337,7 +340,7 @@ export interface SubAgentPromptHandles {
 export function buildSubAgentPromptCallbacks(
   step: ManifestStep,
   parent: SubAgentPromptHandles | undefined,
-): { promptUser?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
+): { promptUser?: PromptUserFn | undefined; askUserPrompt?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
   if (!parent) return {};
   const meta: PromptMeta = { stepId: step.id, stepTask: step.task, workflowName: parent.workflowName };
   const budget = parent.promptBudget;
@@ -351,6 +354,17 @@ export function buildSubAgentPromptCallbacks(
           if (budget) budget.consume();
           try {
             return await parent.parentPromptUser!(q, opts, { ...meta, ...m });
+          } catch (err) {
+            if (budget) budget.refund();
+            throw err;
+          }
+        }
+      : undefined,
+    askUserPrompt: parent.parentAskUserPrompt
+      ? async (q, opts, m) => {
+          if (budget) budget.consume();
+          try {
+            return await parent.parentAskUserPrompt!(q, opts, { ...meta, ...m });
           } catch (err) {
             if (budget) budget.refund();
             throw err;
@@ -382,9 +396,94 @@ export function buildSubAgentPromptCallbacks(
   };
 }
 
-export function stripHumanInTheLoopTools(tools: ToolEntry[]): ToolEntry[] {
-  if (!tools.some(t => isHumanInTheLoopTool(t.definition.name))) return tools;
-  return tools.filter(t => !isHumanInTheLoopTool(t.definition.name));
+/**
+ * A step's time limit, held while the step waits for its owner's answer (PRD 3b-2 G5 (a)). A
+ * scheduled workflow's question may wait up to the prompt's TTL, and only one clock may bound
+ * that wait; outside a question the limit runs as before, so a step that hangs on anything else
+ * still times out. Holds nest: parallel questions of one step keep it held until the last ends.
+ */
+export class StepTimeout {
+  readonly ms: number;
+  #remaining: number;
+  #armedAt = 0;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #held = 0;
+  #fired = false;
+  #cleared = false;
+  #onFire: (() => void) | undefined;
+
+  constructor(ms: number) {
+    this.ms = ms;
+    this.#remaining = ms;
+  }
+
+  /** Whether the limit ran out. */
+  get fired(): boolean { return this.#fired; }
+
+  start(onFire: () => void): void {
+    this.#onFire = onFire;
+    if (this.#held === 0) this.#arm();
+  }
+
+  hold(): void {
+    this.#held++;
+    if (this.#held > 1 || this.#timer === undefined) return;
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#remaining -= Date.now() - this.#armedAt;
+  }
+
+  release(): void {
+    if (this.#held === 0) return;
+    this.#held--;
+    if (this.#held === 0) this.#arm();
+  }
+
+  clear(): void {
+    this.#cleared = true;
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+
+  #arm(): void {
+    if (this.#cleared || this.#fired || this.#onFire === undefined) return;
+    this.#armedAt = Date.now();
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      this.#fired = true;
+      this.#onFire?.();
+    }, Math.max(0, this.#remaining));
+  }
+}
+
+/** The step's question channel, holding its time limit while a question waits (G5 (a)). */
+export function holdingTimeoutWhileAsking(ask: PromptUserFn | undefined, timeout: StepTimeout): PromptUserFn | undefined {
+  if (!ask) return undefined;
+  return async (q, opts, meta) => {
+    timeout.hold();
+    try {
+      return await ask(q, opts, meta);
+    } finally {
+      timeout.release();
+    }
+  };
+}
+
+/** Whether a step keeps a human-in-the-loop tool. With `promptUser` it keeps all of them, as
+ *  before: `ask_secret` without `promptSecret` answers with a pointer to Settings rather than
+ *  asking, and that answer keeps a model from asking for the key in plain text. With the
+ *  question channel alone (a step of a scheduled workflow) it keeps `ask_user` and nothing
+ *  else: a scheduled run never asks for a secret. Without either it keeps none. */
+export function keepsHumanInTheLoopTool(name: string, parent: SubAgentPromptHandles | undefined): boolean {
+  if (parent?.parentPromptUser !== undefined) return true;
+  return name === 'ask_user' && parent?.parentAskUserPrompt !== undefined;
+}
+
+/** Drops each human-in-the-loop tool the step may not use (`keepsHumanInTheLoopTool`). */
+export function stripHumanInTheLoopToolsWithout(tools: ToolEntry[], parent: SubAgentPromptHandles | undefined): ToolEntry[] {
+  const drop = (name: string): boolean => isHumanInTheLoopTool(name) && !keepsHumanInTheLoopTool(name, parent);
+  if (!tools.some(t => drop(t.definition.name))) return tools;
+  return tools.filter(t => !drop(t.definition.name));
 }
 
 // The module-level `activePipelineAgents` set and `abortPipelineAgents()` are GONE, for
@@ -739,13 +838,9 @@ export async function spawnViaAgent(
     );
   }
 
-  // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
-  // Belt-and-suspenders default: the validator already rejects autonomous
-  // pipelines that need them, but a registry drift here would silently throw
-  // "ask_user: agent.promptUser is not set" deep in the run.
-  if (!parentPrompt?.parentPromptUser) {
-    tools = stripHumanInTheLoopTools(tools);
-  }
+  // Strip each human-in-the-loop tool the step may not use (`keepsHumanInTheLoopTool`): all of
+  // them in an autonomous run, all but ask_user in a scheduled workflow that may ask.
+  tools = stripHumanInTheLoopToolsWithout(tools, parentPrompt);
 
   // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
   // Pipeline steps were previously bypassing this gate — see #401 follow-up.
@@ -764,6 +859,7 @@ export async function spawnViaAgent(
     : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
+  const stepTimeout = new StepTimeout(step.timeout_ms ?? 1_800_000);
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
@@ -820,6 +916,7 @@ export async function spawnViaAgent(
     // only and never read it.)
     toolContext: parentToolContext,
     promptUser: promptCallbacks.promptUser,
+    askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
@@ -848,12 +945,8 @@ export async function spawnViaAgent(
   if (runTaint && runTaintArmed(runTaint)) {
     agent.restoreConversationTaint();
   }
-  const timeoutMs = step.timeout_ms ?? 1_800_000;
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    agent.abort();
-  }, timeoutMs);
+  const timeoutMs = stepTimeout.ms;
+  stepTimeout.start(() => { agent.abort(); });
   try {
     // ⛔ INSIDE the try, paired with the `finally` that removes it. Outside it, a throw
     // in the lines between add and try left a dead agent in a set that lives as long as
@@ -864,7 +957,7 @@ export async function spawnViaAgent(
     // so a pipeline step that schedules "in 5 min" via run_at lands at
     // wallclock + 5 min, not session-start + 5 min.
     const result = await agent.send(withCurrentTimePrefix(JSON.stringify(stepContext), userTimezone));
-    if (timedOut) {
+    if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     return { result, tokensIn, tokensOut, durationMs: Date.now() - startTime };
@@ -873,12 +966,12 @@ export async function spawnViaAgent(
     // instead of returning ''; surface the clearer "timed out" message. Any
     // other abort/error (e.g. the parent workflow was stopped) propagates as-is
     // so the step is recorded as interrupted/failed, not a silent empty success.
-    if (timedOut) {
+    if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     throw err;
   } finally {
-    clearTimeout(timeoutId);
+    stepTimeout.clear();
     abortScope?.members.delete(agent);
     // Deregister + fold what this step SAW into the run accumulator — in
     // finally, because a step that read external content and then failed/timed
@@ -1066,12 +1159,9 @@ export async function spawnInline(
       );
     }
   }
-  // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
-  // Belt-and-suspenders: validator/scheduler should already block this path,
-  // but a registry drift here would silently throw at tool dispatch time.
-  if (!parentPrompt?.parentPromptUser) {
-    tools = stripHumanInTheLoopTools(tools);
-  }
+  // Strip each human-in-the-loop tool the step may not use (`keepsHumanInTheLoopTool`): all of
+  // them in an autonomous run, all but ask_user in a scheduled workflow that may ask.
+  tools = stripHumanInTheLoopToolsWithout(tools, parentPrompt);
   // Honour user-disabled tools (Settings → Integrations → Tool Toggles).
   const disabledToolsInline = config.disabled_tools ?? [];
   if (disabledToolsInline.length > 0) {
@@ -1101,6 +1191,7 @@ export async function spawnInline(
   const maxIter = 10;
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
+  const stepTimeout = new StepTimeout(step.timeout_ms ?? 1_800_000);
   const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
@@ -1144,6 +1235,7 @@ export async function spawnInline(
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
+    askUserPrompt: holdingTimeoutWhileAsking(promptCallbacks.askUserPrompt, stepTimeout),
     promptTabs: promptCallbacks.promptTabs,
     promptSecret: promptCallbacks.promptSecret,
     userTimezone,
@@ -1178,12 +1270,8 @@ export async function spawnInline(
   if (runTaint && runTaintArmed(runTaint)) {
     agent.restoreConversationTaint();
   }
-  const timeoutMs = step.timeout_ms ?? 1_800_000;
-  let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    agent.abort();
-  }, timeoutMs);
+  const timeoutMs = stepTimeout.ms;
+  stepTimeout.start(() => { agent.abort(); });
 
   // Captured steps replay the literal call — but ONLY when the captured tool is
   // actually in this step's (deliberately minimal) inline tool set. A captured
@@ -1202,7 +1290,7 @@ export async function spawnInline(
     // See `spawnViaAgent`: inside the try that releases it, so add and delete are paired.
     abortScope?.members.add(agent);
     const result = await agent.send(withCurrentTimePrefix(JSON.stringify({ task, context: stepContext }), userTimezone));
-    if (timedOut) {
+    if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     return { result, tokensIn, tokensOut, durationMs: Date.now() - startTime };
@@ -1211,12 +1299,12 @@ export async function spawnInline(
     // instead of returning ''; surface the clearer "timed out" message. Any
     // other abort/error (e.g. the parent workflow was stopped) propagates as-is
     // so the step is recorded as interrupted/failed, not a silent empty success.
-    if (timedOut) {
+    if (stepTimeout.fired) {
       throw new Error(`Step "${step.id}" timed out after ${timeoutMs}ms`);
     }
     throw err;
   } finally {
-    clearTimeout(timeoutId);
+    stepTimeout.clear();
     abortScope?.members.delete(agent);
     // Deregister + backstop fold — see spawnViaAgent's finally.
     taintWiring.release(agent);

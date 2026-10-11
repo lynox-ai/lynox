@@ -4,6 +4,7 @@ import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { logErrorChain } from '../../core/utils.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 
 // TaskManager accessed via agent.toolContext.taskManager
 
@@ -399,11 +400,13 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // once confirmed" is false whenever the first tick precedes the
         // confirmation, because the disabled task does not come back by itself.
         //
-        // Same order as the worker's gate and the library's schedule route: an
-        // interactive workflow cannot run unattended at all, a workflow that is
-        // not in the library cannot be confirmed there, and only then is the
+        // Same order as the worker's gate and the library's schedule route: a
+        // workflow no schedule may run is refused first, a workflow that is not
+        // in the library cannot be confirmed there, and only then is the
         // confirmation the missing piece — otherwise the advice points at a
-        // step the reader cannot take. The library route creates the task as
+        // step the reader cannot take. One step has no twin in the worker: a
+        // workflow that asks its owner is sent to the library even when
+        // confirmed (see below). The library route creates the task as
         // part of confirming, so the refusal says not to create it here again.
         // Only the id is echoed: this tool's result is not scanned, and the
         // stored name is free text written by someone else. A workflow this
@@ -412,10 +415,15 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         const { getPipeline } = await import('./pipeline.js');
         const planned = getPipeline(input.workflow_id, agent.toolContext.runHistory);
         if (planned) {
-          const unschedulable = planned.mode !== 'autonomous'
-            ? `is '${planned.mode}'; only an 'autonomous' workflow runs unattended. Convert it (remove its ask_user / ask_secret steps) before scheduling it.`
+          const unschedulable = !isSchedulableWorkflow(planned)
+            ? `is '${planned.mode}' and may ask for something other than an answer from its owner; a schedule runs an 'autonomous' workflow, or one whose only question tool is ask_user. Remove its ask_secret / ask_human steps before scheduling it.`
             : planned.template !== true
               ? 'is not a saved workflow. Save it to the workflow library first; scheduling it from there confirms it and creates the task.'
+              // A workflow that asks its owner is scheduled only where the confirmation names
+              // the steps that ask: the library. A `confirmedAt` alone does not show that the
+              // owner saw them (an old template carries one from its content migration).
+              : planned.mode === 'interactive'
+                ? 'asks its owner while it runs. Ask the user to schedule it from the workflow library: its confirmation names the steps that ask, and it creates the task. Do not create it here.'
               : !planned.confirmedAt
                 ? 'has not been confirmed for unattended runs, so a task for it would be disabled at its first run. Ask the user to schedule it from the workflow library: that confirms it and creates the task. Do not create it again here.'
                 : null;

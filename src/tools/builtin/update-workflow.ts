@@ -1,7 +1,7 @@
 import type { ToolEntry, InlinePipelineStep, PlannedPipeline } from '../../types/index.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { getPipeline, forgetPipeline, buildManifest } from './pipeline.js';
-import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
+import { inferPipelineMode, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { MAX_STEPS, validateManifest } from '../../orchestrator/validate.js';
 import { validateContractAgainstSteps } from '../../orchestrator/contract-validation.js';
 import { getErrorMessage } from '../../core/utils.js';
@@ -178,10 +178,20 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     }
     forgetPipeline(planned.id);
 
+    // What a schedule can still do with it (PRD 3b-2 §4.3): a workflow whose only question tool
+    // is ask_user still runs on one, and asks its owner; any other interactive one cannot.
+    // Read off the schedulability, not only the mode: an interactive workflow that gains an
+    // ask_secret step stays interactive, and loses its schedule all the same.
+    const nowSchedulable = isSchedulableWorkflow({ mode: newMode, steps });
+    const lostSchedule = ' ⚠️ It may now ask for more than an answer (ask_secret / ask_human) and can no longer run on a cron/schedule.';
+    const scheduleNote = nowSchedulable
+      ? ' It asks its owner through ask_user, so a schedule still runs it and waits for the answers.'
+      : lostSchedule;
     const modeNote = newMode !== planned.mode
-      ? ` Mode changed ${planned.mode} → ${newMode}.${newMode === 'interactive' ? ' ⚠️ It is now interactive and can no longer run on a cron/schedule.' : ''}`
-      : '';
-    const confirmNote = wasConfirmed
+      ? ` Mode changed ${planned.mode} → ${newMode}.${newMode === 'interactive' ? scheduleNote : ''}`
+      : (isSchedulableWorkflow(planned) && !nowSchedulable ? lostSchedule : '');
+    // No re-confirm advice for a workflow no schedule can run: confirming would not help it.
+    const confirmNote = wasConfirmed && nowSchedulable
       ? ' Its first-run-confirm was reset — re-confirm before the next scheduled run.'
       : '';
     const stepList = steps.map((s, i) => `${i + 1}. ${s.id}: ${s.task}`).join('\n');
