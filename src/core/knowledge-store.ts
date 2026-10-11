@@ -1367,8 +1367,12 @@ export class KnowledgeStore {
         rewritten.push({ id: row.id, next });
       }
     }
-    const minted = (this.db.prepare('SELECT subject_id FROM subject_mints WHERE thread_id = ?').all(threadId) as Array<{ subject_id: string }>)
-      .map(r => r.subject_id);
+    // A subject another one was merged into is no longer only this conversation's: the merge
+    // brought in what the other one held.
+    const minted = (this.db.prepare(`
+      SELECT m.subject_id FROM subject_mints m
+      WHERE m.thread_id = ? AND NOT EXISTS (SELECT 1 FROM subjects s WHERE s.merged_into = m.subject_id)
+    `).all(threadId) as Array<{ subject_id: string }>).map(r => r.subject_id);
     return this.db.transaction(() => {
       this.db.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run(threadId);
       // The entry becomes the remaining source's: its wording, its trust and its pin. The tier is

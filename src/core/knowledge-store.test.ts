@@ -1474,6 +1474,21 @@ describe('private mode takes the subjects only the private chat created', () => 
     expect(subjects.getSubject(known.id)).not.toBeNull();
   });
 
+  it('a subject the private chat created stays once another subject was merged into it', () => {
+    const { ks, subjects } = make();
+    const known = subjects.findOrCreate({ kind: 'organization', name: 'Kornfeld' });
+    if (known.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(a.subjectId).not.toBe(known.id);
+    subjects.mergeSubjects(known.id, a.subjectId!);
+    expect(subjects.getSubject(known.id)?.merged_into).toBe(a.subjectId); // positive control
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).not.toBeNull();
+    expect(subjects.getSubject(known.id)).not.toBeNull();
+  });
+
   it('a subject the private chat created stays while a thread is anchored on it', () => {
     const anchored = new Set<string>();
     const { ks, subjects } = make(refs(anchored));
@@ -1512,6 +1527,18 @@ describe('private mode takes the subjects only the private chat created', () => 
     ks.deleteByThread('chat-a');
 
     expect(subjects.getSubject(created.row.id)).toBeNull();
+  });
+
+  it('a subject that existed before the private chat\'s queued entry was approved stays', () => {
+    const { ks, subjects } = make();
+    const known = subjects.findOrCreate({ kind: 'organization', name: NAME });
+    if (known.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const queued = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-a' });
+    expect(ks.reviewEntry(queued.id, 'approve')?.subjectId).toBe(known.id);
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(known.id)).not.toBeNull();
   });
 
   it('a subject created when the private chat\'s queued entry was approved goes', () => {
