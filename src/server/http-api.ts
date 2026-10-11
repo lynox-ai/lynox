@@ -10582,7 +10582,7 @@ export class LynoxHTTPApi {
       //
       // Pending entries are included: a queued fact is stored personal data whether or not it
       // was ever approved, and Art. 15 asks what is held, not what is active.
-      const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], blocks: {}, may_be_incomplete: false };
+      const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], sources: [], blocks: {}, may_be_incomplete: false };
       const knowledgeStore = engine.getKnowledgeStore();
       if (knowledgeStore) {
         // try/catch like its `knowledge_graph` neighbour, and for the same reason: `listActive`
@@ -10595,18 +10595,22 @@ export class LynoxHTTPApi {
           // Masked, matching the active half. The raw-text queue is for a human deciding about
           // an entry; this is a file that gets stored and forwarded.
           const pending = knowledgeStore.listPendingMasked(ENTRY_CAP);
+          // The wording each conversation used for an entry, masked like the rest: a source can
+          // hold words the entry itself does not carry.
+          const sources = knowledgeStore.listSourcesMasked(ENTRY_CAP);
           const blocks: Record<string, string | null> = {};
           for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
           exportData['durable_knowledge'] = {
             entries: active,
             pending_entries: pending,
+            sources,
             blocks,
             // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
             // a different thing from one that looks complete. Named `may_be_incomplete` rather
             // than `truncated` because that is the honest strength of the claim — the store
             // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
             // exactly 500, and over-reporting is the right way to be wrong here.
-            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
+            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP || sources.length >= ENTRY_CAP,
           };
         } catch {
           exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };

@@ -108,7 +108,7 @@ export interface PromoteOnboardingResult {
  */
 function seedProfileBlock(
   knowledgeStore: KnowledgeStore,
-  lines: ReadonlyArray<{ prefix: string; text: string }>,
+  lines: ReadonlyArray<{ prefix: string; text: string; entryId: string }>,
 ): number {
   if (lines.length === 0) return 0;
   try {
@@ -146,6 +146,9 @@ function seedProfileBlock(
       }
       next = candidate;
       added++;
+      // Which entry this line came from: removing that entry later removes this line, and
+      // nothing else does.
+      knowledgeStore.recordProfileSeed(line.entryId);
     }
     return added;
   } catch (err: unknown) {
@@ -190,7 +193,7 @@ export function promoteOnboardingBasics(
   let skipped = 0;
   let rejected = 0;
   /** Collected for {@link seedProfileBlock} — ACTIVE landings only. */
-  const activeLines: Array<{ prefix: string; text: string }> = [];
+  const activeLines: Array<{ prefix: string; text: string; entryId: string }> = [];
 
   for (const { key, answer } of answers) {
     const basic = CATALOG.get(key);
@@ -248,7 +251,7 @@ export function promoteOnboardingBasics(
       // turn — and worse, it would DISPLACE their typed answer, since the stored fact wins
       // the dedup. `remember`-written facts stay where they belong, in recall.
       if (known.sourceType === 'user_asserted') {
-        activeLines.push({ prefix, text: collapseToSingleLine(known.text) });
+        activeLines.push({ prefix, text: collapseToSingleLine(known.text), entryId: known.id });
       }
       continue;
     }
@@ -266,7 +269,11 @@ export function promoteOnboardingBasics(
 
     if (result.status === 'active') {
       promoted++;
-      activeLines.push({ prefix, text: collapseToSingleLine(`${prefix}${value}`) });
+      // A folded answer has no entry of its own: `result.id` is an existing entry with other
+      // wording, and a line seeded under it would not leave with this chat. No line then.
+      if (result.deduped !== true) {
+        activeLines.push({ prefix, text: collapseToSingleLine(`${prefix}${value}`), entryId: result.id });
+      }
     } else queued++;
   }
 

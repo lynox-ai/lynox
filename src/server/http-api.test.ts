@@ -11972,9 +11972,11 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // masked, so shipping the queue unmasked would redact a fact once approved and hand it
       // over in the clear while it waits.
       const listPending = vi.fn(() => { throw new Error('export must use listPendingMasked'); });
+      // Each chat's own wording of an entry: held, so exported, masked like the rest.
+      const listSourcesMasked = vi.fn(() => [{ entryId: 'k1', threadId: 't1', text: 'Nordberg pays each month', addedAt: '2026-10-11 00:00:00', threadDeletedAt: null }]);
       await swapEngine({
         getKnowledgeStore: () => ({
-          listActive, listPending, listPendingMasked,
+          listActive, listPending, listPendingMasked, listSourcesMasked,
           getBlock: (id: string) => ({ content: `block:${id}`, charLimit: 100 }),
         }),
         getKnowledgeLayer: () => null,
@@ -11987,6 +11989,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           durable_knowledge: {
             entries: Array<{ text: string }>;
             pending_entries: Array<{ text: string }>;
+            sources: Array<{ text: string }>;
             blocks: Record<string, string>;
             may_be_incomplete: boolean;
           };
@@ -11995,6 +11998,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // A queued fact is held personal data whether or not it was ever approved — Art. 15
         // asks what is stored, not what is active.
         expect(body.durable_knowledge.pending_entries.map(e => e.text)).toEqual(['from a web page']);
+        expect(body.durable_knowledge.sources.map(e => e.text)).toEqual(['Nordberg pays each month']);
         expect(body.durable_knowledge.blocks).toEqual({ profile: 'block:profile', playbook: 'block:playbook' });
         expect(body.durable_knowledge.may_be_incomplete).toBe(false);
         expect(listPendingMasked).toHaveBeenCalled();
