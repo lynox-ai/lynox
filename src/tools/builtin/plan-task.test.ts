@@ -770,6 +770,30 @@ describe('plan_task auto-planning fallback', () => {
     expect(counters.costUSD).toBe(0);
   });
 
+  it('books an ABORTED planning call\'s upper bound to the session cap only — never to the tenant', async () => {
+    // Same hook host and counters as the debit tests above: the debit path, if taken, would
+    // reach `onAfterRun`. An aborted call was never paid for by the tenant.
+    const upperBoundUsd = 0.0123;
+    mockPlanDAG.mockImplementationOnce(async (_goal: string, opts?: {
+      onAbortedSpend?: (cost: { upperBoundUsd: number; estimateUsd: number; fromSnapshot: boolean }) => void;
+    }) => {
+      opts?.onAbortedSpend?.({ upperBoundUsd, estimateUsd: 0.001, fromSnapshot: true });
+      return null;
+    });
+    const onAfterRun = vi.fn();
+    const counters = {
+      httpRequests: 0, writeBytes: 0, costUSD: 0,
+    };
+    const agent = makeAgent({ promptUser: undefined, sessionCounters: counters }, mockConfig);
+    agent.toolContext.meteredHost = { getHooks: () => [{ onAfterRun }], getContext: () => undefined };
+
+    await planTaskTool.handler({ summary: 'Create a research report' }, agent);
+    expect(mockPlanDAG).toHaveBeenCalledTimes(1);
+    // The BOUND, exactly — not the estimate.
+    expect(counters.costUSD).toBe(upperBoundUsd);
+    expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();
+  });
+
   it('carries planDAG\'s declared model AND tools into the stored pipeline (auto-plan)', async () => {
     // The regression this pins: the auto-plan phase mapping used to drop
     // `model` (and would drop `tools`), so every auto-planned step ran on the

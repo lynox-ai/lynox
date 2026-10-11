@@ -47,6 +47,8 @@ import { resolveTierModel } from './tier-resolver.js';
 import { calculateCost } from './pricing.js';
 import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 import { debitInRunHelperCost } from './metered-request.js';
+import { recordSessionCost } from './session-budget.js';
+import { abortedCallCost, partialMessageOf, reportAbortedCall } from './aborted-call.js';
 import {
   FOLLOW_UP_TOOL_NAME,
   FOLLOW_UP_FALLBACK_MAX_TOKENS,
@@ -111,6 +113,9 @@ import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js'
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
+
+/** A helper request that is out and has not answered yet — what an abort would leave unbooked. */
+interface AbortableHelperCall { modelId: string; maxTokens: number; request: unknown; stream: unknown }
 
 /**
  * Per-image token estimate for occupancy accounting. Anthropic bills vision by
@@ -1548,6 +1553,8 @@ export class Agent implements IAgent {
 
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), FOLLOW_UP_TIMEOUT_MS);
+    // Set once the request is out, cleared once its reply is in: what an abort in between costs.
+    let inFlight: AbortableHelperCall | undefined;
     try {
       const helper = this._helperModel();
       // `getActiveProvider()` and NOT `this.provider`, deliberately — the obvious-looking fix
@@ -1568,12 +1575,15 @@ export class Agent implements IAgent {
       // So the wrong client stays until the right one can be chosen WITH its credentials, and
       // the catch below now says when this path fails — which is what was missing to measure
       // how often it actually fires.
+      const request = {
+        system: FOLLOW_UP_FALLBACK_SYSTEM,
+        messages: [{ role: 'user' as const, content: buildFollowUpExcerpt(question, text) }],
+        tools: [entry.definition],
+      };
       const stream = helper.client.beta.messages.stream({
         model: helper.modelId,
         max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
-        system: FOLLOW_UP_FALLBACK_SYSTEM,
-        messages: [{ role: 'user', content: buildFollowUpExcerpt(question, text) }],
-        tools: [entry.definition],
+        ...request,
         tool_choice: { type: 'tool', name: FOLLOW_UP_TOOL_NAME },
         ...(helper.betas ? { betas: helper.betas } : {}),
       }, {
@@ -1582,10 +1592,12 @@ export class Agent implements IAgent {
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
         ),
       });
+      inFlight = { modelId: helper.modelId, maxTokens: FOLLOW_UP_FALLBACK_MAX_TOKENS, request, stream };
       // A model that rejects a forced tool gets `auto` at the client boundary, and a reply
       // without the call comes back as `missed` instead of a throw, so the booking below
       // still runs on it (llm-wire-rules.ts › settleForcedTool).
       const { message: response, missed } = await settleForcedTool(stream.finalMessage());
+      inFlight = undefined;
 
       // Account the spend BEFORE the early returns below: the tokens were spent
       // whether or not the suggestions turn out usable.
@@ -1669,6 +1681,7 @@ export class Agent implements IAgent {
       process.stderr.write(
         `[lynox:follow-up] recovery failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
+      this._bookAbortedHelper('agent.follow_up', inFlight, timeout.signal);
     } finally {
       clearTimeout(timer);
     }
@@ -1764,14 +1777,19 @@ export class Agent implements IAgent {
     // and one run would occupy two states the comment declares mutually exclusive, with
     // the over-count landing precisely on failing runs.
     let announced = false;
+    // Set once the request is out, cleared once its reply is in: what an abort in between costs.
+    let inFlight: AbortableHelperCall | undefined;
     try {
       const helper = this._helperModel();
+      const request = {
+        system: CAPTURE_SYSTEM,
+        messages: [{ role: 'user' as const, content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
+        tools: [CAPTURE_TOOL],
+      };
       const stream = helper.client.beta.messages.stream({
         model: helper.modelId,
         max_tokens: CAPTURE_FALLBACK_MAX_TOKENS,
-        system: CAPTURE_SYSTEM,
-        messages: [{ role: 'user', content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
-        tools: [CAPTURE_TOOL],
+        ...request,
         tool_choice: { type: 'tool', name: CAPTURE_TOOL_NAME },
         ...(helper.betas ? { betas: helper.betas } : {}),
       }, {
@@ -1779,7 +1797,9 @@ export class Agent implements IAgent {
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
         ),
       });
+      inFlight = { modelId: helper.modelId, maxTokens: CAPTURE_FALLBACK_MAX_TOKENS, request, stream };
       const { message: response, missed } = await settleForcedTool(stream.finalMessage());
+      inFlight = undefined;
 
       // Booked BEFORE the early returns: the tokens were spent whether or not the
       // extraction turns out usable. Priced on the fast model and charged as a
@@ -1924,6 +1944,7 @@ export class Agent implements IAgent {
       // (fast-model id sent to a client that does not know it) is a 404 that would
       // otherwise be invisible.
       process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+      this._bookAbortedHelper('agent.capture', inFlight, timeout.signal);
       // …and the SINK has to hear it too, not only stderr. The emit above sits after
       // `finalMessage()`, so a timeout, an abort or a provider error produced no line at
       // all — and "the pass ran and its provider call failed" collapsed onto "the pass
@@ -2197,6 +2218,27 @@ export class Agent implements IAgent {
    * own token counts would misprice them at the run's `pricePerM`.
    */
   private _helperCostUsd = 0;
+
+  /**
+   * Book a helper call that was aborted (its timeout, or a user stop) before its reply came
+   * back — booked nowhere before, while the provider bills it. Each reader gets the number
+   * whose error is safe for it: the run ceiling and the session cap get an upper bound, the
+   * run's cost line gets the estimate, and the tenant debit gets nothing (aborted-call.ts).
+   * A failure that was not an abort, or that came after the reply, books nothing here.
+   */
+  private _bookAbortedHelper(site: string, call: AbortableHelperCall | undefined, timeout: AbortSignal): void {
+    if (!call) return;
+    if (!timeout.aborted && !this.abortController?.signal.aborted) return;
+    try {
+      const cost = abortedCallCost({ model: call.modelId, maxTokens: call.maxTokens, request: call.request, partial: partialMessageOf(call.stream) });
+      this.costGuard?.recordExternalCost(cost.upperBoundUsd);
+      recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
+      this._helperCostUsd += cost.estimateUsd;
+      reportAbortedCall(site, call.modelId, cost);
+    } catch {
+      // Booking an aborted helper must not fail the turn it ran in.
+    }
+  }
 
   /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
   getHelperCostUsd(): number { return this._helperCostUsd; }

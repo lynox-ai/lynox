@@ -5,6 +5,7 @@ import { initLLMProvider } from '../../core/llm-client.js';
 import { setOpenAIModelResolver, getActiveOpenAIModelMap, MISTRAL_MODEL_MAP } from '../../types/models.js';
 import type { SearchResult } from './search-provider.js';
 import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from '../../core/llm-wire-rules.js';
+import { abortedCallCounts } from '../../core/aborted-call.js';
 
 // `mockCreate` resolves the reranker's stream().finalMessage() call (it now
 // uses streaming uniformly so the OpenAIAdapter, which has no `.create`, works
@@ -15,11 +16,17 @@ import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts 
 const mockCreate = vi.fn();
 const createLLMClientSpy = vi.fn();
 const clientForTierSnapshotSpy = vi.fn();
+// The partial message the Anthropic SDK's stream holds after its first event; set only by the
+// aborted-call tests (the bound reads the provider's prompt count from it).
+let mockCurrentMessage: unknown;
 
 const fakeClient = {
   beta: {
     messages: {
-      stream: (...args: unknown[]) => ({ finalMessage: () => mockCreate(...args) }),
+      stream: (...args: unknown[]) => ({
+        finalMessage: () => mockCreate(...args),
+        ...(mockCurrentMessage !== undefined ? { currentMessage: mockCurrentMessage } : {}),
+      }),
     },
   },
 };
@@ -66,6 +73,7 @@ describe('rerankSearchResults', () => {
     mockCreate.mockReset();
     createLLMClientSpy.mockReset();
     clientForTierSnapshotSpy.mockReset();
+    mockCurrentMessage = undefined;
     delete process.env['LYNOX_SEARCH_RERANK'];
   });
 
@@ -252,6 +260,44 @@ describe('rerankSearchResults', () => {
     const out = await rerankSearchResults('x', results, { enabled: true, timeoutMs: 20 });
     expect(out.results).toEqual(results);
     expect(out.skipReason).toBe('timeout');
+  });
+
+  // The timeout ABORTS the call now (a race alone left it running and paid for at the
+  // provider). The reply never arrives, so there is no `costUsd` for the tenant debit;
+  // `abortedCost` carries bounds whose upper one is for the session cap only. Both tests
+  // use the same fake stream with the same partial message — only the timeout differs.
+  it('a timeout aborts the call and hands back its upper bound, with no billable cost', async () => {
+    mockCurrentMessage = { usage: { input_tokens: 600 } };
+    mockCreate.mockImplementationOnce(() => new Promise(() => { /* never resolves */ }));
+    const before = abortedCallCounts().notBilled['search-reranker'] ?? 0;
+    const results = makeResults();
+
+    const out = await rerankSearchResults('x', results, { enabled: true, timeoutMs: 20 });
+
+    const [params, opt] = mockCreate.mock.calls[0]! as [{ model: string }, { signal?: AbortSignal } | undefined];
+    expect(opt?.signal, 'the stream gets a signal').toBeInstanceOf(AbortSignal);
+    expect(opt!.signal!.aborted, 'the timeout aborted the request').toBe(true);
+    expect(out.skipReason).toBe('timeout');
+    expect(out.results).toEqual(results);
+    // EXACT: the prompt count from the partial message, the whole output budget.
+    expect(out.abortedCost?.upperBoundUsd).toBe(calculateCost(params.model, { input_tokens: 600, output_tokens: 512 }));
+    expect(out.abortedCost!.estimateUsd).toBeLessThan(out.abortedCost!.upperBoundUsd);
+    expect(out.costUsd, 'nothing for the tenant debit').toBeUndefined();
+    expect(abortedCallCounts().notBilled['search-reranker']).toBe(before + 1);
+  });
+
+  it('a provider error that is NOT the timeout hands back no aborted cost', async () => {
+    mockCurrentMessage = { usage: { input_tokens: 600 } };
+    mockCreate.mockRejectedValueOnce(new Error('API down'));
+    const before = abortedCallCounts().notBilled['search-reranker'] ?? 0;
+
+    const out = await rerankSearchResults('x', makeResults(), { enabled: true, timeoutMs: 5000 });
+
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(out.skipReason).toBe('llm-error');
+    expect(out.abortedCost).toBeUndefined();
+    expect(out.costUsd).toBeUndefined();
+    expect(abortedCallCounts().notBilled['search-reranker'] ?? 0).toBe(before);
   });
 
   it('includes durationMs in all outcomes', async () => {

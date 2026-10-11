@@ -3,6 +3,7 @@ import { pinnedModelOf } from '../../core/profile-pair.js';
 import type { ToolEntry, IAgent, InlinePipelineStep, PlannedPipeline, ModelTier, ThinkingHint, EffortLevel } from '../../types/index.js';
 import { estimatePipelineCost, planDAG } from '../../core/dag-planner.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
+import { recordSessionCost } from '../../core/session-budget.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
@@ -358,6 +359,11 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
         // not the plan: a reply that yields no plan was paid for too.
         onSpend: (costUsd) => {
           debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
+        },
+        // A planning call aborted at its timeout returned no reply to book. Its upper bound
+        // goes to the session cap only — never to the tenant balance (aborted-call.ts).
+        onAbortedSpend: (cost) => {
+          recordSessionCost(agent.sessionCounters, cost.upperBoundUsd);
         },
       });
       if (plan && plan.steps.length > 0) {

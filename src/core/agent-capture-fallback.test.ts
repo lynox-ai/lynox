@@ -48,7 +48,8 @@ vi.mock('./metered-request.js', async () => {
 });
 
 import { Agent } from './agent.js';
-import { CAPTURE_EXCERPT_MAX_CHARS, CAPTURE_MAX_FACTS, CAPTURE_TOOL_NAME } from './capture-fallback.js';
+import { CAPTURE_EXCERPT_MAX_CHARS, CAPTURE_MAX_FACTS, CAPTURE_TOOL_NAME, CAPTURE_FALLBACK_MAX_TOKENS } from './capture-fallback.js';
+import { abortedCallCounts } from './aborted-call.js';
 import { calculateCost } from './pricing.js';
 import { debitInRunHelperCost } from './metered-request.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
@@ -75,13 +76,14 @@ interface Internals {
   isInternalRun: boolean;
   skipMemoryExtraction: boolean;
   captureFallback: boolean;
+  abortController: AbortController | null;
 }
 
 const USAGE = { input_tokens: 900, output_tokens: 120, cache_creation_input_tokens: null, cache_read_input_tokens: null };
 const ANSWER = 'Habe die Offerte an Veltamare geschickt. Petra ist dort die Ansprechperson für Bestellungen.';
 const FACTS = [{ text: 'Petra Meier ist bei Veltamare die Ansprechperson für Bestellungen.', subject: 'Veltamare' }];
 
-function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unknown; modelPinnedByProfile?: boolean } = {}) {
+function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unknown; modelPinnedByProfile?: boolean; currentMessage?: unknown } = {}) {
   const reply = opts.reply ?? vi.fn().mockResolvedValue({
     content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: FACTS } }],
     usage: USAGE,
@@ -90,7 +92,11 @@ function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; writeResult?: unkno
   const agent = new Agent({ name: 'test', model: 'minimax-m3', systemPrompt: 'SYS', modelPinnedByProfile: opts.modelPinnedByProfile });
   const inner = agent as unknown as Agent & Internals;
   inner.client = {
-    beta: { messages: { stream: (params: unknown, opt: unknown) => ({ finalMessage: () => reply(params, opt) }) } },
+    // `currentMessage`: the partial message the Anthropic SDK's stream holds after its first event.
+    beta: { messages: { stream: (params: unknown, opt: unknown) => ({
+      finalMessage: () => reply(params, opt),
+      ...(opts.currentMessage !== undefined ? { currentMessage: opts.currentMessage } : {}),
+    }) } },
   };
   inner.toolContext = { ...(inner.toolContext ?? {}), knowledgeStore: { write } } as Internals['toolContext'];
   inner.messages = [
@@ -1184,5 +1190,89 @@ describe('turn-end capture — a reply cut off at max_tokens', () => {
     expect(recordExternalCost).toHaveBeenCalledTimes(1);
     expect(write).not.toHaveBeenCalled();
     expect(forcedToolCutOffCounts()['agent.capture'] ?? 0).toBe(before);
+  });
+});
+
+describe('turn-end capture — a call aborted before its reply', () => {
+  // Same rule as the follow-up recovery: an aborted call is booked by ROLE — the upper bound
+  // into the run ceiling and the session cap, the estimate into the run's cost line, nothing
+  // into the tenant debit. Both tests run the same fake stream with the same partial message;
+  // only whether an abort landed while the request was out differs.
+  const PARTIAL = { usage: { input_tokens: 700 } };
+
+  function setUp(reply: ReturnType<typeof vi.fn>, run: AbortController) {
+    const made = makeAgent({ reply, currentMessage: PARTIAL });
+    made.inner.abortController = run;
+    const recordExternalCost = vi.fn().mockReturnValue(false);
+    made.inner.costGuard = { recordExternalCost };
+    made.inner._helperCostUsd = 0;
+    return { ...made, recordExternalCost };
+  }
+
+  it('books the upper bound into both caps, the estimate into the cost line, and nothing into the debit', async () => {
+    const run = new AbortController();
+    const reply = vi.fn().mockImplementation(() => { run.abort(); return Promise.reject(new Error('aborted')); });
+    const { inner, write, recordExternalCost } = setUp(reply, run);
+    const costBefore = inner.sessionCounters.costUSD;
+    const countBefore = abortedCallCounts().notBilled['agent.capture'] ?? 0;
+
+    await inner._captureFallback(ANSWER, false, 'none');
+
+    const model = (reply.mock.calls[0]![0] as { model: string }).model;
+    expect(model, 'the helper runs on the fast tier in this fixture').toBe('claude-haiku-4-5-20251001');
+    const upper = calculateCost(model, { input_tokens: 700, output_tokens: CAPTURE_FALLBACK_MAX_TOKENS });
+    // EXACT, so booking the estimate (a smaller number) into a cap fails here.
+    expect(recordExternalCost).toHaveBeenCalledTimes(1);
+    expect(recordExternalCost.mock.calls[0]![0]).toBe(upper);
+    expect(inner.sessionCounters.costUSD, 'the session cap gets the same bound').toBe(costBefore + upper);
+    expect(vi.mocked(debitInRunHelperCost), 'the tenant never paid for an aborted call').not.toHaveBeenCalled();
+    expect(inner._helperCostUsd, 'the run\'s cost line moves').toBeGreaterThan(0);
+    expect(inner._helperCostUsd, 'and by the estimate, not the bound').toBeLessThan(upper);
+    expect(abortedCallCounts().notBilled['agent.capture']).toBe(countBefore + 1);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('a failure that was NOT an abort books nothing', async () => {
+    const run = new AbortController();
+    const reply = vi.fn().mockRejectedValue(new Error('provider down'));
+    const { inner, recordExternalCost } = setUp(reply, run);
+    const costBefore = inner.sessionCounters.costUSD;
+    const countBefore = abortedCallCounts().notBilled['agent.capture'] ?? 0;
+
+    await inner._captureFallback(ANSWER, false, 'none');
+
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(recordExternalCost).not.toHaveBeenCalled();
+    expect(vi.mocked(debitInRunHelperCost)).not.toHaveBeenCalled();
+    expect(inner.sessionCounters.costUSD).toBe(costBefore);
+    expect(inner._helperCostUsd).toBe(0);
+    expect(abortedCallCounts().notBilled['agent.capture'] ?? 0).toBe(countBefore);
+  });
+
+  it('an abort that lands AFTER the reply books only the reply, not an aborted call', async () => {
+    // The reply came back and was booked; then the stop lands and the write throws. The
+    // request is no longer in flight, so the catch must not book it a second time.
+    const run = new AbortController();
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: FACTS } }],
+      usage: USAGE,
+    });
+    const { inner, write, recordExternalCost } = setUp(reply, run);
+    write.mockImplementation(() => { run.abort(); throw new Error('database is locked'); });
+    const costBefore = inner.sessionCounters.costUSD;
+    const countBefore = abortedCallCounts().notBilled['agent.capture'] ?? 0;
+
+    await expect(inner._captureFallback(ANSWER, false, 'none')).resolves.toBeUndefined();
+
+    expect(write).toHaveBeenCalled();
+    expect(run.signal.aborted, 'the stop did land').toBe(true);
+    const model = (reply.mock.calls[0]![0] as { model: string }).model;
+    expect(recordExternalCost, 'the reply\'s own booking, once').toHaveBeenCalledTimes(1);
+    expect(recordExternalCost.mock.calls[0]![0]).toBe(calculateCost(model, {
+      input_tokens: USAGE.input_tokens, output_tokens: USAGE.output_tokens,
+    }));
+    expect(vi.mocked(debitInRunHelperCost), 'the normal debit still ran').toHaveBeenCalledTimes(1);
+    expect(inner.sessionCounters.costUSD, 'no upper bound on top').toBe(costBefore);
+    expect(abortedCallCounts().notBilled['agent.capture'] ?? 0).toBe(countBefore);
   });
 });

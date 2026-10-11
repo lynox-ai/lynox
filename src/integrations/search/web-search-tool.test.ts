@@ -391,6 +391,28 @@ describe('search edge cases', () => {
     rerankSpy.mockRestore();
   });
 
+  it('books an ABORTED rerank\'s upper bound to the session cap only — never to the tenant', async () => {
+    // Same metered agent as the debit test above: the debit path, if taken, reaches `onAfterRun`.
+    const raw: SearchResult[] = [
+      { title: 'A', url: 'https://a.invalid', snippet: 's1' },
+      { title: 'B', url: 'https://b.invalid', snippet: 's2' },
+    ];
+    const upperBoundUsd = 0.0042;
+    const rerankSpy = vi.spyOn(reranker, 'rerankSearchResults').mockResolvedValue({
+      results: raw, droppedCount: 0, meanScore: null, skipReason: 'timeout', durationMs: 5000,
+      abortedCost: { upperBoundUsd, estimateUsd: 0.0003, fromSnapshot: true },
+    });
+    const onAfterRun = vi.fn();
+    const { agent, counters } = meteredAgent(onAfterRun);
+    await createWebSearchTool(mockProvider(raw)).handler({ action: 'search', query: 'x' }, agent);
+
+    expect(rerankSpy).toHaveBeenCalledTimes(1);
+    // The BOUND, exactly — not the estimate.
+    expect(counters.costUSD).toBe(upperBoundUsd);
+    expect(onAfterRun, 'the aborted call must not reach the tenant debit').not.toHaveBeenCalled();
+    rerankSpy.mockRestore();
+  });
+
   it('handles whitespace-only query', async () => {
     const provider = mockProvider();
     const tool = createWebSearchTool(provider);

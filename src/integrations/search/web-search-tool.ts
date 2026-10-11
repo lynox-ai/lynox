@@ -5,6 +5,7 @@ import { extractContent } from './content-extractor.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
+import { recordSessionCost } from '../../core/session-budget.js';
 import { rerankSearchResults } from './search-reranker.js';
 
 interface WebSearchInput {
@@ -184,6 +185,11 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           // balance. No-op when reranking was skipped (no cost) or self-host.
           if (reranked.costUsd !== undefined) {
             debitInRunHelperCost(ctx.meteredHost, agent.sessionCounters, reranked.costUsd, 'fast');
+          }
+          // A rerank aborted at its timeout returned no reply to book. Its upper bound goes to
+          // the session cap only — never to the tenant debit (aborted-call.ts).
+          if (reranked.abortedCost) {
+            recordSessionCost(agent.sessionCounters, reranked.abortedCost.upperBoundUsd);
           }
           results = reranked.results;
           results = await enrichResults(results, ctx);

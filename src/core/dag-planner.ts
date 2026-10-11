@@ -4,6 +4,10 @@ import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { calculateCost } from './pricing.js';
 import { resolveModel, undeclaredInlineStepTier } from '../orchestrator/runtime-adapter.js';
 import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
+import { abortedCallCost, partialMessageOf, reportAbortedCall } from './aborted-call.js';
+import type { AbortedCallCost } from './aborted-call.js';
+
+const PLAN_MAX_TOKENS = 4096;
 
 export interface DagPlanResult {
   steps: InlinePipelineStep[];
@@ -76,6 +80,12 @@ export async function planDAG(
      * reply that plans nothing was paid for all the same.
      */
     onSpend?: ((costUsd: number) => void) | undefined;
+    /**
+     * Called once when the planning call is aborted (its timeout) before the reply arrives,
+     * with bounds for what it cost. The upper bound is for budget caps; it is not a spend to
+     * debit to the tenant (aborted-call.ts).
+     */
+    onAbortedSpend?: ((cost: AbortedCallCost) => void) | undefined;
   },
 ): Promise<DagPlanResult | null> {
   try {
@@ -104,20 +114,27 @@ export async function planDAG(
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
+    // Set once the request is out. No await follows the reply, so the timeout cannot land
+    // after it: an abort seen in the catch is always one before the reply.
+    let inFlight: { request: unknown; stream: unknown } | undefined;
 
     try {
+      const request = {
+        system: systemText,
+        tools: [PROPOSE_DAG_TOOL],
+        messages: [{ role: 'user' as const, content: `Plan a pipeline for this goal: ${goal}` }],
+      };
       const stream = client.beta.messages.stream(
         {
           model,
-          max_tokens: 4096,
+          max_tokens: PLAN_MAX_TOKENS,
           ...(isOpenAICompat ? {} : { betas: getBetasForProvider(provider) }),
-          system: systemText,
+          ...request,
           tool_choice: { type: 'tool', name: 'propose_dag' },
-          tools: [PROPOSE_DAG_TOOL],
-          messages: [{ role: 'user', content: `Plan a pipeline for this goal: ${goal}` }],
         },
         { signal: controller.signal },
       );
+      inFlight = { request, stream };
       const { message: response, missed } = await settleForcedTool(stream.finalMessage());
 
       // Actual pool-key spend of this planning call, for the managed in-run
@@ -191,6 +208,13 @@ export async function planDAG(
         estimatedCost: typeof input.estimated_cost_usd === 'number' ? input.estimated_cost_usd : 0,
         actualCostUsd,
       };
+    } catch (err) {
+      if (inFlight && controller.signal.aborted) {
+        const cost = abortedCallCost({ model, maxTokens: PLAN_MAX_TOKENS, request: inFlight.request, partial: partialMessageOf(inFlight.stream) });
+        reportAbortedCall('dag-planner', model, cost);
+        options?.onAbortedSpend?.(cost);
+      }
+      throw err;
     } finally {
       clearTimeout(timeout);
     }
