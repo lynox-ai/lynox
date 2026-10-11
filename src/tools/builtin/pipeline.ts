@@ -897,13 +897,17 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // Three answers, one per kind (PRD 3b-2 §4.3): an interactive workflow whose only question tool
   // is ask_user does have an unattended run — its schedule, where the questions reach the owner —
   // but not here, where its questions would have nobody to reach.
+  // A workflow that asks its owner runs only on its schedule, confirmed or not: scheduling it
+  // stamps `confirmedAt`, and a worker session that called it here would hand its steps the
+  // full `promptUser` — the channel the consent gates read — instead of the question channel.
+  if (deps.autonomy === 'autonomous' && planned.mode === 'interactive' && isSchedulableWorkflow(planned)) {
+    return `Error: Workflow "${planned.id}" asks its owner while it runs, and this run has no way to reach them. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`;
+  }
   if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
     if (planned.mode !== 'interactive') {
       return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
     }
-    return isSchedulableWorkflow(planned)
-      ? `Error: Workflow "${planned.id}" asks its owner while it runs, and this run has no way to reach them. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`
-      : `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`;
+    return `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;

@@ -2360,7 +2360,7 @@ describe('WorkerLoop', () => {
     await expect(
       (loop as unknown as { executePipeline: (t: TriggerRecord, ...handOver: unknown[]) => Promise<void> })
         .executePipeline(task, ...NO_STOP()),
-    ).rejects.toThrow(/only runs 'autonomous' pipelines/);
+    ).rejects.toThrow(/may ask for more than an answer \(ask_secret \/ ask_human\), which a scheduled run has nobody to give/);
   });
 
   it('executePipeline lets an interactive PlannedPipeline that asks only through ask_user past the mode gate', async () => {

@@ -181,6 +181,34 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     expect(out).toContain('can no longer run on a cron/schedule');
   });
 
+  it('says so too when an asking workflow gains ask_secret and stays interactive, without re-confirm advice', async () => {
+    // interactive → interactive: no mode change, and the schedule is lost all the same.
+    history.insertPlannedPipeline(makePlanned({
+      mode: 'interactive', confirmedAt: '2026-10-01T00:00:00.000Z',
+      steps: [{ id: 'step-0', task: 'Use ask_user to pick the list' }],
+    }));
+    const out = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'add_step', step_id: 'step-key', value: 'Use ask_secret to get the API key' }] },
+      makeAgent(history),
+    );
+    expect(out).not.toContain('Mode changed');
+    expect(out).toContain('can no longer run on a cron/schedule');
+    expect(out).not.toContain('re-confirm before the next scheduled run');
+  });
+
+  it('keeps the re-confirm advice for an asking workflow that stays schedulable', async () => {
+    history.insertPlannedPipeline(makePlanned({
+      mode: 'interactive', confirmedAt: '2026-10-01T00:00:00.000Z',
+      steps: [{ id: 'step-0', task: 'Use ask_user to pick the list' }],
+    }));
+    const out = await updateWorkflowTool.handler(
+      { workflow_id: 'wf-1', modifications: [{ action: 'update_task', step_id: 'step-0', value: 'Use ask_user to pick the month' }] },
+      makeAgent(history),
+    );
+    expect(out).not.toContain('can no longer run on a cron');
+    expect(out).toContain('re-confirm before the next scheduled run');
+  });
+
   // === Destructive-edit guard (U5) ===
 
   describe('scheduled-workflow guard', () => {

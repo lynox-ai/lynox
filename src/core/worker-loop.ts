@@ -2295,16 +2295,16 @@ export class WorkerLoop {
     const asksItsOwner = planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps);
     if (planned.mode !== 'autonomous' && !asksItsOwner) {
       throw new Error(
-        `Pipeline "${planned.id}" is marked '${planned.mode}'; WorkerLoop only runs 'autonomous' pipelines. ` +
-        `Convert it (remove ask_user/ask_secret steps) or invoke it manually from a chat session.`,
+        `Pipeline "${planned.id}" is marked '${planned.mode}' and may ask for more than an answer (ask_secret / ask_human), ` +
+        `which a scheduled run has nobody to give: remove those steps, or run it from a chat session.`,
       );
     }
 
     // Slice B2 — first-run-confirm gate (S2, PRD §4.4): a workflow must have been
     // confirmed by a human before it runs unattended.
-    // LOAD-BEARING ORDER: the 'autonomous'-only check above throws first, so the
-    // message below is only ever read for an autonomous workflow — the one kind
-    // that can actually be scheduled. Keep it in that order, or "schedule it from
+    // LOAD-BEARING ORDER: the check above throws first, so the message below is
+    // only ever read for a workflow a schedule may run (autonomous, or asking only
+    // through ask_user). Keep it in that order, or "schedule it from
     // the workflow library" becomes advice its reader cannot follow. The B2 scheduling surface
     // stamps `confirmedAt` as part of the consent action, so any workflow
     // scheduled through the product has it; enforce here too so a hand-edited /
