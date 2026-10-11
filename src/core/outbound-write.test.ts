@@ -63,6 +63,13 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     ['multipart name in RFC 2231 form', MULTI, "--b\r\nContent-Disposition: form-data; name*=utf-8''_%6Dethod\r\n\r\nDELETE\r\n--b--", 'DELETE'],
     ['multipart that mentions it only in a file', MULTI, '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nuse _method=DELETE\r\n--b--', 'POST'],
     ['no type, a non-method only the other parser finds', {}, '_method=Looks+safe', 'POST'],
+    ['multipart name in numbered RFC 2231 pieces', MULTI, '--b\r\nContent-Disposition: form-data; name*0="_me"; name*1="thod"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart header folded onto a second line', MULTI, '--b\r\nContent-Disposition: form-data;\r\n name="_method"\r\n\r\nDELETE\r\n--b--', 'DELETE'],
+    ['multipart part with a longer name', MULTI, '--b\r\nContent-Disposition: form-data; name="payment_method"\r\n\r\npm_1\r\n--b--', 'POST'],
+    ['multipart file whose name mentions it', MULTI, '--b\r\nContent-Disposition: form-data; name="file"; filename="methodology.pdf"\r\n\r\nx\r\n--b--', 'POST'],
+    ['NDJSON lines that hold a method value', { 'Content-Type': 'application/x-ndjson' }, '{"http.request.method":"DELETE"}\n{"b":1}', 'POST'],
+    ['text in quotes that mentions the word', { 'Content-Type': 'text/plain' }, '"Quote" about the scientific method', 'POST'],
+    ['JSON object whose string holds a form override', JSON_T, '{"note":"a&_method=DELETE&b"}', 'POST'],
   ] as const)('%s', (_k, headers, body, want) => {
     expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
   });
