@@ -1489,6 +1489,20 @@ describe('private mode takes the subjects only the private chat created', () => 
     expect(subjects.getSubject(known.id)).not.toBeNull();
   });
 
+  it('two subjects the private chat created and merged go together', () => {
+    const { ks, subjects } = make();
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    const b = ks.write({ text: 'Sattlerei Kornfeld AG is in Thun', subjectName: 'Sattlerei Kornfeld AG', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(b.subjectId).not.toBe(a.subjectId);
+    subjects.mergeSubjects(b.subjectId!, a.subjectId!);
+    expect(subjects.getSubject(b.subjectId!)?.merged_into).toBe(a.subjectId); // positive control
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).toBeNull();
+    expect(subjects.getSubject(b.subjectId!)).toBeNull();
+  });
+
   it('a subject the private chat created stays while a thread is anchored on it', () => {
     const anchored = new Set<string>();
     const { ks, subjects } = make(refs(anchored));
