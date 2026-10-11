@@ -397,7 +397,7 @@ describe('WorkerLoop', () => {
     expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', 'deep');
   });
 
-  it('executeStandard does not apply a stored trigger tier on a managed pool tier', async () => {
+  it('executeStandard applies a stored trigger tier on a managed pool tier too', async () => {
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
     try {
       const session = makeSession('Done.');
@@ -405,8 +405,8 @@ describe('WorkerLoop', () => {
       const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
       await loop.tick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).not.toHaveProperty('model');
-      expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', undefined);
+      expect(engine.createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'deep' }));
+      expect(engine.workerRunModelOverride).toHaveBeenCalledWith('standard', 'deep');
     } finally {
       vi.unstubAllEnvs();
     }
@@ -443,13 +443,13 @@ describe('WorkerLoop', () => {
     await fire(makeTask({ id: 't-tier2', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
     expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ model: 'fast' }));
 
-    // On a managed pool tier a stored tier is not applied: the watch stays `fast`.
+    // A managed pool tier applies the stored tier the same way.
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
     try {
       mockFetchPinned.mockResolvedValueOnce(new Response('CONTENT v1', { status: 200 }));
       await fire(makeTask({ id: 't-tier3', source: 'watch', effect: 'run_agent', model_tier: 'deep', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
-      expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ model: 'fast' }));
-      expect(override).toHaveBeenLastCalledWith('watch', undefined);
+      expect(vi.mocked(engine.createSession).mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ model: 'deep' }));
+      expect(override).toHaveBeenLastCalledWith('watch', 'deep');
     } finally {
       vi.unstubAllEnvs();
     }

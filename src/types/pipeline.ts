@@ -342,8 +342,7 @@ export interface TriggerRecord {
    *  Only a `run_agent` trigger takes one (a standard run and a watch analysis); a
    *  workflow, backup or notify trigger refuses it. A choice is held to the same
    *  `max_tier` ceiling and blocklist as any tier request, and replaces the background
-   *  model and `worker_profile` for that trigger's runs. On a managed pool tier a stored
-   *  tier is not applied (`admittedTriggerTier`). */
+   *  model and `worker_profile` for that trigger's runs. */
   model_tier?: ModelTier | undefined;
   /** Slice B2: cron kill-switch (SQLite 0/1). 1 = fires on schedule, 0 = the
    *  worker skips it. Absent = enabled (the column defaults to 1). */
