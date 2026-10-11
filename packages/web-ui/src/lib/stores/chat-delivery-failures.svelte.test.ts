@@ -210,6 +210,37 @@ describe('a new question that arrives while an answer is being saved', () => {
 		expect(store.getPendingSecretPrompt()?.promptId).toBe('p2');
 	});
 
+	it('does not keep a card shown again for the same question, as a resume does', async () => {
+		let putDone!: (r: Response) => void;
+		let accountDone!: (r: Response) => void;
+		const run = openRun((url) => {
+			if (url.includes('/secrets/')) return new Promise<Response>((r) => { putDone = r; });
+			if (url.endsWith('/mail/accounts')) return new Promise<Response>((r) => { accountDone = r; });
+			return json({});
+		});
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		await settle();
+		const saving = store.submitSecret('API_KEY', 'value');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		await settle();
+		putDone(json({}));
+		await expect(saving).resolves.toBe('saved');
+		expect(store.getPendingSecretPrompt()).toBeNull();
+
+		run.send('mail_connect_prompt', { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		const connecting = store.submitMailConnect('pw');
+		await settle();
+		run.send('mail_connect_prompt', { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		accountDone(json({}));
+		await expect(connecting).resolves.toEqual({ ok: true });
+		expect(store.getPendingMailConnect()).toBeNull();
+	});
+
 	it('control: without a new question the saved card is cleared', async () => {
 		const run = openRun(() => json({}));
 		void store.sendMessage('go');
