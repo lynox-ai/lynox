@@ -6,6 +6,9 @@ import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
 
 export class ChangesetManager {
   private entries: Map<string, ChangesetEntry> = new Map();
+  /** The pre-run bytes of each `modified` entry. Held here, not read back from the backup
+   *  copy: that copy can be a symlink to the live file, or shared with another manager. */
+  private originalBytes: Map<string, Buffer> = new Map();
   private readonly backupDir: string;
 
   constructor(private readonly cwd: string, _runId: string) {
@@ -26,13 +29,15 @@ export class ChangesetManager {
 
     if (existsSync(abs)) {
       try {
-        originalContent = readFileSync(abs, 'utf-8');
+        const bytes = readFileSync(abs);
+        originalContent = bytes.toString('utf-8');
         status = 'modified';
         // Copy original to backup dir preserving relative structure
         const rel = relative(this.cwd, abs);
         const backupPath = join(this.backupDir, rel);
         mkdirSync(dirname(backupPath), { recursive: true });
         cpSync(abs, backupPath);
+        this.originalBytes.set(abs, bytes);
       } catch {
         // Best-effort — if we can't read, treat as new file
         originalContent = null;
@@ -50,33 +55,25 @@ export class ChangesetManager {
    * empty entry would open a review with nothing in it, and the review holds the next
    * message until it is answered. `getChanges`, `hasChanges` and `size` all read this.
    *
-   * "Same" is decided on the bytes, against the backup copy, never on decoded text: a
-   * file with bytes that are not valid UTF-8 decodes to the same string after a write
-   * that changed them, and that write must still be reviewed.
+   * "Same" is decided on the bytes read before the run, never on decoded text: a file with
+   * bytes that are not valid UTF-8 decodes to the same string after a write that changed
+   * them, and that write must still be reviewed.
    */
   private _changed(): Array<[string, ChangesetEntry, string]> {
     const changed: Array<[string, ChangesetEntry, string]> = [];
     for (const [abs, entry] of this.entries) {
-      let currentContent: string;
+      let currentBytes: Buffer;
       try {
-        currentContent = readFileSync(abs, 'utf-8');
+        currentBytes = readFileSync(abs);
       } catch {
         // Deleted during the run, or unreadable — not reported
         continue;
       }
-      if (entry.status === 'modified' && this._sameBytesAsBackup(abs)) continue;
+      if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
+      const currentContent = currentBytes.toString('utf-8');
       changed.push([abs, entry, currentContent]);
     }
     return changed;
-  }
-
-  /** Whether the file's bytes equal its backup copy. Anything unreadable counts as changed. */
-  private _sameBytesAsBackup(abs: string): boolean {
-    try {
-      return readFileSync(abs).equals(readFileSync(join(this.backupDir, relative(this.cwd, abs))));
-    } catch {
-      return false;
-    }
   }
 
   /**

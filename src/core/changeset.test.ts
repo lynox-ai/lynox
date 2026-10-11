@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -295,15 +295,35 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
     });
 
-    it('without its backup copy, a tracked file counts as changed', () => {
+    // The comparison is against bytes held in memory, never against the backup copy: that
+    // copy is a symlink when the tracked path is one, and gone after cleanup().
+    it('a write through a symlink is a change', () => {
       const cwd = makeTempDir();
-      const filePath = join(cwd, 'copy-gone.txt');
-      writeFileSync(filePath, 'same', 'utf-8');
+      const target = join(cwd, 'target.txt');
+      const link = join(cwd, 'link.txt');
+      writeFileSync(target, 'before', 'utf-8');
+      symlinkSync('target.txt', link);
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(link);
+      writeFileSync(link, 'through the link', 'utf-8');
+      expect(readFileSync(target, 'utf-8'), 'positive control: the write reached the target').toBe('through the link');
+      expect(mgr.hasChanges()).toBe(true);
+      expect(mgr.size).toBe(1);
+      mgr.cleanup();
+    });
+
+    it('after cleanup, a file restored by rollback is not a change', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'restored.txt');
+      writeFileSync(filePath, 'before', 'utf-8');
       const mgr = new ChangesetManager(cwd, 'test-run');
       mgr.backupBeforeWrite(filePath);
-      rmSync(join((mgr as unknown as { backupDir: string }).backupDir, 'copy-gone.txt'));
-      expect(mgr.hasChanges()).toBe(true);
+      writeFileSync(filePath, 'after', 'utf-8');
+      expect(mgr.hasChanges(), 'positive control').toBe(true);
+      mgr.rollbackAll();
       mgr.cleanup();
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
     });
   });
 });
