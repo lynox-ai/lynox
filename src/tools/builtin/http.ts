@@ -2556,19 +2556,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // is what protects the account against an injected instruction (PRD
     // customer-granted-operator-access 4.11). A grant covers neither a table path nor, for a
     // mandate, anything H2b refused above.
+    //
+    // An override of the same rank as the method (a POST that says PATCH) is gated as the
+    // override, but a server that ignores it runs the method that is sent. So when the two
+    // differ and both write, the contract must grant both, and the approval is keyed and asked as
+    // the pair, so an approval for a plain PATCH does not cover a POST that only claims to be one.
+    // (The outbound-effect table reads only whether a method writes, so one check covers both.)
+    const sentMethod = method.trim().toUpperCase();
+    const keyedMethod = sentMethod === gatedMethod ? gatedMethod : `${sentMethod}>${gatedMethod}`;
     const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
     const contractGrantsWrite =
       contract !== undefined &&
       !outboundEffect &&
-      contractGrants('http_request', { ...input, method: gatedMethod }, contract);
+      contractGrants('http_request', { ...input, method: gatedMethod }, contract) &&
+      (!isWriteMethod(sentMethod) || contractGrants('http_request', { ...input, method: sentMethod }, contract));
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && isOwnerPrincipal(agent.principal);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
       const hostname = approvalHost;
-      const key = approvalKey(gatedMethod, hostname);
+      const key = approvalKey(keyedMethod, hostname);
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
       if (!(remembers && isApproved(counters, key, epoch))) {
@@ -2632,8 +2641,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               : outboundEffect ? pv` This sends or issues something and is asked every time.`
                 : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
                   : pv` In this session every write is asked.`;
+            // What goes on the wire when an override names another method: a server that ignores
+            // the override runs the sent one, so the question names both.
+            const sentNote = sentMethod === gatedMethod ? pv``
+              : pv` It is sent as a ${sentMethod} that asks for ${gatedMethod}; a server that ignores the override runs a ${sentMethod}.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${bodyBlock}`,
+              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());

@@ -858,6 +858,37 @@ describe('httpRequestTool', () => {
         expect(fetchMock).toHaveBeenCalled();
       });
 
+      it('a contract that grants PATCH does not grant a POST that carries a PATCH override', async () => {
+        mockDnsPublic();
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const patchOnly: CapabilityContract = { ...contract, httpMethods: ['PATCH'] };
+        const plain = await handler(
+          { url: 'https://example.com/v1/report', method: 'PATCH', body: '{}' },
+          makeAgent({ capabilityContract: patchOnly }),
+        );
+        expect(plain).not.toContain('requires user consent');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const res = await visible(
+          { url: 'https://example.com/v1/report', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' },
+          makeAgent({ capabilityContract: patchOnly }),
+        );
+        expect(res).toContain('requires user consent');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('a GET that carries a POST override needs only the POST grant: what is sent reads', async () => {
+        mockDnsPublic();
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const res = await handler(
+          { url: 'https://example.com/v1/report', method: 'GET', headers: { 'X-HTTP-Method-Override': 'POST' } },
+          makeAgent({ capabilityContract: contract }),
+        );
+        expect(res).not.toContain('requires user consent');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
       it('a POST outside the contract is still blocked headless (the grant is call-specific)', async () => {
         mockDnsPublic();
         const res = await visible(
@@ -5660,6 +5691,28 @@ describe('write approvals per method and host (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
     await visible({ url: 'https://h.example/a', method: 'PUT', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
+  // An override of the same rank as the method is gated as the override, but a server that
+  // ignores it runs the method sent: the approval is the pair's, and the question names both.
+  it('(2b) an approval for PATCH does not cover a POST that carries a PATCH override', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'PATCH', body: '{}' }, agent);
+    expect(question(prompt, 0)).not.toContain('It is sent as');
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('PATCH to h.example');
+    expect(question(prompt, 1)).toContain('It is sent as a POST that asks for PATCH');
+    await visible({ url: 'https://h.example/b', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(testCounters.approvedWrites?.has('POST>PATCH h.example')).toBe(true);
+  });
+
+  it('(2c) a method written in lower case or with spaces is the same method, not an override', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: ' patch ', body: '{}' }, agent);
+    expect(question(prompt, 0)).not.toContain('It is sent as');
+    expect(testCounters.approvedWrites?.has('PATCH h.example')).toBe(true);
   });
 
   it('(1) an approval does not hold once the epoch moved', async () => {
