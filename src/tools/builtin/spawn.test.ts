@@ -1710,6 +1710,18 @@ describe('spawn_agent tool', () => {
 
   // === F5/S8: spawn seeds the child's sticky taint from a tainted parent ===
 
+  it('a spawned child runs neither helper fallback — it is debited from its own cost snapshot', async () => {
+    // Both fallbacks debit their helper call to the tenant directly AND record it in the
+    // agent's cost guard. A child's tenant debit is its whole snapshot, so a child running
+    // either one would bill that helper call twice. Off by default (agent.ts), and spawn
+    // must not turn them on.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, makeAgent());
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as { followUpFallback?: boolean; captureFallback?: boolean };
+    expect(child.followUpFallback ?? false).toBe(false);
+    expect(child.captureFallback ?? false).toBe(false);
+  });
+
   it('F5/S8: a tainted parent seeds the spawned child\'s untrusted taint', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     // Parent read untrusted content earlier (sticky conversation latch set) — an injected

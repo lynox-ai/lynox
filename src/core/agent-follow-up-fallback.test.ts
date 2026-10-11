@@ -115,6 +115,17 @@ function makeAgent(opts: { reply?: ReturnType<typeof vi.fn>; modelPinnedByProfil
   return { agent, inner, reply, events };
 }
 
+describe('helper fallbacks are opt-in', () => {
+  // Off unless the session turns them on for its own agent. A spawned child is debited from
+  // its cost snapshot, and both fallbacks record a helper call there that already debited
+  // itself — so an agent built without the override must have both off.
+  it('a new agent runs neither the follow-up recovery nor the turn-end capture', () => {
+    const agent = new Agent({ name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS' });
+    expect(agent.followUpFallback).toBe(false);
+    expect(agent.captureFallback).toBe(false);
+  });
+});
+
 describe('follow-up recovery — when it stays quiet', () => {
   it('does nothing when the surface never asked for chips (CLI / headless)', async () => {
     const { agent, inner, reply } = makeAgent();
