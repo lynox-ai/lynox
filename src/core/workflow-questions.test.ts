@@ -84,7 +84,7 @@ async function stillPending(p: Promise<unknown>): Promise<boolean> {
 describe('a question of a scheduled workflow run', () => {
   it('lands in the run\'s thread, carries no trigger, reaches the owner and records the delivery', async () => {
     const h = makeHarness();
-    const answer = h.q.ask('Which list, A or B?', ['A', 'B'], { stepId: 'pick', stepTask: 'pick a list', workflowName: 'Weekly offer' });
+    const answer = h.q.ask('Which list, A or B?', ['A', 'B', '\x00'], { stepId: 'pick', stepTask: 'pick a list', workflowName: 'Weekly offer' });
     const id = await openQuestion(h);
     const row = h.prompts.getById(id)!;
     expect(row.session_id).toBe(RUN_ID);
@@ -102,6 +102,7 @@ describe('a question of a scheduled workflow run', () => {
     expect(h.notified).toHaveLength(1);
     expect(h.notified[0]).toMatchObject({
       taskId: 'trg-wf', priority: 'high', data: { threadId: RUN_ID, promptId: id },
+      // The free-text marker stays on the row for the owner's dialog, and off the copy that leaves.
       inquiry: { question: 'Which list, A or B?', options: ['A', 'B'] },
     });
     await vi.waitFor(() => { expect(h.deliveries).toEqual(['delivered']); });

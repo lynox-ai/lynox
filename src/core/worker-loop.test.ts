@@ -1572,7 +1572,7 @@ describe('WorkerLoop', () => {
         sessionId: 'thread-worker-test',
         _recreateAgent: vi.fn(),
         promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
-        run: vi.fn(async () => { answer = await session.promptUser!('Approve this?', ['Yes', 'No']); return 'Done.'; }),
+        run: vi.fn(async () => { answer = await session.promptUser!('Approve this?', ['Yes', 'No', '\x00']); return 'Done.'; }),
       };
       const task = makeTask();
       const engine = makeEngine({
@@ -1591,7 +1591,8 @@ describe('WorkerLoop', () => {
       // and now carries the prompt id so a client can settle this exact row.
       expect(router.notify).toHaveBeenCalledWith(
         expect.objectContaining({
-          inquiry: expect.objectContaining({ question: 'Approve this?' }) as { question: string },
+          // Without the free-text marker: it is for the owner's dialog, not for a mail or a push.
+          inquiry: { question: 'Approve this?', options: ['Yes', 'No'] },
           data: expect.objectContaining({
             threadId: 'thread-worker-test',
             promptId: store.getPending('thread-worker-test')!.id,
@@ -1603,7 +1604,7 @@ describe('WorkerLoop', () => {
       const pending = loop.getTaskPendingInput(task.id);
       expect(pending).toBeDefined();
       expect(pending!.question).toBe('Approve this?');
-      expect(pending!.options).toEqual(['Yes', 'No']);
+      expect(pending!.options).toEqual(['Yes', 'No', '\x00']); // the row keeps the marker for the owner's dialog
 
       loop.stop();
       for (let i = 0; i < 200 && answer === undefined; i++) {

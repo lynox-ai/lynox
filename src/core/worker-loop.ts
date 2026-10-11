@@ -20,6 +20,7 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
+import { inquiryOptions } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -1916,7 +1917,7 @@ export class WorkerLoop {
         // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
         // `promptId` rides along so a client can settle this exact row.
         data: { threadId: session.sessionId, promptId },
-        inquiry: { question: offBoxQuestion, options },
+        inquiry: { question: offBoxQuestion, options: inquiryOptions(options) },
       });
       try {
         const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
