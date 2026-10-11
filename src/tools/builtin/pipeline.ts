@@ -901,7 +901,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // stamps `confirmedAt`, and a worker session that called it here would hand its steps the
   // full `promptUser` — the channel the consent gates read — instead of the question channel.
   if (deps.autonomy === 'autonomous' && planned.mode === 'interactive' && isSchedulableWorkflow(planned)) {
-    return `Error: Workflow "${planned.id}" asks its owner while it runs, and this run has no way to reach them. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`;
+    return `Error: Workflow "${planned.id}" asks its owner while it runs, and only its schedule gives those questions their own channel to the owner. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`;
   }
   if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
     if (planned.mode !== 'interactive') {
