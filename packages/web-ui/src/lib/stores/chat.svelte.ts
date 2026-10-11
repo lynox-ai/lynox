@@ -2438,10 +2438,17 @@ export type SecretSubmitResult = 'saved' | 'managed_blocked' | 'vault_error';
  *  timeouts and is generous for a single PUT. */
 const SECRET_PUT_TIMEOUT_MS = 30_000;
 
+/** Whether the card on screen is still the one an answer was submitted from: the same object,
+ *  or the same question put back on screen by a resume while the answer was saved. */
+function isSameCard(current: { promptId?: string | undefined } | null, submitted: { promptId?: string | undefined }): boolean {
+	return current === submitted || (submitted.promptId !== undefined && current?.promptId === submitted.promptId);
+}
+
 export async function submitSecret(name: string, value: string): Promise<SecretSubmitResult> {
 	if (!sessionId || !pendingSecretPrompt) return 'vault_error';
 	const sid = sessionId;
-	const promptId = pendingSecretPrompt.promptId;
+	const card = pendingSecretPrompt;
+	const promptId = card.promptId;
 	const ac = new AbortController();
 	const timer = setTimeout(() => ac.abort(), SECRET_PUT_TIMEOUT_MS);
 	try {
@@ -2457,12 +2464,14 @@ export async function submitSecret(name: string, value: string): Promise<SecretS
 		// retry — surface this as a distinct status so the tool result tells
 		// it to escalate to admin provisioning instead of looping.
 		clearTimeout(timer);
+		// The run may have asked a new question while the vault write was under way; its card
+		// replaced this one and stays. A resume may have shown this same question again.
 		const status: SecretSubmitResult = vaultRes.ok
 			? 'saved'
 			: vaultRes.status === 403
 				? 'managed_blocked'
 				: 'vault_error';
-		pendingSecretPrompt = null;
+		if (isSameCard(pendingSecretPrompt, card)) pendingSecretPrompt = null;
 		await fetch(`${getApiBase()}/sessions/${sid}/secret-saved`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -2471,7 +2480,7 @@ export async function submitSecret(name: string, value: string): Promise<SecretS
 		return status;
 	} catch {
 		clearTimeout(timer);
-		pendingSecretPrompt = null;
+		if (isSameCard(pendingSecretPrompt, card)) pendingSecretPrompt = null;
 		// Best-effort notify so the agent isn't stuck waiting — but if the
 		// network is completely dead this POST will fail too, in which case
 		// the engine's expireOld() / orphan watchdog eventually clears it.
@@ -2563,7 +2572,9 @@ export async function submitMailConnect(password: string): Promise<MailConnectSu
 			// can correct the password and resubmit.
 			return { ok: false, error: err.error ?? `Connection failed (${res.status})` };
 		}
-		pendingMailConnect = null;
+		// A newer question that replaced this card while the account was saved keeps its card;
+		// the same question shown again by a resume does not.
+		if (isSameCard(pendingMailConnect, p)) pendingMailConnect = null;
 		await fetch(`${getApiBase()}/sessions/${sid}/mail-connected`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
