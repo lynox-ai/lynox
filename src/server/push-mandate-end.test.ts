@@ -98,8 +98,10 @@ describe('push subscription and the end of a grant (real engine)', () => {
     // No record step in the test: the request itself records the end the cookie carries.
     expect(res.status).toBe(201);
     expect(pushOf().addedBy(endpoint)).toEqual({ created_by: 'mandate:ida@example.invalid' });
+    const ida: RequestPrincipal = { kind: 'mandate', email: 'ida@example.invalid', mandateId: 'TEST-MANDATE-3' };
+    expect(pushOf().subscriptionCount(ida)).toBe(1);
     endsOf().revoke('TEST-MANDATE-3');
-    expect(pushOf().subscriptionCount()).toBe(0);
+    expect(pushOf().subscriptionCount(ida)).toBe(0);
     expect(pushOf().addedBy(endpoint)).toBeUndefined();
   });
 

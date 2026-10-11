@@ -160,8 +160,11 @@ describe('WebPushNotificationChannel — a mandate\'s subscriptions', () => {
 		flaky.subscribe('https://push.example/eva', 'k', 'a', EVA);
 		expect(flaky.subscribe('https://push.example/max', 'k', 'a', max)).toBe('ok');
 		busy = true;
+		const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 		// Another subscribe runs the purge: a lookup that fails must not remove the row.
 		flaky.subscribe('https://push.example/owner-2', 'k', 'a', OWNER_PRINCIPAL);
+		expect(stderr.mock.calls.some(([line]) => String(line).includes('access grant could not be checked: engine.db busy'))).toBe(true);
+		stderr.mockRestore();
 		await flaky.send({ title: 't', body: 'b', priority: 'normal' });
 		expect(sendCalls().sort()).toEqual(['https://push.example/abc', 'https://push.example/eva', 'https://push.example/owner-2']);
 		expect(flaky.addedBy('https://push.example/max')).toEqual({ created_by: 'mandate:max@example.invalid' });

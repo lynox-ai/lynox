@@ -256,7 +256,8 @@ export class WebPushNotificationChannel implements NotificationChannel {
   private grantState(mandateId: string): 'live' | 'ended' | 'unknown' {
     try {
       return this.isMandateLive(mandateId) ? 'live' : 'ended';
-    } catch {
+    } catch (err: unknown) {
+      process.stderr.write(`[lynox] push: access grant could not be checked: ${err instanceof Error ? err.message : String(err)}\n`);
       return 'unknown';
     }
   }
