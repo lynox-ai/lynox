@@ -1631,6 +1631,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'workflow_library.schedule': { de: 'Planen', en: 'Schedule' },
 	'workflow_library.schedule_title': { de: 'Workflow planen', en: 'Schedule workflow' },
 	'workflow_library.schedule_hint': { de: 'Dieser Workflow läuft danach automatisch nach dem Zeitplan unten – unbeaufsichtigt. Bestätige die Aktionen, die er ausführen darf.', en: 'This workflow will then run automatically on the schedule below — unattended. Confirm the actions it is allowed to take.' },
+	'workflow_library.schedule_hint_asks': { de: 'Dieser Workflow läuft danach automatisch nach dem Zeitplan unten. Braucht ein Schritt eine Antwort von dir, fragt er dich. Bestätige die Aktionen, die er ausführen darf.', en: 'This workflow will then run automatically on the schedule below, and ask you when a step needs your answer. Confirm the actions it is allowed to take.' },
 	'workflow_library.schedule_cron_label': { de: 'Cron-Zeitplan', en: 'Cron schedule' },
 	'workflow_library.schedule_cron_hint': { de: 'Standard-Cron, z.B. „0 9 * * *“ = täglich um 9 Uhr.', en: 'Standard cron, e.g. "0 9 * * *" = every day at 9am.' },
 	'workflow_library.schedule_cron_required': { de: 'Bitte einen Cron-Zeitplan angeben.', en: 'Please enter a cron schedule.' },

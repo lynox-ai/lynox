@@ -626,7 +626,8 @@
 	>
 		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<h2 class="text-sm font-medium mb-1">{t('workflow_library.schedule_title')}: {scheduleModalWf.name}</h2>
-			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.schedule_hint')}</p>
+			<!-- "unattended" is false for a workflow that asks its owner while it runs. -->
+			<p class="text-xs text-text-subtle mb-4">{t(asksOwner(scheduleModalWf) ? 'workflow_library.schedule_hint_asks' : 'workflow_library.schedule_hint')}</p>
 
 			{#if asksOwner(scheduleModalWf) && (scheduleModalWf.askingSteps ?? []).length > 0}
 				<div class="rounded-[var(--radius-sm)] border border-border bg-bg-muted p-3 mb-4 text-xs">
