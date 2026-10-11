@@ -36,6 +36,7 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     ['JSON field', JSON_T, '{"_method":"PATCH"}', 'PATCH'],
     ['JSON field, escaped name', JSON_T, '{"_\\u006dethod":"DELETE"}', 'DELETE'],
     ['JSON field nested', JSON_T, '{"item":{"_method":"DELETE"}}', 'POST'],
+    ['JSON field that only ends in method', JSON_T, '{"payment_method":"DELETE"}', 'POST'],
     ['JSON array at the top', JSON_T, '[{"_method":"DELETE"}]', 'POST'],
     ['JSON +json media type', { 'Content-Type': 'application/vnd.api+json' }, '{"_method":"DELETE"}', 'DELETE'],
     ['JSON that does not parse and mentions it', JSON_T, '{"_method":"DELETE",', 'DELETE'],

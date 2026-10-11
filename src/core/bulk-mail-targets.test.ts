@@ -210,6 +210,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     const item = 'https://shop.example.test/items/1';
     const c = client('shop.example.test', [item], 'POST');
     expect(await c.write(item, 'POST', { _method: 'DELETE', x: 1 })).toEqual({ kind: 'not_granted' });
+    expect(await c.write(item, 'POST', { _method: 'Looks safe', x: 1 }), 'an override that is not a method').toEqual({ kind: 'not_granted' });
     expect(requests).toEqual([]);
     // The control: the same field one level down is not an override, and the write goes out.
     expect(await c.write(item, 'POST', { meta: { _method: 'DELETE' }, x: 1 })).toEqual({ kind: 'ok', value: undefined });
