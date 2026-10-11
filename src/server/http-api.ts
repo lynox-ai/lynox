@@ -187,8 +187,10 @@ export type RunOnDelete =
   | 'not_running'
   /** The run's effect is one a delete leaves alone (`STOPPED_BY_DELETE`); it finishes. */
   | 'effect_kept'
-  /** The caller may not stop this run (`mayStopRun`); it finishes. */
-  | 'not_permitted'
+  /** A mandate's answer when no run of its own was in flight: none, or one it may not stop
+   *  (`mayStopRun`), which finishes. One word for both, as `POST /stop` gives one 403 for both,
+   *  so a delete does not tell a mandate whether someone else's run is going. */
+  | 'not_stopped'
   /** The run is in a phase nothing interrupts right now; it finishes. `POST /stop` may reach it later. */
   | 'unstoppable_now'
   /** The stop threw. The delete stands; the run may still be going. */
@@ -1832,9 +1834,11 @@ export class LynoxHTTPApi {
   private _stopRunOfDeletedSchedule(principal: RequestPrincipal, id: string): RunOnDelete {
     const loop = this.engine?.getWorkerLoop();
     const starter = loop?.runningStarterTag(id);
-    if (loop === undefined || loop === null || starter === undefined) return 'not_running';
+    const owner = isOwnerPrincipal(principal);
+    if (loop === undefined || loop === null || starter === undefined) return owner ? 'not_running' : 'not_stopped';
+    // Before the effect: what a mandate may not stop, it learns nothing about.
+    if (!mayStopRun(principal, starter)) return 'not_stopped';
     if (!STOPPED_BY_DELETE.has(loop.runningEffect(id) ?? '')) return 'effect_kept';
-    if (!mayStopRun(principal, starter)) return 'not_permitted';
     return loop.stopTask(id).kind === 'requested' ? 'stopped' : 'unstoppable_now';
   }
 

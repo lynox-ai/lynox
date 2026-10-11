@@ -14167,7 +14167,8 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
       });
       expect(h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_running');
+      // A mandate is not told whether a run is going: the same word as for a run it may not stop.
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
 
     // PRD 3b-2 G9 (a): a delete by whoever may stop the run (§3.13 E7) stops it too, for the
@@ -14196,10 +14197,10 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
 
       const foreign = loopWith('owner', 'run_workflow');
       const byMandate = await deleteAs('mandate', foreign);
-      expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_permitted' } });
+      expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
       expect(byMandate.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
       expect(foreign.stopTask).not.toHaveBeenCalled();
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_permitted');
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
 
     it('a mandate\'s delete stops a run it started itself, and the trail says so', async () => {
@@ -14207,6 +14208,17 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       expect(await deleteAs('mandate', own)).toMatchObject({ status: 200, body: { deleted: true, run: 'stopped' } });
       expect(own.stopTask).toHaveBeenCalledWith('trg-9');
       expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:stopped');
+    });
+
+    it('a mandate learns nothing about a foreign run whose effect a delete leaves alone', async () => {
+      const loop = loopWith('owner', 'backup');
+      expect(await deleteAs('mandate', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
+      expect(loop.stopTask).not.toHaveBeenCalled();
+    });
+
+    it('the owner still hears that no run was in flight', async () => {
+      const loop = { ...loopWith('owner', 'run_workflow'), runningStarterTag: vi.fn(() => undefined) };
+      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'not_running' } });
     });
 
     it.each(['backup', 'notify', 'bulk_apply'])('the owner\'s delete of a %s schedule leaves its run alone, as before', async (effect) => {
