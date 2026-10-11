@@ -15,6 +15,7 @@ import type { WebPushNotificationChannel } from '../integrations/push/web-push-c
 import type { ApiStore } from '../core/api-store.js';
 import type { BatchIndex } from '../core/batch-index.js';
 import type { BackupManager } from '../core/backup.js';
+import { OWNER_PRINCIPAL } from '../core/request-principal.js';
 
 /**
  * `DELETE /api/data` erases what the data-dir inventory says it erases — measured on a
@@ -174,7 +175,7 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     if (mail === null) throw new Error('fixture: mail-state.db never opened');
     mail.getConnection().exec('CREATE TABLE IF NOT EXISTS zz_seed (v TEXT)');
     mail.getConnection().prepare('INSERT INTO zz_seed (v) VALUES (?)').run(mark('mail-state'));
-    pushOf().subscribe(`https://push.example/${randomBytes(4).toString('hex')}`, 'p256dh', 'auth');
+    pushOf().subscribe(`https://push.example/${randomBytes(4).toString('hex')}`, 'p256dh', 'auth', OWNER_PRINCIPAL);
     const memory = e.getMemory();
     if (memory === null) throw new Error('fixture: no flat-file memory');
     const userDir = join(dir, 'memory', `user-${USER.id}`);

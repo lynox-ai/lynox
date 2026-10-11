@@ -1634,7 +1634,11 @@ export class LynoxHTTPApi {
       const { WebPushNotificationChannel } = await import('../integrations/push/web-push-channel.js');
       const { getLynoxDir } = await import('../core/config.js');
       const dataDir = getLynoxDir();
-      this.pushChannel = new WebPushNotificationChannel(dataDir);
+      const engine = this.engine!;
+      // A subscription a mandate added ends with its grant; with no store of ends, every mandate counts as ended.
+      this.pushChannel = new WebPushNotificationChannel(dataDir, {
+        isMandateLive: (mandateId) => engine.getMandateEnds()?.isLive(mandateId) ?? false,
+      });
       this.engine!.getNotificationRouter().register(this.pushChannel);
     } catch (err: unknown) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -8567,9 +8571,26 @@ export class LynoxHTTPApi {
         return;
       }
 
-      this.pushChannel.subscribe(endpoint, p256dh, auth);
+      // A mandate's subscription is its own and ends with its grant (PRD §3.13 B3).
+      const added = this.pushChannel.subscribe(endpoint, p256dh, auth, this._principalOf(_req));
+      if (added === 'no_grant') {
+        errorResponse(res, 403, 'This session\'s access grant has ended or is not recorded on this instance, so notifications cannot be tied to its end. If your access is still running, sign in again.');
+        return;
+      }
+      if (added === 'unavailable') {
+        errorResponse(res, 503, 'Your access could not be checked just now. Try again in a moment.');
+        return;
+      }
+      if (added === 'taken') {
+        errorResponse(res, 409, 'This browser already receives notifications for someone else on this instance.');
+        return;
+      }
+      if (added === 'full') {
+        errorResponse(res, 409, 'This instance holds as many notification subscriptions as it keeps. Remove one of yours, or ask the owner.');
+        return;
+      }
       jsonResponse(res, 201, { ok: true });
-    }, ownerOnly('subscribe to notifications'));
+    }, OWN);
 
     this.addStatic('user', 'POST /api/push/unsubscribe', async (_req, res, _params, body) => {
       if (!this.pushChannel) {
@@ -8582,16 +8603,22 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Missing endpoint');
         return;
       }
+      if (!ownedBy(this.pushChannel.addedBy(endpoint), this._principalOf(_req))) {
+        errorResponse(res, 403, 'In this session you can remove only a notification subscription you added yourself.');
+        return;
+      }
       this.pushChannel.unsubscribe(endpoint);
       jsonResponse(res, 200, { ok: true });
-    }, ownerOnly('change notification subscriptions'));
+    }, OWN);
 
     this.addStatic('user', 'POST /api/push/test', async (_req, res) => {
       if (!this.pushChannel) {
         errorResponse(res, 503, 'Push notifications not available');
         return;
       }
-      const count = this.pushChannel.subscriptionCount();
+      // A mandate tests only the subscriptions it added itself.
+      const by = this._principalOf(_req);
+      const count = this.pushChannel.subscriptionCount(by);
       if (count === 0) {
         errorResponse(res, 404, 'No push subscriptions registered');
         return;
@@ -8600,13 +8627,13 @@ export class LynoxHTTPApi {
         title: 'lynox',
         body: 'Push notifications are working.',
         priority: 'normal',
-      });
+      }, by);
       if (result.sent === 0) {
         errorResponse(res, 502, `Delivery failed — ${result.cleaned} subscription(s) expired, ${result.failed} failed`);
         return;
       }
       jsonResponse(res, 200, { ok: true, sent: result.sent, failed: result.failed, cleaned: result.cleaned });
-    }, ownerOnly('send a test notification'));
+    }, OWN);
 
     // ── Google Auth ──
     //
