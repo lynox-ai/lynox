@@ -1580,6 +1580,8 @@ describe('WorkerLoop', () => {
         session: session as unknown as Session,
         promptStore: store,
       });
+      // A vault that knows "Yes" as a secret: the options leave the box masked, like the body.
+      vi.mocked(engine.getSecretStore).mockReturnValue({ maskAll: (t: string) => t.replace('Yes', 'Y***') } as unknown as ReturnType<Engine['getSecretStore']>);
       const router = makeNotificationRouter();
       const loop = new WorkerLoop(engine, router, 60_000);
       await loop.tick();
@@ -1592,7 +1594,7 @@ describe('WorkerLoop', () => {
       expect(router.notify).toHaveBeenCalledWith(
         expect.objectContaining({
           // Without the free-text marker: it is for the owner's dialog, not for a mail or a push.
-          inquiry: { question: 'Approve this?', options: ['Yes', 'No'] },
+          inquiry: { question: 'Approve this?', options: ['Y***', 'No'] },
           data: expect.objectContaining({
             threadId: 'thread-worker-test',
             promptId: store.getPending('thread-worker-test')!.id,

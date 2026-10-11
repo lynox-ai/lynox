@@ -241,7 +241,8 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       taskId: deps.scheduleId,
       priority: 'high',
       data: { threadId: deps.runId, promptId },
-      inquiry: { question: offBoxQuestion, options: inquiryOptions(options) },
+      // The options leave the box too (the mail channel lists them), so they are masked like the body.
+      inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => deps.maskOffBox(o)) },
     }).then((report) => { record(summarizeDelivery(report)); }).catch((err: unknown) => {
       process.stderr.write(`[lynox:worker] recording a workflow question's delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
     });

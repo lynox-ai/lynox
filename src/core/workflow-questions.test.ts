@@ -116,9 +116,12 @@ describe('a question of a scheduled workflow run', () => {
 
   it('masks a known secret in the copy that leaves the box, not in the stored row', async () => {
     const h = makeHarness();
-    void h.q.ask('Use key sk-secret-123?');
+    void h.q.ask('Use key sk-secret-123?', ['sk-secret-123', 'another key']);
     const id = await openQuestion(h);
     expect(h.notified[0]!.body).toBe('Use key ***123?');
+    // The options leave the box as well: the mail channel lists them.
+    expect(h.notified[0]!.inquiry?.options).toEqual(['***123', 'another key']);
+    expect(h.prompts.getById(id)!.options_json).toContain('sk-secret-123');
     expect(h.prompts.getById(id)!.question).toBe('Use key sk-secret-123?');
   });
 
