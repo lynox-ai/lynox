@@ -540,37 +540,6 @@ export class WorkerLoop {
     entry.session = session;
   }
 
-  /**
-   * Stop a RUNNING task on its owner's explicit instruction.
-   *
-   * ⭐ Both aborts, and in this order. `session.abort()` is the one that ends a
-   * computing run; `controller.abort()` is the one that ends a wait. A run can be in
-   * either state and the caller cannot know which, so a stop that did one of them
-   * would work for half the cases — and the half it missed is the motivating one.
-   *
-   * ⚠ The session abort is wrapped: it reaches into the agent, and if it throws, the
-   * controller must still be aborted. Otherwise a throwing session leaves a task that
-   * is neither stopped nor running.
-   *
-   * ⛔ This is NOT the execution deadline. The deadline still ends only a wait, and
-   * wiring it to this method is a decision nobody has taken — see the NOTE ON REACH
-   * in `executeTask`. Do not route the timer here "but disabled".
-   *
-   * ⛔ AND IT DOES NOT PAUSE THE DEADLINE. An earlier version did: `pauseDeadline`
-   * stops the timer AND the budget clock, and `resumeDeadline` has exactly one caller
-   * (the prompt un-park), so a stop that did not land left the run with its budget
-   * clock stopped for good. ⚠ What that costs is bounded — the timer today ends a WAIT,
-   * not a computing run (see the NOTE ON REACH), so the lost bound can only bite at the
-   * run's NEXT park — which is why "it un-bounded a runaway run" was too strong a claim
-   * for it. Pausing is not needed for the recorded word either: the catch prefers the
-   * stop over a timeout.
-   *
-   * ⚠ REACH: this run and the agents its chain created, nothing else. `Session.abort()`
-   * aborts its own agent and the members of that agent's abort scope — children,
-   * workflow steps, grandchildren — and no other session's. An earlier version of this
-   * comment argued against shipping because the abort was process-wide; `session.ts`
-   * scoped it since, which is what this route relies on.
-   */
   /** The effect of the run of `taskId` in flight, or undefined when none is. */
   runningEffect(taskId: string): string | undefined {
     return this.activeTasks.get(taskId)?.effect;
@@ -615,6 +584,37 @@ export class WorkerLoop {
     return ctx?.taskId === id && ctx.run !== undefined ? ctx.run : this.activeTasks.get(id);
   }
 
+  /**
+   * Stop a RUNNING task on its owner's explicit instruction.
+   *
+   * ⭐ Both aborts, and in this order. `session.abort()` is the one that ends a
+   * computing run; `controller.abort()` is the one that ends a wait. A run can be in
+   * either state and the caller cannot know which, so a stop that did one of them
+   * would work for half the cases — and the half it missed is the motivating one.
+   *
+   * ⚠ The session abort is wrapped: it reaches into the agent, and if it throws, the
+   * controller must still be aborted. Otherwise a throwing session leaves a task that
+   * is neither stopped nor running.
+   *
+   * ⛔ This is NOT the execution deadline. The deadline still ends only a wait, and
+   * wiring it to this method is a decision nobody has taken — see the NOTE ON REACH
+   * in `executeTask`. Do not route the timer here "but disabled".
+   *
+   * ⛔ AND IT DOES NOT PAUSE THE DEADLINE. An earlier version did: `pauseDeadline`
+   * stops the timer AND the budget clock, and `resumeDeadline` has exactly one caller
+   * (the prompt un-park), so a stop that did not land left the run with its budget
+   * clock stopped for good. ⚠ What that costs is bounded — the timer today ends a WAIT,
+   * not a computing run (see the NOTE ON REACH), so the lost bound can only bite at the
+   * run's NEXT park — which is why "it un-bounded a runaway run" was too strong a claim
+   * for it. Pausing is not needed for the recorded word either: the catch prefers the
+   * stop over a timeout.
+   *
+   * ⚠ REACH: this run and the agents its chain created, nothing else. `Session.abort()`
+   * aborts its own agent and the members of that agent's abort scope — children,
+   * workflow steps, grandchildren — and no other session's. An earlier version of this
+   * comment argued against shipping because the abort was process-wide; `session.ts`
+   * scoped it since, which is what this route relies on.
+   */
   stopTask(taskId: string): StopOutcome {
     const active = this.activeTasks.get(taskId);
     if (active === undefined) return { kind: 'not_running' };
