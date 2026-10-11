@@ -1067,6 +1067,31 @@ describe('httpRequestTool', () => {
           expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
+        it('a write refused for its header names the header, never its value', async () => {
+          mockDnsPublic();
+          const fetchMock = vi.fn();
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await visible(
+            { url: 'https://example.com/v1/report', method: 'POST', headers: { Prefer: 'respond-async-zq7' }, body: '{}' },
+            makeAgent({ capabilityContract: reviewed }),
+          );
+          expect(res).toContain('Not granted for an unattended run: POST https://example.com/v1/report. It sets a header "Prefer", which a run under a reviewed grant may not set.');
+          expect(res).not.toContain('respond-async-zq7');
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('CONTROL: a header the grant allows sends the write, and no note names a header', async () => {
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const res = await visible(
+            { url: 'https://example.com/v1/report', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+            makeAgent({ capabilityContract: reviewed }),
+          );
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          expect(res).not.toContain('sets a header');
+        });
+
         it('still names the POST two hops later, after the method was rewritten to GET', async () => {
           mockDnsPublic();
           const fetchMock = vi.fn()

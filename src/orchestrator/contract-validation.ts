@@ -2,6 +2,8 @@ import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/c
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/pre-approve.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
+import { isReviewedHeaderName } from '../tools/permission-guard.js';
+import { headerNameForNote } from '../core/write-notes.js';
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -339,7 +341,11 @@ function isLiteralReviewedPath(path: string): boolean {
  *  - one host, literal and lowercase, and no path on it a mail API answers;
  *  - one or more literal paths;
  *  - for every parameter that flows into a tool call, an `enum` of exactly one value, and
- *    no constraint on anything else.
+ *    no constraint on anything else;
+ *  - no step template that sets a request header the run would be refused at dispatch
+ *    (`isReviewedHeaderName`, the list `contractGrants` enforces), and no template whose
+ *    headers are not written out as names: a person would otherwise accept a grant that
+ *    every run then fails on.
  * The product of methods × host × paths is then finite and equal to the list.
  *
  * Only the save of a WORKFLOW checks this (`validateContractAgainstSteps`). A bulk run's
@@ -381,7 +387,28 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   for (const name of referenced) {
     if (!(name in contract.paramConstraints)) return `parameter "${name}" flows into a tool call and is not bound to a value.`;
   }
+  for (const step of steps ?? []) {
+    const headerError = reviewedHeaderError(step);
+    if (headerError !== null) return headerError;
+  }
   return null;
+}
+
+/**
+ * Why a step's template sets a header a reviewed grant refuses, or `null`. Header names are
+ * read as written: `resolveInputTemplate` substitutes values, never keys. A `headers` that is
+ * not an object (a placeholder, which a parameter or an earlier step fills) names nothing
+ * that could be checked here, so it is refused too.
+ */
+function reviewedHeaderError(step: InlinePipelineStep): string | null {
+  const template = step.input_template;
+  if (template === undefined || !('headers' in template) || template['headers'] === undefined) return null;
+  const headers = template['headers'];
+  if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
+    return `step "${step.id}" takes its request headers from a value, and a reviewed grant needs each header named.`;
+  }
+  const refused = Object.keys(headers).find((name) => !isReviewedHeaderName(name));
+  return refused === undefined ? null : `step "${step.id}" sets a header ${headerNameForNote(refused)}, which a run under a reviewed grant may not set.`;
 }
 
 /**
