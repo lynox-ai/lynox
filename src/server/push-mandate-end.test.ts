@@ -78,4 +78,43 @@ describe('push subscription and the end of a grant (real engine)', () => {
     const unknown: RequestPrincipal = { kind: 'mandate', email: 'max@example.invalid', mandateId: 'TEST-MANDATE-UNSEEN' };
     expect(pushOf().subscribe('https://push.example/max', 'p256dh', 'auth', unknown)).toBe('no_grant');
   });
+
+  it('subscribes through the route with a mandate\'s cookie, and the grant\'s end ends it', async () => {
+    await api.start(0);
+    const addr = (api as unknown as { server: import('node:http').Server | null }).server?.address();
+    if (addr === null || addr === undefined || typeof addr === 'string') throw new Error('fixture: no port');
+    const { loginSession } = await import('../../packages/web-ui/src/lib/server/auth.js');
+    const cookie = loginSession(SECRET, {
+      kind: 'mandate', email: 'ida@example.invalid', display: 'IDA', mandate_id: 'TEST-MANDATE-3',
+      mandate_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    })?.token;
+    if (cookie === undefined) throw new Error('fixture: no mandate cookie');
+    const endpoint = 'https://fcm.googleapis.com/fcm/send/ida';
+    const res = await fetch(`http://127.0.0.1:${String(addr.port)}/api/push/subscribe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: `lynox_session=${cookie}` },
+      body: JSON.stringify({ subscription: { endpoint, keys: { p256dh: 'p256dh', auth: 'auth' } } }),
+    });
+    // No record step in the test: the request itself records the end the cookie carries.
+    expect(res.status).toBe(201);
+    expect(pushOf().addedBy(endpoint)).toEqual({ created_by: 'mandate:ida@example.invalid' });
+    endsOf().revoke('TEST-MANDATE-3');
+    expect(pushOf().subscriptionCount()).toBe(0);
+    expect(pushOf().addedBy(endpoint)).toBeUndefined();
+  });
+
+  it('counts every mandate as ended when the engine keeps no store of grant ends', () => {
+    const engine = (api as unknown as { engine: { _mandateEnds: MandateEnds | null } }).engine;
+    const kept = engine._mandateEnds;
+    const nowS = Math.floor(Date.now() / 1000);
+    const lea: RequestPrincipal = { kind: 'mandate', email: 'lea@example.invalid', mandateId: 'TEST-MANDATE-4', mandateExp: nowS + 3600 };
+    endsOf().record(lea, nowS);
+    engine._mandateEnds = null;
+    try {
+      expect(pushOf().subscribe('https://push.example/lea', 'p256dh', 'auth', lea)).toBe('no_grant');
+    } finally {
+      engine._mandateEnds = kept;
+    }
+    expect(pushOf().subscribe('https://push.example/lea', 'p256dh', 'auth', lea)).toBe('ok');
+  });
 });
