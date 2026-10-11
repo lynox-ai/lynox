@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  inquiryOptions,
   NotificationRouter,
   summarizeDelivery,
   type ChannelOutcome,
@@ -223,5 +224,17 @@ describe('NotificationRouter', () => {
     );
 
     stderrSpy.mockRestore();
+  });
+});
+
+describe('inquiryOptions', () => {
+  it('drops the free-text marker and keeps the choices in order', () => {
+    expect(inquiryOptions(['Yes', 'No', '\x00'])).toEqual(['Yes', 'No']);
+  });
+
+  it('is absent when nothing but the marker, or nothing at all, is left', () => {
+    expect(inquiryOptions(['\x00'])).toBeUndefined();
+    expect(inquiryOptions([])).toBeUndefined();
+    expect(inquiryOptions(undefined)).toBeUndefined();
   });
 });

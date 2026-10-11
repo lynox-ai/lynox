@@ -5,7 +5,7 @@ import type { PromptStore } from './prompt-store.js';
 import { promptOriginOf } from './prompt-store.js';
 import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
-import { summarizeDelivery } from './notification-router.js';
+import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 
 /** What the runner reads off a scheduled workflow run that may ask its owner (PRD 3b-2 §4.5, G5). */
@@ -236,7 +236,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       taskId: deps.scheduleId,
       priority: 'high',
       data: { threadId: deps.runId, promptId },
-      inquiry: { question: offBoxQuestion, options },
+      inquiry: { question: offBoxQuestion, options: inquiryOptions(options) },
     }).then((report) => { record(summarizeDelivery(report)); }).catch((err: unknown) => {
       process.stderr.write(`[lynox:worker] recording a workflow question's delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
     });
