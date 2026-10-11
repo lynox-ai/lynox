@@ -305,8 +305,9 @@ function stoppedByOwner(options: RunManifestOptions, state: RunState): boolean {
 }
 
 /**
- * Whether a question of the run went unanswered until its TTL ran out; if so, end the run with
- * that cause (PRD 3b-2 §4.5). Checked after `stoppedByOwner`: a stop wins. A run that already
+ * Whether the run lacks an answer it asked for — a question that went unanswered until its TTL
+ * ran out, or one that could not be put to the owner; if so, end the run with that cause (PRD
+ * 3b-2 §4.5). Checked after `stoppedByOwner`: a stop wins. A run that already
  * ended on a cause of its own keeps it, as with the stop.
  */
 function questionUnanswered(options: RunManifestOptions, state: RunState): boolean {

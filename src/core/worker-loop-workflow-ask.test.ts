@@ -23,7 +23,7 @@ import type { TriggerRecord, PlannedPipeline } from '../types/index.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
 import type { WorkflowQuestionWait } from './workflow-questions.js';
 import { getPipelineStore } from '../tools/builtin/pipeline.js';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR } from '../orchestrator/workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR } from '../orchestrator/workflow-stop.js';
 
 interface RunOpts {
   runId?: string;
@@ -47,7 +47,10 @@ vi.mock('./saved-workflow-runner.js', () => ({
 /** What the runner would end the run with, read off the run as the runner reads it. */
 function runnerResult(opts: RunOpts, answers: string[]): Record<string, unknown> {
   if (opts.stopSignal?.aborted === true) return { ok: true, status: 'failed', error: WORKFLOW_STOPPED_ERROR, runId: opts.runId };
-  if (opts.questionWait?.unanswered === true) return { ok: true, status: 'failed', error: WORKFLOW_QUESTION_UNANSWERED_ERROR, runId: opts.runId };
+  if (opts.questionWait?.unanswered === true) {
+    const error = opts.questionWait.unansweredBecause === 'not_asked' ? WORKFLOW_QUESTION_NOT_ASKED_ERROR : WORKFLOW_QUESTION_UNANSWERED_ERROR;
+    return { ok: true, status: 'failed', error, runId: opts.runId };
+  }
   return { ok: true, status: 'completed', runId: opts.runId, answers };
 }
 
@@ -88,6 +91,7 @@ interface Harness {
   threads: ThreadStore;
   records: Array<[string, string, string]>;
   escalations: () => number;
+  escalationBodies: string[];
   deliveries: string[];
   parks: unknown[];
   leaseReleases: () => number;
@@ -134,6 +138,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
   } as unknown as TaskManager;
   const parks: unknown[] = [];
   let escalations = 0;
+  const escalationBodies: string[] = [];
   const engine = {
     getTaskManager: () => manager,
     getRunHistory: () => ({ getTrigger: () => task, updateTrigger: (_id: string, patch: unknown) => { parks.push(patch); } }),
@@ -142,7 +147,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
     getSecretStore: () => null,
     getUserConfig: () => ({}),
     workerRunModelOverride: () => ({}),
-    escalateToUser: () => { escalations++; return null; },
+    escalateToUser: (e: { body: string }) => { escalations++; escalationBodies.push(e.body); return null; },
   } as unknown as Engine;
   const notified: NotificationMessage[] = [];
   const router = {
@@ -151,7 +156,7 @@ function makeHarness(o?: { taskTimeoutMs?: number; steps?: PlannedPipeline['step
   } as unknown as NotificationRouter;
   const loop = new WorkerLoop(engine, router, 60_000, o?.taskTimeoutMs);
   loops.push(loop);
-  return { loop, prompts, threads, records, escalations: () => escalations, deliveries, parks, leaseReleases: () => leaseReleases, notified };
+  return { loop, prompts, threads, records, escalations: () => escalations, escalationBodies, deliveries, parks, leaseReleases: () => leaseReleases, notified };
 }
 
 const RUN_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -237,6 +242,24 @@ describe('a scheduled workflow that asks its owner', () => {
     await waitUntil('the run to end', () => h.records.length > 0);
     expect(h.records[0]![2]).toBe('failed');
     expect(wf.calls[0]!.questionWait?.unanswered).toBe(true);
+  });
+
+  it('a question that cannot be put to the owner ends the run failed as not asked, and says so', async () => {
+    const h = makeHarness();
+    const ask = askingStep([]);
+    // The owner's own chat in the run's thread holds the session's one open slot.
+    wf.step = async (opts) => { h.prompts.insertAskUser(opts.runId!, 'A question of the owner\'s own chat'); return ask(opts); };
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      void h.loop.tick();
+      await waitUntil('the run to end', () => h.records.length > 0);
+    } finally { write.mockRestore(); }
+    expect(h.records[0]![2]).toBe('failed');
+    expect(wf.calls[0]!.questionWait?.unansweredBecause).toBe('not_asked');
+    expect(h.notified.filter((m) => m.inquiry !== undefined)).toHaveLength(0);
+    // The owner is told, with what happened — not that a question expired.
+    expect(h.escalationBodies).toHaveLength(1);
+    expect(h.escalationBodies[0]).toContain(`Error: ${WORKFLOW_QUESTION_NOT_ASKED_ERROR}`);
   });
 
   it('a shutdown during the wait records nothing, escalates nothing, and keeps the lease', async () => {

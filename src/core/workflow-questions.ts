@@ -112,7 +112,8 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     if (early === 'teardown') return neverSettles();
     if (early !== undefined) return DISMISSED_ANSWER;
     const store = deps.promptStore();
-    if (!store) return DISMISSED_ANSWER;
+    // No store, no question: the run stops rather than let the step go on without its answer.
+    if (!store) return this.#endUnanswered('not_asked');
 
     const question = flattenPrompt(rawQuestion);
     const segments = promptSegments(rawQuestion);
