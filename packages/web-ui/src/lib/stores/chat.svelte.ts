@@ -600,7 +600,12 @@ let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : fa
 /** Queue a failed user turn for another send. Extracted so the confirmed and
  *  the offline-verified paths below re-fire through exactly one place. */
 function refireFailedTurn(msg: ChatMessage): void {
+	// Runs past `sendMessage`, so it checks the open review itself. Silently: it is not the
+	// user's action, and browsers fire `online` in bursts. The turn stays failed, with its
+	// tap-to-retry and its `failedOffline` mark, so the next automatic re-send probes again.
+	if (pendingChangeset) return;
 	msg.failed = false;
+	msg.failedOffline = false;
 	msg.sendUnconfirmed = false;
 	msg.queued = true;
 	msg.queueId = newQueueId();
@@ -622,7 +627,9 @@ if (typeof window !== 'undefined') {
 		isOffline = false;
 		// Auto-retry the last failed message
 		const lastFailed = [...messages].reverse().find((m) => m.role === 'user' && m.failed);
-		if (lastFailed && !isStreaming) {
+		// An open review holds the next send, so nothing is probed or asked while it is open.
+		// Answering it does not re-fire the turn: it waits for the next `online` or a tap.
+		if (lastFailed && !isStreaming && !pendingChangeset) {
 			// A turn whose start failed before the server answered may be running: ask first.
 			if (lastFailed.sendUnconfirmed) {
 				void askBeforeResend().then((resend) => { if (resend) refireFailedTurn(lastFailed); });
@@ -687,7 +694,6 @@ if (typeof window !== 'undefined') {
 							}
 							return;
 						}
-						lastFailed.failedOffline = false;
 						refireFailedTurn(lastFailed);
 					} finally {
 						_offlineProbeInFlight = false;
@@ -793,6 +799,21 @@ export interface RunOptions {
 		| { kind: 'mail-batch'; ids: string[] };
 }
 
+/**
+ * Whether a send must wait for the open changeset review — and if so, says so and points at
+ * the review. A caller that holds the user's text asks this BEFORE clearing it: `sendMessage`
+ * returns without sending in that case, and text cleared first is lost.
+ */
+export function sendBlockedByReview(): boolean {
+	if (!pendingChangeset) return false;
+	addToast(t('changeset.review_pending'), 'info', 4000);
+	// Scroll changeset into view if visible
+	setTimeout(() => {
+		document.querySelector('[data-changeset-review]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+	}, 100);
+	return true;
+}
+
 export async function sendMessage(task: string, displayText?: string | FileAttachment[], files?: FileAttachment[], runOptions?: RunOptions): Promise<void> {
 	// Overload: sendMessage(task, files?) — backwards compatible
 	if (Array.isArray(displayText)) {
@@ -801,14 +822,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 	}
 
 	// Block if changeset review is pending — user must review before next run
-	if (pendingChangeset) {
-		addToast(t('changeset.review_pending'), 'info', 4000);
-		// Scroll changeset into view if visible
-		setTimeout(() => {
-			document.querySelector('[data-changeset-review]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-		}, 100);
-		return;
-	}
+	if (sendBlockedByReview()) return;
 
 	// Queue if a run is in progress
 	if (isStreaming) {
@@ -1185,6 +1199,7 @@ export async function retryFailedTurn(msg: ChatMessage, text: string): Promise<v
 		addToast(t('chat.still_running'), 'info', 6000);
 		return;
 	}
+	if (sendBlockedByReview()) return;
 	if (!await askBeforeResend()) return;
 	msg.failed = false;
 	msg.sendUnconfirmed = false;
@@ -3254,6 +3269,8 @@ export async function dismissInterruptedRun(): Promise<void> {
  * as a fresh run (there is no cross-restart resume — the partial output stays
  * in the transcript as history). */
 export async function retryInterruptedRun(): Promise<void> {
+	// Before the dismiss: a blocked send would otherwise take the banner and its Retry with it.
+	if (sendBlockedByReview()) return;
 	let lastUserText = '';
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
