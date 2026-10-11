@@ -1580,6 +1580,7 @@ export class Agent implements IAgent {
         messages: [{ role: 'user' as const, content: buildFollowUpExcerpt(question, text) }],
         tools: [entry.definition],
       };
+      const signalWasAborted = timeout.signal.aborted || this.abortController?.signal.aborted === true;
       const stream = helper.client.beta.messages.stream({
         model: helper.modelId,
         max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
@@ -1592,7 +1593,8 @@ export class Agent implements IAgent {
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
         ),
       });
-      inFlight = { modelId: helper.modelId, maxTokens: FOLLOW_UP_FALLBACK_MAX_TOKENS, request, stream };
+      // Not when the signal was already aborted: the SDK then throws before sending anything.
+      if (!signalWasAborted) inFlight = { modelId: helper.modelId, maxTokens: FOLLOW_UP_FALLBACK_MAX_TOKENS, request, stream };
       // A model that rejects a forced tool gets `auto` at the client boundary, and a reply
       // without the call comes back as `missed` instead of a throw, so the booking below
       // still runs on it (llm-wire-rules.ts › settleForcedTool).
@@ -1786,6 +1788,7 @@ export class Agent implements IAgent {
         messages: [{ role: 'user' as const, content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
         tools: [CAPTURE_TOOL],
       };
+      const signalWasAborted = timeout.signal.aborted || this.abortController?.signal.aborted === true;
       const stream = helper.client.beta.messages.stream({
         model: helper.modelId,
         max_tokens: CAPTURE_FALLBACK_MAX_TOKENS,
@@ -1797,7 +1800,8 @@ export class Agent implements IAgent {
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
         ),
       });
-      inFlight = { modelId: helper.modelId, maxTokens: CAPTURE_FALLBACK_MAX_TOKENS, request, stream };
+      // Not when the signal was already aborted: the SDK then throws before sending anything.
+      if (!signalWasAborted) inFlight = { modelId: helper.modelId, maxTokens: CAPTURE_FALLBACK_MAX_TOKENS, request, stream };
       const { message: response, missed } = await settleForcedTool(stream.finalMessage());
       inFlight = undefined;
 
@@ -2224,14 +2228,16 @@ export class Agent implements IAgent {
    * back — booked nowhere before, while the provider bills it. Each reader gets the number
    * whose error is safe for it: the run ceiling and the session cap get an upper bound, the
    * run's cost line gets the estimate, and the tenant debit gets nothing (aborted-call.ts).
-   * A failure that was not an abort, or that came after the reply, books nothing here.
+   * A failure that was not an abort, that came after the reply, or of a request that never
+   * left (its signal was aborted before it was sent) books nothing here.
    */
   private _bookAbortedHelper(site: string, call: AbortableHelperCall | undefined, timeout: AbortSignal): void {
     if (!call) return;
     if (!timeout.aborted && !this.abortController?.signal.aborted) return;
     try {
       const cost = abortedCallCost({ model: call.modelId, maxTokens: call.maxTokens, request: call.request, partial: partialMessageOf(call.stream) });
-      this.costGuard?.recordExternalCost(cost.upperBoundUsd);
+      // The ceiling only: `recordExternalCost` would also reach a spawned child's tenant debit.
+      this.costGuard?.recordCapOnlyCost(cost.upperBoundUsd);
       recordSessionCost(this.sessionCounters, cost.upperBoundUsd);
       this._helperCostUsd += cost.estimateUsd;
       reportAbortedCall(site, call.modelId, cost);

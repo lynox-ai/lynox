@@ -67,7 +67,7 @@ interface Internals {
   client: unknown;
   tools: unknown[];
   onStream: ((e: StreamEvent) => void | Promise<void>) | undefined;
-  costGuard: { recordTurn: (u: unknown) => boolean; recordExternalCost: (usd: number) => boolean } | null;
+  costGuard: { recordTurn: (u: unknown) => boolean; recordExternalCost: (usd: number) => boolean; recordCapOnlyCost?: (usd: number) => boolean } | null;
   toolContext: { meteredHost: unknown };
   abortController: AbortController | null;
   _helperCostUsd: number;
@@ -533,15 +533,16 @@ describe('follow-up recovery — a call aborted before its reply', () => {
     const made = makeAgent({ reply, currentMessage: PARTIAL });
     made.inner.abortController = run;
     const recordExternalCost = vi.fn().mockReturnValue(false);
-    made.inner.costGuard = { recordTurn: vi.fn().mockReturnValue(false), recordExternalCost };
+    const recordCapOnlyCost = vi.fn().mockReturnValue(false);
+    made.inner.costGuard = { recordTurn: vi.fn().mockReturnValue(false), recordExternalCost, recordCapOnlyCost };
     mockDebit.mockClear();
-    return { ...made, recordExternalCost };
+    return { ...made, recordExternalCost, recordCapOnlyCost };
   }
 
   it('books the upper bound into both caps, the estimate into the cost line, and nothing into the debit', async () => {
     const run = new AbortController();
     const reply = vi.fn().mockImplementation(() => { run.abort(); return Promise.reject(new Error('aborted')); });
-    const { inner, recordExternalCost } = setUp(reply, run);
+    const { inner, recordExternalCost, recordCapOnlyCost } = setUp(reply, run);
     const costBefore = inner.sessionCounters.costUSD;
     const helperBefore = inner._helperCostUsd;
     const countBefore = abortedCallCounts().notBilled['agent.follow_up'] ?? 0;
@@ -552,8 +553,10 @@ describe('follow-up recovery — a call aborted before its reply', () => {
     expect(model, 'the helper runs on the fast tier in this fixture').toBe('claude-haiku-4-5-20251001');
     const upper = calculateCost(model, { input_tokens: 700, output_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS });
     // EXACT, so booking the estimate (a smaller number) into a cap fails here.
-    expect(recordExternalCost).toHaveBeenCalledTimes(1);
-    expect(recordExternalCost.mock.calls[0]![0]).toBe(upper);
+    expect(recordCapOnlyCost).toHaveBeenCalledTimes(1);
+    expect(recordCapOnlyCost.mock.calls[0]![0]).toBe(upper);
+    // Not as spend: the cost guard's spend is also what a spawned child is debited with.
+    expect(recordExternalCost).not.toHaveBeenCalled();
     expect(inner.sessionCounters.costUSD, 'the session cap gets the same bound').toBe(costBefore + upper);
     // The tenant never paid for an aborted helper call.
     expect(mockDebit).not.toHaveBeenCalled();
@@ -566,7 +569,7 @@ describe('follow-up recovery — a call aborted before its reply', () => {
   it('a failure that was NOT an abort books nothing', async () => {
     const run = new AbortController();
     const reply = vi.fn().mockRejectedValue(new Error('502 upstream'));
-    const { inner, recordExternalCost } = setUp(reply, run);
+    const { inner, recordExternalCost, recordCapOnlyCost } = setUp(reply, run);
     const costBefore = inner.sessionCounters.costUSD;
     const helperBefore = inner._helperCostUsd;
     const countBefore = abortedCallCounts().notBilled['agent.follow_up'] ?? 0;
@@ -575,6 +578,7 @@ describe('follow-up recovery — a call aborted before its reply', () => {
 
     expect(reply).toHaveBeenCalledTimes(1);
     expect(recordExternalCost).not.toHaveBeenCalled();
+    expect(recordCapOnlyCost).not.toHaveBeenCalled();
     expect(mockDebit).not.toHaveBeenCalled();
     expect(inner.sessionCounters.costUSD).toBe(costBefore);
     expect(inner._helperCostUsd).toBe(helperBefore);
@@ -589,7 +593,7 @@ describe('follow-up recovery — a call aborted before its reply', () => {
       content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
       usage: USAGE,
     });
-    const { inner, recordExternalCost } = setUp(reply, run);
+    const { inner, recordExternalCost, recordCapOnlyCost } = setUp(reply, run);
     inner.onStream = () => { run.abort(); throw new Error('stream closed'); };
     const costBefore = inner.sessionCounters.costUSD;
     const countBefore = abortedCallCounts().notBilled['agent.follow_up'] ?? 0;
@@ -602,8 +606,28 @@ describe('follow-up recovery — a call aborted before its reply', () => {
     expect(recordExternalCost.mock.calls[0]![0]).toBe(calculateCost(model, {
       input_tokens: USAGE.input_tokens, output_tokens: USAGE.output_tokens,
     }));
+    expect(recordCapOnlyCost).not.toHaveBeenCalled();
     expect(mockDebit, 'the normal debit still ran').toHaveBeenCalledTimes(1);
     expect(inner.sessionCounters.costUSD, 'no upper bound on top').toBe(costBefore);
+    expect(abortedCallCounts().notBilled['agent.follow_up'] ?? 0).toBe(countBefore);
+  });
+
+  it('a request whose signal was aborted before it was sent books nothing — it never left', async () => {
+    const run = new AbortController();
+    run.abort();
+    const reply = vi.fn().mockRejectedValue(new Error('aborted'));
+    const { inner, recordExternalCost, recordCapOnlyCost } = setUp(reply, run);
+    const costBefore = inner.sessionCounters.costUSD;
+    const helperBefore = inner._helperCostUsd;
+    const countBefore = abortedCallCounts().notBilled['agent.follow_up'] ?? 0;
+
+    await inner._recoverFollowUps(ANSWER);
+
+    expect(reply, 'the call was still attempted, so the guard is what holds').toHaveBeenCalledTimes(1);
+    expect(recordCapOnlyCost).not.toHaveBeenCalled();
+    expect(recordExternalCost).not.toHaveBeenCalled();
+    expect(inner.sessionCounters.costUSD).toBe(costBefore);
+    expect(inner._helperCostUsd).toBe(helperBefore);
     expect(abortedCallCounts().notBilled['agent.follow_up'] ?? 0).toBe(countBefore);
   });
 });

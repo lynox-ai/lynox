@@ -24,6 +24,14 @@ export class CostGuard {
    * keep "already spent" and "promised" separable, and only the first outlives the run.
    */
   private reservedUSD = 0;
+  /**
+   * Upper bounds for helper calls that were aborted before their reply (aborted-call.ts).
+   *
+   * ⛔ Counted against the ceiling, and NOT in `snapshot().estimatedCostUSD`. The snapshot
+   * is also what a spawned child's run is debited to the tenant with, and an aborted helper
+   * call is never billed to the tenant. A bound in `externalCostUSD` would reach that debit.
+   */
+  private capOnlyUSD = 0;
   private iterations = 0;
   private warned = false;
 
@@ -46,7 +54,7 @@ export class CostGuard {
 
   shouldWarn(): boolean {
     if (this.warned) return false;
-    const cost = this.estimateCost();
+    const cost = this.capCost();
     if (cost >= this.warnAtUSD) {
       this.warned = true;
       return true;
@@ -55,7 +63,7 @@ export class CostGuard {
   }
 
   isExceeded(): boolean {
-    const cost = this.estimateCost();
+    const cost = this.capCost();
     // Fail closed on a non-finite cost (NaN from a malformed pricing override):
     // `NaN >= cap` is false and would silently disable the dollar ceiling. An
     // explicitly-disabled budget (Infinity) stays the user's opt-out.
@@ -91,6 +99,7 @@ export class CostGuard {
     this.cacheWriteTokens = 0;
     this.cacheReadTokens = 0;
     this.externalCostUSD = 0;
+    this.capOnlyUSD = 0;
     // A hold belongs to work that is in flight; a reset means there is none.
     this.reservedUSD = 0;
     this.iterations = 0;
@@ -121,7 +130,7 @@ export class CostGuard {
     // caller clamps or validates), which is exactly why it has to fail closed: the
     // reachability is a property of the callers, and callers change.
     if (!Number.isFinite(this.maxBudgetUSD)) return 0;
-    const spent = this.estimateCost();
+    const spent = this.capCost();
     if (!Number.isFinite(spent)) return 0;
     return Math.max(0, this.maxBudgetUSD - spent - this.reservedUSD);
   }
@@ -181,6 +190,20 @@ export class CostGuard {
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;
     return this.isExceeded();
+  }
+
+  /**
+   * Book the upper bound of an aborted helper call against the ceiling only — see
+   * {@link capOnlyUSD}. Returns true if the budget is now exceeded.
+   */
+  recordCapOnlyCost(usd: number): boolean {
+    if (Number.isFinite(usd) && usd > 0) this.capOnlyUSD += usd;
+    return this.isExceeded();
+  }
+
+  /** What the ceiling is measured against: the spend plus the aborted-call bounds. */
+  private capCost(): number {
+    return this.estimateCost() + this.capOnlyUSD;
   }
 
   private estimateCost(): number {
