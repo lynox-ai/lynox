@@ -70,25 +70,25 @@ function namesMethodKey(body: string): boolean {
 
 /**
  * Whether a multipart body has a part whose name a server may read as `_method`. Folded header
- * lines are joined first. Each `name` parameter counts on its own, plain, quoted or in its
- * RFC 2231 form (`name*=utf-8''_%6Dethod`), and so do the numbered pieces of one
- * (`name*0`, `name*1`) put together. `filename` is not a name.
+ * lines are joined first. Each `name` parameter counts on its own, plain, quoted (with its
+ * backslash escapes read) or in its RFC 2231 form (`name*=utf-8''_%6Dethod`), and so do the
+ * numbered pieces of one (`name*0`, `name*1`) put together in their order. `filename` is not a name.
  */
 function multipartNamesMethod(body: string): boolean {
   const unfolded = body.replace(/\r?\n[ \t]+/g, ' ');
   for (const line of unfolded.split(/\r?\n/)) {
     if (!/^\s*content-disposition\s*:/i.test(line)) continue;
     const names: string[] = [];
-    const pieces: string[] = [];
+    const pieces: [number, string][] = [];
     for (const match of line.matchAll(/;\s*name(\*(\d+)?\*?)?\s*=\s*("(?:[^"\\]|\\.)*"|[^;]*)/gi)) {
       let value = match[3]!.trim();
-      if (value.startsWith('"')) value = value.slice(1, -1);
+      if (value.startsWith('"')) value = value.slice(1, -1).replace(/\\(.)/g, '$1');
       if (match[1]?.endsWith('*')) value = value.replace(/^[^']*'[^']*'/, '');
       value = percentDecoded(value);
       if (match[2] === undefined) names.push(value);
-      else pieces.push(value);
+      else pieces.push([Number(match[2]), value]);
     }
-    if (pieces.length > 0) names.push(pieces.join(''));
+    if (pieces.length > 0) names.push(pieces.sort(([a], [b]) => a - b).map(([, piece]) => piece).join(''));
     if (names.some((name) => formFieldName(name) === '_method')) return true;
   }
   return false;
@@ -106,14 +106,14 @@ function multipartNamesMethod(body: string): boolean {
  * it is a method. The form reading is left out only for a body declared as JSON alone that parses
  * as JSON: no server reads that as a form. `unreadable` is set when a server may read an
  * override this module cannot: a body that looks like JSON (by its type or its first character),
- * does not parse and holds a `"_method":` key, or a multipart body with a part named `_method`.
+ * does not parse and holds a `"_method":` key, or a body under a multipart type with a part named
+ * `_method`.
  * The caller gates such a request as the strongest method.
  */
 function bodyOverrides(body: string, headers: Record<string, string>): { declared: string[]; other: string[]; unreadable: boolean } {
   const contentType = Object.entries(headers)
     .filter(([name]) => name.trim().toLowerCase() === 'content-type')
     .map(([, value]) => value).join(', ').toLowerCase();
-  if (contentType.includes('multipart/')) return { declared: [], other: [], unreadable: multipartNamesMethod(body) };
   let json: string[] | null;
   try {
     const parsed: unknown = JSON.parse(body);
@@ -134,7 +134,11 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
   return {
     declared: [...(jsonDeclared ? json ?? [] : []), ...(formDeclared ? form : [])],
     other: [...(jsonDeclared ? [] : json ?? []), ...(formDeclared ? [] : form)],
-    unreadable: looksJson && json === null && namesMethodKey(body),
+    // A multipart type may follow a form type (`application/x-www-form-urlencoded, multipart/…`),
+    // and a server that takes the first one reads the form: the multipart check is added to the
+    // two readings, not put in their place.
+    unreadable: (looksJson && json === null && namesMethodKey(body)) ||
+      (contentType.includes('multipart/') && multipartNamesMethod(body)),
   };
 }
 
