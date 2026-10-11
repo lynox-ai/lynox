@@ -278,5 +278,32 @@ describe('ChangesetManager', () => {
       expect(mgr.size).toBe(1);
       mgr.cleanup();
     });
+
+    it('a write that changed only bytes the text decoding hides is still a change', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'not-utf8.bin');
+      writeFileSync(filePath, Buffer.from([0x61, 0xff, 0x62]));
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      // Writing back the decoded text turns 0xff into U+FFFD: same string, other bytes.
+      const decoded = readFileSync(filePath, 'utf-8');
+      writeFileSync(filePath, decoded, 'utf-8');
+      expect(readFileSync(filePath, 'utf-8'), 'positive control: the decoded text is unchanged').toBe(decoded);
+      expect(readFileSync(filePath).equals(Buffer.from([0x61, 0xff, 0x62])), 'positive control: the bytes changed').toBe(false);
+      expect(mgr.hasChanges()).toBe(true);
+      expect(mgr.size).toBe(1);
+      mgr.cleanup();
+    });
+
+    it('without its backup copy, a tracked file counts as changed', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'copy-gone.txt');
+      writeFileSync(filePath, 'same', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      rmSync(join((mgr as unknown as { backupDir: string }).backupDir, 'copy-gone.txt'));
+      expect(mgr.hasChanges()).toBe(true);
+      mgr.cleanup();
+    });
   });
 });

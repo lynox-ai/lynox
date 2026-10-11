@@ -49,6 +49,10 @@ export class ChangesetManager {
    * same text leaves an entry behind. Such a file is unchanged and not reported: an
    * empty entry would open a review with nothing in it, and the review holds the next
    * message until it is answered. `getChanges`, `hasChanges` and `size` all read this.
+   *
+   * "Same" is decided on the bytes, against the backup copy, never on decoded text: a
+   * file with bytes that are not valid UTF-8 decodes to the same string after a write
+   * that changed them, and that write must still be reviewed.
    */
   private _changed(): Array<[string, ChangesetEntry, string]> {
     const changed: Array<[string, ChangesetEntry, string]> = [];
@@ -60,10 +64,19 @@ export class ChangesetManager {
         // Deleted during the run, or unreadable — not reported
         continue;
       }
-      if (entry.status === 'modified' && currentContent === entry.originalContent) continue;
+      if (entry.status === 'modified' && this._sameBytesAsBackup(abs)) continue;
       changed.push([abs, entry, currentContent]);
     }
     return changed;
+  }
+
+  /** Whether the file's bytes equal its backup copy. Anything unreadable counts as changed. */
+  private _sameBytesAsBackup(abs: string): boolean {
+    try {
+      return readFileSync(abs).equals(readFileSync(join(this.backupDir, relative(this.cwd, abs))));
+    } catch {
+      return false;
+    }
   }
 
   /**
