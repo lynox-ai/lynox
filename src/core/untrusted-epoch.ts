@@ -28,7 +28,7 @@ export type EpochSource = { readonly kind: 'foreign' } | { readonly kind: 'host'
 /** The part of the Session counters this module reads and writes. */
 export interface EpochCounters {
   untrustedEpoch?: number | undefined;
-  /** `METHOD host` → the epoch the approval was given in. */
+  /** `METHOD host` → the epoch the approval was given in. METHOD is every write the request names, sorted and joined by `+` (`PATCH+POST` for a POST that carries a PATCH override). */
   approvedWrites?: Map<string, number> | undefined;
 }
 

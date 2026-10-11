@@ -877,6 +877,30 @@ describe('httpRequestTool', () => {
         expect(fetchMock).toHaveBeenCalledTimes(1);
       });
 
+      it('a contract that grants POST and PATCH grants a POST that carries a PATCH override', async () => {
+        mockDnsPublic();
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const res = await handler(
+          { url: 'https://example.com/v1/report', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' },
+          makeAgent({ capabilityContract: { ...contract, httpMethods: ['POST', 'PATCH'] } }),
+        );
+        expect(res).not.toContain('requires user consent');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('a contract must grant every write a request names, not only the strongest', async () => {
+        mockDnsPublic();
+        const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+        vi.stubGlobal('fetch', fetchMock);
+        const res = await visible(
+          { url: 'https://example.com/v1/report?_method=PUT', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' },
+          makeAgent({ capabilityContract: { ...contract, httpMethods: ['POST', 'PUT'] } }),
+        );
+        expect(res).toContain('requires user consent');
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
       it('a GET that carries a POST override needs only the POST grant: what is sent reads', async () => {
         mockDnsPublic();
         const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
@@ -5702,10 +5726,46 @@ describe('write approvals per method and host (270)', () => {
     await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
     expect(question(prompt, 1)).toContain('PATCH to h.example');
-    expect(question(prompt, 1)).toContain('It is sent as a POST that asks for PATCH');
+    expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
     await visible({ url: 'https://h.example/b', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(testCounters.approvedWrites?.has('POST>PATCH h.example')).toBe(true);
+    expect(testCounters.approvedWrites?.has('PATCH+POST h.example')).toBe(true);
+  });
+
+  it('(2d) with two overrides of the same rank, an approval for the pair does not cover the three', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a?_method=PUT', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://h.example/a?_method=PUT', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH, PUT');
+  });
+
+  it('(2e) a denial in a batch stands for each write the denied request named', async () => {
+    const batch = {};
+    const { agent, prompt } = agent270({ answer: 'Deny', batch });
+    const denied = await visible({ url: 'https://h.example/a', method: 'PATCH', body: '{}' }, agent);
+    expect(denied).toContain('denied by user');
+    const again = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    expect(again).toContain('was denied earlier in this batch');
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(2g) denying a plain POST stands for a later POST that carries a PATCH override', async () => {
+    const batch = {};
+    const { agent, prompt } = agent270({ answer: 'Deny', batch });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    const again = await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    expect(again).toContain('was denied earlier in this batch');
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(2f) denying a POST that carries a PATCH override also stands for a plain POST in the batch', async () => {
+    const batch = {};
+    const { agent, prompt } = agent270({ answer: 'Deny', batch });
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'X-HTTP-Method-Override': 'PATCH' }, body: '{}' }, agent);
+    const again = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    expect(again).toContain('was denied earlier in this batch');
+    expect(prompt).toHaveBeenCalledTimes(1);
   });
 
   it('(2c) a method written in lower case or with spaces is the same method, not an override', async () => {

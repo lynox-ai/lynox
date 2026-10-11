@@ -56,6 +56,17 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
   let effective = method.trim().toUpperCase();
   // The schema offers six methods, but nothing below may rely on the model having kept to it.
   if (!KNOWN_METHODS.has(effective)) return null;
+  for (const raw of overrideCandidates(headers, url)) {
+    const m = raw.trim().toUpperCase();
+    if (m === '') continue;
+    if (!KNOWN_METHODS.has(m)) return null;
+    if (rank(m) > 0 && rank(m) >= rank(effective)) effective = m;
+  }
+  return effective;
+}
+
+/** Every override value the request carries, raw: the three header names, then `?_method=`. */
+function overrideCandidates(headers: Record<string, string>, url: string): string[] {
   const candidates: string[] = [];
   for (const [name, value] of Object.entries(headers)) {
     if (OVERRIDE_HEADERS.has(name.trim().toLowerCase())) candidates.push(value);
@@ -65,13 +76,25 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
       if (name.toLowerCase() === '_method') candidates.push(value);
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
-  for (const raw of candidates) {
+  return candidates;
+}
+
+/**
+ * Every write a server may run this request as, sorted: the method that is sent and each
+ * override, whichever one a server reads. `effectiveWriteMethod` picks the strongest, and among
+ * writes of the same rank (POST, PUT, PATCH) that is only the last one named — a server that
+ * ignores the overrides runs the sent method, one that reads another header than the last runs
+ * that. A check that holds for the gated method alone holds for one of these, not for the
+ * request. Call it after `effectiveWriteMethod` has accepted the request: values that are not
+ * a method are not repeated here.
+ */
+export function writeMethodsNamed(method: string, headers: Record<string, string>, url: string): string[] {
+  const named = new Set<string>();
+  for (const raw of [method, ...overrideCandidates(headers, url)]) {
     const m = raw.trim().toUpperCase();
-    if (m === '') continue;
-    if (!KNOWN_METHODS.has(m)) return null;
-    if (rank(m) > 0 && rank(m) >= rank(effective)) effective = m;
+    if (KNOWN_METHODS.has(m) && rank(m) > 0) named.add(m);
   }
-  return effective;
+  return [...named].sort();
 }
 
 /** Headers a server or a proxy in front of it may route on instead of the URL. */

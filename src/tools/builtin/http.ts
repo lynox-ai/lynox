@@ -38,7 +38,7 @@ import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -2558,20 +2558,22 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // mandate, anything H2b refused above.
     //
     // An override of the same rank as the method (a POST that says PATCH) is gated as the
-    // override, but a server that ignores it runs the method that is sent. So when the two
-    // differ and both write, the contract must grant both, and the approval is keyed and asked as
-    // the pair, so an approval for a plain PATCH does not cover a POST that only claims to be one.
-    // (The outbound-effect table reads only whether a method writes, so one check covers both.)
+    // override, but a server that ignores it runs the method that is sent, and one that reads an
+    // earlier override header runs that one. So the checks below hold for every write the request
+    // names (`writeMethodsNamed`): the contract must grant each, the approval is keyed and asked
+    // as the set, so an approval for a plain PATCH does not cover a POST that only claims to be
+    // one, and a denial in a batch stands for each of them. (The outbound-effect table reads only
+    // whether a method writes, so one check covers them all.)
     const sentMethod = method.trim().toUpperCase();
-    const keyedMethod = sentMethod === gatedMethod ? gatedMethod : `${sentMethod}>${gatedMethod}`;
+    const named = writeMethodsNamed(method, headers, input.url);
+    const keyedMethod = named.join('+');
     const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
     const contractGrantsWrite =
       contract !== undefined &&
       !outboundEffect &&
-      contractGrants('http_request', { ...input, method: gatedMethod }, contract) &&
-      (!isWriteMethod(sentMethod) || contractGrants('http_request', { ...input, method: sentMethod }, contract));
+      named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && isOwnerPrincipal(agent.principal);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
@@ -2627,7 +2629,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           pending = inSessionPromptChain(counters, async () => {
             // Re-read once it is this call's turn: the question before it may have answered it.
             if (remembers && isApproved(counters, key, epoch)) return true;
-            if (remembers && batch !== undefined && deniedInBatch.get(batch)?.has(key)) {
+            const deniedHere = batch === undefined ? undefined : deniedInBatch.get(batch);
+            if (remembers && deniedHere !== undefined && named.some((m) => deniedHere.has(approvalKey(m, hostname)))) {
               blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: a ${gatedMethod} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
@@ -2641,10 +2644,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               : outboundEffect ? pv` This sends or issues something and is asked every time.`
                 : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
                   : pv` In this session every write is asked.`;
-            // What goes on the wire when an override names another method: a server that ignores
-            // the override runs the sent one, so the question names both.
-            const sentNote = sentMethod === gatedMethod ? pv``
-              : pv` It is sent as a ${sentMethod} that asks for ${gatedMethod}; a server that ignores the override runs a ${sentMethod}.`;
+            // What goes on the wire when an override names other methods: a server may run any of
+            // them, so the question names them all.
+            const alsoNamed = named.filter((m) => m !== sentMethod);
+            const sentNote = alsoNamed.length === 0 ? pv``
+              : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
             const answer = await promptUser(
               pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
@@ -2654,7 +2658,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             if (remembers && !allowed && batch !== undefined) {
               let denied = deniedInBatch.get(batch);
               if (!denied) { denied = new Set(); deniedInBatch.set(batch, denied); }
-              denied.add(key);
+              // Each write the request named, so a later request naming any of them is not asked.
+              for (const m of named) denied.add(approvalKey(m, hostname));
             }
             return allowed;
           }).finally(() => { if (shareKey !== undefined) pendingMap?.delete(shareKey); });
