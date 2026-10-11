@@ -49,7 +49,7 @@ const DISMISSED_RESULT =
 /** One question of a batch that got no answer; the batch result ends with the instruction once. */
 export const DISMISSED_IN_BATCH = '(no answer)';
 const DISMISSED_BATCH_NOTE =
-  'The questions marked "(no answer)" got no answer. Do not act on an '
+  `The questions marked "${DISMISSED_IN_BATCH}" got no answer. Do not act on an `
   + `assumed answer to those. ${AFTER_NO_ANSWER}`;
 /** The same for a plan put to the user for approval (`plan_task`). */
 export const PLAN_NOT_ANSWERED =
