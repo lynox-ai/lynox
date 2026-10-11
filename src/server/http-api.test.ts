@@ -17,7 +17,7 @@ import type { LynoxHooks } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
-import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody } from './http-api.js';
+import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { AuditLog } from '../core/audit-log.js';
@@ -14046,6 +14046,17 @@ describe('operator stamp rules — who may stamp, and what a mandate leaves behi
 });
 
 
+describe('mayStopRun — who may stop a run (§3.13 E7)', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'recipient@example.invalid', display: 'D', mandateId: 'M-1' };
+  it('the owner may stop any run; a mandate only the one it started', () => {
+    expect(mayStopRun(OWNER_PRINCIPAL, 'owner')).toBe(true);
+    expect(mayStopRun(OWNER_PRINCIPAL, 'mandate:recipient@example.invalid')).toBe(true);
+    expect(mayStopRun(MANDATE, 'mandate:recipient@example.invalid')).toBe(true);
+    expect(mayStopRun(MANDATE, 'owner')).toBe(false);
+    expect(mayStopRun(MANDATE, 'mandate:someone-else@example.invalid')).toBe(false);
+  });
+});
+
 // PRD customer-granted-operator-access §3.6 (piece H2h): the actor trail of a mandate's
 // request. Each recorded act leaves an `attempt` row BEFORE it runs and its outcome row
 // after, joined by one correlation id; a request whose attempt cannot be written is refused
@@ -14087,16 +14098,17 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   }
   const failingLog = { record: (): void => { throw new Error('disk full'); } };
 
-  /** The two rows of one recorded act, read in full. */
-  function expectPair(action: string, target: string, outcome: 'done' | 'refused'): void {
+  /** The two rows of one recorded act, read in full. `closingAction` is the outcome row's action
+   *  where the request names what it did beyond its action (a delete and the run it stopped). */
+  function expectPair(action: string, target: string, outcome: 'done' | 'refused', closingAction = action): void {
     const r = rows();
     expect(r.map((x) => x.phase)).toEqual(['attempt', outcome]);
-    for (const x of r) {
+    r.forEach((x, i) => {
       expect(x).toMatchObject({
         actor_kind: 'mandate', actor_email: 'recipient@example.invalid', actor_display: 'TEST-DISPLAY',
-        mandate_id: 'TEST-MANDATE-1', action, target,
+        mandate_id: 'TEST-MANDATE-1', action: i === 0 ? action : closingAction, target,
       });
-    }
+    });
     expect(r[0]!.correlation_id).toBe(r[1]!.correlation_id);
   }
 
@@ -14155,7 +14167,89 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect((await jsonFetch('/api/tasks/trg-9', { method: 'DELETE' })).status).toBe(200);
       });
       expect(h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done');
+      // A mandate is not told whether a run is going: the same word as for a run it may not stop.
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
+    });
+
+    // PRD 3b-2 G9 (a): a delete by whoever may stop the run (§3.13 E7) stops it too, for the
+    // effects a stop ends; anyone else deletes only the future runs.
+    const loopWith = (starter: string, effect: string) => ({
+      runningStarterTag: vi.fn((id: string) => (id === 'trg-9' ? starter : undefined)),
+      runningEffect: vi.fn((id: string) => (id === 'trg-9' ? effect : undefined)),
+      stopTask: vi.fn().mockReturnValue({ kind: 'requested', via: 'wait' }),
+    });
+    const deleteAs = async (who: 'owner' | 'mandate', loop: unknown, id = 'trg-9'): Promise<{ status: number; body: Record<string, unknown>; h: Record<string, unknown> }> => {
+      const h = history(id === 'trg-9');
+      let status = 0; let body: Record<string, unknown> = {};
+      await withEngine({ getRunHistory: () => h, getTaskManager: () => h, getWorkerLoop: () => loop }, async () => {
+        if (who === 'mandate') asMandate();
+        const res = await jsonFetch(`/api/tasks/${id}`, { method: 'DELETE' });
+        status = res.status; body = await res.json() as Record<string, unknown>;
+      });
+      return { status, body, h };
+    };
+
+    it('G9 (a), both directions: the owner\'s delete stops a waiting workflow run; a mandate\'s delete of a run it did not start does not', async () => {
+      const owners = loopWith('owner', 'run_workflow');
+      const byOwner = await deleteAs('owner', owners);
+      expect(byOwner).toMatchObject({ status: 200, body: { deleted: true, run: 'stopped' } });
+      expect(owners.stopTask).toHaveBeenCalledWith('trg-9');
+
+      const foreign = loopWith('owner', 'run_workflow');
+      const byMandate = await deleteAs('mandate', foreign);
+      expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
+      expect(byMandate.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      expect(foreign.stopTask).not.toHaveBeenCalled();
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
+    });
+
+    it('a mandate\'s delete stops a run it started itself, and the trail says so', async () => {
+      const own = loopWith(TAG, 'run_agent');
+      expect(await deleteAs('mandate', own)).toMatchObject({ status: 200, body: { deleted: true, run: 'stopped' } });
+      expect(own.stopTask).toHaveBeenCalledWith('trg-9');
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:stopped');
+    });
+
+    it('a mandate learns nothing about a foreign run whose effect a delete leaves alone', async () => {
+      const loop = loopWith('owner', 'backup');
+      expect(await deleteAs('mandate', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
+      expect(loop.stopTask).not.toHaveBeenCalled();
+    });
+
+    it('the owner still hears that no run was in flight', async () => {
+      const loop = { ...loopWith('owner', 'run_workflow'), runningStarterTag: vi.fn(() => undefined) };
+      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'not_running' } });
+    });
+
+    it.each(['backup', 'notify', 'bulk_apply'])('the owner\'s delete of a %s schedule leaves its run alone, as before', async (effect) => {
+      const loop = loopWith('owner', effect);
+      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'effect_kept' } });
+      expect(loop.stopTask).not.toHaveBeenCalled();
+    });
+
+    it('says so when the stop reaches nothing in the run\'s current phase', async () => {
+      const loop = { ...loopWith('owner', 'run_agent'), stopTask: vi.fn().mockReturnValue({ kind: 'unstoppable', effect: 'run_agent' }) };
+      expect(await deleteAs('owner', loop)).toMatchObject({ status: 200, body: { deleted: true, run: 'unstoppable_now' } });
+      expect(loop.stopTask).toHaveBeenCalledWith('trg-9');
+    });
+
+    it('a stop that throws leaves the delete standing and says the stop failed', async () => {
+      const loop = { ...loopWith(TAG, 'run_workflow'), stopTask: vi.fn(() => { throw new Error('boom'); }) };
+      const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const res = await deleteAs('mandate', loop);
+        expect(res).toMatchObject({ status: 200, body: { deleted: true, run: 'stop_failed' } });
+        expect(res.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
+      } finally { write.mockRestore(); }
+      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:stop_failed');
+    });
+
+    it('a delete that finds no row stops nothing', async () => {
+      const loop = loopWith('owner', 'run_workflow');
+      const res = await deleteAs('owner', loop, 'trg-missing');
+      expect(res.status).toBe(404);
+      expect(loop.stopTask).not.toHaveBeenCalled();
+      expect(loop.runningStarterTag).not.toHaveBeenCalled();
     });
 
     it('records refused when nothing was deleted', async () => {
