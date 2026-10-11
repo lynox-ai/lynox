@@ -669,7 +669,9 @@ describe('Task Tools', () => {
       const trigger = tm.createScheduled({ ...stored, scheduleCron: '0 9 * * 1' });
       const result = await taskUpdateTool.handler({ task_id: trigger.id, ...edit }, makeAgent());
       expect(result).toContain('refused to update this trigger');
-      expect(tm.getTrigger(trigger.id)?.title).toBe(stored.title);
+      const row = tm.getTrigger(trigger.id);
+      expect(row?.title).toBe(stored.title);
+      expect(row?.description ?? '').toBe(stored.description ?? '');
     });
 
     it('refuses a mandate\'s instruction-shaped edit before it takes the owner\'s stamp off', async () => {

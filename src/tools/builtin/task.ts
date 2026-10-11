@@ -528,7 +528,7 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
         if (target) {
           const scan = detectInjectionAttempt(`${input.title ?? target.title}\n${input.description ?? target.description ?? ''}`);
           if (scan.detected) {
-            return `Error: refused to update this trigger — its new title/description matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, edit it on the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
+            return `Error: refused to update this trigger — its title and description as they would stand after this edit (the field you did not send counts too: the run prompt joins them) matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, edit it on the Triggers page (a human-confirmed schedule) or rephrase both fields without embedded instructions/addresses.`;
           }
         }
       }
