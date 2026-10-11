@@ -1717,6 +1717,11 @@ export class Engine {
     // how the DataStore→KG bridge stayed dead from 2026-05-14 until it was removed. The reap
     // must not sit on that side of the split.
     if (this._dataStore) this.knowledgeLayer?.setRecordStore(this._dataStore);
+    // Private mode's subject cleanup on the durable store asks the same two questions.
+    if (this._knowledgeStore) {
+      const { makeSubjectExternalRefs } = await import('./subject-store.js');
+      this._knowledgeStore.setSubjectRefs(makeSubjectExternalRefs(this._threadStore, this._dataStore));
+    }
 
     // Initialize ArtifactStore (best-effort)
     try {
