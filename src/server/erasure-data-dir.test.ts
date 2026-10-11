@@ -240,13 +240,23 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
       heldDuring = isBoundedJsonlQuiesced();
       return original.apply(this, a);
     };
+    // The config reload runs after the file pass: a hold released early fails here.
+    const engine = (api as unknown as { engine: { reloadUserConfig: (...a: unknown[]) => unknown } }).engine;
+    const reload = engine.reloadUserConfig;
+    let heldAfterFiles: boolean | null = null;
+    engine.reloadUserConfig = function (this: unknown, ...a: unknown[]) {
+      heldAfterFiles = isBoundedJsonlQuiesced();
+      return reload.apply(this, a);
+    };
     try {
       const res = await erase();
       expect(res.status).toBe(200);
     } finally {
       target.erasureBlockedBy = original;
+      engine.reloadUserConfig = reload;
     }
     expect(heldDuring).toBe(true);
+    expect(heldAfterFiles).toBe(true);
     expect(isBoundedJsonlQuiesced()).toBe(false);
   }, 60_000);
 

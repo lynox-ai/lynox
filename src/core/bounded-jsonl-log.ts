@@ -79,18 +79,30 @@ const chains = new Map<string, Promise<void>>();
  */
 let quiesced = 0;
 
-/**
- * Stop the sinks and wait until no write is in flight. Returns the call that resumes them;
- * calling it more than once resumes once.
- */
+/** How long a hold waits for writes in flight before it gives up waiting. */
+const QUIESCE_WAIT_MS = 2_000;
+
 /** Whether the sinks are held by `quiesceBoundedJsonl`. */
 export function isBoundedJsonlQuiesced(): boolean {
   return quiesced > 0;
 }
 
-export async function quiesceBoundedJsonl(): Promise<() => void> {
+/**
+ * Stop the sinks and wait until no write is in flight. Returns the call that resumes them;
+ * calling it more than once resumes once.
+ *
+ * The wait is bounded: a write stuck on a hung volume would otherwise hold the erasure
+ * forever. After `maxWaitMs` the hold stands and the caller goes on; a write that was
+ * already past its check can still finish later.
+ */
+export async function quiesceBoundedJsonl(maxWaitMs: number = QUIESCE_WAIT_MS): Promise<() => void> {
   quiesced++;
-  await Promise.all([...chains.values()]);
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all([...chains.values()]),
+    new Promise<void>((r) => { timer = setTimeout(r, maxWaitMs); }),
+  ]);
+  clearTimeout(timer);
   let resumed = false;
   return () => {
     if (resumed) return;

@@ -10915,7 +10915,8 @@ export class LynoxHTTPApi {
           return;
         }
         // The measurement logs are written fire-and-forget, so a stopped run can still have
-        // an append queued. Held until the route ends, so none lands after the file pass.
+        // an append queued. Held until the route ends, so no append issued while it runs
+        // lands after the file pass; one issued after the answer starts a fresh log.
         resumeLogs = await quiesceBoundedJsonl();
 
         // What would write the stores again AFTER they are emptied, or carry mail content to a
