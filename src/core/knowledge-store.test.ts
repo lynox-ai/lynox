@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import type Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
+import type { SubjectExternalRefs } from './subject-store.js';
 import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS, MAX_HINT_LOOKUPS_PER_BATCH, knowledgeEvidence } from './knowledge-store.js';
 import { deriveProvenanceTier } from './provenance.js';
 import { channels } from './observability.js';
@@ -1412,6 +1413,158 @@ describe('a fact said in two chats: private mode takes only what the private cha
     expect(rows[0]).toEqual({ thread_id: 'chat-a', at: null });
     expect(rows[1]?.at).toMatch(/^\d{4}-/);
     expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBeNull();
+  });
+});
+
+describe('private mode takes the subjects only the private chat created', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  /** Nothing outside engine.db holds a subject, unless the test says a thread is anchored on it. */
+  function refs(anchored: ReadonlySet<string> = new Set()): SubjectExternalRefs {
+    return { isThreadAnchor: id => anchored.has(id), hasRecords: () => false };
+  }
+
+  function make(withRefs: SubjectExternalRefs | null = refs()): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-subjects-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
+    ks.setSubjectRefs(withRefs);
+    return { ks, subjects };
+  }
+
+  const FACT = 'Kornfeld Sattlerei repairs saddles in Thun';
+  const NAME = 'Kornfeld Sattlerei';
+
+  it('a subject only the private chat created goes with it', () => {
+    const { ks, subjects } = make();
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(a.subjectId).not.toBeNull();
+    expect(subjects.getSubject(a.subjectId!)).not.toBeNull(); // positive control
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).toBeNull();
+  });
+
+  it('a subject the private chat created that another chat\'s entry also names stays', () => {
+    const { ks, subjects } = make();
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    const b = ks.write({ text: 'Kornfeld Sattlerei closes on Mondays', subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-b' });
+    expect(b.deduped).not.toBe(true); // a separate entry, not a restatement
+    expect(b.subjectId).toBe(a.subjectId);
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).not.toBeNull();
+    expect(ks.getEntry(b.id)?.subjectId).toBe(a.subjectId);
+  });
+
+  it('a subject that existed before the private chat named it stays, though nothing else holds it', () => {
+    const { ks, subjects } = make();
+    const known = subjects.findOrCreate({ kind: 'organization', name: NAME });
+    if (known.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(a.subjectId).toBe(known.id);
+
+    expect(ks.deleteByThread('chat-a')).toBe(1);
+
+    expect(subjects.getSubject(known.id)).not.toBeNull();
+  });
+
+  it('a subject the private chat created stays once another subject was merged into it', () => {
+    const { ks, subjects } = make();
+    const known = subjects.findOrCreate({ kind: 'organization', name: 'Kornfeld' });
+    if (known.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(a.subjectId).not.toBe(known.id);
+    subjects.mergeSubjects(known.id, a.subjectId!);
+    expect(subjects.getSubject(known.id)?.merged_into).toBe(a.subjectId); // positive control
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).not.toBeNull();
+    expect(subjects.getSubject(known.id)).not.toBeNull();
+  });
+
+  it('two subjects the private chat created and merged go together', () => {
+    const { ks, subjects } = make();
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    const b = ks.write({ text: 'Sattlerei Kornfeld AG is in Thun', subjectName: 'Sattlerei Kornfeld AG', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(b.subjectId).not.toBe(a.subjectId);
+    subjects.mergeSubjects(b.subjectId!, a.subjectId!);
+    expect(subjects.getSubject(b.subjectId!)?.merged_into).toBe(a.subjectId); // positive control
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).toBeNull();
+    expect(subjects.getSubject(b.subjectId!)).toBeNull();
+  });
+
+  it('a subject the private chat created stays while a thread is anchored on it', () => {
+    const anchored = new Set<string>();
+    const { ks, subjects } = make(refs(anchored));
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    anchored.add(a.subjectId!);
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(a.subjectId!)).not.toBeNull();
+  });
+
+  it('without the thread and table stores to check against, no subject is removed — and a later purge with them still can', () => {
+    const { ks, subjects } = make(null);
+    const a = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a' });
+
+    expect(ks.deleteByThread('chat-a')).toBe(1);
+    expect(subjects.getSubject(a.subjectId!)).not.toBeNull();
+
+    ks.setSubjectRefs(refs());
+    ks.deleteByThread('chat-a');
+    expect(subjects.getSubject(a.subjectId!)).toBeNull();
+  });
+
+  it('a subject the private chat created in a write that folded into its earlier entry goes', () => {
+    const { ks, subjects } = make();
+    // Same run: the first write names no subject, the restatement names one and creates it,
+    // then folds into the first entry — which carries no subject.
+    const first = ks.write({ text: 'saddles are repaired in Thun on weekdays', sourceChannel: 'user', sourceThreadId: 'chat-a', sourceRunId: 'run-1' });
+    const again = ks.write({ text: 'saddles are repaired in Thun', subjectName: NAME, sourceChannel: 'user', sourceThreadId: 'chat-a', sourceRunId: 'run-1' });
+    expect(again.deduped).toBe(true);
+    expect(again.id).toBe(first.id);
+    const created = subjects.findByNameAnyKind(NAME);
+    if (created.ambiguous || !created.row) throw new Error('fixture: the restatement should have created the subject');
+    expect(ks.getEntry(first.id)?.subjectId).toBeNull();
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(created.row.id)).toBeNull();
+  });
+
+  it('a subject that existed before the private chat\'s queued entry was approved stays', () => {
+    const { ks, subjects } = make();
+    const known = subjects.findOrCreate({ kind: 'organization', name: NAME });
+    if (known.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+    const queued = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-a' });
+    expect(ks.reviewEntry(queued.id, 'approve')?.subjectId).toBe(known.id);
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(known.id)).not.toBeNull();
+  });
+
+  it('a subject created when the private chat\'s queued entry was approved goes', () => {
+    const { ks, subjects } = make();
+    const queued = ks.write({ text: FACT, subjectName: NAME, sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-a' });
+    expect(queued.status).toBe('pending_review');
+    const approved = ks.reviewEntry(queued.id, 'approve');
+    expect(approved?.subjectId).not.toBeNull();
+
+    ks.deleteByThread('chat-a');
+
+    expect(subjects.getSubject(approved!.subjectId!)).toBeNull();
   });
 });
 
