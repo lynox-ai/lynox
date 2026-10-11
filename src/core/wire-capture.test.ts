@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
+import { setDataDir } from './config.js';
 import {
   redactWireUserMessage,
   buildWireSnapshot,
@@ -218,6 +219,18 @@ describe('wireSinkDir', () => {
     expect(wireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink');
     expect(wireSinkDir({})).not.toContain(tmpdir());
     expect(wireSinkDir({})).toContain('.lynox');
+  });
+
+  // An instance started with `--data-dir` sets the override and no env var; the capture
+  // used to land in `~/.lynox`, outside the directory the erasure clears.
+  it('follows a --data-dir override over the env', () => {
+    setDataDir('/srv/lx-override');
+    try {
+      expect(wireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/srv/lx-override/wire-sink');
+      expect(rawWireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/srv/lx-override/wire-sink-raw');
+    } finally {
+      setDataDir(null);
+    }
   });
 });
 

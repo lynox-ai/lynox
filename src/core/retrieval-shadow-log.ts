@@ -69,8 +69,9 @@ export interface RetrievalShadowLogEntry {
  * The hash was a plain sha256 prefix, and a query is often a name: anyone holding the
  * file and a list of candidate names could read back who was looked up, and that survived
  * the erasure of the person it named. Keyed with a salt nothing persists, the hash still
- * groups repeat queries within a process — the only use it has — and reveals nothing
- * after a restart. The price is that grouping does not span restarts or containers, which
+ * groups repeat queries within a process — the only use it has — and a record written
+ * now reveals nothing after a restart. Records written before this change keep their
+ * plain prefix until the file rotates or is erased. The price is that grouping does not span restarts or containers, which
  * no reader of this log needs.
  */
 const QUERY_HASH_SALT = randomBytes(32);

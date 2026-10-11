@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendBoundedJsonl } from './bounded-jsonl-log.js';
+import { appendBoundedJsonl, isBoundedJsonlQuiesced, quiesceBoundedJsonl } from './bounded-jsonl-log.js';
 import { setDataDir } from './config.js';
 
 /**
@@ -165,8 +165,24 @@ describe('bounded-jsonl-log — retention + best-effort', () => {
       expect((await readFile(join(override, FILE), 'utf8')).trim()).toBe('{"seq":1}');
       await expect(stat(join(dir, FILE))).rejects.toThrow();
     } finally {
-      setDataDir(null as unknown as string);
+      setDataDir(null);
       await rm(override, { recursive: true, force: true }).catch(() => {});
     }
+  });
+
+  // The erasure holds the sinks: an append queued before the hold, or issued during it,
+  // must not write — else it recreates a log the erasure just removed.
+  it('drops queued and new appends while quiesced, and writes again once resumed', async () => {
+    const queued = appendBoundedJsonl(FILE, { seq: 1 });
+    const resume = await quiesceBoundedJsonl();
+    expect(isBoundedJsonlQuiesced()).toBe(true);
+    await queued;
+    await appendBoundedJsonl(FILE, { seq: 2 });
+    await expect(stat(join(dir, FILE))).rejects.toThrow();
+    resume();
+    resume();                                      // a second call must not release a second hold
+    expect(isBoundedJsonlQuiesced()).toBe(false);
+    await appendBoundedJsonl(FILE, { seq: 3 });
+    expect((await readFile(join(dir, FILE), 'utf8')).trim()).toBe('{"seq":3}');
   });
 });

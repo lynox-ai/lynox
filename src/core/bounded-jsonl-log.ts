@@ -71,6 +71,34 @@ function maxBytes(): number {
  */
 const chains = new Map<string, Promise<void>>();
 
+/**
+ * While above zero, every append is dropped — also one already queued, because the check
+ * runs when the append executes. The erasure holds it across its whole run: an append
+ * queued in a run's last moment would otherwise recreate a log, with the thread or subject
+ * id of the data just erased, after the route removed the file.
+ */
+let quiesced = 0;
+
+/**
+ * Stop the sinks and wait until no write is in flight. Returns the call that resumes them;
+ * calling it more than once resumes once.
+ */
+/** Whether the sinks are held by `quiesceBoundedJsonl`. */
+export function isBoundedJsonlQuiesced(): boolean {
+  return quiesced > 0;
+}
+
+export async function quiesceBoundedJsonl(): Promise<() => void> {
+  quiesced++;
+  await Promise.all([...chains.values()]);
+  let resumed = false;
+  return () => {
+    if (resumed) return;
+    resumed = true;
+    quiesced--;
+  };
+}
+
 /** Rotate the live file to `<file>.1` if it has reached the cap. Best-effort. */
 async function rotateIfNeeded(file: string, cap: number): Promise<void> {
   let size: number;
@@ -108,6 +136,7 @@ export function appendBoundedJsonl(fileName: string, entry: unknown): Promise<vo
   }
   const prev = chains.get(file) ?? Promise.resolve();
   const next = prev.then(async () => {
+    if (quiesced > 0) return;
     try {
       await rotateIfNeeded(file, cap);
       await appendFile(file, JSON.stringify(entry) + '\n', 'utf8');

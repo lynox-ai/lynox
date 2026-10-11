@@ -161,11 +161,16 @@ type LlmProviderMaybe = LynoxUserConfig['provider'];
 let _dataDirOverride: string | null = null;
 
 /**
- * Override the data directory for this process.
+ * Override the data directory for this process (`null` clears it).
  * Must be called before Engine.init().
  */
-export function setDataDir(dir: string): void {
+export function setDataDir(dir: string | null): void {
   _dataDirOverride = dir;
+}
+
+/** The `--data-dir` override, or `null` — for resolvers that read their own env. */
+export function getDataDirOverride(): string | null {
+  return _dataDirOverride;
 }
 
 function getUserConfigDir(): string {

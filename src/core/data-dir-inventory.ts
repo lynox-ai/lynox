@@ -42,7 +42,8 @@ export type DataDirKind = 'sqlite' | 'dir' | 'file';
  * hand-written list beside this table, and half of the table never reached it.
  *
  *   step    a named step of the route empties it in place (the stores it holds open)
- *   remove  the route removes the entry, with its `-wal`/`-shm`/`-journal` sidecars
+ *   remove  the route removes the entry, with its `-wal`/`-shm`/`-journal` sidecars or, for
+ *           a measurement log, its `.1` rotation
  *   keep    the installation's own operating state, not user content — `why` says so
  */
 export type DataDirErase =

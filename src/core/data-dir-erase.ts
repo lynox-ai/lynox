@@ -27,7 +27,11 @@ import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, type
 import { join } from 'node:path';
 import { DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
 
-/** SQLite sidecars that belong to the database they extend — only a `sqlite` entry has them. */
+/**
+ * SQLite sidecars that belong to the database they extend — only a `sqlite` entry has them.
+ * The `sidecar` class also carries a log's rotation (`ROTATED` below): both follow the
+ * decision of the entry they belong to.
+ */
 const SIDECAR = /^(.+?)(-wal|-shm|-journal)$/;
 /**
  * The one kept generation of a size-rotated measurement log (`bounded-jsonl-log.ts`
