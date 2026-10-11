@@ -699,6 +699,8 @@ export type ApiKeyProvider = string | (() => Promise<string>);
  * caller passes today, enumerated from source on 2026-08-18 — 64 (thread title)
  * · 256 (retrieval HyDE) · 512 (follow-up pills, entity extraction, search
  * rerank) · 1024 (memory extraction) — not a round number picked for feel.
+ * Since 2026-10-11 the follow-up pills pass 960 (`FOLLOW_UP_FALLBACK_MAX_TOKENS`,
+ * derived from the chip limits), still within this bound.
  *
  * It is a bound, not a threshold to tune: the point is to separate "a
  * single-shot utility call that cannot afford to think" from "a sub-agent run

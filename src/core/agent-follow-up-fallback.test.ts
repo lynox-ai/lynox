@@ -55,6 +55,7 @@ import {
 } from './follow-up-fallback.js';
 import type { StreamEvent } from '../types/index.js';
 import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
+import { REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
 
 interface Internals {
   _recoverFollowUps(text: string): Promise<void>;
@@ -444,6 +445,10 @@ describe('follow-up recovery — the output budget', () => {
     expect(longest.length).toBeLessThanOrEqual(FOLLOW_UP_FALLBACK_MAX_TOKENS * 2);
   });
 
+  it('stays within the bound under which the OpenAI-compatible adapter suppresses reasoning', () => {
+    expect(FOLLOW_UP_FALLBACK_MAX_TOKENS).toBeLessThanOrEqual(REASONING_SUPPRESSION_MAX_TOKENS);
+  });
+
   it('asks for that budget', async () => {
     const { inner, reply } = makeAgent();
     await inner._recoverFollowUps(ANSWER);
@@ -474,5 +479,34 @@ describe('follow-up recovery — the output budget', () => {
     await inner._recoverFollowUps(ANSWER);
     expect(forcedToolCutOffCounts()['agent.follow_up'] ?? 0).toBe(before);
     expect(events.find((e) => e.type === 'tool_call'), 'same machinery, chips shown').toBeDefined();
+  });
+
+  // The two cases above differ in both the stop reason and the input. These two hold one
+  // fixed and vary the other, so a report keyed on "no suggestions" instead of the stop
+  // reason fails one of them.
+  it('counts a cut-off reply even when the items it finished are usable, and still shows them', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
+      stop_reason: 'max_tokens',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up']).toBe(before + 1);
+    expect(events.find((e) => e.type === 'tool_call')).toBeDefined();
+  });
+
+  it('counts nothing for an empty call that ended normally — that is the model declining', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: {} }],
+      stop_reason: 'tool_use',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up'] ?? 0).toBe(before);
+    expect(events.find((e) => e.type === 'tool_call')).toBeUndefined();
   });
 });

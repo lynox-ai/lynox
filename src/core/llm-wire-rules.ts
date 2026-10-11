@@ -262,8 +262,8 @@ export function isCutOffReply(reply: { stop_reason?: unknown }): boolean {
  * never throws, called after the reply's cost is booked.
  */
 export function reportForcedToolCutOff(site: string, model: string, reply: { stop_reason?: unknown }): void {
-  if (!isCutOffReply(reply)) return;
   try {
+    if (!isCutOffReply(reply)) return;
     forcedToolCutOffs.set(site, (forcedToolCutOffs.get(site) ?? 0) + 1);
     process.stderr.write(`[wire] ${site}: ${model} stopped at max_tokens; the tool input is incomplete\n`);
   } catch {
