@@ -3,7 +3,7 @@ import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/pre-approve.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { isReviewedHeaderName } from '../tools/permission-guard.js';
-import { headerNameForNote } from '../core/write-notes.js';
+import { headerListForNote } from '../core/write-notes.js';
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -341,11 +341,7 @@ function isLiteralReviewedPath(path: string): boolean {
  *  - one host, literal and lowercase, and no path on it a mail API answers;
  *  - one or more literal paths;
  *  - for every parameter that flows into a tool call, an `enum` of exactly one value, and
- *    no constraint on anything else;
- *  - no step template that sets a request header the run would be refused at dispatch
- *    (`isReviewedHeaderName`, the list `contractGrants` enforces), and no template whose
- *    headers are not written out as names: a person would otherwise accept a grant that
- *    every run then fails on.
+ *    no constraint on anything else.
  * The product of methods × host × paths is then finite and equal to the list.
  *
  * Only the save of a WORKFLOW checks this (`validateContractAgainstSteps`). A bulk run's
@@ -387,28 +383,26 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   for (const name of referenced) {
     if (!(name in contract.paramConstraints)) return `parameter "${name}" flows into a tool call and is not bound to a value.`;
   }
-  for (const step of steps ?? []) {
-    const headerError = reviewedHeaderError(step);
-    if (headerError !== null) return headerError;
-  }
   return null;
 }
 
 /**
- * Why a step's template sets a header a reviewed grant refuses, or `null`. Header names are
+ * Why a step's template sets a header a run under a reviewed grant is refused at dispatch
+ * (`isReviewedHeaderName`, the list `contractGrants` enforces), or `null`. Header names are
  * read as written: `resolveInputTemplate` substitutes values, never keys. A `headers` that is
  * not an object (a placeholder, which a parameter or an earlier step fills) names nothing
- * that could be checked here, so it is refused too.
+ * that could be checked here, so it is refused too. A step without a template writes its
+ * call at run time, and only the run can refuse its headers.
  */
 function reviewedHeaderError(step: InlinePipelineStep): string | null {
   const template = step.input_template;
   if (template === undefined || !('headers' in template) || template['headers'] === undefined) return null;
   const headers = template['headers'];
   if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
-    return `step "${step.id}" takes its request headers from a value, and a reviewed grant needs each header named.`;
+    return `Step "${step.id}" takes its request headers from a value, and a reviewed grant needs each header named.`;
   }
-  const refused = Object.keys(headers).find((name) => !isReviewedHeaderName(name));
-  return refused === undefined ? null : `step "${step.id}" sets a header ${headerNameForNote(refused)}, which a run under a reviewed grant may not set.`;
+  const refused = Object.keys(headers).filter((name) => !isReviewedHeaderName(name));
+  return refused.length === 0 ? null : `Step "${step.id}" sets ${headerListForNote(refused)}, which a run under a reviewed grant may not set.`;
 }
 
 /**
@@ -447,5 +441,13 @@ export function buildReviewedContract(
     paramConstraints,
   };
   const shapeError = reviewedContractShapeError(contract, steps);
-  return shapeError === null ? { contract } : { error: shapeError.charAt(0).toUpperCase() + shapeError.slice(1) };
+  if (shapeError !== null) return { error: shapeError.charAt(0).toUpperCase() + shapeError.slice(1) };
+  // Checked here, where a person is about to accept, and not in the shape a save checks: an
+  // edit drops the grant anyway (`update_workflow`), and refusing it for headers the dropped
+  // grant would have refused helps nobody. Without this, every run of an accepted grant fails.
+  for (const step of steps ?? []) {
+    const headerError = reviewedHeaderError(step);
+    if (headerError !== null) return { error: headerError };
+  }
+  return { contract };
 }

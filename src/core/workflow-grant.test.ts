@@ -4,7 +4,7 @@ import { buildReviewedContract, reviewedContractShapeError, validateContractAgai
 import { contractGrants } from '../tools/permission-guard.js';
 import { decideRunGrant, grantChecksum, prepareWorkflowGrant, acceptWorkflowGrant, grantName, hiddenInBoundValues, acceptedValueMatcher, type GrantHasher, type GrantTrigger } from './workflow-grant.js';
 import { collectWriteNotes } from '../tools/builtin/pipeline.js';
-import { headlessRefusalNote, refusedReviewedHeader } from './write-notes.js';
+import { headlessRefusalNote, refusedReviewedHeaders } from './write-notes.js';
 import { liftsAfterUntrusted } from '../types/capability-contract.js';
 import type { CapabilityContract, ReviewedGrantStamp } from '../types/capability-contract.js';
 import type { PlannedPipeline, InlinePipelineStep } from '../types/pipeline.js';
@@ -126,11 +126,17 @@ describe('the headers a reviewed grant\'s steps set', () => {
     expect(taskManager.createPipelineTask).not.toHaveBeenCalled();
   });
 
-  it('and the save of a workflow carrying a reviewed contract refuses it too', () => {
+  it('names every refused header at once, up to three', () => {
+    expect(prepare(step({ Prefer: 'a', 'anthropic-beta': 'b', 'Content-Type': 'c' })))
+      .toEqual({ ok: false, error: 'Step "s1" sets the headers "Prefer", "anthropic-beta", which a run under a reviewed grant may not set.' });
+    expect(prepare(step({ A: '1', B: '2', C: '3', D: '4', E: '5' })))
+      .toEqual({ ok: false, error: 'Step "s1" sets the headers "A", "B", "C" and 2 more, which a run under a reviewed grant may not set.' });
+  });
+
+  it('CONTROL: the save an edit goes through is not refused for headers, since the edit drops the grant', () => {
     const ok = buildReviewedContract(ENTRY, [STEP_WITH_PARAM], { month: '2026-09' });
     if (!('contract' in ok)) throw new Error(ok.error);
-    expect(validateContractAgainstSteps({ capabilityContract: ok.contract, steps: [step({ 'anthropic-beta': 'x' })] }))
-      .toBe('Capability-contract is invalid: step "s1" sets a header "anthropic-beta", which a run under a reviewed grant may not set.');
+    expect(validateContractAgainstSteps({ capabilityContract: ok.contract, steps: [step({ 'anthropic-beta': 'x' })] })).toBeNull();
   });
 
   it('CONTROL: headers the grant allows are accepted, with a parameter in a value', () => {
@@ -165,17 +171,33 @@ describe('the note when a reviewed grant refuses a write for its header', () => 
   });
 
   it('CONTROL: a header the grant allows draws no header note', () => {
-    expect(refusedReviewedHeader(call({ 'Content-Type': 'application/json' }), reviewed)).toBeUndefined();
+    expect(refusedReviewedHeaders(call({ 'Content-Type': 'application/json' }), reviewed)).toBeUndefined();
   });
 
   it('names no header when the URL is not granted either: the header is not the reason', () => {
-    expect(refusedReviewedHeader(call({ Prefer: 'x' }, 'https://api.example.com/v1/other'), reviewed)).toBeUndefined();
+    expect(refusedReviewedHeaders(call({ Prefer: 'x' }, 'https://api.example.com/v1/other'), reviewed)).toBeUndefined();
+  });
+
+  it('names every refused header in the note', () => {
+    expect(refusedReviewedHeaders(call({ Prefer: 'a', 'X-Request-Id': 'b', Accept: 'c' }), reviewed)).toEqual(['Prefer', 'X-Request-Id']);
+  });
+
+  it('names no header for a write the outbound-effect table holds back: without it the call is still refused', () => {
+    const bexio: CapabilityContract = { ...reviewed, hostPatterns: ['api.bexio.com'], pathPatterns: ['/2.0/kb_invoice/1/send'] };
+    const send = call({ Prefer: 'x' }, 'https://api.bexio.com/2.0/kb_invoice/1/send');
+    expect(contractGrants('http_request', { ...send, headers: {} }, bexio)).toBe(true);
+    expect(refusedReviewedHeaders(send, bexio)).toBeUndefined();
+  });
+
+  it('names no header when the call carries no header object', () => {
+    expect(refusedReviewedHeaders({ url: 'https://api.example.com/v1/reports', method: 'POST', headers: null }, reviewed)).toBeUndefined();
+    expect(refusedReviewedHeaders({ url: 'https://api.example.com/v1/reports', method: 'POST' }, reviewed)).toBeUndefined();
   });
 
   it('names no header under a contract that is not reviewed, which does not refuse for headers', () => {
     const { origin: _o, ...authorship } = reviewed;
-    expect(refusedReviewedHeader(call({ Prefer: 'x' }), authorship as CapabilityContract)).toBeUndefined();
-    expect(refusedReviewedHeader(call({ Prefer: 'x' }), undefined)).toBeUndefined();
+    expect(refusedReviewedHeaders(call({ Prefer: 'x' }), authorship as CapabilityContract)).toBeUndefined();
+    expect(refusedReviewedHeaders(call({ Prefer: 'x' }), undefined)).toBeUndefined();
   });
 });
 

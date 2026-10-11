@@ -8,6 +8,7 @@
 
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants, isReviewedHeaderName } from '../tools/permission-guard.js';
+import { isOutboundEffectWrite } from './outbound-write.js';
 
 /** Start of the line that names a write an unattended run was not granted. */
 export const UNGRANTED_WRITE_PREFIX = 'Not granted for an unattended run:';
@@ -33,27 +34,37 @@ export function headerNameForNote(raw: string): string {
   return /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/.test(name) ? `"${name}"` : 'with a name that is not a valid header name';
 }
 
+/** Up to three refused headers as one phrase, so the next attempt does not meet a second. */
+export function headerListForNote(names: readonly string[]): string {
+  const shown = names.slice(0, 3).map(headerNameForNote);
+  const more = names.length > 3 ? ` and ${String(names.length - 3)} more` : '';
+  return `${shown.length > 1 || more !== '' ? 'the headers' : 'a header'} ${shown.join(', ')}${more}`;
+}
+
 /**
- * The header a reviewed grant refused this call for, or `undefined`. Only when the header is
- * THE reason: the same call without its headers would be granted. Otherwise naming a header
- * would point away from the verb, host or path that is not granted. Names, never values.
+ * The headers a reviewed grant refused this call for, or `undefined`. Only when the headers
+ * are THE reason: the same call without them would be granted, and is no write the
+ * outbound-effect table holds back from every grant. Otherwise naming a header would point
+ * away from what is not granted. `input` is the call as written, with its own method: a
+ * method-override header is then named as the header it is. Names, never values.
  */
-export function refusedReviewedHeader(input: unknown, contract: CapabilityContract | undefined): string | undefined {
+export function refusedReviewedHeaders(input: unknown, contract: CapabilityContract | undefined): string[] | undefined {
   if (contract?.origin !== 'reviewed' || input === null || typeof input !== 'object') return undefined;
-  const { headers, ...rest } = input as { headers?: unknown };
+  const { headers, ...rest } = input as { headers?: unknown; url?: unknown; method?: unknown };
   if (headers === null || typeof headers !== 'object') return undefined;
-  const refused = Object.keys(headers).find((name) => !isReviewedHeaderName(name));
-  if (refused === undefined || !contractGrants('http_request', rest, contract)) return undefined;
+  const refused = Object.keys(headers).filter((name) => !isReviewedHeaderName(name));
+  if (refused.length === 0 || !contractGrants('http_request', rest, contract)) return undefined;
+  if (typeof rest.url === 'string' && isOutboundEffectWrite(rest.url, typeof rest.method === 'string' ? rest.method : 'GET')) return undefined;
   return refused;
 }
 
 /**
  * Names a refused write by verb, host and path, so the next grant can take it in, and the
- * header when a reviewed grant refused it for one (`refusedReviewedHeader`).
+ * headers when a reviewed grant refused it for them (`refusedReviewedHeaders`).
  */
-export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeader?: string): string {
+export function ungrantedWriteNote(method: string, url: string, afterUntrusted: boolean, refusedHeaders?: readonly string[]): string {
   const why = afterUntrusted ? ' The run read external content before this call, and its grant does not cover writes after that.' : '';
-  const header = refusedHeader === undefined ? '' : ` It sets a header ${headerNameForNote(refusedHeader)}, which a run under a reviewed grant may not set.`;
+  const header = refusedHeaders === undefined ? '' : ` It sets ${headerListForNote(refusedHeaders)}, which a run under a reviewed grant may not set.`;
   return `${UNGRANTED_WRITE_PREFIX} ${method} ${urlForNote(url)}.${why}${header}`;
 }
 
@@ -67,5 +78,5 @@ export function headlessRefusalNote(toolName: string, input: unknown, afterUntru
   const { url, method } = input as { url?: unknown; method?: unknown };
   const m = (typeof method === 'string' ? method : 'GET').toUpperCase();
   if (typeof url !== 'string' || m === 'GET' || m === 'HEAD') return '';
-  return `\n${ungrantedWriteNote(m, url, afterUntrusted, refusedReviewedHeader(input, contract))}`;
+  return `\n${ungrantedWriteNote(m, url, afterUntrusted, refusedReviewedHeaders(input, contract))}`;
 }

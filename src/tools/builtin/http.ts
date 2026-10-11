@@ -22,7 +22,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeader, ungrantedWriteNote, urlForNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -2607,7 +2607,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (!agent.promptUser) {
           blockedVerbatim(
             `Blocked: outbound ${gatedMethod} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
-            `\n${ungrantedWriteNote(gatedMethod, input.url, governing?.withheld === 'untrusted', refusedReviewedHeader({ ...input, method: gatedMethod }, contract))}`,
+            `\n${ungrantedWriteNote(gatedMethod, input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
           );
         }
         const promptUser = agent.promptUser;
