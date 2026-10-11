@@ -722,7 +722,7 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     // and a mutant dropping the `&& !parentPromptUser` conjunct survived it.
     // A workflow that asks only through ask_user has an unattended run (its schedule), just
     // not this one (PRD 3b-2 §4.3): the message says where it does run.
-    expect(result).toMatch(/this run has no way to reach them/);
+    expect(result).toMatch(/only its schedule gives those questions their own channel/);
     expect(result).not.toMatch(/requires a live chat session/);
     expect(result).not.toMatch(/Schedule it/);
     expect(mockRunManifest).not.toHaveBeenCalled();
@@ -742,7 +742,7 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
       confirmedAt: '2026-10-01T00:00:00.000Z',
     });
     const result = await runWorkflowTool.handler({ workflow_id: 'interactive-worker-confirmed' }, agent);
-    expect(result).toMatch(/this run has no way to reach them/);
+    expect(result).toMatch(/only its schedule gives those questions their own channel/);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
@@ -758,7 +758,7 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     });
     mockRunManifest.mockClear();
     const result = await runWorkflowTool.handler({ workflow_id: 'interactive-chat-confirmed' }, agent);
-    expect(result).not.toMatch(/this run has no way to reach them/);
+    expect(result).not.toMatch(/only its schedule gives those questions their own channel/);
     expect(mockRunManifest).toHaveBeenCalled();
   });
 
