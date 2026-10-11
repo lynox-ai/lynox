@@ -10,6 +10,7 @@ import {
   forcedToolInstruction,
   withWireRules,
   isWireShaped,
+  isCutOffReply,
 } from './llm-wire-rules.js';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_CAPABILITIES } from '../types/models.js';
@@ -133,6 +134,15 @@ function fakeClient(reply: { content: Array<{ type: string; name?: string; text?
   const client = { messages: surface(), beta: { messages: surface() } } as unknown as Anthropic;
   return { client, sent };
 }
+
+describe('isCutOffReply', () => {
+  it('is true only for a reply that stopped at its output budget', () => {
+    expect(isCutOffReply({ stop_reason: 'max_tokens' })).toBe(true);
+    for (const stop_reason of ['tool_use', 'end_turn', 'stop_sequence', undefined, null]) {
+      expect(isCutOffReply({ stop_reason }), String(stop_reason)).toBe(false);
+    }
+  });
+});
 
 describe('withWireRules', () => {
   const textOnly = { content: [{ type: 'text', text: 'no tool' }], usage: { input_tokens: 5, output_tokens: 5 } };

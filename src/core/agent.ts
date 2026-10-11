@@ -45,7 +45,7 @@ import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { calculateCost } from './pricing.js';
-import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 import { debitInRunHelperCost } from './metered-request.js';
 import {
   FOLLOW_UP_TOOL_NAME,
@@ -1585,6 +1585,9 @@ export class Agent implements IAgent {
       }
 
       reportForcedToolMiss('agent.follow_up', missed);
+      // A reply cut off at the budget can carry the call with an empty input, which the
+      // normalizer below reads as "no suggestions" — say so instead of showing nothing.
+      reportForcedToolCutOff('agent.follow_up', helper.modelId, response);
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
       );

@@ -49,9 +49,12 @@ vi.mock('./metered-request.js', async () => {
 
 import { Agent } from './agent.js';
 import { suggestFollowUpsTool } from '../tools/builtin/suggest-follow-ups.js';
-import { FOLLOW_UP_EXCERPT_CHARS, FOLLOW_UP_MAX_TASK_CHARS } from './follow-up-fallback.js';
+import {
+  FOLLOW_UP_EXCERPT_CHARS, FOLLOW_UP_MAX_TASK_CHARS, FOLLOW_UP_MAX_LABEL_CHARS, FOLLOW_UP_MAX_SUGGESTIONS,
+  FOLLOW_UP_FALLBACK_MAX_TOKENS,
+} from './follow-up-fallback.js';
 import type { StreamEvent } from '../types/index.js';
-import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
 
 interface Internals {
   _recoverFollowUps(text: string): Promise<void>;
@@ -424,5 +427,52 @@ describe('follow-up recovery — a model that lost the forced call', () => {
     expect(recordExternalCost).toHaveBeenCalledTimes(1);
     expect(forcedToolMissCounts()['agent.follow_up'], 'the miss is counted by name').toBe(before + 1);
     expect(events.filter(e => (e as { type?: string }).type === 'follow_ups')).toHaveLength(0);
+  });
+});
+
+describe('follow-up recovery — the output budget', () => {
+  // Measured 2026-10-11: on Sonnet 5.5 and Opus 5.5 the flat 512 cut 3 of 20 replies off,
+  // each carrying the call with an EMPTY input — zero chips, and no miss, because the call
+  // was there.
+  it('fits the longest reply the normalizer still accepts in full, at 2 characters per token', () => {
+    const longest = JSON.stringify({
+      suggestions: Array.from({ length: FOLLOW_UP_MAX_SUGGESTIONS }, () => ({
+        label: 'Ä'.repeat(FOLLOW_UP_MAX_LABEL_CHARS),
+        task: 'ü'.repeat(FOLLOW_UP_MAX_TASK_CHARS),
+      })),
+    });
+    expect(longest.length).toBeLessThanOrEqual(FOLLOW_UP_FALLBACK_MAX_TOKENS * 2);
+  });
+
+  it('asks for that budget', async () => {
+    const { inner, reply } = makeAgent();
+    await inner._recoverFollowUps(ANSWER);
+    expect((reply.mock.calls[0]![0] as { max_tokens: number }).max_tokens).toBe(FOLLOW_UP_FALLBACK_MAX_TOKENS);
+  });
+
+  it('says so when the reply stopped at the budget with an empty call, and shows no chips', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: {} }],
+      stop_reason: 'max_tokens',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up'], 'the cut-off is counted by name').toBe(before + 1);
+    expect(events.find((e) => e.type === 'tool_call')).toBeUndefined();
+  });
+
+  it('counts nothing when the reply ended on the call', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
+      stop_reason: 'tool_use',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up'] ?? 0).toBe(before);
+    expect(events.find((e) => e.type === 'tool_call'), 'same machinery, chips shown').toBeDefined();
   });
 });

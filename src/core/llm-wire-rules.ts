@@ -238,3 +238,35 @@ export function reportForcedToolMiss(site: string, missed: ForcedToolNotCalledEr
     // Reporting must not take a caller down.
   }
 }
+
+/** Cut-off replies per call site since process start — kept apart from the misses. */
+const forcedToolCutOffs = new Map<string, number>();
+
+/** A copy of the per-site cut-off counts. */
+export function forcedToolCutOffCounts(): Record<string, number> {
+  return Object.fromEntries(forcedToolCutOffs);
+}
+
+/**
+ * Whether a reply stopped at its output budget. Its tool call can then be present with a
+ * partial or empty input, which the miss check counts as a call and a parser reads as
+ * "nothing to extract" — the same silence as a miss, by a different road.
+ */
+export function isCutOffReply(reply: { stop_reason?: unknown }): boolean {
+  return reply.stop_reason === 'max_tokens';
+}
+
+/**
+ * Say, by name, that a forced-tool reply was cut off at `max_tokens`. Same contract as
+ * {@link reportForcedToolMiss}: counts per site, one stderr line with model and site only,
+ * never throws, called after the reply's cost is booked.
+ */
+export function reportForcedToolCutOff(site: string, model: string, reply: { stop_reason?: unknown }): void {
+  if (!isCutOffReply(reply)) return;
+  try {
+    forcedToolCutOffs.set(site, (forcedToolCutOffs.get(site) ?? 0) + 1);
+    process.stderr.write(`[wire] ${site}: ${model} stopped at max_tokens; the tool input is incomplete\n`);
+  } catch {
+    // Reporting must not take a caller down.
+  }
+}
