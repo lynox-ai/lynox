@@ -533,6 +533,11 @@ describe('isDangerous', () => {
       'cat ~/.lynox/.env.local',
       // A case-insensitive filesystem (macOS) opens the same file under any case.
       'cat ~/.lynox/VAPID-KEYS.JSON',
+      // The hand-kept names keep their old matching: a hand-made copy is still covered.
+      'cat ~/.lynox/secrets.json-backup',
+      'cat ~/.lynox/.env-old',
+      'cat ~/.lynox/http-secret_old',
+      'cat ~/.lynox/.access-token2',
     ])('BLOCKS in autonomous mode: %s', (command) => {
       expect(isDangerous('bash', { command }, 'autonomous')).toContain('lynox secret store');
     });

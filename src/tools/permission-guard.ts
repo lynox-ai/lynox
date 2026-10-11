@@ -13,31 +13,33 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 
 // ── isCriticalTool — moved from pre-approve.ts ─────────────
 
-// lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — lynox must still
-// read its own `config.json` and other non-secret files. Prefix is fuzzy (matches macOS
-// /Users/foo AND Linux /home/foo paths). Shared between the file-tool path guard and both bash
-// scan lists so they cannot drift apart. H-003 / L1-011.
+// lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
+// still read the entries that are not marked secret, `config.json` among them. Prefix is fuzzy
+// (matches macOS /Users/foo AND Linux /home/foo paths). Shared between the file-tool path guard
+// and both bash scan lists so they cannot drift apart. H-003 / L1-011.
 //
-// The names come from the data-dir inventory (`core/data-dir-inventory.ts`, `secret: true`), the
-// table every store under this directory has to be declared in. This list used to be written by
-// hand, and the push key `vapid-keys.json` sat outside it. A name matches as itself, followed by
-// anything but a word character or a hyphen: `backups` and `backups/x`, `.env` and `.env.local`,
-// but not `.environment/` or the arming marker `wire-sink-raw-on`.
-//
-// Kept as STEMS beside the inventory, matched as a prefix: `vault`, `agent-memory`, `history`
-// (their SQLite sidecars and older spellings), and `runs`, `migration-export`, which no current
-// writer creates — removing an entry is a different decision from adding one.
+// Two halves, joined:
+//  - The names the list has always held, with the matching they have always had (a prefix, `.env`
+//    up to a word boundary, `backups/` with its slash). Kept verbatim, so the rule never matches
+//    less than it did: a hand-made copy such as `secrets.json-backup` or `.env-old` stays covered.
+//    `runs` and `migration-export` match nothing a current writer creates — removing an entry is
+//    a different decision from adding one.
+//  - Every entry of the data-dir inventory (`core/data-dir-inventory.ts`) marked `secret: true`,
+//    the table every store under this directory has to be declared in. The hand-kept list missed
+//    the push key `vapid-keys.json`; a name declared there now reaches this rule by the flag. It
+//    matches as itself, followed by anything but a word character or a hyphen: `backups` without
+//    a slash, `.env.local`, but not the arming marker `wire-sink-raw-on`.
 //
 // `backups` covers the default location only; `backup_dir` can point elsewhere, and a relocated
 // backup directory is not covered by this list. Self-host only — managed instances receive these
 // values as container environment and never materialize the files. Path matching stays a bar,
 // not a boundary (see below). The shell reads `.lynox//x` and `.lynox/./x` as `.lynox/x`, so the
 // name is matched after any run of empty and `.` segments, as `LYNOX_DB_FILES` already is.
-const SECRET_FILE_STEMS = ['vault', 'agent-memory', 'history', 'runs', 'migration-export'];
+const HAND_KEPT_SECRET_NAMES = String.raw`vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/`;
 const escapeForRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const LYNOX_SECRET_FILES = new RegExp(
   `\\.lynox\\/+(?:\\.\\/+)*(?:${[
-    ...SECRET_FILE_STEMS.map(escapeForRegex),
+    HAND_KEPT_SECRET_NAMES,
     ...DATA_DIR_INVENTORY.filter((entry) => entry.secret).map((entry) => `${escapeForRegex(entry.name)}(?![\\w-])`),
   ].join('|')})`,
   'i',
