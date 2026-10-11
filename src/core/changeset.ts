@@ -202,10 +202,10 @@ export class ChangesetManager {
         // File already gone
       }
     } else {
-      // Modified file — restore original content
+      // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8
       if (entry.originalContent !== null) {
         try {
-          writeFileSync(abs, entry.originalContent, 'utf-8');
+          writeFileSync(abs, this.originalBytes.get(abs) ?? entry.originalContent);
         } catch {
           // Best-effort
         }

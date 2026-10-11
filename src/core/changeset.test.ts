@@ -312,6 +312,21 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
     });
 
+    it('rollback restores bytes that are not UTF-8 exactly, and the review is settled', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'not-utf8.bin');
+      const before = Buffer.from([0xff, 0x41]);
+      writeFileSync(filePath, before);
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      writeFileSync(filePath, 'replaced', 'utf-8');
+      expect(mgr.hasChanges(), 'positive control').toBe(true);
+      mgr.rollbackAll();
+      expect(readFileSync(filePath).equals(before)).toBe(true);
+      expect(mgr.hasChanges()).toBe(false);
+      mgr.cleanup();
+    });
+
     it('after cleanup, a file restored by rollback is not a change', () => {
       const cwd = makeTempDir();
       const filePath = join(cwd, 'restored.txt');
