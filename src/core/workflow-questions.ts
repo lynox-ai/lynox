@@ -10,8 +10,11 @@ import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 
 /** What the runner reads off a scheduled workflow run that may ask its owner (PRD 3b-2 §4.5, G5). */
 export interface WorkflowQuestionWait {
-  /** A question of this run went unanswered until its TTL ran out: the run halts. */
+  /** The run lacks an answer it asked for, so it halts: a question went unanswered until its TTL
+   *  ran out, or could not be put to the owner at all. */
   readonly unanswered: boolean;
+  /** Which of the two, for the run's error. `undefined` while nothing is missing. */
+  readonly unansweredBecause: 'expired' | 'not_asked' | undefined;
   /** Milliseconds this run has spent waiting for an answer, so the wall clock leaves them out. */
   pausedMs(now?: number): number;
 }
@@ -69,7 +72,7 @@ const neverSettles = (): Promise<string> => new Promise<string>(() => { /* the r
  */
 export class WorkflowQuestions implements WorkflowQuestionWait {
   readonly #deps: WorkflowQuestionDeps;
-  #unanswered = false;
+  #unansweredBecause: 'expired' | 'not_asked' | undefined;
   #pausedMs = 0;
   #waitingSince: number | undefined;
   #threadReady = false;
@@ -80,7 +83,8 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     this.#deps = deps;
   }
 
-  get unanswered(): boolean { return this.#unanswered; }
+  get unanswered(): boolean { return this.#unansweredBecause !== undefined; }
+  get unansweredBecause(): 'expired' | 'not_asked' | undefined { return this.#unansweredBecause; }
 
   pausedMs(now: number = Date.now()): number {
     return this.#pausedMs + (this.#waitingSince !== undefined ? now - this.#waitingSince : 0);
@@ -125,11 +129,11 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       // A database the engine already closed is the teardown, as after the wait.
       if (!store.isOpen()) return neverSettles();
       // Otherwise the question could not be put to the owner — e.g. a question of the owner's
-      // own chat in the run's thread holds the session's one open slot. Nobody waited, so this
-      // is not an unanswered question: the step's call fails, as it does when the prompt budget
-      // is spent, and nothing reaches the thread.
+      // own chat in the run's thread holds the session's one open slot. The run still stops: a
+      // failed call would leave the step free to guess and the run to end succeeded with the
+      // owner told nothing. Nobody waited, so the run says so rather than "expired".
       process.stderr.write(`[lynox:worker] asking a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      throw new Error('The question could not be put to the owner, so there is no answer. Do not guess one.');
+      return this.#endUnanswered('not_asked');
     }
     // Written only once the question exists, so the thread never shows one nobody can answer.
     this.#writeToThread(offBoxText);
@@ -148,7 +152,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       // teardown that already closed the database is not a query that throws.
       const cause = this.#causeOfEnd(meta?.signal) ?? this.#causeFromRow(store, promptId);
       if (cause === 'teardown') return neverSettles();
-      if (cause === 'ttl') return this.#endUnanswered();
+      if (cause === 'ttl') return this.#endUnanswered('expired');
       // A stop or a withdrawal: the question goes, so an answer given later finds it closed.
       try { store.expirePrompt(promptId); } catch (err: unknown) {
         process.stderr.write(`[lynox:worker] withdrawing a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -162,8 +166,8 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
   }
 
   /** The run goes on no further: no later step runs, and every step in flight ends (§4.5). */
-  #endUnanswered(): string {
-    this.#unanswered = true;
+  #endUnanswered(because: 'expired' | 'not_asked'): string {
+    this.#unansweredBecause = because;
     for (const member of this.#deps.abortScope.members) {
       try { member.abort(); } catch { /* the next one still gets its abort */ }
     }
@@ -194,7 +198,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     if (deps.ownerStop.aborted) return 'stop';
     if (deps.tearingDown() || deps.teardown.aborted) return 'teardown';
     if (stepSignal?.aborted === true) return 'withdrawn';
-    if (this.#unanswered) return 'ttl';
+    if (this.#unansweredBecause !== undefined) return 'ttl';
     return undefined;
   }
 

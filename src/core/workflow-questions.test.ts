@@ -174,6 +174,7 @@ describe('how the wait ends (§4.5)', () => {
     h.prompts.expireOld();
     await expect(answer).resolves.toBe('__dismissed__');
     expect(h.q.unanswered).toBe(true);
+    expect(h.q.unansweredBecause).toBe('expired');
     expect(h.scopeMember.abort).toHaveBeenCalledTimes(1);
   });
 
@@ -219,17 +220,18 @@ describe('how the wait ends (§4.5)', () => {
     expect(h.scopeMember.abort).not.toHaveBeenCalled();
   });
 
-  it('a question the store refuses fails the step, marks nothing, and leaves no message in the thread', async () => {
+  it('a question the store refuses ends the run as not asked, and leaves no message in the thread', async () => {
     // The owner's own chat in the run's thread holds the session's one open slot. Nobody waited,
-    // so the run is not one whose question went unanswered.
+    // so the run does not say "expired" — but it stops, so no step acts on a guess.
     const h = makeHarness();
     h.prompts.insertAskUser(RUN_ID, 'A question of the owner\'s own chat');
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      await expect(h.q.ask('Which list?')).rejects.toThrow('could not be put to the owner');
+      await expect(h.q.ask('Which list?')).resolves.toBe('__dismissed__');
     } finally { write.mockRestore(); }
-    expect(h.q.unanswered).toBe(false);
-    expect(h.scopeMember.abort).not.toHaveBeenCalled();
+    expect(h.q.unanswered).toBe(true);
+    expect(h.q.unansweredBecause).toBe('not_asked');
+    expect(h.scopeMember.abort).toHaveBeenCalledTimes(1);
     expect(h.threads.getMessages(RUN_ID)).toEqual([]);
     expect(h.notified).toHaveLength(0);
   });

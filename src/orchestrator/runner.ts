@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
@@ -313,7 +313,7 @@ function questionUnanswered(options: RunManifestOptions, state: RunState): boole
   if (options.questionWait?.unanswered !== true) return false;
   if (state.status !== 'running') return true;
   state.status = 'failed';
-  state.error = WORKFLOW_QUESTION_UNANSWERED_ERROR;
+  state.error = options.questionWait.unansweredBecause === 'not_asked' ? WORKFLOW_QUESTION_NOT_ASKED_ERROR : WORKFLOW_QUESTION_UNANSWERED_ERROR;
   state.completedAt = new Date().toISOString();
   return true;
 }

@@ -24,7 +24,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
 });
 
 import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx } from './runner.js';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR } from './workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR } from './workflow-stop.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
 import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
@@ -2102,8 +2102,8 @@ describe('runManifest — the owner\'s stop', () => {
 
 describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)', () => {
   /** A question channel's state the test sets by hand. */
-  const waitState = (): { unanswered: boolean; paused: number; pausedMs: () => number } => {
-    const w = { unanswered: false, paused: 0, pausedMs: () => w.paused };
+  const waitState = (): { unanswered: boolean; unansweredBecause: 'expired' | 'not_asked' | undefined; paused: number; pausedMs: () => number } => {
+    const w = { unanswered: false, unansweredBecause: undefined as 'expired' | 'not_asked' | undefined, paused: 0, pausedMs: () => w.paused };
     return w;
   };
 
@@ -2116,6 +2116,18 @@ describe('runManifest — a question that went unanswered (PRD 3b-2 §4.5, G5)',
     });
     expect(state.status).toBe('failed');
     expect(state.error).toBe(WORKFLOW_QUESTION_UNANSWERED_ERROR);
+    expect(state.outputs.has('step-2')).toBe(false);
+  });
+
+  it('halts with its own error when the question could not be put to the owner at all', async () => {
+    const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+    const wait = waitState();
+    const state = await runManifest(MANIFEST, CONFIG, {
+      mockResponses, questionWait: wait,
+      hooks: { onStepComplete: (o) => { if (o.stepId === 'step-1') { wait.unanswered = true; wait.unansweredBecause = 'not_asked'; } } },
+    });
+    expect(state.status).toBe('failed');
+    expect(state.error).toBe(WORKFLOW_QUESTION_NOT_ASKED_ERROR);
     expect(state.outputs.has('step-2')).toBe(false);
   });
 
