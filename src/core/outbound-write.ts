@@ -87,7 +87,7 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
   let json: string[] | null;
   try {
     const parsed: unknown = JSON.parse(body);
-    json = parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+    json = parsed === null || typeof parsed !== 'object'
       ? []
       : Object.entries(parsed)
         .filter(([name]) => name.toLowerCase() === '_method')

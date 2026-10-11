@@ -52,6 +52,7 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     ['form key as an array', FORM, '_method[]=DELETE', 'DELETE'],
     ['form key as an indexed array', FORM, '_method[0]=delete', 'DELETE'],
     ['form key in capitals', FORM, '_METHOD=DELETE', 'DELETE'],
+    ['form key with an unclosed bracket, which PHP reads as _method_x', FORM, '_method[x=DELETE', 'POST'],
     ['JSON with a stray close tag a repair strips before sending', JSON_T, '{"_method":"DELETE"}</body>', 'DELETE'],
     ['JSON-like type a server reads as JSON', { 'Content-Type': 'application/json-seq' }, '{"_method":"DELETE"}</body>', 'DELETE'],
     ['JSON that does not parse, method name escaped', JSON_T, '{"_\\u006dethod":"DELETE"}</body>', 'DELETE'],
@@ -75,6 +76,8 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, '{"_method":5}')).toBeNull();
     expect(effectiveWriteMethod('POST', { 'content-type': 'application/json' }, U, '{"_method":"Looks safe"}')).toBeNull();
     expect(effectiveWriteMethod('POST', { 'content-type': 'application/x-www-form-urlencoded' }, U, '_method=my-secret-value')).toBeNull();
+    expect(effectiveWriteMethod('POST', { 'Content-Type': 'application/vnd.api+json' }, U, '{"_method":"Looks safe"}'), 'a +json type').toBeNull();
+    expect(effectiveWriteMethod('POST', { 'content-type': 'text/plain', 'Content-Type': 'application/json' }, U, '{"_method":"Looks safe"}'), 'the second of two types').toBeNull();
   });
 });
 

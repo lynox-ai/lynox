@@ -316,7 +316,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     if (gated === null || !contractGrants('http_request', { url, method: gated }, deps.contract)) return { kind: 'not_granted' };
     // A path that sends to a third party or issues something bindingly is asked on its own,
     // every time (`outbound-write.ts`); a bulk run has no one to ask, so no grant covers it.
-    if (isOutboundEffectWrite(url, method)) return { kind: 'not_granted' };
+    if (isOutboundEffectWrite(url, gated)) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
