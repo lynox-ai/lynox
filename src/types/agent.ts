@@ -248,7 +248,8 @@ export interface SessionCounters {
   /** Moves whenever content the engine did not write enters this Session; see
    *  `core/untrusted-epoch.ts`. Absent means 0. */
   untrustedEpoch?: number | undefined;
-  /** Write approvals keyed `METHOD host`, each with the epoch it was given in; it holds
+  /** Write approvals keyed `METHOD host` (METHOD: every write the request names, sorted and
+   *  joined by `+`), each with the epoch it was given in; it holds
    *  only while that epoch is current. Created on first use; not carried between Sessions. */
   approvedWrites?: Map<string, number> | undefined;
 }
