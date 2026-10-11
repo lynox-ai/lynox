@@ -11672,8 +11672,8 @@ describe('metered audio routes: managed credit gate + debit', () => {
 
     it('a voice chosen in the settings is passed for every language, next to the language', async () => {
       // The rule the voice settings state: a chosen voice is used for every language. The route
-      // passes it as `voice`; the facade's own test shows an explicit `voice` beats a
-      // catalogue match for `voiceLanguage`. Without a chosen voice, `voice` stays unset.
+      // passes it as `voice`; the facade's own test shows an explicit `voice` is used
+      // without consulting the catalogue. Without a chosen voice, `voice` stays unset.
       const { readUserConfig } = await import('../core/config.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
         .mockReturnValueOnce({ tts_voice: 'en_chosen_voice' });
