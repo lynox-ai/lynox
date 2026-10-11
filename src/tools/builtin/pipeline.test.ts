@@ -728,6 +728,40 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
+  it('...also once its schedule confirmed it: a worker never runs an asking workflow with its own prompter', async () => {
+    // Scheduling stamps `confirmedAt`. Gating on it alone let a run_agent worker run a scheduled
+    // asking workflow here, its steps holding the worker's full promptUser.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-worker-confirmed', {
+      id: 'interactive-worker-confirmed', name: 'asks', goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+      confirmedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-worker-confirmed' }, agent);
+    expect(result).toMatch(/this run has no way to reach them/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...while an interactive chat still runs the same confirmed workflow', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-chat-confirmed', {
+      id: 'interactive-chat-confirmed', name: 'asks', goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+      confirmedAt: '2026-10-01T00:00:00.000Z',
+    });
+    mockRunManifest.mockClear();
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-chat-confirmed' }, agent);
+    expect(result).not.toMatch(/this run has no way to reach them/);
+    expect(mockRunManifest).toHaveBeenCalled();
+  });
+
   it('...and one that may ask for a secret still has no unattended run to confirm', async () => {
     const agent = makePipelineAgent();
     (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
