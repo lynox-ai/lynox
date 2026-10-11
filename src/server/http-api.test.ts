@@ -3065,6 +3065,72 @@ describe('LynoxHTTPApi', () => {
         expect(ps.getById(promptId)?.answer_error).toBeNull();
       });
     });
+
+    // A tab left over from an earlier run reports on its own question; the session may have
+    // asked a newer one since, which that report must not settle.
+    it.each([
+      ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id), 410],
+      ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved'), 200],
+    ] as const)('a named question that was %s leaves the newer open one alone', async (_label, close, expected) => {
+      await withStore(async (sid, ps) => {
+        const old = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        close(ps, old);
+        const fresh = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: old }),
+        });
+        expect(res.status).toBe(expected);
+        expect(ps.getById(fresh)?.status).toBe('pending');
+        expect(ps.getById(fresh)?.answer_saved).toBeNull();
+      });
+    });
+
+    it('an unknown promptId is a 404 and leaves the open question alone', async () => {
+      await withStore(async (sid, ps) => {
+        const open = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: 'no-such-id' }),
+        });
+        expect(res.status).toBe(404);
+        expect(ps.getById(open)?.status).toBe('pending');
+      });
+    });
+
+    it('another session\'s promptId is a 409 and settles neither session\'s question', async () => {
+      await withStore(async (sid, ps) => {
+        const foreign = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const own = ps.insertAskSecret('other-1', 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/other-1/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: foreign }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(foreign)?.status).toBe('pending');
+        expect(ps.getById(own)?.status).toBe('pending');
+      });
+    });
+
+    it('a promptId of another kind of question is a 409 and leaves it open', async () => {
+      await withStore(async (sid, ps) => {
+        const ask = ps.insertAskUser(sid, 'Which list?');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'saved', promptId: ask }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(ask)?.status).toBe('pending');
+      });
+    });
+
+    it('without a promptId it settles the session\'s open secret question', async () => {
+      await withStore(async (sid, ps) => {
+        const open = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'saved' }),
+        });
+        expect(res.status).toBe(200);
+        expect(ps.getById(open)?.status).toBe('answered');
+        expect(ps.getById(open)?.answer_saved).toBe(1);
+      });
+    });
   });
 
   describe('POST /api/sessions/:id/mail-connected', () => {
@@ -3143,6 +3209,30 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ status: 'connected', promptId }),
         });
         expect(again.status).toBe(200);
+      });
+    });
+
+    it('a named question that expired is a 410 and leaves the newer open one alone', async () => {
+      await withStore(async (sid, ps) => {
+        const old = ps.insertConnectMail(sid, 'q', payload);
+        ps.expirePrompt(old);
+        const fresh = ps.insertConnectMail(sid, 'q', payload);
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: old }),
+        });
+        expect(res.status).toBe(410);
+        expect(ps.getById(fresh)?.status).toBe('pending');
+      });
+    });
+
+    it('an unknown promptId is a 404 and leaves the open question alone', async () => {
+      await withStore(async (sid, ps) => {
+        const open = ps.insertConnectMail(sid, 'q', payload);
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: 'no-such-id' }),
+        });
+        expect(res.status).toBe(404);
+        expect(ps.getById(open)?.status).toBe('pending');
       });
     });
   });

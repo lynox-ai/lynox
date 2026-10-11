@@ -1839,6 +1839,38 @@ export class LynoxHTTPApi {
     return this._refuseUnlessOwns(req, res, 'answer this question', () => candidates);
   }
 
+  /**
+   * Settle the ask_secret or connect_mail question a client reports on. A promptId names
+   * exactly one question: when it is given, only that question is settled, and one that is
+   * unknown, belongs to another session, is of another kind or is no longer open is reported
+   * as such. It is never replaced by whatever question the session has open now, which may be
+   * a newer one the client has not seen. Only a body without a promptId settles the session's
+   * open question of that kind.
+   */
+  private _settleNamedPrompt(
+    res: ServerResponse,
+    ps: PromptStore,
+    sessionId: string,
+    promptId: string | undefined,
+    type: 'ask_secret' | 'connect_mail',
+    settle: (id: string) => boolean,
+    missing: string,
+  ): void {
+    if (promptId) {
+      const existing = ps.getById(promptId);
+      if (!existing) { errorResponse(res, 404, missing); return; }
+      if (existing.session_id !== sessionId) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
+      if (existing.prompt_type !== type) { errorResponse(res, 409, 'Prompt is a different kind of question'); return; }
+      if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
+      if (!settle(promptId)) { errorResponse(res, 410, 'Prompt expired'); return; }
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+    const pending = ps.getPending(sessionId);
+    if (!pending || pending.prompt_type !== type || !settle(pending.id)) { errorResponse(res, 404, missing); return; }
+    jsonResponse(res, 200, { ok: true });
+  }
+
   /** The run an E7 check reads: the one in flight on the session, or the last one. */
   private _lastRunRow(session: Session): { readonly created_by: string } {
     return { created_by: principalTag(session.lastRunPrincipal) };
@@ -4479,25 +4511,8 @@ export class LynoxHTTPApi {
         outcome = 'vault_error';
       }
 
-      // Bind the supplied promptId to the URL session to prevent an
-      // authenticated client from settling a different session's prompt.
-      // Mirrors the partial-answers route at L1965. Fails closed: an
-      // unbindable promptId falls through to the per-session lookup.
-      let answered = false;
-      if (promptId) {
-        const existing = ps.getById(promptId);
-        if (existing && existing.session_id === params['id'] && existing.prompt_type === 'ask_secret') {
-          answered = ps.answerSecret(promptId, outcome);
-        }
-      }
-      if (!answered) {
-        const pending = ps.getPending(params['id']!);
-        if (pending && pending.prompt_type === 'ask_secret') {
-          answered = ps.answerSecret(pending.id, outcome);
-        }
-      }
-      if (!answered) { errorResponse(res, 404, 'No pending secret prompt'); return; }
-      jsonResponse(res, 200, { ok: true });
+      this._settleNamedPrompt(res, ps, params['id']!, promptId, 'ask_secret',
+        (id) => ps.answerSecret(id, outcome), 'No pending secret prompt');
     }, OWN));
 
     // POST /sessions/:id/mail-connected — settle a connect_mail prompt after the
@@ -4517,29 +4532,8 @@ export class LynoxHTTPApi {
       // where an unknown outcome must not be read as a hard user-cancel.
       const connected = rawStatus === 'connected';
 
-      // Bind the promptId to the URL session so an authenticated client can't
-      // settle another session's prompt (mirrors /secret-saved). Fails closed
-      // to the per-session lookup.
-      let answered = false;
-      if (promptId) {
-        const existing = ps.getById(promptId);
-        if (existing) {
-          if (existing.session_id !== params['id']) { errorResponse(res, 409, 'Prompt belongs to a different session'); return; }
-          if (existing.status === 'expired') { errorResponse(res, 410, 'Prompt expired'); return; }
-          if (existing.status === 'answered') { jsonResponse(res, 200, { ok: true, idempotent: true }); return; }
-          if (existing.prompt_type === 'connect_mail') {
-            answered = ps.answerMailConnect(promptId, connected);
-          }
-        }
-      }
-      if (!answered) {
-        const pending = ps.getPending(params['id']!);
-        if (pending && pending.prompt_type === 'connect_mail') {
-          answered = ps.answerMailConnect(pending.id, connected);
-        }
-      }
-      if (!answered) { errorResponse(res, 404, 'No pending mail prompt'); return; }
-      jsonResponse(res, 200, { ok: true });
+      this._settleNamedPrompt(res, ps, params['id']!, promptId, 'connect_mail',
+        (id) => ps.answerMailConnect(id, connected), 'No pending mail prompt');
     }, OWN));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
