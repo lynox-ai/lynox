@@ -7,6 +7,16 @@
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * The options of a question as they leave the box: without the `'\x00'` marker a prompt's
+ * option list ends with to say "free text is allowed too". The marker is for the owner's own
+ * dialog; a mail or a push that lists it shows an empty or garbled choice.
+ */
+export function inquiryOptions(options: string[] | undefined): string[] | undefined {
+  const shown = options?.filter((o) => o !== '\x00');
+  return shown && shown.length > 0 ? shown : undefined;
+}
+
 export interface NotificationMessage {
   title: string;
   body: string;

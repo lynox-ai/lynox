@@ -20,6 +20,7 @@ import { readBodyCapped, stripUntrustedSeparators, collapseToSingleLine } from '
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
 import type { DeliverySummary, NotificationRouter, NotificationMessage } from './notification-router.js';
+import { inquiryOptions } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PromptText, BulkWriteEffect } from '../types/index.js';
 import { admittedTriggerTier } from './task-manager.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
@@ -33,6 +34,8 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
+import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
+import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
 
 /** The canonical "the human did not answer" value. Spelled the same in
@@ -387,6 +390,13 @@ export interface ActiveTask {
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
+/** What `runTriggerNow` answers. `leaseUntil` on `already_running` is when the run lease runs
+ *  out, the earliest a new run can start; absent when the store could not say. */
+export type RunTriggerNowOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'already_running'; leaseUntil?: string }
+  | { ok: false; reason: 'not_found' | 'awaiting_answer' | 'awaits_owner_stamp' };
+
 export type StopHandle = 'wait' | 'session' | 'signal';
 
 /**
@@ -716,7 +726,7 @@ export class WorkerLoop {
   async runTriggerNow(
     triggerId: string,
     marker?: HandRunMarker,
-  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
+  ): Promise<RunTriggerNowOutcome> {
     // A marker that is not dispatched is dropped on the way out, whatever refused it: it
     // was minted for this one request and must not wait for a later one.
     let dispatched = false;
@@ -742,7 +752,7 @@ export class WorkerLoop {
   async #runTriggerNow(
     triggerId: string,
     marker: HandRunMarker | undefined,
-  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
+  ): Promise<RunTriggerNowOutcome> {
     const taskManager = this.engine.getTaskManager();
     if (!taskManager) return { ok: false, reason: 'not_found' };
     const trigger = taskManager.getTrigger(triggerId);
@@ -756,7 +766,7 @@ export class WorkerLoop {
     if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
       return { ok: false, reason: 'awaits_owner_stamp' };
     }
-    if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
+    if (this.activeTasks.has(trigger.id)) return this.#alreadyRunning(trigger.id);
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
     // process the map is empty and the lease is free — on a graceful deploy immediately,
@@ -799,11 +809,23 @@ export class WorkerLoop {
     // a manual one: running it again is what the person asked for.
     const lease = this.takeLease(trigger.id);
     if (lease === 'not_found') return { ok: false, reason: 'not_found' };
-    if (lease === 'held') return { ok: false, reason: 'already_running' };
+    if (lease === 'held') return this.#alreadyRunning(trigger.id);
     // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
     // activeTasks guard + run history key on exactly the row we found.
     void this.executeTask(trigger, null, marker);
     return { ok: true };
+  }
+
+  /** `already_running`, with the time its lease runs out when the store can say: the earliest a
+   *  run can be started again. After a deploy the lease of the lost run holds until its TTL, and
+   *  without the time the owner can only retry blindly. A live holder renews the lease, so it is a
+   *  lower bound. A time already past is left out: a run of this process whose renewals failed
+   *  still refuses a second start, and "again at <a past time>" would contradict the refusal. */
+  #alreadyRunning(triggerId: string): RunTriggerNowOutcome {
+    let leaseUntil: string | null = null;
+    try { leaseUntil = this.engine.getTaskManager()?.leaseUntil(triggerId) ?? null; } catch { /* the refusal stands without the time */ }
+    const ahead = leaseUntil !== null && Date.parse(leaseUntil) > Date.now();
+    return ahead ? { ok: false, reason: 'already_running', leaseUntil: leaseUntil! } : { ok: false, reason: 'already_running' };
   }
 
   /**
@@ -1895,7 +1917,8 @@ export class WorkerLoop {
         // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
         // `promptId` rides along so a client can settle this exact row.
         data: { threadId: session.sessionId, promptId },
-        inquiry: { question: offBoxQuestion, options },
+        // The options leave the box too (the mail channel lists them), so they are masked like the body.
+        inquiry: { question: offBoxQuestion, options: inquiryOptions(options)?.map((o) => (secretStore ? secretStore.maskAll(o) : o)) },
       });
       try {
         const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
@@ -2264,11 +2287,13 @@ export class WorkerLoop {
       return;
     }
 
-    // Hard gate: WorkerLoop only runs autonomous pipelines. Interactive
-    // pipelines that somehow got onto a cron schedule (legacy data, manual
-    // edit, sync from another instance) are refused at the boundary so they
-    // can't hang waiting for a non-existent live session.
-    if (planned.mode !== 'autonomous') {
+    // Hard gate: WorkerLoop runs autonomous pipelines, and interactive ones whose only question
+    // tool is `ask_user` (PRD 3b-2 §4.3): their questions go to the owner through the run's own
+    // channel below. Any other interactive pipeline that got onto a schedule (legacy data, manual
+    // edit, sync from another instance) is refused at the boundary — a step asking for a secret
+    // has nobody to ask here.
+    const asksItsOwner = planned.mode === 'interactive' && asksOnlyViaAskUser(planned.steps);
+    if (planned.mode !== 'autonomous' && !asksItsOwner) {
       throw new Error(
         `Pipeline "${planned.id}" is marked '${planned.mode}'; WorkerLoop only runs 'autonomous' pipelines. ` +
         `Convert it (remove ask_user/ask_secret steps) or invoke it manually from a chat session.`,
@@ -2341,6 +2366,13 @@ export class WorkerLoop {
     }
 
     const { runGuardedSavedWorkflow } = await import('./saved-workflow-runner.js');
+    const active = this.activeTasks.get(task.id);
+    // The 5-minute deadline stops at the start of a workflow run (§4.4) and stays stopped. It has
+    // never ended a workflow; all it would still do is abort the controller at minute 5, and a
+    // question asked after that would find the run gone before it was written. Resumed by nothing
+    // on this path: an answer that re-armed it would leave a second question the same trap.
+    active?.pauseDeadline();
+    const questions = asksItsOwner ? this.#workflowQuestions(task, starter, active, ownerStop, scope) : undefined;
     // Seeded from what the session that created this task had taken in: the run has no session
     // of its own, and its params came from that one.
     const result = await runGuardedSavedWorkflow(this.engine, task.pipeline_id, scheduledParams, {
@@ -2353,6 +2385,12 @@ export class WorkerLoop {
       ...(starter ? { principal: starter } : {}),
       stopSignal: ownerStop,
       abortScope: scope,
+      // The run's id is set here when it may ask: its questions and its thread carry it.
+      ...(questions !== undefined ? {
+        runId: questions.runId,
+        parentPrompt: { parentAskUserPrompt: questions.channel.ask },
+        questionWait: questions.channel,
+      } : {}),
     });
     ownerStop.removeEventListener('abort', onStop);
 
@@ -2415,6 +2453,43 @@ export class WorkerLoop {
       data: { taskId: task.id, ...(result.runId ? { runId: result.runId } : {}) },
       onReported: this.#recordEscalation(task.id),
     });
+  }
+
+  /**
+   * The question channel of a scheduled workflow run that may ask its owner (PRD 3b-2 §4.1): the
+   * run's steps reach the owner through it, with the run's id as the address. What differs from
+   * the task path (`executeStandard`) is the teardown: nothing is parked, and the wait listens to
+   * the owner's stop and the step's signal, and to the controller only to end at teardown.
+   *
+   * ⚠ A step's children and nested workflows do not get the channel: a spawned agent and a
+   * nested `run_workflow` pass on `promptUser` only, which a scheduled step does not have.
+   */
+  #workflowQuestions(
+    task: TriggerRecord, starter: RequestPrincipal | undefined, active: ActiveTask | undefined,
+    ownerStop: AbortSignal, scope: AbortScope,
+  ): { runId: string; channel: WorkflowQuestions } {
+    const runId = randomUUID();
+    const teardown = active?.controller.signal ?? new AbortController().signal;
+    const channel = new WorkflowQuestions({
+      runId,
+      scheduleId: task.id,
+      title: task.title,
+      createdBy: principalTag(starter ?? OWNER_PRINCIPAL),
+      handRun: active?.handRun === true,
+      promptStore: () => this.engine.getPromptStore(),
+      threadStore: () => this.engine.getThreadStore(),
+      // The vault's mask only, as on the task path: the generic pattern fallback mangles text a
+      // human has to read and answer.
+      maskOffBox: (text) => this.engine.getSecretStore()?.maskAll(text) ?? text,
+      notify: (msg) => this.notificationRouter.notify(msg),
+      recordDelivery: () => this.#recordEscalation(task.id),
+      ownerStop,
+      teardown,
+      tearingDown: () => active?.tearingDown === true,
+      abortScope: scope,
+      onPending: (promptId) => { if (active) active.pendingPromptId = promptId; },
+    });
+    return { runId, channel };
   }
 
   /**

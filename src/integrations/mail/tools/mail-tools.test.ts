@@ -513,6 +513,17 @@ describe('mail_send tool', () => {
     expect(provider.send).not.toHaveBeenCalled();
   });
 
+  it('refuses in a scheduled step that can only ask a question, and asks nothing over that channel', async () => {
+    // `askUserPrompt` lets a step ask its owner; it is no way to approve a send.
+    const askUserPrompt = vi.fn(async () => 'Yes');
+    const tool = createMailSendTool(registry);
+    const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, { askUserPrompt } as unknown as IAgent);
+    expect(out).toContain('mail_send error');
+    expect(out).toContain('confirmation');
+    expect(askUserPrompt).not.toHaveBeenCalled();
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
   it('cancels when user declines confirmation', async () => {
     const tool = createMailSendTool(registry);
     const out = await tool.handler({ to: 'a@x.com', subject: 's', body: 'b' }, noAgent);

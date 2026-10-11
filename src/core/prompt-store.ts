@@ -21,6 +21,8 @@ import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigi
 
 export type PromptType = 'ask_user' | 'ask_secret' | 'connect_mail';
 export type PromptStatus = 'pending' | 'answered' | 'expired';
+/** Why a question was closed without an answer, where that was not its own expiry. */
+export type PromptClosedReason = 'process_restarted';
 
 export interface PendingPromptRow {
   id: string;
@@ -69,6 +71,9 @@ export interface PendingPromptRow {
    * the canonical value set. NULL for ask_user rows and for real save/
    * cancel. */
   answer_error: string | null;
+  /** Why the question was closed without an answer, when that was not its own expiry (v59):
+   *  `process_restarted` for a question the boot or shutdown sweep closed. NULL otherwise. */
+  closed_reason: PromptClosedReason | null;
   status: PromptStatus;
   created_at: string;
   answered_at: string | null;
@@ -622,6 +627,11 @@ export class PromptStore {
    * `endWait` has already cleared the deadline — so `expireOld` detaches the
    * pointer on the same `expires_at`. Both states are bounded; an earlier
    * version of this comment claimed the first bound covered the second.
+   *
+   * Every row it closes carries `closed_reason = 'process_restarted'`, so an answer that
+   * arrives later is told the run that asked is gone, not only that the question expired.
+   * The reason is generic on purpose: the sweep cannot tell a chat question from one a
+   * workflow run asked, and for both the process that would have read the answer is gone.
    */
   expireUnparked(): number {
     const rows = this.db
@@ -777,6 +787,12 @@ export class PromptStore {
     return outcome.status === 'answered' ? outcome.row : undefined;
   }
 
+  /** Whether the database behind this store is still open. False once the engine closed it at
+   *  shutdown, which is how a reader can tell a closing process from a failing query. */
+  isOpen(): boolean {
+    return this.db.open;
+  }
+
   /** Like waitForAnswer but distinguishes why the wait ended. */
   waitForSettled(promptId: string, signal?: AbortSignal): Promise<PromptOutcome> {
     return new Promise<PromptOutcome>((resolve) => {
@@ -887,7 +903,10 @@ export class PromptStore {
   private _getExpireUnparkedStmt(): Database.Statement {
     return (this._stmtExpireUnparked ??= this.db.prepare(`
       UPDATE pending_prompts
-      SET status = 'expired'
+      SET status = 'expired',
+          -- A question whose own TTL already ran out (during downtime, or in the minutes before
+          -- the TTL sweep's next tick) expired; the restart is not why it is closed.
+          closed_reason = CASE WHEN ${NOT_EXPIRED} THEN 'process_restarted' ELSE NULL END
       WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }
