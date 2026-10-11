@@ -17,7 +17,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 import { planDAG, estimatePipelineCost } from './dag-planner.js';
 import type { InlinePipelineStep } from '../types/index.js';
-import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
 
 function makeToolUseResponse(input: unknown) {
   return {
@@ -60,6 +60,37 @@ describe('planDAG', () => {
     expect(onSpend).toHaveBeenCalledOnce();
     expect(onSpend.mock.calls[0]![0] as number).toBeGreaterThan(0);
     expect(forcedToolMissCounts()['dag-planner']).toBe(before + 1);
+  });
+
+  // A reply cut off at its output budget carries the forced call with an incomplete
+  // input. The miss check counts that as a call, so the cut-off is counted by name.
+  it('a reply cut off at max_tokens returns null, is booked once, and is counted as a cut-off', async () => {
+    mockCreate.mockResolvedValueOnce({
+      ...makeToolUseResponse({}),
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 300, output_tokens: 4096 },
+    });
+    const before = forcedToolCutOffCounts()['dag-planner'] ?? 0;
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
+    expect(result).toBeNull();
+    expect(onSpend).toHaveBeenCalledOnce();
+    expect(onSpend.mock.calls[0]![0] as number).toBeGreaterThan(0);
+    expect(forcedToolCutOffCounts()['dag-planner'] ?? 0).toBe(before + 1);
+  });
+
+  it('the same incomplete reply that stopped on its own is NOT counted as a cut-off', async () => {
+    mockCreate.mockResolvedValueOnce({
+      ...makeToolUseResponse({}),
+      stop_reason: 'tool_use',
+      usage: { input_tokens: 300, output_tokens: 4096 },
+    });
+    const before = forcedToolCutOffCounts()['dag-planner'] ?? 0;
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
+    expect(result).toBeNull();
+    expect(onSpend).toHaveBeenCalledOnce();
+    expect(forcedToolCutOffCounts()['dag-planner'] ?? 0).toBe(before);
   });
 
   it('returns null when tool_use block missing', async () => {

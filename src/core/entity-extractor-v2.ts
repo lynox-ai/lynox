@@ -11,7 +11,7 @@ import { resolveTierModel } from './tier-resolver.js';
 import { isCleanupTarget, isJunkPersonShape } from './kg-stopwords.js';
 import { calculateCost } from './pricing.js';
 import { compose, renderFence } from '../core/data-boundary.js';
-import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 
 /**
  * Entity extracted by the v2 tool-call pipeline.
@@ -322,6 +322,7 @@ export async function extractEntitiesV2(
         })
       : 0;
     reportForcedToolMiss('entity-extractor', missed);
+    reportForcedToolCutOff('entity-extractor', fast.modelId, response);
     const toolUse = response.content.find(
       (b): b is Extract<typeof b, { type: 'tool_use' }> =>
         b.type === 'tool_use' && b.name === TOOL_NAME,

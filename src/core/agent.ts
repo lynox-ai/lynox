@@ -1785,6 +1785,7 @@ export class Agent implements IAgent {
       }
 
       reportForcedToolMiss('agent.capture', missed);
+      reportForcedToolCutOff('agent.capture', helper.modelId, response);
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
       );

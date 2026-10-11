@@ -53,7 +53,7 @@ import { calculateCost } from './pricing.js';
 import { debitInRunHelperCost } from './metered-request.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { StreamEvent } from '../types/index.js';
-import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
 
 interface Internals {
   _captureFallback(text: string, turnUntrusted: boolean, turnCause: string): Promise<void>;
@@ -1142,5 +1142,47 @@ describe('turn-end capture — a model that lost the forced call', () => {
     expect(ran, 'a lost call must not silence capture_ran').toHaveLength(1);
     expect(ran[0]).toMatchObject({ facts: 0, source: 'capture' });
     expect(forcedToolMissCounts()['agent.capture']).toBe(before + 1);
+  });
+});
+
+describe('turn-end capture — a reply cut off at max_tokens', () => {
+  // A reply cut off at its output budget carries the forced call with an incomplete
+  // input. The miss check counts that as a call, so the cut-off is counted by name —
+  // and the spend is still booked exactly once, on the same three ledgers.
+  const cutReply = (stopReason: string) => vi.fn().mockResolvedValue({
+    content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: {} }],
+    stop_reason: stopReason,
+    usage: USAGE,
+  });
+
+  it('books once on all three ledgers, writes nothing, and counts the cut-off', async () => {
+    const { inner, write } = makeAgent({ reply: cutReply('max_tokens') });
+    const recordExternalCost = vi.fn().mockReturnValue(false);
+    inner.costGuard = { recordExternalCost };
+    inner._helperCostUsd = 0;
+    const before = forcedToolCutOffCounts()['agent.capture'] ?? 0;
+
+    await inner._captureFallback(ANSWER, false, 'none');
+
+    expect(vi.mocked(debitInRunHelperCost), 'debited once: not lost, not twice').toHaveBeenCalledTimes(1);
+    expect(recordExternalCost).toHaveBeenCalledTimes(1);
+    expect(inner._helperCostUsd).toBeGreaterThan(0);
+    expect(write).not.toHaveBeenCalled();
+    expect(forcedToolCutOffCounts()['agent.capture'] ?? 0).toBe(before + 1);
+  });
+
+  it('the same incomplete reply that stopped on its own is NOT counted as a cut-off', async () => {
+    const { inner, write } = makeAgent({ reply: cutReply('tool_use') });
+    const recordExternalCost = vi.fn().mockReturnValue(false);
+    inner.costGuard = { recordExternalCost };
+    inner._helperCostUsd = 0;
+    const before = forcedToolCutOffCounts()['agent.capture'] ?? 0;
+
+    await inner._captureFallback(ANSWER, false, 'none');
+
+    expect(vi.mocked(debitInRunHelperCost)).toHaveBeenCalledTimes(1);
+    expect(recordExternalCost).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
+    expect(forcedToolCutOffCounts()['agent.capture'] ?? 0).toBe(before);
   });
 });

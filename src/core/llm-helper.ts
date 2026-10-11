@@ -19,7 +19,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
 import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
-import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -436,6 +436,7 @@ export async function callForStructuredJson<T = unknown>(
     tool_choice: { type: 'tool', name: 'extract' },
   }));
   reportForcedToolMiss('llm-helper', missed);
+  reportForcedToolCutOff('llm-helper', model, response);
 
   const inputTokens = response.usage.input_tokens;
   const outputTokens = response.usage.output_tokens;

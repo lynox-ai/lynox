@@ -13,7 +13,7 @@ import {
 } from './llm-helper.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 import { MODEL_MAP, modelCapability } from '../types/models.js';
-import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
 
 const SCHEMA: ExtractSchema = {
   type: 'object',
@@ -695,5 +695,38 @@ describe('callForStructuredJson — the spend behind a failed extraction', () =>
     const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client })
       .catch((e: unknown) => e);
     expect(extractionSpendOf(err)).toBeUndefined();
+  });
+});
+
+describe('callForStructuredJson — a reply cut off at max_tokens', () => {
+  // A reply cut off at its output budget carries the forced call with an incomplete
+  // input. The miss check counts that as a call, so the cut-off is counted by name.
+  const cutClient = (stopReason: string): Anthropic => ({
+    messages: {
+      create: async () => ({
+        content: [{ type: 'tool_use', id: 't', name: 'extract', input: {} }],
+        stop_reason: stopReason,
+        usage: { input_tokens: 1000, output_tokens: 100 },
+      }),
+    },
+  } as unknown as Anthropic);
+
+  it('is refused by the schema, keeps its spend, and is counted as a cut-off', async () => {
+    const before = forcedToolCutOffCounts()['llm-helper'] ?? 0;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client: cutClient('max_tokens'), model: 'claude-sonnet-4-6' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(extractionSpendOf(err)).toBeDefined();
+    expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
+    expect(forcedToolCutOffCounts()['llm-helper'] ?? 0).toBe(before + 1);
+  });
+
+  it('the same incomplete reply that stopped on its own is NOT counted as a cut-off', async () => {
+    const before = forcedToolCutOffCounts()['llm-helper'] ?? 0;
+    const err = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client: cutClient('tool_use'), model: 'claude-sonnet-4-6' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
+    expect(forcedToolCutOffCounts()['llm-helper'] ?? 0).toBe(before);
   });
 });

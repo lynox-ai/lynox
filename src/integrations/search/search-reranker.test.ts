@@ -4,7 +4,7 @@ import { rerankSearchResults, getRerankerCapability } from './search-reranker.js
 import { initLLMProvider } from '../../core/llm-client.js';
 import { setOpenAIModelResolver, getActiveOpenAIModelMap, MISTRAL_MODEL_MAP } from '../../types/models.js';
 import type { SearchResult } from './search-provider.js';
-import { ForcedToolNotCalledError, forcedToolMissCounts } from '../../core/llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from '../../core/llm-wire-rules.js';
 
 // `mockCreate` resolves the reranker's stream().finalMessage() call (it now
 // uses streaming uniformly so the OpenAIAdapter, which has no `.create`, works
@@ -152,6 +152,49 @@ describe('rerankSearchResults', () => {
     const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true });
     expect(out.costUsd).toBeGreaterThan(0);
     expect(forcedToolMissCounts()['search-reranker']).toBe(before + 1);
+  });
+
+  // A reply cut off at its output budget carries the forced call with an incomplete
+  // input. The miss check counts that as a call, so the cut-off is counted by name —
+  // and the skip names it `cut-off`, since its scores are incomplete, not wrong.
+  const cutReply = (input: unknown, stopReason: string): unknown => ({
+    content: [{ type: 'tool_use', name: 'score_results', input }],
+    stop_reason: stopReason,
+    usage: { input_tokens: 800, output_tokens: 120 },
+  });
+
+  it('a reply cut off at max_tokens still surfaces its cost, and is counted as a cut-off', async () => {
+    mockCreate.mockResolvedValueOnce(cutReply({}, 'max_tokens'));
+    const before = forcedToolCutOffCounts()['search-reranker'] ?? 0;
+    const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true });
+    expect(out.costUsd).toBeGreaterThan(0);
+    expect(out.skipReason).toBe('cut-off');
+    expect(forcedToolCutOffCounts()['search-reranker'] ?? 0).toBe(before + 1);
+  });
+
+  it('the same empty reply that stopped on its own is NOT counted as a cut-off', async () => {
+    mockCreate.mockResolvedValueOnce(cutReply({}, 'tool_use'));
+    const before = forcedToolCutOffCounts()['search-reranker'] ?? 0;
+    const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true });
+    expect(out.costUsd).toBeGreaterThan(0);
+    expect(out.skipReason).toBe('malformed');
+    expect(forcedToolCutOffCounts()['search-reranker'] ?? 0).toBe(before);
+  });
+
+  it('incomplete scores from a reply cut off at max_tokens skip as `cut-off`', async () => {
+    mockCreate.mockResolvedValueOnce(cutReply({ scores: [9, 1] }, 'max_tokens'));
+    const results = makeResults();
+    const out = await rerankSearchResults('x', results, { enabled: true });
+    expect(out.results).toEqual(results);
+    expect(out.skipReason).toBe('cut-off');
+  });
+
+  it('the same incomplete scores from a reply that stopped on its own skip as `malformed`', async () => {
+    mockCreate.mockResolvedValueOnce(cutReply({ scores: [9, 1] }, 'tool_use'));
+    const results = makeResults();
+    const out = await rerankSearchResults('x', results, { enabled: true });
+    expect(out.results).toEqual(results);
+    expect(out.skipReason).toBe('malformed');
   });
 
   it('leaves costUsd undefined when reranking is skipped (no LLM call)', async () => {

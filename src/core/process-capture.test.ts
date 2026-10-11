@@ -89,7 +89,7 @@ function call(tool_name: string, input_json: string, order: number): ToolCallRec
   return { id: `tc-${order}`, run_id: 'r', tool_name, input_json, output_json: 'ok', duration_ms: 1, sequence_order: order };
 }
 
-import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
 
 describe('captureProcess', () => {
   beforeEach(() => {
@@ -110,6 +110,32 @@ describe('captureProcess', () => {
     // Exactly once: not lost with the exception, not booked twice.
     expect(counters.costUSD).toBeCloseTo(calculateCost('ministral-14b-2512', { input_tokens: 5_000, output_tokens: 1_000 }), 10);
     expect(forcedToolMissCounts()['process-capture']).toBe(before + 1);
+  });
+
+  // A reply cut off at its output budget carries the forced call with an incomplete
+  // input. The miss check counts that as a call, so the cut-off is counted by name.
+  const cutReply = (stopReason: string) => ({
+    content: [{ type: 'tool_use', id: 'toolu_1', name: 'extract_process', input: {} }],
+    stop_reason: stopReason,
+    usage: { input_tokens: 5_000, output_tokens: 1_000 },
+  });
+
+  it('a reply cut off at max_tokens is booked once and counted as a cut-off', async () => {
+    mockCreate.mockResolvedValueOnce(cutReply('max_tokens'));
+    const counters: import('../types/index.js').SessionCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    const before = forcedToolCutOffCounts()['process-capture'] ?? 0;
+    await captureProcess('run1', 'Ad Report', makeToolCalls(), { apiKey: 'test-key', modelId: 'ministral-14b-2512', sessionCounters: counters });
+    expect(counters.costUSD).toBeCloseTo(calculateCost('ministral-14b-2512', { input_tokens: 5_000, output_tokens: 1_000 }), 10);
+    expect(forcedToolCutOffCounts()['process-capture'] ?? 0).toBe(before + 1);
+  });
+
+  it('the same incomplete reply that stopped on its own is NOT counted as a cut-off', async () => {
+    mockCreate.mockResolvedValueOnce(cutReply('tool_use'));
+    const counters: import('../types/index.js').SessionCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    const before = forcedToolCutOffCounts()['process-capture'] ?? 0;
+    await captureProcess('run1', 'Ad Report', makeToolCalls(), { apiKey: 'test-key', modelId: 'ministral-14b-2512', sessionCounters: counters });
+    expect(counters.costUSD).toBeCloseTo(calculateCost('ministral-14b-2512', { input_tokens: 5_000, output_tokens: 1_000 }), 10);
+    expect(forcedToolCutOffCounts()['process-capture'] ?? 0).toBe(before);
   });
 
   it('sends a pinned model instead of the fast tier, and prices it', async () => {

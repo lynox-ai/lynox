@@ -3,7 +3,7 @@ import { getBetasForProvider, getModelId, normalizeTier } from '../types/index.j
 import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { calculateCost } from './pricing.js';
 import { resolveModel, undeclaredInlineStepTier } from '../orchestrator/runtime-adapter.js';
-import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 
 export interface DagPlanResult {
   steps: InlinePipelineStep[];
@@ -133,6 +133,7 @@ export async function planDAG(
         : 0;
       options?.onSpend?.(actualCostUsd);
       reportForcedToolMiss('dag-planner', missed);
+      reportForcedToolCutOff('dag-planner', model, response);
 
       clearTimeout(timeout);
 
