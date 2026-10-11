@@ -1057,8 +1057,8 @@ export class Agent implements IAgent {
    * Charge a dollar amount that was spent OUTSIDE this agent's own turns against its
    * cost ceiling — a spawned child's actual cost, priced on the child's own model.
    *
-   * The same booking the in-run helpers already make below (`web_research` rerank, the
-   * follow-up chips): those reach `costGuard.recordExternalCost` from inside. A spawned
+   * The same booking the two helper fallbacks already make below (the follow-up chips and
+   * the turn-end capture): those reach `costGuard.recordExternalCost` from inside. A spawned
    * child could not, because `spawn.ts` holds an `IAgent` and the guard is private — so
    * a child's spend reached the tenant's daily total through its own run row while the
    * delegating run's ceiling never saw a cent of it.

@@ -1714,9 +1714,11 @@ describe('spawn_agent tool', () => {
     // Both fallbacks debit their helper call to the tenant directly AND record it in the
     // agent's cost guard. A child's tenant debit is its whole snapshot, so a child running
     // either one would bill that helper call twice. Off by default (agent.ts), and spawn
-    // must not turn them on.
+    // must not turn them on — not even by inheriting them from a parent that runs both, as
+    // the session's own agent does.
     const { Agent: MockAgent } = await import('../../core/agent.js');
-    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, makeAgent());
+    const parent = Object.assign(makeAgent(), { followUpFallback: true, captureFallback: true });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, parent);
     const child = vi.mocked(MockAgent).mock.instances[0] as unknown as { followUpFallback?: boolean; captureFallback?: boolean };
     expect(child.followUpFallback ?? false).toBe(false);
     expect(child.captureFallback ?? false).toBe(false);
