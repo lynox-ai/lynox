@@ -4,6 +4,7 @@ import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
 import { channels } from '../core/observability.js';
+import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
 // in data-store.ts / artifact.ts / memory.ts / google-{drive,calendar,sheets,docs}.ts.
@@ -505,6 +506,44 @@ describe('isDangerous', () => {
       const result = isDangerous('read_file', { path }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
+    });
+
+    // The rule is derived from the data-dir inventory's `secret` flag. Both directions, over
+    // every entry, so the table and the guard cannot drift apart again.
+    const secretEntries = DATA_DIR_INVENTORY.filter((e) => e.secret).map((e) => e.name);
+    const otherEntries = DATA_DIR_INVENTORY.filter((e) => !e.secret && e.kind !== 'sqlite').map((e) => e.name);
+
+    it.each(secretEntries)('BLOCKS reading the inventory\'s secret entry %s, in both modes', (name) => {
+      const autonomous = isDangerous('bash', { command: `cat ~/.lynox/${name}` }, 'autonomous');
+      expect(autonomous).toContain('[BLOCKED');
+      expect(autonomous).toContain('lynox secret store');
+      expect(isDangerous('bash', { command: `cat ~/.lynox/${name}` })).not.toBeNull();
+    });
+
+    it.each(otherEntries)('does NOT treat the inventory\'s non-secret entry %s as a secret', (name) => {
+      expect(isDangerous('bash', { command: `cat ~/.lynox/${name}` }, 'autonomous') ?? '').not.toContain('lynox secret store');
+    });
+
+    it.each([
+      // The push key, which the hand-kept list missed.
+      'cat ~/.lynox/vapid-keys.json',
+      // A directory entry matches without a trailing slash too.
+      'ls ~/.lynox/backups',
+      'cat ~/.lynox/wire-sink-raw/run-1.json',
+      'cat ~/.lynox/.env.local',
+      // A case-insensitive filesystem (macOS) opens the same file under any case.
+      'cat ~/.lynox/VAPID-KEYS.JSON',
+    ])('BLOCKS in autonomous mode: %s', (command) => {
+      expect(isDangerous('bash', { command }, 'autonomous')).toContain('lynox secret store');
+    });
+
+    it.each([
+      'ls ~/.lynox/.environment/x',
+      'cat ~/.lynox/wire-sink-raw-on',
+      // The name is matched literally: its dot is a dot.
+      'cat ~/.lynox/vapid-keysXjson',
+    ])('a name that only resembles a secret entry is not one: %s', (command) => {
+      expect(isDangerous('bash', { command }, 'autonomous') ?? '').not.toContain('lynox secret store');
     });
 
     // ── Counter-directions ────────────────────────────────────────────────────

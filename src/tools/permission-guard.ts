@@ -1,5 +1,6 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod } from '../core/outbound-write.js';
+import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
 import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -12,40 +13,35 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 
 // ── isCriticalTool — moved from pre-approve.ts ─────────────
 
-// lynox-internal secret/DB files — vault + agent-memory + run-history + migration
-// exports + the plaintext engine HTTP secret (`ensureHttpSecret` writes it mode 0600,
-// but a same-uid read still succeeds on self-host). Specific filenames, NOT the whole
-// `~/.lynox/` dir — lynox must still read its own `config.json` and other non-secret
-// files. Prefix is fuzzy (matches macOS /Users/foo AND Linux /home/foo paths).
-// Shared between the file-tool path guard and both bash scan lists so they cannot
-// drift apart. H-003 / L1-011.
+// lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — lynox must still
+// read its own `config.json` and other non-secret files. Prefix is fuzzy (matches macOS
+// /Users/foo AND Linux /home/foo paths). Shared between the file-tool path guard and both bash
+// scan lists so they cannot drift apart. H-003 / L1-011.
 //
-// The later entries were derived from the paths this codebase actually creates,
-// after the original list turned out to have been written from memory rather than
-// from the writers. Keep it that way: when adding a name, find the code that writes
-// it. (`runs`, kept above, matches nothing that is ever created — left in place
-// because removing an entry is a different decision from adding one.)
+// The names come from the data-dir inventory (`core/data-dir-inventory.ts`, `secret: true`), the
+// table every store under this directory has to be declared in. This list used to be written by
+// hand, and the push key `vapid-keys.json` sat outside it. A name matches as itself, followed by
+// anything but a word character or a hyphen: `backups` and `backups/x`, `.env` and `.env.local`,
+// but not `.environment/` or the arming marker `wire-sink-raw-on`.
 //
-//  - `history`, `secrets.json` — durable stores under this directory that hold
-//    conversation content and, in the legacy case, credentials.
-//  - `.access-token` — a credential file the container entrypoint creates. The
-//    neighbouring `/\.token$/` further down does NOT cover it: the character before
-//    `token` is a hyphen, not a dot.
-//  - `.env` — the entrypoint may create one here. `read_file` was already covered by
-//    the `/\.(env|pem|…)$/` rule below; membership HERE is what also puts it on the
-//    bash lists. `\b` keeps it off a `.environment/` directory.
-//  - `backups/` — the backup manager copies the SQLite stores, vault included, into
-//    a timestamped directory here. The rest of this pattern anchors a name directly
-//    after `.lynox/`, so those copies sat outside it while the originals did not.
-//    Covers the default location only; `backup_dir` can point elsewhere, and a
-//    relocated backup directory is not covered by this list.
+// Kept as STEMS beside the inventory, matched as a prefix: `vault`, `agent-memory`, `history`
+// (their SQLite sidecars and older spellings), and `runs`, `migration-export`, which no current
+// writer creates — removing an entry is a different decision from adding one.
 //
-// Self-host only — managed instances receive these values as container environment
-// and never materialize the files. Path matching stays a bar, not a boundary (see
-// below). The shell reads `.lynox//x` and `.lynox/./x` as `.lynox/x`, so the name is
-// matched after any run of empty and `.` segments, as `LYNOX_DB_FILES` already is.
-const LYNOX_SECRET_FILES =
-  /\.lynox\/+(?:\.\/+)*(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
+// `backups` covers the default location only; `backup_dir` can point elsewhere, and a relocated
+// backup directory is not covered by this list. Self-host only — managed instances receive these
+// values as container environment and never materialize the files. Path matching stays a bar,
+// not a boundary (see below). The shell reads `.lynox//x` and `.lynox/./x` as `.lynox/x`, so the
+// name is matched after any run of empty and `.` segments, as `LYNOX_DB_FILES` already is.
+const SECRET_FILE_STEMS = ['vault', 'agent-memory', 'history', 'runs', 'migration-export'];
+const escapeForRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const LYNOX_SECRET_FILES = new RegExp(
+  `\\.lynox\\/+(?:\\.\\/+)*(?:${[
+    ...SECRET_FILE_STEMS.map(escapeForRegex),
+    ...DATA_DIR_INVENTORY.filter((entry) => entry.secret).map((entry) => `${escapeForRegex(entry.name)}(?![\\w-])`),
+  ].join('|')})`,
+  'i',
+);
 
 // Every SQLite store the engine keeps in the lynox dir, by location rather than by
 // name. The name list above protects the stores that hold secrets; it was never a
