@@ -3131,6 +3131,17 @@ describe('LynoxHTTPApi', () => {
         expect(ps.getById(open)?.answer_saved).toBe(1);
       });
     });
+
+    it('without a promptId it leaves an open question of another kind alone', async () => {
+      await withStore(async (sid, ps) => {
+        const ask = ps.insertAskUser(sid, 'Which list?');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'saved' }),
+        });
+        expect(res.status).toBe(404);
+        expect(ps.getById(ask)?.status).toBe('pending');
+      });
+    });
   });
 
   describe('POST /api/sessions/:id/mail-connected', () => {
