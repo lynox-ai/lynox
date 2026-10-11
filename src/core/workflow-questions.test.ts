@@ -236,6 +236,14 @@ describe('how the wait ends (§4.5)', () => {
     expect(h.notified).toHaveLength(0);
   });
 
+  it('with no prompt store the run ends as not asked rather than go on without its answer', async () => {
+    const h = makeHarness({ promptStore: () => null });
+    await expect(h.q.ask('Nowhere to ask?')).resolves.toBe('__dismissed__');
+    expect(h.q.unansweredBecause).toBe('not_asked');
+    expect(h.scopeMember.abort).toHaveBeenCalledTimes(1);
+    expect(h.notified).toHaveLength(0);
+  });
+
   it('a database closed before the question is stored is the teardown: no answer, nothing marked', async () => {
     const h = makeHarness();
     h.history.close();
