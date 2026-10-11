@@ -78,7 +78,7 @@ const VOICES_PAGE_LIMIT = 100;
  * call is unreachable. A representative EN subset; safe to stay out-of-date
  * because the live fetch overwrites this in the UI the moment Mistral is
  * reachable. Still do not add hardcoded DE entries — there is no German voice to
- * add (live catalog 2026-08-02: 8 en_us, 16 en_gb, 6 fr_fr).
+ * add (live catalog 2026-10-11: 8 en_us, 16 en_gb, 6 fr_fr).
  *
  * The list is English-only; the live catalog also has six `fr_marie_*` voices.
  */

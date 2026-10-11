@@ -176,7 +176,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.tts_heading':   { de: 'Ausgabe (Text-to-Speech)',                                         en: 'Output (Text-to-Speech)' },
 	'voice.tts_privacy':   { de: 'Text geht an Mistral (Paris, EU) zur Synthese: kein Training, 30 rollende Tage zur Missbrauchsüberwachung.', en: 'Text goes to Mistral (Paris, EU) for synthesis: no training, kept 30 rolling days to monitor abuse.' },
 	'voice.tts_voice':     { de: 'Stimme',                                                           en: 'Voice' },
-	'voice.tts_voice_hint': { de: 'Eine hier gewählte Stimme liest alle Sprachen vor.',               en: 'A voice you choose here reads out every language.' },
+	'voice.tts_voice_hint': { de: 'Die gewählte Stimme wird für jede Sprache verwendet.',             en: 'The chosen voice is used for every language.' },
 	'voice.default':       { de: 'Standard',                                                         en: 'Default' },
 	'voice.unavailable':   { de: 'nicht verfügbar',                                                  en: 'unavailable' },
 	'voice.env_override':  { de: 'Vom Server überschrieben:',                                        en: 'Overridden by server:' },
