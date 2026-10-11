@@ -47,8 +47,28 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     ['no type, form body', {}, '_method=DELETE', 'DELETE'],
     ['no type, text that mentions it', {}, 'set _method to DELETE', 'POST'],
     ['empty body', JSON_T, '', 'POST'],
+    ['form key PHP reads as _method', FORM, '.method=DELETE', 'DELETE'],
+    ['form key with a leading space, which PHP drops', FORM, '+method=DELETE', 'POST'],
+    ['form key as an array', FORM, '_method[]=DELETE', 'DELETE'],
+    ['form key as an indexed array', FORM, '_method[0]=delete', 'DELETE'],
+    ['form key in capitals', FORM, '_METHOD=DELETE', 'DELETE'],
+    ['JSON with a stray close tag a repair strips before sending', JSON_T, '{"_method":"DELETE"}</body>', 'DELETE'],
+    ['JSON-like type a server reads as JSON', { 'Content-Type': 'application/json-seq' }, '{"_method":"DELETE"}</body>', 'DELETE'],
+    ['JSON that does not parse, method name escaped', JSON_T, '{"_\\u006dethod":"DELETE"}</body>', 'DELETE'],
+    ['no type, JSON that does not parse', {}, '{"_method":"DELETE"', 'DELETE'],
+    ['form type whose parameter names JSON', { 'Content-Type': 'application/x-www-form-urlencoded; v=/json' }, '{"_method":"DELETE"}', 'DELETE'],
+    ['two types, a JSON string the form read splits', { 'Content-Type': 'application/x-www-form-urlencoded,application/vnd.x+json' }, '"&_method=DELETE&"', 'DELETE'],
+    ['two Content-Type headers', { 'content-type': 'text/plain', 'Content-Type': 'application/json' }, '{"_method":"DELETE"', 'DELETE'],
+    ['multipart name in RFC 2231 form', MULTI, "--b\r\nContent-Disposition: form-data; name*=utf-8''_%6Dethod\r\n\r\nDELETE\r\n--b--", 'DELETE'],
+    ['multipart that mentions it only in a file', MULTI, '--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nuse _method=DELETE\r\n--b--', 'POST'],
+    ['no type, a non-method only the other parser finds', {}, '_method=Looks+safe', 'POST'],
   ] as const)('%s', (_k, headers, body, want) => {
     expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
+  });
+
+  it('reads no body for a GET or a HEAD, which send none', () => {
+    expect(effectiveWriteMethod('GET', { 'content-type': 'application/json' }, U, '{"_method":"DELETE"}')).toBe('GET');
+    expect(effectiveWriteMethod('head', { 'content-type': 'application/json' }, U, '{"_method":"DELETE"}')).toBe('HEAD');
   });
 
   it('refuses a body override that is not a method, a string or not', () => {

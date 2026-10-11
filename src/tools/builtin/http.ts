@@ -2704,22 +2704,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // redirected to `/items/` is followed. Headers ride along on a same-host hop, so the
       // hop's method is read with them.
       const askedPath = normalizeWritePath(new URL(input.url).pathname).path;
-      // The body rides along only on a hop that keeps a method with a body (307/308); a hop
-      // turned into a GET sends none, so no override can come from it there.
-      const hopBody = (redirectMethod: string): string | undefined =>
-        typeof input.body === 'string' && !['GET', 'HEAD'].includes(redirectMethod.toUpperCase()) ? input.body : undefined;
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
             // The hop's own method, with the override forms its target may carry: a
-            // `?_method=` in a Location raises it like one in the request.
-            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, hopBody(redirectMethod));
+            // `?_method=` in a Location raises it like one in the request. The body rides along
+            // on a hop that keeps its method (307/308); for a hop turned into a GET none is read.
+            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, typeof input.body === 'string' ? input.body : undefined);
             return hop !== null &&
               contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
               !isOutboundEffectWrite(nextUrl, hop);
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
-              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, hopBody(redirectMethod));
+              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, typeof input.body === 'string' ? input.body : undefined);
               if (hop === null) return 'consent';
               if (!isWriteMethod(hop)) return true;
               // Another write than the one asked (a Location with `?_method=DELETE`) needs
