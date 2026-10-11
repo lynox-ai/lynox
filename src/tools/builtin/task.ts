@@ -400,11 +400,13 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         // once confirmed" is false whenever the first tick precedes the
         // confirmation, because the disabled task does not come back by itself.
         //
-        // Same order as the worker's gate and the library's schedule route: an
-        // interactive workflow cannot run unattended at all, a workflow that is
-        // not in the library cannot be confirmed there, and only then is the
+        // Same order as the worker's gate and the library's schedule route: a
+        // workflow no schedule may run is refused first, a workflow that is not
+        // in the library cannot be confirmed there, and only then is the
         // confirmation the missing piece — otherwise the advice points at a
-        // step the reader cannot take. The library route creates the task as
+        // step the reader cannot take. One step has no twin in the worker: a
+        // workflow that asks its owner is sent to the library even when
+        // confirmed (see below). The library route creates the task as
         // part of confirming, so the refusal says not to create it here again.
         // Only the id is echoed: this tool's result is not scanned, and the
         // stored name is free text written by someone else. A workflow this
