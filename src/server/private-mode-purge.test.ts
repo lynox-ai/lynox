@@ -9,6 +9,7 @@ import { reloadConfig } from '../core/config.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import type { KnowledgeLayer } from '../core/knowledge-layer.js';
+import type { SubjectStore } from '../core/subject-store.js';
 import type { IAgent } from '../types/index.js';
 import { rememberTool } from '../tools/builtin/knowledge.js';
 
@@ -127,6 +128,25 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     expect(kl.getDb().getMemoryIdsByThread('t-private')).toEqual([]);
     for (const id of other.durable) expect(ks.getEntry(id)).not.toBeNull();
     expect(kl.getDb().getMemoryIdsByThread('t-other')).toEqual([other.legacy]);
+  });
+
+  it('on the booted engine, a subject only the private chat named goes and one another chat named stays', async () => {
+    const { ts, ks } = stores();
+    const subjects = (ks as unknown as { subjects: SubjectStore }).subjects;
+    ts.createThread('t-subject-private', { title: 'chat t-subject-private' });
+    ts.createThread('t-subject-other', { title: 'chat t-subject-other' });
+    const only = ks.write({ text: 'Kornfeld Sattlerei repairs saddles in Thun', subjectName: 'Kornfeld Sattlerei', sourceChannel: 'user', sourceThreadId: 't-subject-private' });
+    const shared = ks.write({ text: 'Brenntal Verlag prints in Olten', subjectName: 'Brenntal Verlag', sourceChannel: 'user', sourceThreadId: 't-subject-private' });
+    ks.write({ text: 'Brenntal Verlag answers within two days', subjectName: 'Brenntal Verlag', sourceChannel: 'user', sourceThreadId: 't-subject-other' });
+    // Positive control: both subjects exist before the switch.
+    expect(subjects.getSubject(only.subjectId!)).not.toBeNull();
+    expect(subjects.getSubject(shared.subjectId!)).not.toBeNull();
+
+    const { status } = await setPrivate('t-subject-private');
+
+    expect(status).toBe(200);
+    expect(subjects.getSubject(only.subjectId!)).toBeNull();
+    expect(subjects.getSubject(shared.subjectId!)).not.toBeNull();
   });
 
   it('a failed durable purge answers 500 with the stored state — never "ok" while the facts remain', async () => {

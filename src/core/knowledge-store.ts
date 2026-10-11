@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
+import type { SubjectStore, SubjectKind, SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
 import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
@@ -186,6 +186,15 @@ export class KnowledgeStore {
    */
   private _focusOverrideSubjectId: string | null = null;
 
+  /**
+   * The references to a subject that live outside engine.db (a thread anchored on it, a table
+   * row linking it), handed over once the engine has both stores. Without it private mode
+   * removes no subject: it cannot tell one nothing else holds.
+   */
+  private _subjectRefs: SubjectExternalRefs | null = null;
+  /** One stderr line per store when private mode has to leave subjects in place. */
+  private _subjectReapSkipWarned = false;
+
   constructor(
     private readonly engine: EngineDb,
     private readonly subjects: SubjectStore,
@@ -199,6 +208,10 @@ export class KnowledgeStore {
     } catch (err: unknown) {
       process.stderr.write(`[lynox:knowledge] profile seed backfill failed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
+  }
+
+  setSubjectRefs(refs: SubjectExternalRefs | null): void {
+    this._subjectRefs = refs;
   }
 
   setFocusOverride(subjectId: string | null): void {
@@ -232,13 +245,19 @@ export class KnowledgeStore {
    * back as ambiguous exactly like {@link SubjectStore.findOrCreate} does.
    */
   private _resolveWriteSubject(name: string):
-    | { ambiguous: false; id: string }
+    | { ambiguous: false; id: string; created: boolean }
     | { ambiguous: true } {
     const found = this._lookupWriteSubject(name);
     if (found.ambiguous) return { ambiguous: true };
-    if (found.row) return { ambiguous: false, id: this._linkWriteHit(found, name) };
+    if (found.row) return { ambiguous: false, id: this._linkWriteHit(found, name), created: false };
     const minted = this.subjects.findOrCreate({ kind: 'organization', name });
-    return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+    return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id, created: minted.created };
+  }
+
+  /** Remember that a conversation's write created a subject, so its private mode can remove it. */
+  private _recordMint(subjectId: string, threadId: string | null | undefined): void {
+    if (!threadId) return;
+    this.db.prepare('INSERT OR IGNORE INTO subject_mints (subject_id, thread_id) VALUES (?, ?)').run(subjectId, threadId);
   }
 
   /**
@@ -452,7 +471,10 @@ export class KnowledgeStore {
           subjectHint = name;
         } else {
           const minted = this.subjects.findOrCreate({ kind: kind ?? 'organization', name });
-          if (minted.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = minted.id; }
+          if (minted.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else {
+            subjectId = minted.id;
+            if (minted.created) this._recordMint(minted.id, params.sourceThreadId);
+          }
         }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
@@ -1061,6 +1083,7 @@ export class KnowledgeStore {
       // mint the organization twin the queue deliberately avoided creating.
       const r = this._resolveWriteSubject(hint);
       subjectId = r.ambiguous ? null : r.id;
+      if (!r.ambiguous && r.created) this._recordMint(r.id, row.source_thread_id);
     }
 
     // Only rewrite the ciphertext when the reviewer actually EDITED the text — a plain approve
@@ -1311,6 +1334,10 @@ export class KnowledgeStore {
    * first source's and can hold detail only this conversation said. An entry left with no
    * source is deleted.
    *
+   * A subject this conversation's writes created goes too, once nothing holds it any more: no
+   * entry, memory, task, thread anchored on it or table row ({@link SubjectStore.reapOrphans}).
+   * A subject that existed before the conversation named it stays.
+   *
    * The block goes FIRST, and a failure on it throws, so the caller can report it. The order
    * is what makes a retry work: with the rows changed first, a failing block would leave a
    * retry with no text to match. Block first, a failure leaves the rows, and the retry
@@ -1340,6 +1367,8 @@ export class KnowledgeStore {
         rewritten.push({ id: row.id, next });
       }
     }
+    const minted = (this.db.prepare('SELECT subject_id FROM subject_mints WHERE thread_id = ?').all(threadId) as Array<{ subject_id: string }>)
+      .map(r => r.subject_id);
     return this.db.transaction(() => {
       this.db.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run(threadId);
       // The entry becomes the remaining source's: its wording, its trust and its pin. The tier is
@@ -1366,6 +1395,17 @@ export class KnowledgeStore {
       const del = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?');
       let removed = 0;
       for (const id of doomed) removed += del.run(id).changes;
+      // Same check, and same transaction, as the legacy memories' purge. A subject something
+      // else still holds stays, and is no longer this conversation's.
+      if (minted.length > 0) {
+        if (this._subjectRefs) {
+          this.subjects.reapOrphans(minted, this._subjectRefs);
+          this.db.prepare('DELETE FROM subject_mints WHERE thread_id = ?').run(threadId);
+        } else if (!this._subjectReapSkipWarned) {
+          this._subjectReapSkipWarned = true;
+          process.stderr.write('[lynox:private] subjects left in place: no thread or table store to check them against\n');
+        }
+      }
       return removed;
     })();
   }
