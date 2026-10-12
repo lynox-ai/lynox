@@ -1,0 +1,29 @@
+# BuildKit config for every `docker/setup-buildx-action` builder that pulls the
+# base image (release.yml, staging.yml, canary-build.yml). ONE COPY, ON PURPOSE.
+#
+# Why a mirror: hosted runners pull Docker Hub anonymously, and the anonymous
+# quota is counted per source IP — an IP shared with other repos' jobs. A busy
+# window answers `429 Too Many Requests` on the `node:22-slim` manifest, and a
+# rerun only helps once the window clears.
+#
+# What it changes: `docker.io` pulls go to mirror.gcr.io first. BuildKit falls
+# back to Docker Hub when the mirror fails, so the mirror adds a path, it does
+# not replace one. For the base image, the `FROM ...@sha256:` pin in the
+# Dockerfile stays the integrity boundary: a mirror that served other bytes
+# would fail the digest.
+#
+# Measured before this was written: mirror.gcr.io answers the pinned digest
+# with 200 and the same Docker-Content-Digest; a builder with this config
+# fetched only from mirror.gcr.io, the same builder without it only from
+# registry-1.docker.io (buildkitd debug log, docker-container driver).
+#
+# This file only reaches pulls made inside the builder. The `moby/buildkit`
+# image the builder itself runs on is pulled by the runner's daemon, as are
+# all pulls in the ci.yml jobs; those go through
+# .github/actions/docker-hub-mirror. A new setup-buildx step needs that action
+# before it, and the same `driver-opts: image=…@sha256:` pin as the five that
+# exist (release.yml ×2, staging.yml ×2, canary-build.yml) — nothing checks
+# this. To move the builder to a newer BuildKit, change the digest in all five.
+
+[registry."docker.io"]
+  mirrors = ["mirror.gcr.io"]
