@@ -55,7 +55,7 @@ export async function verifyCodeLogin(deps: CodeLoginDeps): Promise<CodeLoginOut
 
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({ error: 'Verification failed' })) as { error?: string };
-		// The CP answers every failed code (wrong, expired, used up) with 401 and one text.
+		// A 401 means the code was rejected; the page shows its own text for it. Other statuses keep the CP's text.
 		if (res.status === 401) {
 			return { type: 'fail', status: 401, error: body.error ?? 'Invalid code.', failedLogin: true, errorCode: 'code_rejected' };
 		}
