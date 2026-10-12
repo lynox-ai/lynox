@@ -25,6 +25,8 @@ export interface DocumentMemorySink {
 			sourceChannel?: string | undefined;
 			sourceUntrusted?: boolean | undefined;
 			sourceToolName?: string | undefined;
+			/** Asked by the store after each of its own awaits (`KnowledgeLayer.store`). */
+			cancelled?: (() => boolean) | undefined;
 		},
 	): Promise<unknown>;
 }
@@ -101,8 +103,8 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
  * private mode can be switched on while the chunks are embedding. A chat in private mode
  * stores nothing here: the switch's own purge removes what carries the thread id, and a
  * chunk written after it would carry the id and stay. A check here cannot reach a chunk
- * whose `store` call is already in flight when the switch is flipped; what that call writes
- * after the purge is decided inside `store`, not in this loop.
+ * whose `store` call is already in flight when the switch is flipped, so the predicate is
+ * also handed to `store` as `cancelled`, which asks it again after each of its own awaits.
  */
 export async function ingestDocumentText(
 	sink: DocumentMemorySink,
@@ -159,6 +161,9 @@ export async function ingestDocumentText(
 			sourceChannel: 'upload',
 			sourceUntrusted: true,
 			sourceToolName: 'document_upload',
+			// The same question, asked again inside the store after the embedding and the
+			// entity extraction: a chunk already in flight when the switch flips is dropped there.
+			cancelled: params.isPrivate,
 		});
 		stored++;
 	}

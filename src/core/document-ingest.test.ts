@@ -34,7 +34,7 @@ interface RecordedCall {
 	text: string;
 	namespace: MemoryNamespace;
 	scope: MemoryScopeRef;
-	options?: { sourceThreadId?: string; sourceChannel?: string; sourceUntrusted?: boolean; sourceToolName?: string };
+	options?: { sourceThreadId?: string; sourceChannel?: string; sourceUntrusted?: boolean; sourceToolName?: string; cancelled?: (() => boolean) | undefined };
 }
 
 function fakeSink(): { sink: DocumentMemorySink; calls: RecordedCall[] } {
@@ -125,6 +125,15 @@ describe('ingestDocumentText', () => {
 		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => true });
 		expect(n).toBe(0);
 		expect(calls).toHaveLength(0);
+	});
+
+	it('hands the same predicate to the store, which asks it after its own awaits', async () => {
+		const { sink, calls } = fakeSink();
+		const isPrivate = (): boolean => false;
+		const text = 'first paragraph\n\n' + 'y'.repeat(30);
+		await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate });
+		expect(calls.length).toBeGreaterThan(0);
+		for (const c of calls) expect(c.options?.cancelled).toBe(isPrivate);
 	});
 
 	it('stops at the next chunk when private mode is switched on during the ingest', async () => {
