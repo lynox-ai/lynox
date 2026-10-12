@@ -207,6 +207,15 @@ function shouldRewriteToGet(status: number, method: string): boolean {
   return (status === 301 || status === 302) && method !== 'GET' && method !== 'HEAD';
 }
 
+/** Same scheme and port, so the same service on a host whose name was already compared.
+ *  The one exception is plain http on its default port upgraded to https on its own. The
+ *  asked URL is http or https (the host policy admits nothing else), and https on the default
+ *  port already matched above, so the default ports are all that is left to check. */
+function sameServiceOnHost(asked: URL, next: URL): boolean {
+  if (asked.protocol === next.protocol && asked.port === next.port) return true;
+  return asked.port === '' && next.protocol === 'https:' && next.port === '';
+}
+
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
@@ -2710,8 +2719,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // question — another host, or another path for a write that is asked every time or for
       // a path of the outbound-effect table. Compared on the normalized form, so `/items`
       // redirected to `/items/` is followed. Headers ride along on a same-host hop, so the
-      // hop's method is read with them.
-      const askedPath = normalizeWritePath(new URL(input.url).pathname).path;
+      // hop's method is read with them. Another scheme or port is another service on that
+      // host and is refused the same way; only the upgrade from plain http to https on
+      // the default ports is followed.
+      const askedUrl = new URL(input.url);
+      const askedPath = normalizeWritePath(askedUrl.pathname).path;
       const redirectGuard = (contractGrantsWrite && contract !== undefined)
         ? (nextUrl: string, redirectMethod: string): boolean => {
             // The hop's own method, with the override forms its target may carry: a
@@ -2731,6 +2743,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               if (hop !== gatedMethod) return 'consent';
               const next = new URL(nextUrl);
               if (normalizeApprovalHost(next.hostname) !== approvalHost) return 'consent';
+              if (!sameServiceOnHost(askedUrl, next)) return 'consent';
               const pathDiffers = normalizeWritePath(next.pathname).path !== askedPath;
               return pathDiffers && (!remembers || isOutboundEffectWrite(nextUrl, hop)) ? 'consent' : true;
             }
