@@ -26,19 +26,27 @@ export function urlForNote(raw: string): string {
 }
 
 /**
- * A header name as a note or a refusal may quote it: a header-name token of at most 64
- * characters, or a phrase that quotes nothing. The name was written by a model.
+ * A header name a note or a refusal may quote: a header-name token of at most 64 characters.
+ * The name was written by a model, so anything else is counted, never quoted.
  */
-export function headerNameForNote(raw: string): string {
-  const name = raw.trim();
-  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/.test(name) ? `"${name}"` : 'with a name that is not a valid header name';
-}
+const NOTE_HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/;
 
-/** Up to three refused headers as one phrase, so the next attempt does not meet a second. */
+/**
+ * Every refused header as one phrase, so the next attempt does not meet a second: up to three
+ * valid names quoted, the rest counted, and the names that are not valid header names counted
+ * apart, never quoted.
+ */
 export function headerListForNote(names: readonly string[]): string {
-  const shown = names.slice(0, 3).map(headerNameForNote);
-  const more = names.length > 3 ? ` and ${String(names.length - 3)} more` : '';
-  return `${shown.length > 1 || more !== '' ? 'the headers' : 'a header'} ${shown.join(', ')}${more}`;
+  const valid = names.map((n) => n.trim()).filter((n) => NOTE_HEADER_NAME.test(n));
+  const invalid = names.length - valid.length;
+  if (valid.length === 0) {
+    return invalid === 1 ? 'a header with a name that is not a valid header name' : `${String(invalid)} headers with names that are not valid header names`;
+  }
+  const parts = valid.slice(0, 3).map((n) => `"${n}"`);
+  if (valid.length > 3) parts.push(`${String(valid.length - 3)} more`);
+  if (invalid > 0) parts.push(invalid === 1 ? 'one with a name that is not a valid header name' : `${String(invalid)} with names that are not valid header names`);
+  const last = parts.pop() ?? '';
+  return `${names.length > 1 ? 'the headers' : 'a header'} ${parts.length === 0 ? last : `${parts.join(', ')} and ${last}`}`;
 }
 
 /**
