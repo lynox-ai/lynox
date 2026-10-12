@@ -476,11 +476,11 @@ export interface OAuthRevokeResponse {
 }
 
 /**
- * Why the control plane refused to START a Google consent flow, as sent on the
- * wire: the signed start token was absent, past its TTL, already spent, forged,
- * or names an instance that is not bound. `expired` has a second producer on the
- * callback side (a grant that outlived its latency budget), which is why it is
- * not repeated in {@link OAUTH_DECLINE_CODES}.
+ * Why the control plane refused a signed start token, as sent on the wire: it was
+ * absent, past its TTL, already spent, forged, or names an instance that is not
+ * bound. The start route refuses with these, and the callback reuses `expired`
+ * and `replayed` when it spends the token's nonce. {@link OAUTH_DECLINE_CODES}
+ * includes this list once, so `expired` stays ONE code with two producers.
  */
 export const BROKER_START_FAILURES = [
   'missing_token',

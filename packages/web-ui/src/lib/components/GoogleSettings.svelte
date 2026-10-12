@@ -6,7 +6,7 @@
 	// (shipped in P3-PR-A1); this component just renders the card and owns
 	// the OAuth-claim side-effect (only fires on this route now).
 
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -139,7 +139,9 @@
 				const url = new URL(window.location.href);
 				url.searchParams.delete('google_oauth_error');
 				window.history.replaceState({}, '', url.toString());
-				addToast(t(notice.key), notice.type, 12000);
+				// untrack: `addToast` reads the toast list, which would make this effect
+				// re-run and load both statuses twice.
+				untrack(() => addToast(t(notice.key), notice.type, 12000));
 			}
 		}
 	});

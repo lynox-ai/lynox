@@ -20,7 +20,7 @@ const FAILED: GoogleOAuthErrorNotice = { key: 'integrations.google_oauth_failed'
 // until it has a notice, instead of falling through to the generic one.
 const NOTICE: Record<OAuthDeclineCode, GoogleOAuthErrorNotice> = {
 	access_denied: CANCELLED,
-	missing_token: LINK_STALE,
+	missing_token: FAILED,
 	expired: LINK_STALE,
 	replayed: LINK_STALE,
 	bad_signature: FAILED,

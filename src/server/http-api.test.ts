@@ -11331,6 +11331,26 @@ describe('LynoxHTTPApi', () => {
       expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
     });
 
+    it('an error param leaves the state cookie alone; the successful exchange clears it', async () => {
+      // The error branch checks no state, so a cookie clear there would let any page
+      // that navigates the browser to `?error=x` break a consent in progress.
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({ scopeMode: 'read' }),
+      });
+      const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+      expect(oauthCookie).toBeTruthy();
+
+      const errRes = await fetch(`${baseUrl}/api/google/callback?error=access_denied`, { headers: { cookie: oauthCookie! } });
+      expect(errRes.status).toBe(200);
+      expect(errRes.headers.get('set-cookie') ?? '').not.toContain('lynox_oauth_state');
+
+      // Positive control on the same machinery: the success path does clear it.
+      const okRes = await fetch(`${baseUrl}/api/google/callback?code=valid-code&state=test-state`, { headers: { cookie: oauthCookie! } });
+      expect(okRes.status).toBe(200);
+      expect(okRes.headers.get('set-cookie') ?? '').toContain('lynox_oauth_state');
+    });
+
     it('a hostile error param never reaches the page (XSS guard)', async () => {
       // Google never sends this in practice; the handler maps it to a contract
       // code, so nothing from the querystring is rendered at all.

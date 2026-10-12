@@ -8984,7 +8984,9 @@ export class LynoxHTTPApi {
         const decline: OAuthDeclineCode = error === 'access_denied' ? 'access_denied' : 'exchange_failed';
         const target = `${process.env['ORIGIN'] ?? ''}/app/settings/channels/google?google_oauth_error=${decline}`;
         const escaped = target.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
-        LynoxHTTPApi._appendSetCookie(res, this._clearOAuthStateCookie());
+        // The state cookie is left alone: this branch checks no state, so clearing it
+        // would let any page that navigates this browser here break a consent in
+        // progress. The next POST /api/google/auth overwrites it anyway.
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Not connected</title></head><body><p>Google was not connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
         return;

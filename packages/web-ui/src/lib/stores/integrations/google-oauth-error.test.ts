@@ -18,7 +18,7 @@ describe('googleOAuthErrorNotice', () => {
 	it('maps each contract code to its notice', () => {
 		const got = Object.fromEntries(OAUTH_DECLINE_CODES.map((c) => [c, googleOAuthErrorNotice(c)]));
 		expect(got).toEqual({
-			missing_token: { key: 'integrations.google_oauth_link_stale', type: 'error' },
+			missing_token: { key: 'integrations.google_oauth_failed', type: 'error' },
 			expired: { key: 'integrations.google_oauth_link_stale', type: 'error' },
 			replayed: { key: 'integrations.google_oauth_link_stale', type: 'error' },
 			bad_signature: { key: 'integrations.google_oauth_failed', type: 'error' },
@@ -44,15 +44,15 @@ describe('the Google card reads the parameter', () => {
 	it('reads google_oauth_error, removes it from the URL and shows the notice', () => {
 		expect(card).toContain("googleOAuthErrorNotice(params.get('google_oauth_error'))");
 		expect(card).toContain("url.searchParams.delete('google_oauth_error')");
-		expect(card).toContain('addToast(t(notice.key), notice.type, 12000)');
+		expect(card).toContain('untrack(() => addToast(t(notice.key), notice.type, 12000))');
 	});
 });
 
 describe('every notice key has one German and one English line', () => {
 	const lines: Record<string, string> = {
-		'integrations.google_oauth_cancelled': "\t'integrations.google_oauth_cancelled': { de: 'Google-Verbindung abgebrochen. Es wurde nichts verbunden.', en: 'Google connection cancelled. Nothing was connected.' },",
+		'integrations.google_oauth_cancelled': "\t'integrations.google_oauth_cancelled': { de: 'Google-Verbindung abgebrochen. Es wurde nichts geändert.', en: 'Google connection cancelled. Nothing was changed.' },",
 		'integrations.google_oauth_link_stale': "\t'integrations.google_oauth_link_stale': { de: 'Der Verbindungslink war abgelaufen oder schon benutzt. Bitte verbinde Google erneut.', en: 'The connection link had expired or was already used. Please connect Google again.' },",
-		'integrations.google_oauth_failed': "\t'integrations.google_oauth_failed': { de: 'Google-Verbindung fehlgeschlagen. Bitte versuche es erneut. Gehört dein Konto zu einem Google Workspace deiner Firma, muss dessen Admin lynox eventuell zuerst freigeben.', en: 'Google connection failed. Please try again. If your account belongs to your company\\'s Google Workspace, its admin may need to allow lynox first.' },",
+		'integrations.google_oauth_failed': "\t'integrations.google_oauth_failed': { de: 'Google-Verbindung fehlgeschlagen. Bitte versuche es erneut. Gehört dein Konto zu einem Google Workspace deiner Firma, muss dessen Admin die App eventuell zuerst freigeben.', en: 'Google connection failed. Please try again. If your account belongs to your company\\'s Google Workspace, its admin may need to allow the app first.' },",
 	};
 	for (const [key, line] of Object.entries(lines)) {
 		it(key, () => {
