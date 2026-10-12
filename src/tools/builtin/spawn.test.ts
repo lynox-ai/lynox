@@ -808,7 +808,9 @@ describe('spawn_agent tool', () => {
     try {
       await expect(
         spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Analyze', profile: name }] }, makeAgent()),
-      ).rejects.toThrow(/Unknown model profile/);
+      // The error lists the configured names — it is where the model learns them now that the
+      // guard refuses it the config file.
+      ).rejects.toThrow(/Unknown model profile ".*"\. Available: pinned\./);
     } finally {
       vi.unstubAllEnvs();
       reloadConfig();

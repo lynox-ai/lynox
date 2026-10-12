@@ -100,7 +100,12 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   { name: 'apis', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
   { name: 'workspace', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
   { name: 'sweeps', kind: 'dir', secret: false, backup: true, migrate: true, erase: REMOVE },
-  { name: 'config.json', kind: 'file', secret: false, backup: true, migrate: true, erase: STEP },
+  // `secret`: on a self-hosted install `config.json` can hold provider keys and other credentials
+  // the operator saved in settings. The engine reads it through the filesystem, which the path
+  // guard does not see; no agent tool needs it (an unknown model profile name fails in
+  // `spawn_agent` with the list of configured ones). The guard's `.lynox/` prefix also covers a
+  // project's own `<project>/.lynox/config.json`, deliberately.
+  { name: 'config.json', kind: 'file', secret: true, backup: true, migrate: true, erase: STEP },
 
   // ── Carried by backup, deliberately NOT by migration ───────────────────────
   {

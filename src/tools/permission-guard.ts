@@ -14,7 +14,7 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 // ── isCriticalTool — moved from pre-approve.ts ─────────────
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
-// still read the entries that are not marked secret, `config.json` among them. Prefix is fuzzy
+// still read the entries that are not marked secret, `apis/` among them. Prefix is fuzzy
 // (matches macOS /Users/foo AND Linux /home/foo paths). Shared between the file-tool path guard
 // and both bash scan lists so they cannot drift apart. H-003 / L1-011.
 //
@@ -31,10 +31,11 @@ import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 //    a slash, `.env.local`, but not the arming marker `wire-sink-raw-on`.
 //
 // `backups` covers the default location only; `backup_dir` can point elsewhere, and a relocated
-// backup directory is not covered by this list. Self-host only — managed instances receive these
-// values as container environment and never materialize the files. Path matching stays a bar,
-// not a boundary (see below). The shell reads `.lynox//x` and `.lynox/./x` as `.lynox/x`, so the
-// name is matched after any run of empty and `.` segments, as `LYNOX_DB_FILES` already is.
+// backup directory is not covered by this list. Managed-pool instances receive their provider
+// keys as container environment; a hosted BYOK instance can still save a key into its
+// `config.json`, which this list covers. Path matching stays a bar, not a boundary (see below).
+// The shell reads `.lynox//x` and `.lynox/./x` as `.lynox/x`, so the name is matched after any
+// run of empty and `.` segments, as `LYNOX_DB_FILES` already is.
 const HAND_KEPT_SECRET_NAMES = String.raw`vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/`;
 const escapeForRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const LYNOX_SECRET_FILES = new RegExp(
