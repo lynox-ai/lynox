@@ -211,10 +211,8 @@ const deadenOpener = (match: string, open: string): string =>
  * separator class in exchange: `BOUNDARY_SEP` still has to match it for input
  * that reaches a pattern without going through the fold.
  *
- * ⚠ **Bounded, and the bound is the point.** Folding closes the invisible half.
- * It says nothing about re-encodings — percent form, double-encoded entities,
- * fullwidth delimiters — which are a different substrate and are NOT addressed
- * here. Do not read a green suite as more than the half it covers.
+ * Folding only removes `Cf` characters; every other character is kept as it
+ * was written.
  */
 const FORMAT_CHAR = /\p{Cf}/u;
 
