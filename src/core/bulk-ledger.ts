@@ -86,7 +86,18 @@ export type BulkInvalidReason =
   /** The target's address looks like it carries a secret; it is never requested. */
   | 'secret_in_target'
   /** The target is a mail provider's API (`isMailProviderTarget`); a bulk run never writes one. */
-  | 'mail_api';
+  | 'mail_api'
+  // Elements of a list source (`bulk-list.ts`):
+  /** the list element is not a JSON object */
+  | 'list_item_not_object'
+  /** the list element has no id field */
+  | 'list_item_no_id'
+  /** the element's id is not a whole number or a plain token, so it cannot be an address */
+  | 'list_item_bad_id'
+  /** the element's address would lie outside the list's path */
+  | 'list_item_outside_list'
+  /** the target read at the element's address is not the element that was listed */
+  | 'list_item_mismatch';
 
 export interface BulkRunStatus {
   id: string;
