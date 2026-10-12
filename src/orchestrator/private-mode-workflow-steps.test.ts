@@ -254,14 +254,28 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
     await runOneStepWorkflow(parent);
 
     expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(storeResults[0]).toContain(PRIVATE_REFUSAL_PREFIX);
     expect(memory.maybeUpdateCalls).toEqual([]);
   });
 
-  it('D: a nested pipeline\'s step started from a private chat neither stores nor captures', async () => {
+  it('C2: the switch reaches the step through the thread row when the chat\'s agent was rebuilt', async () => {
     const memory = makeFakeMemory();
-    const parent = makeParent({ threadId: 't-priv', privateMode: true, memory });
-    scriptStep();
+    const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    // The session rebuilt its agent (model change) before the user switched private mode on,
+    // so the flag flips on a NEW agent and this run's origin still holds the old one. Only the
+    // thread row changes here.
+    scriptStep(() => {
+      threadRows.set('t-pub', { id: 't-pub', skip_extraction: 1 });
+    });
 
+    await runOneStepWorkflow(parent);
+
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(parent.skipMemoryExtraction).toBe(false);
+    expect(memory.maybeUpdateCalls).toEqual([]);
+  });
+
+  async function runNested(parent: ParentAgent, memory: FakeMemory): Promise<void> {
     await runManifest({
       manifest_version: '1.0',
       name: 'nested-private-probe',
@@ -281,12 +295,32 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
       chatOrigin: chatOriginOf(parent),
     }));
     await new Promise(r => setTimeout(r, 0));
+  }
+
+  it('D: a nested pipeline\'s step started from a private chat neither stores nor captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-priv', privateMode: true, memory });
+    scriptStep();
+
+    await runNested(parent, memory);
 
     expect(mockProcess).toHaveBeenCalledTimes(2);
     expect(storeResults).toHaveLength(1);
     expect(storeResults[0]).toContain(PRIVATE_REFUSAL_PREFIX);
     expect(memory.writes).toEqual([]);
     expect(memory.maybeUpdateCalls).toEqual([]);
+  });
+
+  it('D (positive control): the same nested step from a normal chat stores and captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    scriptStep();
+
+    await runNested(parent, memory);
+
+    expect(storeResults[0]).toMatch(/^Stored in knowledge\./);
+    expect(memory.writes.map(w => w.method)).toEqual(['append']);
+    expect(memory.maybeUpdateCalls).toHaveLength(1);
   });
 
   function plannedProbe(): PlannedPipeline {
@@ -321,23 +355,53 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
     expect(memory.maybeUpdateCalls).toEqual([]);
   });
 
-  it('F: a retry from a chat that went private since the first run neither stores nor captures', async () => {
+  it('E (positive control): the same saved workflow from a normal chat stores and captures', async () => {
     const memory = makeFakeMemory();
     const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    storePipeline('wf-private-probe', plannedProbe());
+    scriptStep();
+
+    await runWorkflowTool.handler({ workflow_id: 'wf-private-probe' }, parent);
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(storeResults[0]).toMatch(/^Stored in knowledge\./);
+    expect(memory.writes.map(w => w.method)).toEqual(['append']);
+    expect(memory.maybeUpdateCalls).toHaveLength(1);
+  });
+
+  async function failFirstRun(parent: ParentAgent): Promise<void> {
     storePipeline('wf-private-probe', plannedProbe());
     // First run: a step that fails, so the retry has something to re-run.
     mockProcess.mockImplementationOnce(() => Promise.reject(new Error('provider down')));
     await runWorkflowTool.handler({ workflow_id: 'wf-private-probe' }, parent);
-    expect(memory.writes).toEqual([]);
+    mockProcess.mockClear();
+  }
+
+  it('F (positive control): a retry from a normal chat stores and captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    await failFirstRun(parent);
+    scriptStep();
+
+    await runWorkflowTool.handler({ workflow_id: 'wf-private-probe', retry: true }, parent);
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(storeResults.at(-1)).toMatch(/^Stored in knowledge\./);
+    expect(memory.maybeUpdateCalls).toHaveLength(1);
+  });
+
+  it('F: a retry from a chat that went private since the first run neither stores nor captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    await failFirstRun(parent);
 
     parent.skipMemoryExtraction = true;
     threadRows.set('t-pub', { id: 't-pub', skip_extraction: 1 });
-    mockProcess.mockClear();
     scriptStep();
-    const out = await runWorkflowTool.handler({ workflow_id: 'wf-private-probe', retry: true }, parent);
+    await runWorkflowTool.handler({ workflow_id: 'wf-private-probe', retry: true }, parent);
     await new Promise(r => setTimeout(r, 0));
 
-    expect(out).not.toMatch(/^Error: No previous execution/);
     expect(mockProcess).toHaveBeenCalledTimes(2);
     expect(storeResults.at(-1)).toContain(PRIVATE_REFUSAL_PREFIX);
     expect(memory.writes).toEqual([]);

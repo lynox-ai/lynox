@@ -197,11 +197,21 @@ export interface ChatOrigin {
   readonly skipsCapture: () => boolean;
 }
 
-/** The {@link ChatOrigin} of a calling agent, read live. */
-export function chatOriginOf(agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'>): ChatOrigin {
+/**
+ * The {@link ChatOrigin} of a calling agent, read live — from the agent's flag AND from the
+ * thread row. The row is what the private-mode switch writes, and it outlives the agent: the
+ * session rebuilds its agent on a model or thinking change, and the switch then flips the NEW
+ * agent while this origin still holds the old one. The flag also carries the global
+ * `memory_extraction: false`, which stands a step's capture down as it does the chat's.
+ */
+export function chatOriginOf(
+  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext'>>,
+): ChatOrigin {
+  const threadId = agent.currentThreadId ?? agent.originThreadId;
   return {
-    threadId: agent.currentThreadId ?? agent.originThreadId,
-    skipsCapture: () => agent.skipMemoryExtraction === true,
+    threadId,
+    skipsCapture: () => agent.skipMemoryExtraction === true
+      || (threadId !== undefined && agent.toolContext?.threadStore?.getThread(threadId)?.skip_extraction === 1),
   };
 }
 
