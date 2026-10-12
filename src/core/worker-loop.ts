@@ -1751,27 +1751,32 @@ export class WorkerLoop {
     // read out of a row and handed to a fresh turn as input, which is why §0 E3's
     // objection — that "continuing" would promise a state restoration that does
     // not exist — does not apply to it.
-    const answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
+    let answered = this.engine.getPromptStore()?.getAnsweredForTrigger(task.id);
     // Who this run is for. A request that started it by hand says so; a run that picks up
     // an answer after its starter's request is gone reads who asked from the question
     // (register: hand-run question origin, second half). A mandate's question keeps the
     // mandate's tool lock across a restart instead of coming back as the owner's run. It
     // only narrows the tools: nothing that grants a hand run reads it.
-    const starter = handStarter ?? (answered && isMandateTag(answered.created_by) ? principalOfPrompt(answered) : undefined);
+    // A mandate's answer is taken only while its grant lives (§3.13 B4). The answering request
+    // was checked, but a revoke or the grant's end can come between the answer and this pickup.
+    // Then the answer is released unread, whoever starts the run: a run by hand goes on
+    // without it, and a run that only the answer started is not made in the mandate's name;
+    // it is recorded as failed, with no retry, like any run a mandate started.
+    const asker = answered !== undefined && isMandateTag(answered.created_by) ? principalOfPrompt(answered) : undefined;
+    if (answered !== undefined && asker?.kind === 'mandate'
+      && !(asker.mandateId !== undefined && (this.engine.getMandateEnds()?.isLive(asker.mandateId) ?? false))) {
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      if (handStarter === undefined) {
+        this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed', { starter: asker });
+        process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
+        return;
+      }
+      answered = undefined;
+    }
+    const starter = handStarter ?? asker;
     // And the run is that mandate's from here on: it may stop it, and it is not retried.
     const running = this.#runSlotOf(task.id);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
-    // A mandate's answer is picked up only while its grant lives (§3.13 B4). The answering
-    // request was checked, but a revoke or the grant's end can come between the answer and
-    // this pickup. Then the answer is released unread and no run is made in the mandate's
-    // name; the run is recorded as failed, with no retry, like any run a mandate started.
-    if (handStarter === undefined && answered !== undefined && starter?.kind === 'mandate'
-      && !(starter.mandateId !== undefined && (this.engine.getMandateEnds()?.isLive(starter.mandateId) ?? false))) {
-      this.engine.getPromptStore()?.releaseTrigger(answered.id);
-      this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed');
-      process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
-      return;
-    }
     const triggerTier = admittedTriggerTier(task.model_tier);
     const session = this.engine.createSession({
       autonomy: 'autonomous',

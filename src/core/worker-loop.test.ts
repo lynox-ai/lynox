@@ -3588,10 +3588,10 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   // it the in-memory hand-run mark; only the question row still says who asked and whether a
   // run by hand did. Each case below is the state a restart leaves — a proposal the owner
   // stamped while its test question was open — read by a loop that never ran it.
-  // The mandate's grant, as a question written since v60 carries it; `live` says which grants
-  // the engine's store of mandate ends still reads as live.
+  // The mandate's grant, as a question written since v60 carries it; `isLive` is the engine's
+  // store of mandate ends (null: the engine has none).
   const EVA_GRANT = { ...EVA, mandateId: 'grant-eva' };
-  function parkedAfterRestart(stamp: PromptStamp, stamped = true, maxRetries?: number, live: ReadonlySet<string> = new Set(['grant-eva'])): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
+  function parkedAfterRestart(stamp: PromptStamp, stamped = true, maxRetries?: number, isLive: ((id: string) => boolean) | null = (id) => id === 'grant-eva'): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
     const store = new PromptStore(history.getDb());
     const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, ...(maxRetries !== undefined ? { maxRetries } : {}) }) as TriggerRecord;
     const promptId = store.insertAskUser(`ask-${t.id}`, 'Which list?', ['A', 'B'], undefined, undefined, undefined, t.id, stamp);
@@ -3600,7 +3600,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const session = makeSession('Resumed.');
     const engine = Object.assign(
       makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store }),
-      { getRunHistory: () => history, getMandateEnds: () => ({ isLive: (id: string) => live.has(id) }) },
+      { getRunHistory: () => history, getMandateEnds: () => (isLive === null ? null : { isLive }) },
     ) as unknown as Engine;
     return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), store, t, promptId, engine };
   }
@@ -3722,7 +3722,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
 
     it('255-e: a mandate\'s answer picked up after its grant ended makes no run, and the answer is let go', async () => {
     // Answered while the grant lived; revoked (or run out) before the pickup.
-    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true }, true, 2, new Set());
+    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true }, true, 2, () => false);
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
     const calls = create.mock.calls.length;
@@ -3738,7 +3738,8 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-e twin: a mandate\'s answer from before v60 names no grant and is let go the same way', async () => {
-    const h = parkedAfterRestart({ principal: EVA, handRun: true });
+    // A store that calls every grant live: what refuses here is that the question names none.
+    const h = parkedAfterRestart({ principal: EVA, handRun: true }, true, undefined, () => true);
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
     const calls = create.mock.calls.length;
@@ -3749,7 +3750,47 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     h.loop.stop();
   });
 
-it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
+  it('255-e2: with no store of mandate ends, a mandate\'s answer is let go too', async () => {
+    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true }, true, undefined, null);
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
+    const calls = create.mock.calls.length;
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    expect(create.mock.calls.length).toBe(calls);
+    expect(tm.getTrigger(h.t.id)!.last_run_status).toBe('failed');
+    h.loop.stop();
+  });
+
+  it('255-e3: the owner running it by hand after the grant ended runs without the mandate\'s answer, and lets it go', async () => {
+    const h = parkedAfterRestart({ principal: EVA_GRANT }, true, undefined, () => false);
+    expect(h.store.answerUser(h.promptId, 'SECRET-ANSWER')).toBe(true);
+    let task: string | undefined;
+    const session = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>)() as Session;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async (x: unknown) => { task = String(x); return 'Ran.'; });
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null, h.loop.claimHandRunMinter()(h.t.id, OWNER_PRINCIPAL));
+    expect(task).toBeDefined();
+    expect(task).not.toContain('SECRET-ANSWER');
+    const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
+    expect(opts?.['principal']).toEqual(OWNER_PRINCIPAL);
+    expect(h.store.getAnsweredForTrigger(h.t.id)).toBeUndefined();
+    h.loop.stop();
+  });
+
+  it('255-e3 twin: the owner running it by hand while the grant lives gets the answer', async () => {
+    const h = parkedAfterRestart({ principal: EVA_GRANT });
+    expect(h.store.answerUser(h.promptId, 'LIVE-ANSWER')).toBe(true);
+    let task: string | undefined;
+    const session = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>)() as Session;
+    (session.run as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(async (x: unknown) => { task = String(x); return 'Ran.'; });
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null, h.loop.claimHandRunMinter()(h.t.id, OWNER_PRINCIPAL));
+    expect(task).toContain('LIVE-ANSWER');
+    h.loop.stop();
+  });
+
+  it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
     const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
     const { session, started, release } = heldSession(new Error('provider down'));
     const router = makeNotificationRouter(true);

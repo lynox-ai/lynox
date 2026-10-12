@@ -6,6 +6,7 @@ import type { LynoxConfig } from '../types/index.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
+import { MandateEnds } from './mandate-ends.js';
 
 /**
  * The engine hands out a store for mandate ends, on its own engine.db.
@@ -123,5 +124,35 @@ describe('Engine boot — mandate ends', () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
     try { sweeps[0]!(); } finally { clock.mockRestore(); }
     expect(store.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
+
+    // With no store of ends, every mandate counts as ended — a live grant included.
+    ends.record({ kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-long', mandateExp: now + 3_600 }, now);
+    const live = store.insertAskUser('s-2', 'q?', undefined, undefined, undefined, undefined, undefined,
+      { principal: { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-long' } });
+    sweeps[0]!();
+    expect(store.getById(live)!.status).toBe('pending');
+    (engine as unknown as { _mandateEnds: unknown })._mandateEnds = null;
+    sweeps[0]!();
+    expect(store.getById(live)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
+  });
+
+  it('keeps its questions working when the sweep at boot fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mandatesweepfail-'));
+    dirs.push(dir);
+    const first = await boot(dir);
+    const t = first.getTaskManager()!.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z' });
+    const id = first.getPromptStore()!.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, t.id,
+      { principal: { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-any' } });
+    await first.shutdown();
+    engines.length = 0;
+    const broken = vi.spyOn(MandateEnds.prototype, 'isLive').mockImplementation(() => { throw new Error('engine.db busy'); });
+    let second: Engine;
+    try { second = await boot(dir); } finally { broken.mockRestore(); }
+    const store = second.getPromptStore();
+    expect(store).not.toBeNull();
+    expect(store!.getById(id)!.status).toBe('pending');
+    // The next sweep, with engine.db readable again, closes it.
+    second.getMandateEnds()!.revoke('M-other');
+    expect(store!.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
   });
 });

@@ -1909,10 +1909,17 @@ export class LynoxHTTPApi {
     sessionId: string,
     promptId: string | undefined,
   ): boolean {
-    if (isOwnerPrincipal(this._principalOf(req))) return false;
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
     const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
       .filter((row): row is PendingPromptRow => row !== undefined);
     if (candidates.length === 0) return false;
+    // A question names the grant it was asked under (v60). A later grant for the same address is
+    // another grant (§3.13 B4): it does not answer what the earlier one left open.
+    if (principal.kind === 'mandate' && candidates.some((row) => row.mandate_id !== null && row.mandate_id !== principal.mandateId)) {
+      errorResponse(res, 403, 'Only the owner of this instance, or the person who started it, can answer this question.');
+      return true;
+    }
     return this._refuseUnlessOwns(req, res, 'answer this question', () => candidates);
   }
 

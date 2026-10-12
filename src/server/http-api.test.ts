@@ -15514,6 +15514,18 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
       expect((await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) })).status).toBe(200);
       expect(prompts.getById(id)!.status).toBe('answered');
     });
+
+    it('refuses a later grant for the same address the question an earlier grant asked, by id and through the fallback', async () => {
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: { ...MANDATE, mandateId: 'grant-old' } });
+      api.setPrincipalResolverForTesting(() => ({ ...MANDATE, mandateId: 'grant-new' }));
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) }));
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ answer: 'A' }) }));
+      expect(prompts.getById(id)!.status).toBe('pending');
+      // The grant that asked answers it.
+      api.setPrincipalResolverForTesting(() => ({ ...MANDATE, mandateId: 'grant-old' }));
+      expect((await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) })).status).toBe(200);
+      expect(prompts.getById(id)!.status).toBe('answered');
+    });
   });
 
   describe('stopping, reviewing and compacting a run (E7, G3)', () => {
