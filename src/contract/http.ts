@@ -217,8 +217,14 @@ export interface MagicLinkVerifyRequest {
  * only to callers of a version that does all of it. Sent on all three auth
  * requests: the code request too, so that no code is mailed for a login the
  * caller could not carry.
+ *
+ * - 1: reads the principal in the success body (Bau B).
+ * - 2: H2. A mandate session cannot mint an owner session (no passkey, no link code,
+ *   no credential reveal), every user route declares what a mandate may do there, and
+ *   the owner's own session carries the owner's principal, so a cookie without one is
+ *   refused on a managed instance.
  */
-export const LOGIN_PRINCIPAL_VERSION = 1;
+export const LOGIN_PRINCIPAL_VERSION = 2;
 
 /** Body of `POST /internal/auth/request`. */
 export interface AuthCodeRequest {

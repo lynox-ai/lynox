@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readLoginPrincipal, type MandateLoginPrincipal } from '../contract/http.js';
+import { isHostedInstance } from '../contract/vocab.js';
 
 export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60; // 30 days
 
@@ -16,12 +17,33 @@ export const MANDATE_SESSION_MAX_S = 15 * 60;
 export const SESSION_FUTURE_SKEW_S = 60;
 
 /**
- * The principal a session carries. Only a mandate session carries one: an owner
- * login still mints the cookie without a principal, as before. The engine reads
- * the same part (`src/server/http-api.ts`, `_verifySessionCookie`); the two must
- * agree on every field here.
+ * Whether this instance was provisioned by the control plane. Read the way the engine
+ * reads it (`readEnvAlias('LYNOX_BILLING_TIER')`, legacy `LYNOX_MANAGED_MODE`); on a
+ * managed instance the Web UI runs in the engine's process, so both see the same env.
+ * An instance id alone also counts: mandate login needs it, so a missing or unknown tier
+ * must not leave a cookie without a principal standing where a mandate can log in.
  */
-export interface SessionPrincipal {
+function hostedInstance(): boolean {
+	const env = process.env;
+	const tier = env['LYNOX_BILLING_TIER'] || env['LYNOX_MANAGED_MODE'] || undefined;
+	return isHostedInstance(tier) || Boolean(env['LYNOX_MANAGED_INSTANCE_ID']);
+}
+
+/** The owner's principal: every owner login mints it (PRD D2). */
+export interface OwnerSessionPrincipal {
+	v: 1;
+	kind: 'owner';
+}
+
+/** The principal the owner's session carries. */
+export const OWNER_SESSION_PRINCIPAL: OwnerSessionPrincipal = Object.freeze({ v: 1, kind: 'owner' });
+
+/**
+ * The principal a mandate session carries. The engine reads the same part
+ * (`src/server/http-api.ts`, `_verifySessionCookie`); the two must agree on every
+ * field here and on the owner's principal above.
+ */
+export interface MandateSessionPrincipal {
 	v: 1;
 	kind: 'mandate';
 	email: string;
@@ -40,7 +62,7 @@ export interface SessionPrincipal {
  * when the mandate ends, whichever comes first. `null` when the mandate has
  * already ended or its end cannot be read.
  */
-export function mandateSessionPrincipal(p: MandateLoginPrincipal, nowS = Math.floor(Date.now() / 1000)): SessionPrincipal | null {
+export function mandateSessionPrincipal(p: MandateLoginPrincipal, nowS = Math.floor(Date.now() / 1000)): MandateSessionPrincipal | null {
 	const mandateEndS = Math.floor(Date.parse(p.mandate_expires_at) / 1000);
 	if (!Number.isFinite(mandateEndS)) return null;
 	const exp = Math.min(nowS + MANDATE_SESSION_MAX_S, mandateEndS);
@@ -53,7 +75,7 @@ export function mandateSessionPrincipal(p: MandateLoginPrincipal, nowS = Math.fl
  * principal `<nonce>.<principal>.<unix_ts>.<hmac_hex>`, the principal one
  * base64url part (no dots) covered by the same HMAC.
  */
-export function createSessionToken(secret: string, principal?: SessionPrincipal): string {
+export function createSessionToken(secret: string, principal?: OwnerSessionPrincipal | MandateSessionPrincipal): string {
 	const key = deriveKey(secret, 'lynox-session');
 	const nonce = randomBytes(8).toString('hex');
 	const ts = Math.floor(Date.now() / 1000).toString();
@@ -64,7 +86,7 @@ export function createSessionToken(secret: string, principal?: SessionPrincipal)
 	return `${payload}.${hmac}`;
 }
 
-function parseSessionPrincipal(part: string): SessionPrincipal | null {
+function parseSessionPrincipal(part: string): OwnerSessionPrincipal | MandateSessionPrincipal | null {
 	let raw: unknown;
 	try {
 		raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -73,7 +95,11 @@ function parseSessionPrincipal(part: string): SessionPrincipal | null {
 	}
 	if (raw === null || typeof raw !== 'object') return null;
 	const p = raw as Record<string, unknown>;
-	if (p['v'] !== 1 || p['kind'] !== 'mandate') return null;
+	if (p['v'] !== 1) return null;
+	// The owner's principal is exactly `{v:1,kind:'owner'}`: any other field beside it is a
+	// shape this reader does not know, refused rather than read as the owner.
+	if (p['kind'] === 'owner') return Object.keys(p).length === 2 ? OWNER_SESSION_PRINCIPAL : null;
+	if (p['kind'] !== 'mandate') return null;
 	const { email, display, mandate_id: mandateId, exp } = p;
 	if (typeof email !== 'string' || email.length === 0) return null;
 	if (typeof display !== 'string' || display.length === 0) return null;
@@ -89,10 +115,14 @@ function parseSessionPrincipal(part: string): SessionPrincipal | null {
  * Read a session token: who it is and when it was issued, or `null` when it is
  * not correctly signed, has expired, or carries a principal this reader does not
  * know. Formats: `<ts>.<hmac>` (old), `<nonce>.<ts>.<hmac>`, and
- * `<nonce>.<principal>.<ts>.<hmac>`. A principal session ends at its signed `exp`
- * and is refused when stamped more than a minute in the future.
+ * `<nonce>.<principal>.<ts>.<hmac>`. A principal session is refused when stamped
+ * more than a minute in the future; a mandate's ends at its signed `exp`.
+ *
+ * `principal: null` means the owner, in either form: the owner's principal, or no
+ * principal at all. The second is the owner's only on a self-hosted instance; on a
+ * managed one a token without a principal is refused (PRD D2), as the engine does.
  */
-export function readSessionToken(token: string, secret: string): { iat: number; principal: SessionPrincipal | null } | null {
+export function readSessionToken(token: string, secret: string): { iat: number; principal: MandateSessionPrincipal | null } | null {
 	const parts = token.split('.');
 	if (parts.length < 2 || parts.length > 4) return null;
 
@@ -120,19 +150,20 @@ export function readSessionToken(token: string, secret: string): { iat: number; 
 		return null;
 	}
 
-	if (parts.length < 4) return { iat: timestamp, principal: null };
+	if (parts.length < 4) return hostedInstance() ? null : { iat: timestamp, principal: null };
 	const principal = parseSessionPrincipal(parts[1]!);
 	if (principal === null) return null;
 	if (timestamp - nowS > SESSION_FUTURE_SKEW_S) return null;
+	if (principal.kind === 'owner') return { iat: timestamp, principal: null };
 	if (nowS >= principal.exp) return null;
 	return { iat: timestamp, principal };
 }
 
 /**
  * The session a verified login gets: the token and the cookie's Max-Age. The
- * owner (`null`) gets the principal-less 30-day session as before; a mandate
- * login gets a principal session that ends at its `exp`. `null` when the
- * mandate has already ended, and then there is no session.
+ * owner (`null`) gets the owner's 30-day session; a mandate login gets a
+ * principal session that ends at its `exp`. `null` when the mandate has already
+ * ended, and then there is no session.
  */
 export function loginSession(secret: string, login: MandateLoginPrincipal | null): { token: string; maxAge: number } | null {
 	if (login === null) return ownerSession(secret);
@@ -142,9 +173,9 @@ export function loginSession(secret: string, login: MandateLoginPrincipal | null
 	return { token: createSessionToken(secret, principal), maxAge: principal.exp - nowS };
 }
 
-/** The owner's session: no principal, 30 days, as every login minted it before mandates. */
+/** The owner's session: the owner's principal, 30 days. */
 export function ownerSession(secret: string): { token: string; maxAge: number } {
-	return { token: createSessionToken(secret), maxAge: SESSION_MAX_AGE_S };
+	return { token: createSessionToken(secret, OWNER_SESSION_PRINCIPAL), maxAge: SESSION_MAX_AGE_S };
 }
 
 /**
@@ -165,7 +196,8 @@ export function verifySessionToken(token: string, secret: string): boolean {
 
 /**
  * Whether a session token is the owner's: correctly signed, not expired, and
- * carrying no principal. A mandate session is valid but not the owner's, so it
+ * carrying the owner's principal (or, on a self-hosted instance, none). A mandate
+ * session is valid but not the owner's, so it
  * may not create a way back in that mints an owner session (a passkey on the
  * owner's account, a one-time link code).
  */

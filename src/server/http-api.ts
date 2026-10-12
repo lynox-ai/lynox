@@ -1711,6 +1711,8 @@ export class LynoxHTTPApi {
   private static readonly SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
   private static readonly SESSION_REFRESH_AFTER_S = 24 * 60 * 60;
   private static readonly SESSION_COOKIE_NAME = 'lynox_session';
+  /** The owner's principal part of a session cookie; the Web UI mints the same bytes (`ownerSession`). */
+  private static readonly OWNER_PRINCIPAL_PART = Buffer.from(JSON.stringify({ v: 1, kind: 'owner' }), 'utf8').toString('base64url');
   /** A principal cookie stamped further than this in the future is refused (D4). */
   private static readonly SESSION_FUTURE_SKEW_S = 60;
 
@@ -1907,11 +1909,17 @@ export class LynoxHTTPApi {
    *
    * Formats: `<ts>.<hmac>` (old), `<nonce>.<ts>.<hmac>`, and
    * `<nonce>.<principal>.<ts>.<hmac>` — the principal one base64url JSON part, minted
-   * by the Web UI for a mandate login (`createSessionToken` in
-   * packages/web-ui/src/lib/server/auth.ts) and covered by the same HMAC. A principal
-   * cookie ends at its signed `exp` and is refused when stamped more than a minute in
-   * the future; a principal this engine does not know is refused, never read as the
-   * owner.
+   * by the Web UI (`createSessionToken` in packages/web-ui/src/lib/server/auth.ts) and by
+   * the refresh below, covered by the same HMAC. The owner's principal is `{v:1,kind:'owner'}`;
+   * a mandate's carries its address and ends at its signed `exp`. A principal cookie stamped
+   * more than a minute in the future is refused; a principal this engine does not know is
+   * refused, never read as the owner.
+   *
+   * `principal: null` in the result means the owner, whichever form the cookie had. A cookie
+   * without any principal is the owner's only on a self-hosted instance: on a CP-provisioned
+   * one (`isHostedInstance`) it is refused (PRD D2), so that "no principal" can never be
+   * mistaken for the owner where mandates exist. The Web UI reads the same rule
+   * (`readSessionToken`).
    */
   private _verifySessionCookie(req: IncomingMessage, secret: string): { iat: number; principal: RequestPrincipal | null } | null {
     const cookieHeader = req.headers['cookie'];
@@ -1950,10 +1958,11 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return { iat: timestamp, principal: null };
+    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
+    if (session.kind === 'owner') return { iat: timestamp, principal: null };
     if (nowS >= session.exp) return null;
     return {
       iat: timestamp,
@@ -1964,8 +1973,17 @@ export class LynoxHTTPApi {
     };
   }
 
+  /**
+   * Whether an owner cookie must carry the owner's principal: on an instance the control plane
+   * provisioned. An instance id alone also counts — mandate login needs it, so a missing or
+   * unknown tier must not leave a cookie without a principal standing where a mandate can log in.
+   */
+  private static _ownerNeedsPrincipal(): boolean {
+    return isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) || Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
+  }
+
   /** The signed principal part of a session cookie; null for anything this engine does not know. */
-  private static _parseSessionPrincipal(part: string): { email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
+  private static _parseSessionPrincipal(part: string): { kind: 'owner' } | { kind: 'mandate'; email: string; display: string; mandateId: string; exp: number; mandateExp?: number } | null {
     let raw: unknown;
     try {
       raw = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
@@ -1974,7 +1992,10 @@ export class LynoxHTTPApi {
     }
     if (raw === null || typeof raw !== 'object') return null;
     const p = raw as Record<string, unknown>;
-    if (p['v'] !== 1 || p['kind'] !== 'mandate') return null;
+    if (p['v'] !== 1) return null;
+    // Exactly `{v:1,kind:'owner'}`: any other field beside it is refused, never read as the owner.
+    if (p['kind'] === 'owner') return Object.keys(p).length === 2 ? { kind: 'owner' } : null;
+    if (p['kind'] !== 'mandate') return null;
     const { email, display, mandate_id: mandateId, exp } = p;
     if (typeof email !== 'string' || email.length === 0) return null;
     if (typeof display !== 'string' || display.length === 0) return null;
@@ -1984,9 +2005,9 @@ export class LynoxHTTPApi {
     // present it is a whole number of seconds and never earlier than the session's end, which
     // the web UI takes as the earlier of the two.
     const mandateExp = p['mandate_exp'];
-    if (mandateExp === undefined) return { email, display, mandateId, exp };
+    if (mandateExp === undefined) return { kind: 'mandate', email, display, mandateId, exp };
     if (typeof mandateExp !== 'number' || !Number.isSafeInteger(mandateExp) || mandateExp < exp) return null;
-    return { email, display, mandateId, exp, mandateExp };
+    return { kind: 'mandate', email, display, mandateId, exp, mandateExp };
   }
 
   /**
@@ -2007,8 +2028,9 @@ export class LynoxHTTPApi {
 
   /**
    * Mint a fresh `lynox_session` cookie if the just-verified one has
-   * crossed SESSION_REFRESH_AFTER_S. Format matches the Web UI's
-   * `createSessionToken`: `<nonce>.<ts>.<hmac>`.
+   * crossed SESSION_REFRESH_AFTER_S. Called only for the owner's session. Format matches
+   * the Web UI's owner session (`ownerSession`): `<nonce>.<owner principal>.<ts>.<hmac>`,
+   * so a refresh also moves a self-hosted cookie without a principal to the owner's form.
    *
    * `trustProxy` mirrors the gate used for `x-forwarded-for` (managed
    * deployments behind Traefik) — without it, an unprotected self-hosted
@@ -2030,7 +2052,7 @@ export class LynoxHTTPApi {
     const key = createHmac('sha256', 'lynox-session').update(secret).digest();
     const nonce = randomBytes(8).toString('hex');
     const ts = Math.floor(Date.now() / 1000).toString();
-    const payload = `${nonce}.${ts}`;
+    const payload = `${nonce}.${LynoxHTTPApi.OWNER_PRINCIPAL_PART}.${ts}`;
     const hmac = createHmac('sha256', key).update(payload).digest('hex');
     const token = `${payload}.${hmac}`;
 
@@ -2759,9 +2781,10 @@ export class LynoxHTTPApi {
           }
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);
-          // Never re-mint a principal cookie (D2): the refresh below mints a cookie
-          // WITHOUT a principal, so re-minting would turn the mandate into the owner,
-          // and it would restart a clock the mandate session must not outlive.
+          // Never re-mint a mandate's cookie (D2): the refresh below mints the OWNER's
+          // principal, so re-minting would turn the mandate into the owner, and it would
+          // restart a clock the mandate session must not outlive. `principal === null`
+          // is the owner here, in either cookie form (`_verifySessionCookie`).
           if (session.principal === null) this._maybeRefreshSessionCookie(req, res, secret, session.iat, trustProxy);
         } else {
           errorResponse(res, 401, 'Unauthorized');

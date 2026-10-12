@@ -9,10 +9,12 @@ import {
 	loginSessionFromBody,
 	mandateSessionPrincipal,
 	MANDATE_SESSION_MAX_S,
-	type SessionPrincipal,
+	type MandateSessionPrincipal,
 	secretEquals,
 	isHttpsRequest,
 	SESSION_MAX_AGE_S,
+	ownerSession,
+	OWNER_SESSION_PRINCIPAL,
 } from './auth.js';
 
 const SECRET = 'a'.repeat(64);
@@ -20,6 +22,7 @@ const OTHER_SECRET = 'b'.repeat(64);
 
 afterEach(() => {
 	vi.useRealTimers();
+	vi.unstubAllEnvs();
 });
 
 describe('createSessionToken / verifySessionToken — roundtrip', () => {
@@ -258,7 +261,7 @@ const LOGIN = {
 	mandate_expires_at: '2100-01-01T00:00:00.000Z',
 };
 
-function mandateAt(nowS: number, overrides: Partial<SessionPrincipal> = {}): SessionPrincipal {
+function mandateAt(nowS: number, overrides: Partial<MandateSessionPrincipal> = {}): MandateSessionPrincipal {
 	return { v: 1, kind: 'mandate', email: LOGIN.email, display: LOGIN.display, mandate_id: LOGIN.mandate_id, exp: nowS + MANDATE_SESSION_MAX_S, ...overrides };
 }
 
@@ -334,10 +337,14 @@ describe('session tokens with a principal', () => {
 });
 
 describe('loginSession', () => {
-	it('gives the owner the principal-less 30-day session, unchanged', () => {
+	it('gives the owner a 30-day session that carries the owner\'s principal (D2)', () => {
 		const s = loginSession(SECRET, null)!;
 		expect(s.maxAge).toBe(SESSION_MAX_AGE_S);
-		expect(s.token.split('.')).toHaveLength(3);
+		const parts = s.token.split('.');
+		expect(parts).toHaveLength(4);
+		expect(JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'))).toEqual({ v: 1, kind: 'owner' });
+		expect(readSessionToken(s.token, SECRET)?.principal).toBeNull();
+		expect(isOwnerSession(s.token, SECRET)).toBe(true);
 	});
 
 	it('signs the mandate\'s own end beside the session\'s, so the engine can keep it (B9)', () => {
@@ -438,5 +445,49 @@ describe('isOwnerSession (who may create a way back in as the owner)', () => {
 		expect(isOwnerSession('', SECRET)).toBe(false);
 		expect(isOwnerSession(createSessionToken(SECRET), undefined)).toBe(false);
 		expect(isOwnerSession(createSessionToken(SECRET), '')).toBe(false);
+	});
+});
+
+// PRD D2, second half: on a managed instance a cookie without a principal is not the owner.
+// The engine reads the same rule (`_verifySessionCookie`); its twin test sits in
+// src/server/http-api.test.ts.
+describe('a session without a principal on a managed instance', () => {
+	const legacy = (): string => createSessionToken(SECRET);
+	const cleanTier = (): void => {
+		vi.stubEnv('LYNOX_BILLING_TIER', '');
+		vi.stubEnv('LYNOX_MANAGED_MODE', '');
+		vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+	};
+
+	it('is the owner\'s on a self-hosted instance, as before', () => {
+		cleanTier();
+		expect(readSessionToken(legacy(), SECRET)).not.toBeNull();
+		expect(isOwnerSession(legacy(), SECRET)).toBe(true);
+	});
+
+	it.each([
+		['LYNOX_BILLING_TIER', 'managed'],
+		['LYNOX_BILLING_TIER', 'hosted'],
+		['LYNOX_BILLING_TIER', 'starter'],
+		['LYNOX_MANAGED_MODE', 'managed'],
+		['LYNOX_MANAGED_INSTANCE_ID', 'inst_test'],
+	])('is refused when %s=%s, and the owner\'s principal is not', (name, value) => {
+		cleanTier();
+		vi.stubEnv(name, value);
+		expect(readSessionToken(legacy(), SECRET)).toBeNull();
+		expect(verifySessionToken(legacy(), SECRET)).toBe(false);
+		expect(isOwnerSession(legacy(), SECRET)).toBe(false);
+		const owner = ownerSession(SECRET).token;
+		expect(readSessionToken(owner, SECRET)).toEqual({ iat: expect.any(Number), principal: null });
+		expect(isOwnerSession(owner, SECRET)).toBe(true);
+	});
+
+	it('reads the owner\'s principal only in its exact form', () => {
+		cleanTier();
+		const nowS = Math.floor(Date.now() / 1000);
+		expect(readSessionToken(sign(`aaaaaaaaaaaaaaaa.${b64(OWNER_SESSION_PRINCIPAL)}.${nowS}`), SECRET)).toEqual({ iat: nowS, principal: null });
+		for (const p of [{ v: 1, kind: 'owner', email: 'x@example.invalid' }, { v: 2, kind: 'owner' }, { kind: 'owner' }]) {
+			expect(readSessionToken(sign(`aaaaaaaaaaaaaaaa.${b64(p)}.${nowS}`), SECRET), JSON.stringify(p)).toBeNull();
+		}
 	});
 });

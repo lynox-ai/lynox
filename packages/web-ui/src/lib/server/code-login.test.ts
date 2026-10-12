@@ -29,7 +29,7 @@ describe('verifyCodeLogin', () => {
 		await verifyCodeLogin(d);
 		const [url, init] = (d.fetchImpl as unknown as { mock: { calls: Array<[string, RequestInit]> } }).mock.calls[0]!;
 		expect(url).toBe('https://cp.example.invalid/internal/auth/verify');
-		expect(JSON.parse(init.body as string)).toEqual({ email: 'owner@example.invalid', code: '123456', instanceId: 'inst-1', principal_version: 1 });
+		expect(JSON.parse(init.body as string)).toEqual({ email: 'owner@example.invalid', code: '123456', instanceId: 'inst-1', principal_version: 2 });
 		expect((init.headers as Record<string, string>)['x-instance-secret']).toBe(SECRET);
 	});
 

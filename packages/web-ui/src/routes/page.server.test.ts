@@ -42,10 +42,13 @@ async function visit(cookie?: string): Promise<{ set: string | null; redirectedT
 }
 
 describe('root page in demo mode — a mandate session keeps its own session', () => {
-	it('an anonymous visitor gets a demo session', async () => {
+	it('an anonymous visitor gets a demo session, in the owner\'s form (D2)', async () => {
 		const r = await visit();
 		expect(r.redirectedTo).toBe('/app');
 		expect(readSessionToken(r.set!, SECRET)?.principal).toBeNull();
+		const parts = r.set!.split('.');
+		expect(parts).toHaveLength(4);
+		expect(JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'))).toEqual({ v: 1, kind: 'owner' });
 	});
 
 	it('a mandate session is sent on and gets no new session', async () => {
