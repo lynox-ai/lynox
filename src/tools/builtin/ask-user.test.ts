@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { InputRequiredError } from '../../core/input-required.js';
-import { askUserTool } from './ask-user.js';
+import { readFileSync } from 'node:fs';
+import { askUserTool, DISMISSED_IN_BATCH } from './ask-user.js';
 import type { IAgent } from '../../types/index.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { isPromptText, promptSegments } from '../../core/prompt-value.js';
@@ -72,7 +73,65 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
  * A single round-trip test would need a harness spanning both packages, which
  * does not exist; that is a real gap.
  */
+/** A closed question reaches the model as a sentence, never as the bare marker, and the sentence
+ *  says not to act on an assumed answer. */
+function expectClosedResult(result: string): void {
+  expect(result).not.toContain('__dismissed__');
+  expect(result).toMatch(/This question got no answer: the user closed it, it expired, or it could not be asked\./);
+  expect(result).toMatch(/Do not act on any of the options/);
+  // A choice between asking and waiting, never an order to ask again (a flow may say move on).
+  expect(result).toMatch(/Ask briefly what they want, or wait for their next message\./);
+}
+
 describe('askUserTool', () => {
+  describe('a question the user closed without answering', () => {
+    it('single question: the model is told not to act, not handed the bare marker', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      expectClosedResult(await askUserTool.handler({ question: 'Which task?', options: ['A', 'B'] }, agent));
+    });
+
+    it('single question without options: the same', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      expectClosedResult(await askUserTool.handler({ question: 'Anything else?' }, agent));
+    });
+
+    it('sets no step hint, even when an option happens to be labelled like the marker', async () => {
+      const agent = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
+      await askUserTool.handler({ question: 'q', options: [{ label: '__dismissed__', hint: { effort: 'high' } }] }, agent);
+      expect(agent.toolContext.pendingStepHint).toBeNull();
+    });
+
+    it('sequential batch: the closed one is marked, the answered one kept, and the note added once', async () => {
+      const promptUser = vi.fn().mockResolvedValueOnce('A').mockResolvedValueOnce('__dismissed__');
+      const agent = makeAgent({ promptUser });
+      const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
+      const lines = result.split('\n');
+      expect(lines[0]).toBe('First?: A');
+      expect(lines[1]).toBe('Second?: (no answer)');
+      expect(lines).toHaveLength(3);
+      expect(lines[2]).toMatch(/Do not act on an assumed answer/);
+      expect(lines[2]).toMatch(/Ask briefly what they want, or wait for their next message\./);
+      expect(result).not.toContain('__dismissed__');
+    });
+
+    it('tabbed batch: the same', async () => {
+      const promptTabs = vi.fn().mockResolvedValue(['__dismissed__', 'B']);
+      const agent = makeAgent({ promptUser: vi.fn(), promptTabs });
+      const result = await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent);
+      expect(result.split('\n').slice(0, 2)).toEqual(['First?: (no answer)', 'Second?: B']);
+      expect(result).toMatch(/Do not act on an assumed answer/);
+      expect(result).toMatch(/Ask briefly what they want, or wait for their next message\./);
+      expect(result).not.toContain('__dismissed__');
+    });
+
+    it('a batch with every question answered carries no note', async () => {
+      const promptTabs = vi.fn().mockResolvedValue(['A', 'B']);
+      const agent = makeAgent({ promptUser: vi.fn(), promptTabs });
+      expect(await askUserTool.handler({ questions: [{ question: 'First?' }, { question: 'Second?' }] }, agent))
+        .toBe('First?: A\nSecond?: B');
+    });
+  });
+
   it('calls promptUser with question and returns result', async () => {
     const promptUser = vi.fn().mockResolvedValue('user answer');
     const agent = makeAgent({ promptUser });
@@ -117,11 +176,12 @@ describe('askUserTool', () => {
       expect(agent.toolContext.pendingStepHint).toBeNull();
     });
 
-    it('passes through __dismissed__ and an empty selection as dismissed', async () => {
+    it('tells the model a closed question and an empty selection were not answered', async () => {
       const dismissed = makeAgent({ promptUser: vi.fn().mockResolvedValue('__dismissed__') });
-      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, dismissed)).toBe('__dismissed__');
+      const closed = await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, dismissed);
+      expectClosedResult(closed);
       const empty = makeAgent({ promptUser: vi.fn().mockResolvedValue(JSON.stringify([])) });
-      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, empty)).toBe('__dismissed__');
+      expect(await askUserTool.handler({ question: 'q', options: ['a'], multiSelect: true }, empty)).toBe(closed);
     });
 
     it('falls back to the raw answer when a legacy client returns a non-JSON string', async () => {
@@ -389,5 +449,17 @@ describe('askUserTool', () => {
     await expect(
       askUserTool.handler({} as Parameters<typeof askUserTool.handler>[0], agent),
     ).rejects.toThrow(/provide either `question`.*or a non-empty `questions`/);
+  });
+});
+
+// The onboarding prompt tells the model what to do with skipped questions by naming how a
+// skipped one reads in the batch result. If the two drift apart, the rule never applies.
+describe('the onboarding prompt names the batch marker the model sees', () => {
+  it('quotes the marker in its "do not re-ask" rule, not the internal value', () => {
+    const view = readFileSync(new URL('../../../packages/web-ui/src/lib/components/ChatView.svelte', import.meta.url), 'utf8');
+    const rule = view.split('\n').find((line) => line.includes('do NOT re-ask'));
+    expect(rule).toBeDefined();
+    expect(rule).toContain(`"${DISMISSED_IN_BATCH}"`);
+    expect(rule).not.toContain('__dismissed__');
   });
 });

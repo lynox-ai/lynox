@@ -1391,8 +1391,7 @@ function promptCallbacksWithOrigin(
     //
     // And a question raised once the child has settled is not forwarded at all: it
     // answers itself as not-given (the same value an unanswered question settles to),
-    // whatever the parent's channel does with a stopped signal — the worker loop's,
-    // for one, ignores it, and would leave the question answerable for its TTL.
+    // whatever the parent's channel does with a stopped signal.
     promptUser: promptUser ? (q, opts, m) => (childGone.aborted ? Promise.resolve('__dismissed__')
       : whileHeld(holdForHuman, () => promptUser(q, opts, { ...origin, ...m, signal: m?.signal ?? childGone }))) : undefined,
     promptSecret: promptSecret ? (n, p, k, m) => (childGone.aborted ? Promise.resolve('canceled' as const)

@@ -101,7 +101,7 @@ import { collectVaultKeys } from './api-store.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
-import { runInCallSlot } from './call-connection.js';
+import { currentCallSignal, runInCallSlot, trackCallAnswer } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
@@ -357,12 +357,12 @@ export class Agent implements IAgent {
   private _promptSecret: PromptSecretFn | undefined;
   get promptUser(): PromptUserFn | undefined {
     const raw = this._promptUser;
-    return raw ? (question, options, meta) => this._notingAskedNobody(raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
+    return raw ? (question, options, meta) => this._notingAskedNobody(trackCallAnswer(raw(question, options, { ...meta, signal: this._promptSignal(meta) }))) : undefined;
   }
   set promptUser(fn: PromptUserFn | undefined) { this._promptUser = fn; }
   get promptTabs(): PromptTabsFn | undefined {
     const raw = this._promptTabs;
-    return raw ? (questions, meta) => this._notingAskedNobody(raw(questions, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
+    return raw ? (questions, meta) => this._notingAskedNobody(trackCallAnswer(raw(questions, { ...meta, signal: this._promptSignal(meta) }))) : undefined;
   }
   /** A prompt that could reach nobody, noted HERE — where every prompt passes — and not only
    *  where it is thrown: a tool that catches the error and returns it as text would otherwise
@@ -388,7 +388,16 @@ export class Agent implements IAgent {
   set promptTabs(fn: PromptTabsFn | undefined) { this._promptTabs = fn; }
   get promptSecret(): PromptSecretFn | undefined {
     const raw = this._promptSecret;
-    return raw ? (name, prompt, keyType, meta) => raw(name, prompt, keyType, { ...meta, signal: meta?.signal ?? this.runSignal }) : undefined;
+    return raw ? (name, prompt, keyType, meta) => trackCallAnswer(raw(name, prompt, keyType, { ...meta, signal: this._promptSignal(meta) })) : undefined;
+  }
+  /** The signal a prompt carries: the caller's own if it brought one, otherwise the run's,
+   *  joined with the signal of the tool call that asks (`CallSlot.abort`), so a call the
+   *  engine stopped waiting for withdraws its question. Outside a tool call, the run's. */
+  private _promptSignal(meta: { signal?: AbortSignal | undefined } | undefined): AbortSignal | undefined {
+    if (meta?.signal) return meta.signal;
+    const call = currentCallSignal();
+    const run = this.runSignal;
+    return call && run ? AbortSignal.any([call, run]) : call ?? run;
   }
   set promptSecret(fn: PromptSecretFn | undefined) { this._promptSecret = fn; }
   promptMailConnect?: PromptMailConnectFn | undefined;
@@ -3529,12 +3538,12 @@ export class Agent implements IAgent {
    *  self-bounded by execSync's own `timeout` and blocks the event loop anyway,
    *  so the race timer can't help it — it is not the target here.) */
   private static readonly TOOL_TIMEOUT_MS = 900_000;
-  /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret` block on
+  /** Tools EXEMPT from the per-tool timeout: `ask_user`/`ask_secret`/`plan_task` block on
    *  user input by design (24h prompt expiry), and `spawn_agent`/`run_workflow`
    *  run nested work bounded by their own budget/depth/step guards — a
    *  wall-clock cap would abort legitimate long-running delegations. */
   private static readonly TOOL_TIMEOUT_EXEMPT = new Set([
-    'ask_user', 'ask_secret', 'spawn_agent', 'run_workflow',
+    'ask_user', 'ask_secret', 'plan_task', 'spawn_agent', 'run_workflow',
   ]);
 
   /** Tools whose `secret:NAME` refs must reach the handler VERBATIM, because the
@@ -4281,7 +4290,7 @@ export class Agent implements IAgent {
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     let trailWatched = false;
     // This call's own slot for the connection the engine resolves (call-connection.ts).
-    const callSlot: CallSlot = {};
+    const callSlot: CallSlot = { abort: new AbortController() };
     try {
       // Publish the GO's downgrade decision to the instance field synchronously,
       // immediately before the handler reads it. spawn_agent calls
@@ -4318,7 +4327,12 @@ export class Agent implements IAgent {
               rawResult,
               new Promise<never>((_, reject) => {
                 toolTimer = setTimeout(
-                  () => reject(new Error(toolTimeoutMessage(tc.name, Math.round(Agent.TOOL_TIMEOUT_MS / 1000)))),
+                  () => {
+                    // Read before the abort: withdrawing the question settles it.
+                    const waiting = (callSlot.awaitingAnswers ?? 0) > 0;
+                    callSlot.abort?.abort();
+                    reject(new Error(toolTimeoutMessage(tc.name, Math.round(Agent.TOOL_TIMEOUT_MS / 1000), waiting)));
+                  },
                   Agent.TOOL_TIMEOUT_MS,
                 );
               }),
@@ -4553,7 +4567,15 @@ function annotateNonRetryable(message: string): string {
  * sentence carries the write/read split itself. The leading
  * `Tool "<name>" timed out after <n>s` is kept for anything keyed on it.
  */
-function toolTimeoutMessage(toolName: string, seconds: number): string {
+function toolTimeoutMessage(toolName: string, seconds: number, waitingForAnswer = false): string {
+  // A call stopped while it waited on a person: its question is withdrawn (`CallSlot.abort`), so
+  // the decision it asked for was never made. "may still have run to completion" would invite the
+  // model to read an approval into it.
+  if (waitingForAnswer) {
+    return `Tool "${toolName}" timed out after ${seconds}s while it was waiting for the user's answer. `
+      + `The question was withdrawn unanswered: the user approved or chose nothing, so do not act as if they had. `
+      + `If the call wrote or sent something before it asked, check whether that took effect before calling it again.`;
+  }
   return `Tool "${toolName}" timed out after ${seconds}s, but it may still have run to completion. `
     + `If this call writes, sends, or changes something, check whether it already took effect `
     + `before calling it again — repeating a write that landed does it twice. `

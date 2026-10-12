@@ -32,6 +32,36 @@ function findHint(options: AskUserOption[] | undefined, selectedLabel: string): 
   return undefined;
 }
 
+/** What the prompt layer hands back for a question that got no answer: the user closed it, it
+ *  expired, or its run or call was stopped. Other readers of a prompt answer treat it as a control
+ *  value, so it is translated for the model only (here and in `plan_task`) and stays unchanged
+ *  everywhere else. */
+export const DISMISSED = '__dismissed__';
+/** What to do after an unanswered question: a choice, not an order to ask again. A flow may have
+ *  told the model to move on without re-asking (onboarding does), and a background run that asks
+ *  again parks for another day. */
+const AFTER_NO_ANSWER = 'Ask briefly what they want, or wait for their next message.';
+/** Bare, the marker reads as an answer, and a model that reads "go ahead" into it acts on a choice
+ *  the user did not make. The result says what happened and what not to do. */
+const DISMISSED_RESULT =
+  'This question got no answer: the user closed it, it expired, or it could not be asked. Do not act on any of the options '
+  + `or on an assumed answer. ${AFTER_NO_ANSWER}`;
+/** One question of a batch that got no answer; the batch result ends with the instruction once. */
+export const DISMISSED_IN_BATCH = '(no answer)';
+const DISMISSED_BATCH_NOTE =
+  `The questions marked "${DISMISSED_IN_BATCH}" got no answer. Do not act on an `
+  + `assumed answer to those. ${AFTER_NO_ANSWER}`;
+/** The same for a plan put to the user for approval (`plan_task`). */
+export const PLAN_NOT_ANSWERED =
+  'The plan got no answer: the user closed the question, it expired, or it could not be asked. Nothing is approved; do not '
+  + `carry out the plan or any part of it. ${AFTER_NO_ANSWER}`;
+
+/** The batch result: one line per question, a closed one marked, and the note when any was closed. */
+function batchResult(questions: ReadonlyArray<{ question: string }>, answers: readonly string[]): string {
+  const lines = answers.map((a, i) => `${questions[i]!.question}: ${a === DISMISSED ? DISMISSED_IN_BATCH : a}`);
+  return answers.includes(DISMISSED) ? [...lines, DISMISSED_BATCH_NOTE].join('\n') : lines.join('\n');
+}
+
 /** Convert AskUserOption[] to plain string[] for promptUser. */
 function toLabels(options: AskUserOption[]): string[] {
   return options.map(optionLabel);
@@ -171,7 +201,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
             break;
           }
         }
-        return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
+        return batchResult(input.questions, answers);
       }
       // Sequential fallback: ask each question one at a time
       const answers: string[] = [];
@@ -192,7 +222,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
         }
         answers.push(answer);
       }
-      return answers.map((a, i) => `${input.questions![i]!.question}: ${a}`).join('\n');
+      return batchResult(input.questions, answers);
     }
 
     // Single-question path: reached only when no `questions` batch was given,
@@ -217,7 +247,8 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     // Multi-select answers come back as a JSON-encoded string[] of labels.
     // Present them to the model as a clean comma-joined list; a step hint only
     // applies when exactly one option was chosen (hints are single-choice).
-    if (input.multiSelect && answer !== '__dismissed__') {
+    if (answer === DISMISSED) return DISMISSED_RESULT;
+    if (input.multiSelect) {
       let selected: string[] | null = null;
       try {
         const parsed = JSON.parse(answer) as unknown;
@@ -228,7 +259,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
           const hint = findHint(input.options, selected[0]!);
           if (hint) agent.toolContext.pendingStepHint = hint;
         }
-        return selected.length > 0 ? selected.join(', ') : '__dismissed__';
+        return selected.length > 0 ? selected.join(', ') : DISMISSED_RESULT;
       }
     }
 

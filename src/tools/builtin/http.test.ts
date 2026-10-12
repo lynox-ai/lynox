@@ -5719,6 +5719,43 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
+  // A call the engine stopped waiting for (its tool timeout aborts the call's slot) asks nothing,
+  // and a question withdrawn with it is nobody's denial: the next call of the batch is asked.
+  it('a timed-out call raises no question, and its withdrawn question denies nothing for the batch', async () => {
+    const timedOut: CallSlot = { abort: new AbortController() };
+    timedOut.abort!.abort();
+    const quiet = agent270({ batch: {} });
+    const refused = await runInCallSlot(timedOut, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, quiet.agent));
+    expect(quiet.prompt).not.toHaveBeenCalled();
+    expect(refused).toContain('was not asked: the call timed out');
+
+    const batch = {};
+    const first: CallSlot = { abort: new AbortController() };
+    let asked = 0;
+    const { agent, prompt } = agent270({
+      batch,
+      answer: async () => {
+        asked++;
+        if (asked === 1) { first.abort!.abort(); return '__dismissed__'; }
+        return 'Allow';
+      },
+    });
+    await runInCallSlot(first, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent));
+    const second = await runInCallSlot({ abort: new AbortController() }, () => visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent));
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(second).not.toContain('denied earlier in this batch');
+  });
+
+  it('a real Deny stands for the batch even when the call timed out as it came in', async () => {
+    const batch = {};
+    const first: CallSlot = { abort: new AbortController() };
+    const { agent, prompt } = agent270({ batch, answer: async () => { first.abort!.abort(); return 'Deny'; } });
+    await runInCallSlot(first, () => visible({ url: 'https://h.example/a', method: 'POST', body: '{"x":1}' }, agent));
+    const second = await runInCallSlot({ abort: new AbortController() }, () => visible({ url: 'https://h.example/b', method: 'POST', body: '{"y":1}' }, agent));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(second).toContain('was not asked: a POST to this host was denied earlier in this batch');
+  });
+
   it('a deny holds for the calls of the same batch that waited on it, and they say they were not asked', async () => {
     const batch = {};
     const { agent, prompt } = agent270({ batch, answer: async () => { await new Promise((r) => setTimeout(r, 5)); return 'Deny'; } });

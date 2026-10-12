@@ -9,6 +9,7 @@ import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import type { RunHistory } from '../../core/run-history.js';
 import type { PromptText } from '../../types/index.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
+import { DISMISSED, PLAN_NOT_ANSWERED } from './ask-user.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -434,6 +435,7 @@ export const planTaskTool: ToolEntry<PlanTaskInput> = {
     if (['cancel', 'n', 'no'].includes(normalized)) {
       return JSON.stringify({ approved: false, feedback: 'User canceled the plan.' });
     }
+    if (answer === DISMISSED) return JSON.stringify({ approved: false, feedback: PLAN_NOT_ANSWERED });
     const feedback = normalized === 'adjust' ? 'User wants adjustments. Ask what to change.' : answer;
     return JSON.stringify({ approved: false, feedback });
   },
