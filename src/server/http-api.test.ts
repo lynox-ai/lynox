@@ -1789,6 +1789,84 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    describe('changeset review', () => {
+      const runningSessions = (): Map<string, unknown> =>
+        (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+
+      it('is refused while a run is in progress, and the files stay as the run left them', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-review-'));
+        const file = join(cwd, 'a.txt');
+        writeFileSync(file, 'before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(file);
+        writeFileSync(file, 'during the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        runningSessions().set('test', { streamAlive: true, lastEventAt: Date.now(), takeover: () => {} });
+        try {
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          expect(res.status).toBe(409);
+          expect(readFileSync(file, 'utf-8')).toBe('during the run');
+          runningSessions().delete('test');
+          const after = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          expect(after.status, 'positive control: the same request works once the run is over').toBe(200);
+          expect(readFileSync(file, 'utf-8')).toBe('before');
+        } finally {
+          runningSessions().delete('test');
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      it('a second answer to the same review is refused, and the accepted change stays', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-twice-'));
+        const file = join(cwd, 'a.txt');
+        writeFileSync(file, 'before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(file);
+        writeFileSync(file, 'accepted', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const first = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'accept' }) });
+          expect(first.status, 'positive control').toBe(200);
+          const second = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          expect(second.status).toBe(400);
+          expect(readFileSync(file, 'utf-8')).toBe('accepted');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      it('a partial rollback reaches a file in a workspace that is not the process directory', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-partial-'));
+        expect(cwd, 'precondition: the workspace is elsewhere').not.toBe(process.cwd());
+        const back = join(cwd, 'back.txt');
+        const keep = join(cwd, 'keep.txt');
+        writeFileSync(back, 'back before', 'utf-8');
+        writeFileSync(keep, 'keep before', 'utf-8');
+        const csm = new ChangesetManager(cwd, 'run');
+        csm.backupBeforeWrite(back);
+        csm.backupBeforeWrite(keep);
+        writeFileSync(back, 'back by the run', 'utf-8');
+        writeFileSync(keep, 'keep by the run', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(csm);
+        try {
+          const res = await jsonFetch('/api/sessions/test/changeset/review', {
+            method: 'POST', body: JSON.stringify({ action: 'partial', rolledBackFiles: ['back.txt'] }),
+          });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ rolledBack: 1, accepted: 1 });
+          expect(readFileSync(back, 'utf-8')).toBe('back before');
+          expect(readFileSync(keep, 'utf-8')).toBe('keep by the run');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          csm.cleanup();
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+    });
+
     it('carries fatal through to the wire on an ENGINE error, not just the catch', async () => {
       // The other test covers http-api's own catch. This covers the path every
       // engine event takes: session.onStream -> JSON.stringify -> res.write.

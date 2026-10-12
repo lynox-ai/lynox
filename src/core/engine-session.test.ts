@@ -318,6 +318,8 @@ vi.mock('./changeset.js', () => ({
     this.acceptAll = vi.fn();
     // @ts-expect-error mock constructor
     this.cleanup = vi.fn();
+    // @ts-expect-error mock constructor
+    this.settle = vi.fn();
   }),
 }));
 
@@ -463,6 +465,11 @@ import { initLLMProvider } from './llm-client.js';
 import { setTierSetResolver, resolveTierModel, snapshotForSlot } from './tier-resolver.js';
 import { MISTRAL_MODEL_MAP, setOpenAIModelResolver, getBetasForProvider } from '../types/index.js';
 import { InputRequiredError } from './input-required.js';
+import { ChangesetManager } from './changeset.js';
+import { setTenantWorkspace } from './workspace.js';
+import { mkdtempSync as mkdtempForWorkspace, rmSync as rmForWorkspace } from 'node:fs';
+import { tmpdir as tmpdirForWorkspace } from 'node:os';
+import { join as joinForWorkspace } from 'node:path';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -3554,5 +3561,108 @@ describe('the stop a run reports belongs to the agent that made it', () => {
     reported = 'end_turn';
     await session.run('summarize', { noTools: true, internal: true });
     expect(session.getLastRunStop()?.cause, 'still the outer run\'s').toBe('budget_cap');
+  });
+});
+
+describe('the changeset belongs to the user run, from its start to its end', () => {
+  type Mgr = { cleanup: ReturnType<typeof vi.fn>; settle: ReturnType<typeof vi.fn> };
+  let workspace: string;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetMessages.mockReturnValue([]);
+    mockGetUnpersistedTail.mockReturnValue([]);
+    mockRegister.mockReturnThis();
+    mockSend.mockResolvedValue('response');
+    workspace = mkdtempForWorkspace(joinForWorkspace(tmpdirForWorkspace(), 'lynox-ws-'));
+    setTenantWorkspace(workspace);
+  });
+  afterEach(() => {
+    setTenantWorkspace(null);
+    rmForWorkspace(workspace, { recursive: true, force: true });
+  });
+
+  it('is made relative to the workspace, settled when the run ends, and cleaned up by the next run', async () => {
+    const { session } = await createEngineAndSession();
+    await session.run('first');
+    const first = session.getChangesetManager() as unknown as Mgr | null;
+    expect(first, 'positive control: the run made a changeset').not.toBeNull();
+    expect(vi.mocked(ChangesetManager).mock.calls.at(-1)?.[0]).toBe(workspace);
+    expect(first!.settle).toHaveBeenCalledTimes(1);
+    expect(first!.cleanup).not.toHaveBeenCalled();
+
+    await session.run('second');
+    expect(session.getChangesetManager()).not.toBe(first);
+    expect(first!.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('a run that ends in an error settles its changeset too', async () => {
+    const { session } = await createEngineAndSession();
+    mockSend.mockRejectedValueOnce(new Error('provider down'));
+    await expect(session.run('task')).rejects.toThrow();
+    const mgr = session.getChangesetManager() as unknown as Mgr | null;
+    expect(mgr, 'positive control').not.toBeNull();
+    expect(mgr!.settle).toHaveBeenCalledTimes(1);
+  });
+
+  it('when review turns off, the agent no longer holds a changeset, so writes are prompted again', async () => {
+    const { session } = await createEngineAndSession();
+    // The agent is mocked: what it holds is what the session built the latest one with.
+    const agentManager = (): unknown =>
+      (vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetManager?: unknown } | undefined)?.changesetManager;
+    await session.run('with review');
+    expect(agentManager(), 'positive control: the agent was built with the changeset').toBeDefined();
+    setTenantWorkspace(null); // no workspace, no changeset review
+    await session.run('without review');
+    expect(session.getChangesetManager()).toBeNull();
+    expect(agentManager()).toBeUndefined();
+  });
+
+  it('turning review off in the settings rebuilds the agent without the changeset too', async () => {
+    // Here the config change rebuilds the agent first, while the session still holds the
+    // old manager — that rebuild alone would hand it straight back.
+    const { engine, session } = await createEngineAndSession();
+    const agentManager = (): unknown =>
+      (vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetManager?: unknown } | undefined)?.changesetManager;
+    await session.run('with review');
+    expect(agentManager(), 'positive control').toBeDefined();
+    engine.getUserConfig().changeset_review = false;
+    // What reloadUserConfig() does for any settings change: the session's next run sees a
+    // new config version and rebuilds the agent — still holding the old manager.
+    (engine as unknown as { _configVersion: number })._configVersion++;
+    const builds = vi.mocked(Agent).mock.calls.length;
+    try {
+      await session.run('without review');
+      expect(vi.mocked(Agent).mock.calls.slice(builds).length, 'positive control: the config rebuild ran, and the one after it').toBe(2);
+      expect((vi.mocked(Agent).mock.calls[builds]?.[0] as { changesetManager?: unknown }).changesetManager, 'the config rebuild alone hands the manager back').toBeDefined();
+      expect(session.getChangesetManager()).toBeNull();
+      expect(agentManager()).toBeUndefined();
+    } finally {
+      delete engine.getUserConfig().changeset_review;
+    }
+  });
+
+  it('a rebuild that failed is retried by the next run, because the agent still holds the changeset', async () => {
+    const { session } = await createEngineAndSession();
+    await session.run('with review');
+    setTenantWorkspace(null);
+    vi.mocked(Agent).mockImplementationOnce(() => { throw new Error('agent build failed'); });
+    await expect(session.run('first without review')).rejects.toThrow('agent build failed');
+    expect(session.getChangesetManager(), 'precondition: the field is already empty').toBeNull();
+    const builds = vi.mocked(Agent).mock.calls.length;
+    await session.run('second without review');
+    expect(vi.mocked(Agent).mock.calls.length, 'the agent is rebuilt').toBeGreaterThan(builds);
+    expect((vi.mocked(Agent).mock.calls.at(-1)?.[0] as { changesetManager?: unknown }).changesetManager).toBeUndefined();
+  });
+
+  it('an internal run neither replaces nor cleans up the user run\'s changeset', async () => {
+    const { session } = await createEngineAndSession();
+    await session.run('task');
+    const userRun = session.getChangesetManager() as unknown as Mgr | null;
+    expect(userRun, 'positive control').not.toBeNull();
+    // The shape compact() makes, which auto-compaction reaches from inside the user run.
+    await session.run('summarize', { noTools: true, internal: true });
+    expect(session.getChangesetManager()).toBe(userRun);
+    expect(userRun!.cleanup).not.toHaveBeenCalled();
+    expect(userRun!.settle).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -222,8 +222,8 @@ describe('ChangesetManager', () => {
     expect(changes).toHaveLength(1);
 
     mgr.cleanup();
-    // After cleanup, getChanges still works (reads from entries map + current files)
-    // but backup dir is gone
+    // The changeset is over: nothing is left to show or to roll back.
+    expect(mgr.getChanges()).toEqual([]);
   });
 
   // The backup is taken before the write tool runs. A write that failed — or wrote the same
@@ -327,7 +327,7 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
     });
 
-    it('after cleanup, a file restored by rollback is not a change', () => {
+    it('after cleanup, a restored file leaves nothing to review', () => {
       const cwd = makeTempDir();
       const filePath = join(cwd, 'restored.txt');
       writeFileSync(filePath, 'before', 'utf-8');
@@ -339,6 +339,187 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
       expect(mgr.hasChanges()).toBe(false);
       expect(mgr.size).toBe(0);
+    });
+  });
+
+  // The run's end is the one point where the changeset is settled: what did not change is
+  // dropped there, never in a query, and a manager with nothing left keeps no directory.
+  describe('the end of the run', () => {
+    const backupDirOf = (mgr: ChangesetManager): string | null =>
+      (mgr as unknown as { backupDir: string | null }).backupDir;
+
+    it('"Rollback all" resets only what the review showed, not a file backed up and left as it was', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'x.txt');
+      const y = join(cwd, 'y.txt');
+      writeFileSync(x, 'x before', 'utf-8');
+      writeFileSync(y, 'y before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(x); // the write to x failed
+      mgr.backupBeforeWrite(y);
+      writeFileSync(y, 'y by the run', 'utf-8');
+      mgr.settle();
+      expect(mgr.getChanges().map(c => c.file), 'the review shows y alone').toEqual(['y.txt']);
+      // Before the answer comes, x is changed from outside the run.
+      writeFileSync(x, 'x by the user', 'utf-8');
+      mgr.rollbackAll();
+      expect(readFileSync(x, 'utf-8')).toBe('x by the user');
+      expect(readFileSync(y, 'utf-8')).toBe('y before');
+      mgr.cleanup();
+    });
+
+    it('a run without a real change leaves no backup directory', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'x.txt');
+      writeFileSync(x, 'as it was', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(x);
+      const dir = backupDirOf(mgr);
+      expect(dir !== null && existsSync(dir), 'positive control: the backup made a directory').toBe(true);
+      mgr.settle();
+      expect(existsSync(dir!)).toBe(false);
+    });
+
+    it('a run that writes nothing makes no directory at all', () => {
+      const mgr = new ChangesetManager(makeTempDir(), 'test-run');
+      expect(backupDirOf(mgr), 'not made by the constructor').toBeNull();
+      mgr.settle();
+      expect(backupDirOf(mgr)).toBeNull();
+    });
+
+    it('a run with a real change keeps its directory for the review', () => {
+      const cwd = makeTempDir();
+      const y = join(cwd, 'y.txt');
+      writeFileSync(y, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(y);
+      writeFileSync(y, 'after', 'utf-8');
+      mgr.settle();
+      expect(existsSync(backupDirOf(mgr)!)).toBe(true);
+      expect(mgr.getChanges()[0]?.diff).toContain('+after');
+      mgr.cleanup();
+    });
+
+    it('a query between the backup and the write changes nothing about the review or the rollback', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'x.txt');
+      writeFileSync(x, 'original', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(x);
+      // GET /changeset while the run waits between backup and write, e.g. on a prompt.
+      expect(mgr.getChanges(), 'positive control: nothing to show yet').toEqual([]);
+      expect(mgr.hasChanges()).toBe(false);
+      writeFileSync(x, 'write1', 'utf-8');
+      mgr.backupBeforeWrite(x); // the second write keeps the first backup
+      writeFileSync(x, 'write2', 'utf-8');
+      mgr.settle();
+      const diff = mgr.getChanges()[0]?.diff ?? '';
+      expect(diff).toContain('-original');
+      expect(diff).toContain('+write2');
+      mgr.rollbackAll();
+      expect(readFileSync(x, 'utf-8')).toBe('original');
+      mgr.cleanup();
+    });
+
+    it('an existing file whose backup copy fails is restored by "Rollback all", never deleted', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'x.txt');
+      writeFileSync(x, 'the user had this', 'utf-8');
+      // The backup directory cannot be made: TMPDIR names a file.
+      const notADir = join(cwd, 'not-a-dir');
+      writeFileSync(notADir, '', 'utf-8');
+      const saved = process.env['TMPDIR'];
+      process.env['TMPDIR'] = notADir;
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      try {
+        mgr.backupBeforeWrite(x);
+      } finally {
+        if (saved === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = saved;
+      }
+      expect(backupDirOf(mgr), 'positive control: the copy really failed').toBeNull();
+      writeFileSync(x, 'the run wrote this', 'utf-8');
+      mgr.settle();
+      expect(mgr.getChanges().map(c => c.status)).toEqual(['modified']);
+      expect(mgr.getChanges()[0]?.diff, 'no copy to diff against, and the review says so').toContain('(diff unavailable)');
+      mgr.rollbackAll();
+      expect(existsSync(x)).toBe(true);
+      expect(readFileSync(x, 'utf-8')).toBe('the user had this');
+    });
+
+    it('a second answer to the same review finds nothing: an accepted change is not rolled back', () => {
+      const cwd = makeTempDir();
+      const y = join(cwd, 'y.txt');
+      writeFileSync(y, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(y);
+      writeFileSync(y, 'accepted', 'utf-8');
+      mgr.settle();
+      expect(mgr.hasChanges(), 'positive control').toBe(true);
+      mgr.acceptAll();
+      expect(mgr.hasChanges()).toBe(false);
+      mgr.rollbackAll(); // the other tab answers "Rollback all"
+      expect(readFileSync(y, 'utf-8')).toBe('accepted');
+    });
+
+    it('a file the run deleted is kept by settle, and "Rollback all" brings it back', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'x.txt');
+      writeFileSync(x, 'was here', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(x);
+      rmSync(x);
+      mgr.settle();
+      mgr.rollbackAll();
+      expect(readFileSync(x, 'utf-8')).toBe('was here');
+      mgr.cleanup();
+    });
+
+    it.skipIf(process.getuid?.() === 0)('an existing file that cannot be read is never deleted by "Rollback all"', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'locked.txt');
+      writeFileSync(x, 'the user had this', 'utf-8');
+      chmodSync(x, 0o000);
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      try {
+        mgr.backupBeforeWrite(x);
+        mgr.rollbackAll();
+        expect(existsSync(x)).toBe(true);
+      } finally {
+        chmodSync(x, 0o600);
+        mgr.cleanup();
+      }
+      expect(readFileSync(x, 'utf-8')).toBe('the user had this');
+    });
+
+    it('a backup after cleanup makes a fresh directory and still diffs', () => {
+      const cwd = makeTempDir();
+      const x = join(cwd, 'x.txt');
+      const y = join(cwd, 'y.txt');
+      writeFileSync(x, 'x', 'utf-8');
+      writeFileSync(y, 'y before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(x);
+      const first = backupDirOf(mgr);
+      mgr.cleanup();
+      mgr.backupBeforeWrite(y);
+      writeFileSync(y, 'y after', 'utf-8');
+      expect(backupDirOf(mgr)).not.toBe(first);
+      expect(mgr.getChanges().find(c => c.file === 'y.txt')?.diff).toContain('-y before');
+      mgr.cleanup();
+    });
+
+    it('keeps the backup of a file outside the working directory inside its own directory', () => {
+      const cwd = makeTempDir();
+      const outside = join(makeTempDir(), 'elsewhere.txt');
+      writeFileSync(outside, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(outside);
+      writeFileSync(outside, 'after', 'utf-8');
+      const dir = backupDirOf(mgr)!;
+      expect(readdirSync(dir)).toHaveLength(1);
+      expect(mgr.getChanges()[0]?.diff).toContain('-before');
+      mgr.cleanup();
+      expect(existsSync(dir)).toBe(false);
     });
   });
 });
