@@ -136,10 +136,6 @@ jobs:
           file: Dockerfile
           push: false
           tags: lynox:ci-scan
-      - name: PROBE which registry served the daemon pulls
-        if: always()
-        run: |
-          sudo journalctl -u docker --no-pager | grep -oE 'https?://(mirror\.gcr\.io|registry-1\.docker\.io)/v2/[a-z0-9._/-]+/(manifests|blobs)' | sed -E 's#/(manifests|blobs)$##' | sort | uniq -c || echo "PROBE: no registry lines"
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lynox:ci-scan
@@ -176,11 +172,6 @@ jobs:
             -p 3025:3025 -p 3143:3143 -p 3465:3465 -p 3993:3993 -p 8080:8080 \
             -e GREENMAIL_OPTS='-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled' \
             greenmail/standalone:2.1.8
-
-      - name: PROBE which registry served the daemon pulls
-        if: always()
-        run: |
-          sudo journalctl -u docker --no-pager | grep -oE 'https?://(mirror\.gcr\.io|registry-1\.docker\.io)/v2/[a-z0-9._/-]+/(manifests|blobs)' | sed -E 's#/(manifests|blobs)$##' | sort | uniq -c || echo "PROBE: no registry lines"
 
       - name: Wait for IMAPS to accept connections
         run: |
@@ -225,10 +216,6 @@ jobs:
       - uses: ./.github/actions/docker-hub-mirror
       - name: Run smoke (build + up + playwright + teardown)
         run: bash scripts/smoke-local.sh --verbose
-      - name: PROBE which registry served the daemon pulls
-        if: always()
-        run: |
-          sudo journalctl -u docker --no-pager | grep -oE 'https?://(mirror\.gcr\.io|registry-1\.docker\.io)/v2/[a-z0-9._/-]+/(manifests|blobs)' | sed -E 's#/(manifests|blobs)$##' | sort | uniq -c || echo "PROBE: no registry lines"
       - name: Upload playwright trace artifacts on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
