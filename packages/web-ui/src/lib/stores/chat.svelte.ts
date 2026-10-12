@@ -27,7 +27,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -1634,6 +1634,32 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 					await reconcileThread();
 					reconciledAfterDrop = true;
 				}
+			} else if (reattachOutcome === 'no-run' && dropped?.role === 'assistant') {
+				// A partial answer stays standing — but the run that produced it is
+				// over, and the stream of an aborted run ends without `done`, so the
+				// note the server wrote for it ("Turn interrupted", a loop break, a
+				// budget stop) never arrived. Without this the user saw thinking or
+				// half a text and no word that the turn had stopped; only a reload
+				// showed the note.
+				//
+				// NOT reconcileThread(): the server does not persist an answer the
+				// abort cut off, so adopting the transcript deletes text the user has
+				// already read. The note goes BEHIND the bubble instead.
+				//
+				// Only on `no-run`: the registry answered that nothing is live. On
+				// `unreachable` we do not know that, and a run still going would end
+				// on a note that is not there yet — so nothing is added.
+				try {
+					const r = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}/messages`);
+					if (r.ok) {
+						const note = trailingTurnNote(await r.json(), messages.filter((m) => m.role === 'user').length);
+						// Re-checked after the await: a thread switch in between means
+						// `messages` belongs to another thread now.
+						if (note && sessionId === sid) {
+							appendNoteOnce(messages, assistantIdx, note, (n) => ({ role: 'assistant' as const, content: '', note: n }));
+						}
+					}
+				} catch { /* transcript unreachable: the partial answer stays as it was */ }
 			}
 		}
 	}
