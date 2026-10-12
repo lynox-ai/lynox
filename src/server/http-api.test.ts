@@ -2070,7 +2070,6 @@ describe('LynoxHTTPApi', () => {
         privateMode = 0;
         expect((await uploadLong('long.docx')).status).toBe(200);
         await vi.waitFor(() => { expect(count('long.docx')).toBeGreaterThan(1); });
-        privateMode = 0;
         expect((await uploadLong('flip.docx')).status).toBe(200);
         await vi.waitFor(() => { expect(count('flip.docx')).toBeGreaterThan(0); });
         // Settle: a capture-once route would keep storing every remaining chunk.
