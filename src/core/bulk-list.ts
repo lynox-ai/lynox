@@ -24,8 +24,9 @@ import type { BulkInvalidReason } from './bulk-ledger.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
 export interface BulkListFormSpec {
-  /** The paths a list of this form lives at. Its filter names mean what they mean only
-   *  there: a form chosen for any path would make its names an allowlist everywhere. */
+  /** The paths a list of this form lives at — anchored, no `.` segment, no `%`, no trailing
+   *  slash. Its filter names mean what they mean only there: a form chosen for any path
+   *  would make its names an allowlist everywhere. */
   readonly path: RegExp;
   /** Filter names the planner may give values for. */
   readonly filters: readonly string[];
@@ -74,8 +75,6 @@ export interface BulkListSource {
 const TOKEN_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-/** Path segments: no `.`/`..` (a segment never starts with a dot), no `%`, nothing else. */
-const PATH_RE = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}){1,16}$/;
 
 /** At most this many bytes of one page are read. */
 export const BULK_LIST_PAGE_BYTES = 4 * 1024 * 1024;
@@ -106,11 +105,10 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
   const spec: BulkListFormSpec = BULK_LIST_FORMS[form];
 
   const path = input['path'];
-  if (typeof path !== 'string' || !PATH_RE.test(path)) {
-    throw new BulkSourceError('source_list.path must be a plain path such as /wp-json/wc/v3/products — letters, digits, - _ . and /, no trailing slash, no query.');
-  }
+  if (typeof path !== 'string') throw new BulkSourceError('source_list.path must be the list\'s path, such as /wp-json/wc/v3/products.');
   const listUrl = `https://${host}${path}`;
-  // The same rules a written target is held to, on the address the list is read at.
+  // The same rules a written target is held to, on the address the list is read at. Under
+  // today's only form its path rule below is stricter still; this one holds for any form.
   if (externalTargetKey(host, listUrl) !== listUrl) throw new BulkSourceError('source_list.path is not a plain path on target_host.');
   // Before the form's own path rule, so that this refusal holds whatever a form admits.
   if (isMailProviderTarget(listUrl)) throw new BulkSourceError('A bulk run does not read or write a mail provider\'s API.');

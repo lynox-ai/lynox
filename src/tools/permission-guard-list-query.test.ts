@@ -22,6 +22,12 @@ describe('a reviewed contract without a list query — unchanged', () => {
     expect(contractGrants('http_request', { method: 'GET', url: `${LIST}?` }, base)).toBe(false);
   });
 
+  it('stays so after a list-read copy was made from it: only the copy carries the query', () => {
+    const fresh: CapabilityContract = { ...base };
+    expect(grants(PAGE, {}, withListQuery(fresh, constraints))).toBe(true);
+    expect(contractGrants('http_request', { method: 'GET', url: PAGE }, fresh)).toBe(false);
+  });
+
   it('a stored or parsed copy of a list-read contract is such a contract: the query grant does not survive serialisation', () => {
     const live = withListQuery(base, constraints);
     expect(grants(PAGE, {}, live)).toBe(true);
@@ -90,6 +96,32 @@ describe('reviewableQuery', () => {
     [`page=1&${'x'.repeat(520)}=1`, 'too long'],
   ])('refuses %j (%s)', (raw) => {
     expect(reviewableQuery(raw, constraints)).toBe(false);
+  });
+
+  // Each of these is allowed by the constraints it is checked against, so only the rule its
+  // title names refuses it.
+  it.each([['Page'], ['pa.ge'], ['pa-ge'], ['pa[ge'], ['_page'], ['1page'], ['x'.repeat(33)]])(
+    'refuses the name %j, outside the name alphabet, even when the constraints list it',
+    (name) => {
+      expect(reviewableQuery(`${name}=1`, { [name]: { enum: ['1'] } })).toBe(false);
+    },
+  );
+
+  it.each([['a%2Fb'], ['a+b'], ['a;b'], ['a.b'], ['a=b'], ['a b'], ['x'.repeat(65)]])(
+    'refuses the value %j, outside the value alphabet, even when the constraints list it',
+    (value) => {
+      expect(reviewableQuery(`page=${value}`, { page: { enum: [value] } })).toBe(false);
+    },
+  );
+
+  it('refuses a query longer than the cap, every part of it allowed', () => {
+    const names = Array.from({ length: 9 }, (_, i) => `f${String(i)}`);
+    const value = 'v'.repeat(60);
+    const wide = Object.fromEntries(names.map((n) => [n, { enum: [value] }]));
+    const raw = names.map((n) => `${n}=${value}`).join('&');
+    expect(raw.length).toBeGreaterThan(512);
+    expect(reviewableQuery(raw, wide)).toBe(false);
+    expect(reviewableQuery(names.slice(0, 7).map((n) => `${n}=${value}`).join('&'), wide)).toBe(true);
   });
 
   it('refuses a constraint that allows nothing explicit', () => {

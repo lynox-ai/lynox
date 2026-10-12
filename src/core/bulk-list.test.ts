@@ -171,6 +171,13 @@ describe('listItemId', () => {
   it('reads the id field of the element itself, never one it inherits', () => {
     const inherited: unknown = JSON.parse('{"__proto__": {"id": 1}}');
     expect(listItemId(inherited, 'id')).toEqual({ invalid: 'list_item_no_id' });
+    // A polluted prototype is the case an `in` check would read: every plain object has it.
+    Object.defineProperty(Object.prototype, 'sku_ref', { value: 7, configurable: true, enumerable: false });
+    try {
+      expect(listItemId({ name: 'x' }, 'sku_ref')).toEqual({ invalid: 'list_item_no_id' });
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['sku_ref'];
+    }
   });
 });
 

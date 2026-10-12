@@ -731,14 +731,6 @@ const LIST_QUERY_NAME = /^[a-z][a-z0-9_]{0,31}$/;
 const LIST_QUERY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * A query name as a server may read it: PHP turns `.`, ` ` and `[` in a name into `_`,
- * header names are written with `-`, and a leading `_` is how `_method` is spelt.
- */
-function normalizedQueryName(name: string): string {
-  return name.toLowerCase().replace(/[.\s[-]/g, '_').replace(/^_+/, '');
-}
-
-/**
  * Whether `raw` — the text after `?` — is a query a list read may send. Checked on the raw
  * text, not on a parse of it: every server splits and decodes on its own, so the text admitted
  * is one no splitting can read differently. Names and values of a narrow alphabet (no `%`,
@@ -748,17 +740,22 @@ function normalizedQueryName(name: string): string {
  * (`_method`, the override headers written as parameters, a getter of the app's choosing).
  */
 export function reviewableQuery(raw: string, constraints: ListQueryConstraints): boolean {
-  if (raw === '' || raw.length > LIST_QUERY_MAX) return false;
+  if (raw.length > LIST_QUERY_MAX) return false;
   const seen = new Set<string>();
   for (const segment of raw.split('&')) {
     const eq = segment.indexOf('=');
-    if (eq <= 0 || segment.indexOf('=', eq + 1) !== -1) return false;
+    // An empty segment, a name without a value, a value without a name. A second `=` fails
+    // the value alphabet below.
+    if (eq <= 0) return false;
     const name = segment.slice(0, eq);
     const value = segment.slice(eq + 1);
     if (!LIST_QUERY_NAME.test(name) || !LIST_QUERY_VALUE.test(value)) return false;
     if (seen.has(name)) return false;
     seen.add(name);
-    if (normalizedQueryName(name).includes('method')) return false;
+    // The alphabet above already leaves out every spelling a server folds into another name
+    // (PHP turns `.`, ` ` and `[` into `_`; header names are written with `-`; `_method`
+    // starts with `_`), so the name a server reads is this one.
+    if (name.includes('method')) return false;
     if (!Object.hasOwn(constraints, name)) return false;
     const c = constraints[name]!;
     if (c.enum !== undefined && !c.enum.includes(value)) return false;
