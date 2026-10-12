@@ -45,7 +45,7 @@ import {
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
   evictImagesFrom,
 } from './tool-result-blob-store.js';
-import { isWorkspaceActive } from './workspace.js';
+import { isWorkspaceActive, getWorkspaceCwd } from './workspace.js';
 import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,
@@ -378,6 +378,10 @@ export class Session {
   /** Set by {@link run} after each non-internal send; read via {@link getLastRunStop}. */
   private _lastRunStop: SendStop | null = null;
   private _changesetManager: ChangesetManager | null = null;
+  /** The manager the current agent was built with. While it holds one, a file write skips
+   *  the permission prompt, so this — not `_changesetManager` — decides whether turning
+   *  review off needs a rebuild. Set only once a build succeeded. */
+  private _agentChangeset: ChangesetManager | null = null;
   private _profileOverride: import('../types/index.js').ModelProfile | null = null;
   /**
    * The user's background-task model for this session (WorkerLoop runs only), set
@@ -774,12 +778,31 @@ export class Session {
     const isAutonomous = this.agentOverrides.autonomy === 'autonomous';
     const hasWorkspace = isWorkspaceActive();
     const changesetEnabled = hasWorkspace && (isAutonomous || (this.engine.getUserConfig().changeset_review !== false));
-    if (changesetEnabled) {
-      const runId = randomUUID();
-      this._changesetManager = new ChangesetManager(process.cwd(), runId);
-      this._recreateAgent();
-    } else {
-      this._changesetManager = null;
+    // The manager this run owns, settled in the `finally` below. An internal run (the
+    // compaction summary) owns none and leaves the user run's manager alone: auto-compaction
+    // reaches this point synchronously from inside the user run, before the caller has read
+    // that run's changes, and replacing the manager there would lose its review.
+    let runChangeset: ChangesetManager | null = null;
+    if (runOptions?.internal !== true) {
+      // The previous run's backups go with its manager; nothing reaches them after this.
+      const previous = this._changesetManager;
+      previous?.cleanup();
+      if (changesetEnabled) {
+        const runId = randomUUID();
+        // Relative to the workspace the files live in, not to the process: in the image the
+        // process runs in /app and every workspace path would start with `../`.
+        runChangeset = new ChangesetManager(getWorkspaceCwd(), runId);
+        this._changesetManager = runChangeset;
+        this._recreateAgent();
+      } else {
+        this._changesetManager = null;
+        // The agent holds the manager it was built with, and while it has one, a file
+        // write skips the permission prompt (the review was to come after the run). A
+        // rebuild above for the config change that turned review off still saw the old
+        // manager, so the agent is rebuilt without it — or writes would go unprompted
+        // and unreviewed.
+        if (this._agentChangeset !== null) this._recreateAgent();
+      }
     }
 
     // Check persistent daily/monthly budget before running
@@ -1149,9 +1172,9 @@ export class Session {
     // inside the send, so the two are the same object at the call. It stays for the
     // reader, not as a fix. `this.agent` is a mutable field and `run()`'s own
     // prologue replaces it from three places; worse, the auto-compaction this method
-    // kicks off below is fire-and-forget and reaches `_recreateAgent()` SYNCHRONOUSLY
-    // (`_autoCompactIfNeeded` → `compact` → nested `run` → the changeset branch, with
-    // no `await` anywhere in between). So a caller that reads `getAgent().getLastStop()`
+    // kicks off below is fire-and-forget and can reach `_recreateAgent()` before the
+    // caller reads anything (`_autoCompactIfNeeded` → `compact` → nested `run`, whose
+    // prologue rebuilds the agent on a registry, config or tier change). So a caller that reads `getAgent().getLastStop()`
     // after awaiting this method can get a brand-new Agent whose stop is `null`.
     const runAgent = this.agent;
     if (runOptions?.internal !== true) this._lastRunStop = null;
@@ -1604,6 +1627,8 @@ export class Session {
 
       throw err;
     } finally {
+      // The run has stopped writing: its changeset now holds only what the review shows.
+      runChangeset?.settle();
       this.currentRunId = null;
       this._onPersistCheckpoint = null;
       if (this.agent) {
@@ -2720,6 +2745,7 @@ export class Session {
       toolCallTracker: this._toolCallTracker,
       userTimezone: this._userTimezone ?? undefined,
     });
+    this._agentChangeset = this._changesetManager;
 
     // Respect memory_extraction config (default: true)
     if (userConfig.memory_extraction === false) {

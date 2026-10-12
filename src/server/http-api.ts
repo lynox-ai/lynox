@@ -4693,6 +4693,13 @@ export class LynoxHTTPApi {
       // the owner) accepts or rolls it back, even in the mandate's own conversation (§3.13 E7).
       // The next run replaces it, whoever starts it, as it always has.
       if (this._refuseUnlessOwns(_req, res, 'review the changes of this run', () => [this._threadRow(params['id']!), this._lastRunRow(session)])) return;
+      // While a run is in progress the changeset is that run's and still growing: a rollback
+      // would reset files under a run that goes on writing them, and the cleanup after it
+      // would take backups the run still needs.
+      if (this.runningSessions.has(params['id']!)) {
+        errorResponse(res, 409, 'Cannot review changes while a run is in progress');
+        return;
+      }
       const csm = session.getChangesetManager();
       if (!csm || !csm.hasChanges()) {
         errorResponse(res, 400, 'No changeset to review');
@@ -4719,14 +4726,15 @@ export class LynoxHTTPApi {
       } else {
         // Partial: validate rolledBackFiles against changeset entries
         const clientFiles = Array.isArray(b?.['rolledBackFiles']) ? b['rolledBackFiles'] as string[] : [];
-        const validRelPaths = new Set(changes.map(c => c.file));
+        // The paths the review showed, mapped back to the files they name. Not resolved
+        // against `process.cwd()`: the review's paths are relative to the workspace.
+        const absByRel = new Map(changes.map(c => [c.file, c.absolutePath]));
         const toRollback: string[] = [];
 
         for (const f of clientFiles) {
-          if (typeof f !== 'string' || !validRelPaths.has(f)) continue;
-          // Resolve relative path back to absolute via cwd
-          const abs = resolve(process.cwd(), f);
-          toRollback.push(abs);
+          if (typeof f !== 'string') continue;
+          const abs = absByRel.get(f);
+          if (abs !== undefined) toRollback.push(abs);
         }
 
         if (toRollback.length > 0) {

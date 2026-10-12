@@ -1,7 +1,8 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, rmdirSync, rmSync, cpSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
 
 export class ChangesetManager {
@@ -9,10 +10,18 @@ export class ChangesetManager {
   /** The pre-run bytes of each `modified` entry. Held here, not read back from the backup
    *  copy: that copy can be a symlink to the live file, or shared with another manager. */
   private originalBytes: Map<string, Buffer> = new Map();
-  private readonly backupDir: string;
+  /** Created by the first backup, not by the constructor: a run that writes nothing leaves
+   *  no directory behind. `cleanup()` sets it back to null, so a backup after it makes a new
+   *  private (0700) directory instead of re-creating the removed path with default modes. */
+  private backupDir: string | null = null;
 
-  constructor(private readonly cwd: string, _runId: string) {
-    this.backupDir = mkdtempSync(join(tmpdir(), 'lynox-changeset-'));
+  constructor(private readonly cwd: string, _runId: string) {}
+
+  /** One flat file per tracked path, named by its hash. Never a path relative to `cwd`: a
+   *  file outside `cwd` would give `../…` and land outside the directory `cleanup()` removes. */
+  private _backupPathOf(abs: string): string | null {
+    if (this.backupDir === null) return null;
+    return join(this.backupDir, createHash('sha256').update(abs).digest('hex').slice(0, 32));
   }
 
   /**
@@ -28,20 +37,19 @@ export class ChangesetManager {
     let status: 'added' | 'modified' = 'added';
 
     if (existsSync(abs)) {
+      // The file exists, so it is `modified` whatever fails below. Treating it as `added`
+      // would make "Rollback all" delete a file the user had before the run.
+      status = 'modified';
       try {
         const bytes = readFileSync(abs);
         originalContent = bytes.toString('utf-8');
-        status = 'modified';
-        // Copy original to backup dir preserving relative structure
-        const rel = relative(this.cwd, abs);
-        const backupPath = join(this.backupDir, rel);
-        mkdirSync(dirname(backupPath), { recursive: true });
-        cpSync(abs, backupPath);
+        // Held before the copy: a failed copy still leaves the bytes rollback restores.
         this.originalBytes.set(abs, bytes);
+        this.backupDir ??= mkdtempSync(join(tmpdir(), 'lynox-changeset-'));
+        cpSync(abs, this._backupPathOf(abs)!);
       } catch {
-        // Best-effort — if we can't read, treat as new file
-        originalContent = null;
-        status = 'added';
+        // Unreadable: rollback cannot restore it and leaves it alone (no original content).
+        // Copy failed: rollback restores the held bytes; the diff is unavailable.
       }
     }
 
@@ -93,8 +101,9 @@ export class ChangesetManager {
         diffText = header + lines.map(l => `+${l}`).join('\n');
       } else {
         // Modified file: use system diff -u
-        const backupPath = join(this.backupDir, relative(this.cwd, abs));
+        const backupPath = this._backupPathOf(abs);
         try {
+          if (backupPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
           diffText = execFileSync('diff', ['-u', backupPath, abs], {
             encoding: 'utf-8',
             timeout: 5000,
@@ -152,13 +161,56 @@ export class ChangesetManager {
   }
 
   /**
-   * Remove the temporary backup directory.
+   * The changeset is over: the review was answered, or its run is gone. The backup
+   * directory is removed and the tracked files are forgotten, so a second answer to the
+   * same review (another tab, a reload) finds nothing to roll back instead of resetting
+   * changes the first answer accepted.
    */
   cleanup(): void {
+    this.entries.clear();
+    this.originalBytes.clear();
+    if (this.backupDir === null) return;
     try {
       rmSync(this.backupDir, { recursive: true, force: true });
     } catch {
       // Best-effort — OS cleans tmpdir on reboot
+    }
+    this.backupDir = null;
+  }
+
+  /**
+   * The end of the run that owns this manager. Called once, after the run stops writing.
+   * A tracked file that did not change is dropped here, with its backup copy, so "Rollback
+   * all" cannot reset it later, after the user (or another run) changed it. A manager with
+   * nothing left removes its directory. One kind of entry stays although the review does
+   * not show it: a file the run deleted or made unreadable. It did change, and "Rollback
+   * all" restores it.
+   *
+   * Never in a query: a `GET /changeset` between a backup and its write would drop the
+   * entry, and the write that follows would be in neither the review nor the rollback.
+   */
+  settle(): void {
+    const changed = new Set(this._changed().map(([abs]) => abs));
+    for (const [abs, entry] of this.entries) {
+      if (changed.has(abs)) continue;
+      // Kept: a tracked file that is gone or unreadable is not "unchanged".
+      if (entry.status === 'modified' && !this._isUnchanged(abs)) continue;
+      if (entry.status === 'added' && existsSync(abs)) continue;
+      const backupPath = this._backupPathOf(abs);
+      if (backupPath !== null) rmSync(backupPath, { force: true });
+      this.entries.delete(abs);
+      this.originalBytes.delete(abs);
+    }
+    if (this.entries.size === 0) this.cleanup();
+  }
+
+  private _isUnchanged(abs: string): boolean {
+    const before = this.originalBytes.get(abs);
+    if (before === undefined) return false;
+    try {
+      return before.equals(readFileSync(abs));
+    } catch {
+      return false;
     }
   }
 
