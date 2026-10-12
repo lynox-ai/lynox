@@ -37,13 +37,15 @@ const NOTE_HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$/;
  * apart, never quoted.
  */
 export function headerListForNote(names: readonly string[]): string {
+  if (names.length === 0) return 'no header';
   const valid = names.map((n) => n.trim()).filter((n) => NOTE_HEADER_NAME.test(n));
   const invalid = names.length - valid.length;
   if (valid.length === 0) {
     return invalid === 1 ? 'a header with a name that is not a valid header name' : `${String(invalid)} headers with names that are not valid header names`;
   }
+  const count = (n: number): string => (n === 1 ? 'one' : String(n));
   const parts = valid.slice(0, 3).map((n) => `"${n}"`);
-  if (valid.length > 3) parts.push(`${String(valid.length - 3)} more`);
+  if (valid.length > 3) parts.push(`${count(valid.length - 3)} more`);
   if (invalid > 0) parts.push(invalid === 1 ? 'one with a name that is not a valid header name' : `${String(invalid)} with names that are not valid header names`);
   const last = parts.pop() ?? '';
   return `${names.length > 1 ? 'the headers' : 'a header'} ${parts.length === 0 ? last : `${parts.join(', ')} and ${last}`}`;
