@@ -25,7 +25,7 @@ runs:
         current='{}'
         if [ -s "$cfg" ]; then current=$(sudo cat "$cfg"); fi
         printf '%s' "$current" \
-          | jq '.["registry-mirrors"] = ((.["registry-mirrors"] // []) + ["https://mirror.gcr.io"] | unique)' \
+          | jq '.["registry-mirrors"] = ((.["registry-mirrors"] // []) + ["https://mirror.gcr.io"] | unique) | .debug = true' \
           | sudo tee "$cfg.new" > /dev/null
         sudo mv "$cfg.new" "$cfg"
         sudo systemctl restart docker
