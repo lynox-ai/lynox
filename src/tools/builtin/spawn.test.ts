@@ -1722,6 +1722,11 @@ describe('spawn_agent tool', () => {
     const child = vi.mocked(MockAgent).mock.instances[0] as unknown as { followUpFallback?: boolean; captureFallback?: boolean };
     expect(child.followUpFallback ?? false).toBe(false);
     expect(child.captureFallback ?? false).toBe(false);
+    // The other road in: the child's config. The mock copies only the keys it knows onto the
+    // instance, so a flag passed through the config would not show up above.
+    const config = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(config['followUpFallback'] ?? false).toBe(false);
+    expect(config['captureFallback'] ?? false).toBe(false);
   });
 
   it('F5/S8: a tainted parent seeds the spawned child\'s untrusted taint', async () => {
