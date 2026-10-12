@@ -574,6 +574,8 @@ function isInstanceSuppliedLlm(): boolean {
 	return cpSuppliesLLMKey(managedTier);
 }
 let pendingChangeset = $state<ChangesetFileInfo[] | null>(null);
+/** The run whose changes `pendingChangeset` shows; the review answer sends it back. */
+let pendingChangesetRunId: string | null = null;
 let changesetLoading = $state(false);
 let skipExtraction = $state(false);
 let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry' | 'busy' } | null>(null);
@@ -2827,9 +2829,10 @@ async function fetchChangeset(): Promise<void> {
 	try {
 		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset`);
 		if (res.ok) {
-			const data = (await res.json()) as { hasChanges: boolean; files: ChangesetFileInfo[] };
+			const data = (await res.json()) as { hasChanges: boolean; runId?: string; files: ChangesetFileInfo[] };
 			if (data.hasChanges && data.files.length > 0) {
 				pendingChangeset = data.files;
+				pendingChangesetRunId = data.runId ?? null;
 			}
 		}
 	} catch { /* best-effort — don't block UX */ }
@@ -2841,18 +2844,31 @@ export async function submitChangesetReview(
 	rolledBackFiles?: string[],
 ): Promise<void> {
 	if (!sessionId) return;
-	const body: Record<string, unknown> = { action };
+	// The server refuses an answer whose run is not the one holding the changes now.
+	const body: Record<string, unknown> = { action, runId: pendingChangesetRunId };
 	if (action === 'partial' && rolledBackFiles) {
 		body['rolledBackFiles'] = rolledBackFiles;
 	}
+	let status: number;
 	try {
-		await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/changeset/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
 		});
-	} catch { /* best-effort */ }
+		status = res.status;
+	} catch {
+		// Unknown whether it arrived: the review stays open, so the user can answer again.
+		addToast(t('changeset.review_unsent'), 'error', 5000);
+		return;
+	}
 	pendingChangeset = null;
+	pendingChangesetRunId = null;
+	if (status >= 200 && status < 300) return;
+	// The answer did nothing. Closing the review silently would read as done: say so, and show
+	// what is pending now. 409 is the review of an earlier run, or a run in progress.
+	addToast(t(status === 409 ? 'changeset.review_refused' : 'changeset.review_failed'), 'info', 5000);
+	await fetchChangeset();
 }
 
 export function cancelQueue(): void {

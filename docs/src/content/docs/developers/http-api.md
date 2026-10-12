@@ -65,7 +65,7 @@ The response is a Server-Sent Events stream with these event types:
 | `prompt` | Agent requests user input (`ask_user`). Includes `promptId` for resumable prompts |
 | `secret_prompt` | Agent requests a secret (`ask_secret`). Includes `promptId` |
 | `turn_end` | Turn completed |
-| `changeset_ready` | File changes pending review (accept/rollback) |
+| `changeset_ready` | File changes pending review (accept/rollback). Includes the `runId` the review answer must send back |
 | `done` | Run completed |
 | `error` | Error occurred |
 
@@ -322,9 +322,11 @@ POST /api/migration/restore       # Restore imported data
 ### Changeset Review
 
 ```
-GET  /api/sessions/:id/changeset          # Pending file changes
+GET  /api/sessions/:id/changeset          # Pending file changes and the runId they belong to
 POST /api/sessions/:id/changeset/review   # Accept/rollback file changes
 ```
+
+The review body is `{ "action": "accept" | "rollback" | "partial", "runId": "<from the GET>", "rolledBackFiles": ["<path>"] }` (`rolledBackFiles` for `partial` only). The answer is refused with `409` when `runId` is missing or names an earlier run than the one holding the changes, and while a run is in progress.
 
 ### Other
 
