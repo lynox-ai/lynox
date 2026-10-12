@@ -69,6 +69,7 @@ import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../c
 import { promptOriginOf, parseOriginJson, originWireFields, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
+import { MAX_RECORDS, RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -10854,32 +10855,69 @@ export class LynoxHTTPApi {
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
-      // CRM contacts + deals
+      // CRM contacts + deals, and every DataStore collection: walked to the END by
+      // `_id`, the way the threads are walked above.
+      //
+      // Both blocks used to read once through the store's listing, which caps at 500
+      // rows, so a tenant with 501 contacts got an Art. 15 copy with 500 and no sign
+      // of the rest. The walk stops at `MAX_RECORDS`, the most a collection can hold
+      // through the DataStore's own writes, so the dump is complete for anything this
+      // codebase can produce; only a foreign or restored database can exceed it, and
+      // that is what `*_may_be_incomplete` reports. Like the thread cap, this bounds
+      // rows per collection, not the size of the dump.
+      const walkRecords = (page: (afterId: number | undefined) => Array<Record<string, unknown>>): { rows: Array<Record<string, unknown>>; truncated: boolean } => {
+        const rows: Array<Record<string, unknown>> = [];
+        let afterId: number | undefined;
+        for (;;) {
+          const batch = page(afterId);
+          rows.push(...batch);
+          if (batch.length < RECORD_EXPORT_PAGE_MAX) return { rows, truncated: false };
+          if (rows.length >= MAX_RECORDS) return { rows, truncated: true };
+          afterId = batch[batch.length - 1]!['_id'] as number;
+        }
+      };
+
       const crm = engine.getCRM();
       if (crm) {
-        exportData['contacts'] = crm.listContacts(undefined, 500);
-        exportData['deals'] = crm.getAllDeals(undefined, 500);
+        const contacts = walkRecords(afterId => crm.listForExport('contacts', { afterId, limit: RECORD_EXPORT_PAGE_MAX }));
+        const deals = walkRecords(afterId => crm.listForExport('deals', { afterId, limit: RECORD_EXPORT_PAGE_MAX }));
+        exportData['contacts'] = contacts.rows;
+        exportData['contacts_may_be_incomplete'] = contacts.truncated;
+        exportData['deals'] = deals.rows;
+        exportData['deals_may_be_incomplete'] = deals.truncated;
       } else {
         exportData['contacts'] = [];
+        exportData['contacts_may_be_incomplete'] = false;
         exportData['deals'] = [];
+        exportData['deals_may_be_incomplete'] = false;
       }
 
-      // DataStore collections + records
       const ds = engine.getDataStore();
       if (ds) {
         const collections = ds.listCollections();
         const datastoreExport: Record<string, unknown[]> = {};
+        // One flag for the block, set by a truncated collection AND by one that could
+        // not be read: the latter used to export as `[]`, an empty collection to
+        // anyone reading the dump.
+        const incomplete: string[] = [];
         for (const col of collections) {
           try {
-            const result = ds.queryRecords({ collection: col.name, limit: 500 });
-            datastoreExport[col.name] = result.rows;
+            const walked = walkRecords(afterId => ds.listRecordsForExport({ collection: col.name, afterId, limit: RECORD_EXPORT_PAGE_MAX }));
+            datastoreExport[col.name] = walked.rows;
+            if (walked.truncated) incomplete.push(col.name);
           } catch {
             datastoreExport[col.name] = [];
+            incomplete.push(col.name);
           }
         }
+        if (incomplete.length > 0) {
+          process.stderr.write(`⚠ /api/export: datastore collection(s) ${incomplete.join(', ')} truncated or unreadable — dump may be incomplete\n`);
+        }
         exportData['datastore'] = datastoreExport;
+        exportData['datastore_may_be_incomplete'] = incomplete.length > 0;
       } else {
         exportData['datastore'] = {};
+        exportData['datastore_may_be_incomplete'] = false;
       }
 
       // Secret names (never values — GDPR export must not leak secrets)

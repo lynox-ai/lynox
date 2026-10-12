@@ -35,7 +35,14 @@ export const CRM_OVERLAP_NAMES: ReadonlySet<string> = new Set([
 ]);
 const MAX_COLLECTIONS = 100;
 const MAX_COLUMNS = 50;
-const MAX_RECORDS = 100_000;
+/** Exported so the export can walk a collection to the end: past this, a collection cannot be filled through {@link DataStore}. */
+export const MAX_RECORDS = 100_000;
+/**
+ * The largest page {@link DataStore.listRecordsForExport} returns. Exported for the
+ * same reason as the thread store's `EXPORT_PAGE_MAX`: a walk stops on a SHORT page,
+ * so a caller asking for more than this would stop after the first one.
+ */
+export const RECORD_EXPORT_PAGE_MAX = 500;
 const MAX_INSERT_BATCH = 1000;
 const MAX_DB_SIZE_BYTES = 500 * 1024 * 1024;
 const VALID_COLUMN_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
@@ -573,6 +580,33 @@ export class DataStore {
     if (subjectCols.size > 0) this._hydrateSubjectNames(rows, subjectCols);
 
     return { rows, total: countResult.cnt };
+  }
+
+  /**
+   * One page of an EXHAUSTIVE read of a collection, for the data export — not a
+   * listing. {@link queryRecords} caps every call at 500 rows, so the export, which
+   * called it once per collection, returned the first 500 and said nothing about the
+   * rest.
+   *
+   * Keyed on `_id`, not on an offset: `_id` is the `INTEGER PRIMARY KEY
+   * AUTOINCREMENT`, so it is never NULL and never reused, and a walk over
+   * `_id > last` neither repeats nor skips an existing row however the collection is
+   * written during it. `OFFSET` over `_updated_at DESC` would — an update mid-walk
+   * moves a row to the front and shifts the window. A row INSERTED mid-walk may or
+   * may not appear, which is not a loss.
+   *
+   * Raw cells, like {@link queryRecords} without `subjectsByName`. Pass the previous
+   * page's last `_id` as `afterId`; omit it for the first page.
+   */
+  listRecordsForExport(params: { collection: string; afterId?: number | undefined; limit: number }): Record<string, unknown>[] {
+    const info = this._getCollectionMeta(params.collection);
+    if (!info) {
+      throw new Error(`Collection "${params.collection}" not found.`);
+    }
+    const limit = Math.max(1, Math.min(params.limit, RECORD_EXPORT_PAGE_MAX));
+    const tableName = `ds_${params.collection}`;
+    const selectSql = `SELECT * FROM "${tableName}" WHERE _id > ? ORDER BY _id ASC LIMIT ?`;
+    return this.db.prepare(selectSql).all(params.afterId ?? 0, limit) as Record<string, unknown>[];
   }
 
   /**

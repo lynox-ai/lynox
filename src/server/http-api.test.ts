@@ -12813,6 +12813,84 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    // A store that always hands back a FULL page drives the record walk to its bound in
+    // cheap mock calls; seeding 100 000 real rows per case is what this avoids. That every
+    // row below the bound arrives is asserted on a real engine in
+    // `export-crm-complete.test.ts`.
+    const fullPages = () => {
+      let next = 1;
+      return vi.fn(({ limit }: { limit: number }) => Array.from({ length: limit }, () => ({ _id: next++ })));
+    };
+
+    it('GET /api/export marks contacts and deals incomplete when the walk hits the cap, each on its own', async () => {
+      const contactsPage = fullPages();
+      const listForExport = vi.fn((collection: 'contacts' | 'deals', opts: { limit: number }) =>
+        collection === 'contacts' ? contactsPage(opts) : [{ _id: 1 }]);
+      await swapEngine({
+        getThreadStore: () => null,
+        getKnowledgeLayer: () => null,
+        getCRM: () => ({ listForExport }),
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { contacts: unknown[]; contacts_may_be_incomplete: boolean; deals: unknown[]; deals_may_be_incomplete: boolean };
+        expect(body.contacts_may_be_incomplete, 'the dump is short and must say so').toBe(true);
+        expect(body.contacts).toHaveLength(100_000);
+        // The other direction, on the same response: one short page is a complete read.
+        expect(body.deals_may_be_incomplete).toBe(false);
+        expect(body.deals).toHaveLength(1);
+      });
+    });
+
+    it('GET /api/export marks deals incomplete when only deals hit the cap', async () => {
+      const dealsPage = fullPages();
+      const listForExport = vi.fn((collection: 'contacts' | 'deals', opts: { limit: number }) =>
+        collection === 'deals' ? dealsPage(opts) : []);
+      await swapEngine({
+        getThreadStore: () => null,
+        getKnowledgeLayer: () => null,
+        getCRM: () => ({ listForExport }),
+        getDataStore: () => null,
+      }, async () => {
+        const body = await (await jsonFetch('/api/export')).json() as { contacts_may_be_incomplete: boolean; deals_may_be_incomplete: boolean };
+        expect(body.deals_may_be_incomplete).toBe(true);
+        expect(body.contacts_may_be_incomplete).toBe(false);
+      });
+    });
+
+    it('GET /api/export marks the datastore incomplete for a truncated collection and for one it could not read', async () => {
+      const truncatedPage = fullPages();
+      const listRecordsForExport = vi.fn((p: { collection: string; limit: number }) => {
+        if (p.collection === 'huge') return truncatedPage(p);
+        if (p.collection === 'broken') throw new Error('disk I/O error');
+        return [{ _id: 1 }];
+      });
+      const run = async (names: string[]) => {
+        let body: { datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean } | undefined;
+        await swapEngine({
+          getThreadStore: () => null,
+          getKnowledgeLayer: () => null,
+          getCRM: () => null,
+          getDataStore: () => ({ listCollections: () => names.map(name => ({ name })), listRecordsForExport }),
+        }, async () => {
+          const res = await jsonFetch('/api/export');
+          expect(res.status).toBe(200);
+          body = await res.json() as typeof body;
+        });
+        return body!;
+      };
+      const huge = await run(['small', 'huge']);
+      expect(huge.datastore_may_be_incomplete, 'a collection cut at the cap').toBe(true);
+      expect(huge.datastore['huge']).toHaveLength(100_000);
+      const broken = await run(['small', 'broken']);
+      expect(broken.datastore_may_be_incomplete, 'an unreadable collection is not an empty one').toBe(true);
+      expect(broken.datastore['broken']).toEqual([]);
+      const fine = await run(['small']);
+      expect(fine.datastore_may_be_incomplete).toBe(false);
+      expect(fine.datastore['small']).toHaveLength(1);
+    });
+
     it('GET /api/export passes the memory store\'s scopes and its incompleteness through, in both directions', async () => {
       // What `exportAllScopes` reads is asserted on disk in `export-memory-scopes.test.ts`;
       // this is only the hand-over, so a route that dropped the flag cannot pass for one

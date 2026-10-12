@@ -896,6 +896,59 @@ describe('DataStore', () => {
     });
   });
 
+  // === Export walk ===
+
+  describe('listRecordsForExport', () => {
+    const ROWS = 1200;
+    beforeEach(() => {
+      ds.createCollection({ name: 'walked', scope, columns: [{ name: 'k', type: 'number' }, { name: 'v', type: 'string' }], uniqueKey: ['k'] });
+      ds.insertRecords({ collection: 'walked', records: Array.from({ length: 1000 }, (_, i) => ({ k: i, v: 'a' })) });
+      ds.insertRecords({ collection: 'walked', records: Array.from({ length: ROWS - 1000 }, (_, i) => ({ k: 1000 + i, v: 'a' })) });
+    });
+
+    const walk = (between?: () => void): number[] => {
+      const seen: number[] = [];
+      let afterId: number | undefined;
+      for (;;) {
+        const page = ds.listRecordsForExport({ collection: 'walked', afterId, limit: 500 });
+        seen.push(...page.map(r => r['k'] as number));
+        if (page.length < 500) return seen;
+        afterId = page[page.length - 1]!['_id'] as number;
+        between?.();
+      }
+    };
+
+    it('reaches every row past the 500 that queryRecords stops at', () => {
+      expect(ds.queryRecords({ collection: 'walked', limit: 10_000 }).rows, 'precondition: the listing caps').toHaveLength(500);
+      const seen = walk();
+      expect(seen).toHaveLength(ROWS);
+      expect(new Set(seen).size).toBe(ROWS);
+    });
+
+    it('neither repeats nor skips a row when rows are updated mid-walk', () => {
+      // An update moves a row to the front of `_updated_at DESC`; a walk keyed on an
+      // offset over that order repeats one row and loses another. Rows from both
+      // sides of the cursor are updated, after each page.
+      let round = 0;
+      const seen = walk(() => {
+        round++;
+        ds.insertRecords({ collection: 'walked', records: [{ k: 10 * round, v: 'b' }, { k: ROWS - 10 * round, v: 'b' }] });
+      });
+      expect(round, 'precondition: the walk was written between pages').toBeGreaterThan(0);
+      expect(seen).toHaveLength(ROWS);
+      expect(new Set(seen).size).toBe(ROWS);
+    });
+
+    it('clamps a page to RECORD_EXPORT_PAGE_MAX, and at least one row', () => {
+      expect(ds.listRecordsForExport({ collection: 'walked', limit: 10_000 })).toHaveLength(500);
+      expect(ds.listRecordsForExport({ collection: 'walked', limit: 0 })).toHaveLength(1);
+    });
+
+    it('throws for a collection that does not exist, rather than reading it as empty', () => {
+      expect(() => ds.listRecordsForExport({ collection: 'nope', limit: 10 })).toThrow(/not found/);
+    });
+  });
+
   // === Collection Info & Listing ===
 
   describe('listCollections / getCollectionInfo', () => {
