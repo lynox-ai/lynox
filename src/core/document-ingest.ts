@@ -88,7 +88,8 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
 
 /**
  * Store an uploaded document's text into the knowledge layer as recall-sized
- * memories. Returns the number of chunks stored. Each chunk is tagged
+ * memories. Returns the number of chunks handed to the store — the store may still
+ * drop one (a dedup hit, or `cancelled`), so it is an upper bound. Each chunk is tagged
  * `external_unverified` (untrusted uploaded content) so the recall path applies
  * its injection guard, and `document_upload` so the document's memories are
  * attributable. Best-effort: the caller fires this without awaiting.
