@@ -1895,7 +1895,9 @@ export class Agent implements IAgent {
           ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
           sourceChannel: 'agent',
           sourceUntrusted: factUntrusted,
-          sourceThreadId: this.currentThreadId,
+          // A step or sub-agent has no thread of its own; the chat it runs for is where the
+          // private-mode purge looks (see `chatThreadOf` in tools/builtin/private-thread.ts).
+          sourceThreadId: this.currentThreadId ?? this.originThreadId,
           sourceRunId: this.currentRunId,
         });
         // The SAME two emits the `remember` tool makes. Without them the fire-rate
@@ -2107,7 +2109,7 @@ export class Agent implements IAgent {
     if (turnUntrusted) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     this._scheduleMemoryExtraction(gate.memory.maybeUpdate(
-      safeText, this._loopToolCount, this.currentThreadId, this.currentRunId,
+      safeText, this._loopToolCount, this.currentThreadId ?? this.originThreadId, this.currentRunId,
       // Read when the extraction returns, not now: see the same re-read on the durable path.
       () => this.skipMemoryExtraction,
     ));

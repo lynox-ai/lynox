@@ -9,7 +9,7 @@ import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
 import { canSupersede } from '../../core/provenance.js';
-import { privateThreadRefusal } from './private-thread.js';
+import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 
 /**
  * The reason clause every trust-gate outcome names, worded for the signal that ACTUALLY fired.
@@ -136,7 +136,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
       pin: input.pin,
       sourceChannel: 'agent',
       sourceUntrusted,
-      sourceThreadId: agent.currentThreadId,
+      sourceThreadId: chatThreadOf(agent),
       sourceRunId: agent.currentRunId,
     });
 

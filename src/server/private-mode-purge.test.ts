@@ -210,6 +210,33 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     expect(countFor('t-tool-open')).toBe(1); // the same tool on the same engine does write
   });
 
+  it('on the booted engine, a workflow step\'s or sub-agent\'s `remember` goes with the chat it ran for', async () => {
+    // A step or `spawn_agent` child has no thread of its own, only the chat as its origin.
+    // Before the stamp, its write carried no thread id, and the switch left it behind.
+    const { ts, ks } = stores();
+    ts.createThread('t-step-chat', { title: 'chat t-step-chat' });
+    const toolContext = (engineOf() as unknown as { getToolContext: () => IAgent['toolContext'] }).getToolContext();
+    const stepAgent = (originThreadId: string | undefined, runId: string) => ({
+      toolContext, currentThreadId: undefined, originThreadId, currentRunId: runId, autonomy: 'supervised',
+      sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
+      skipMemoryExtraction: false, promptUser: async (_q: unknown, options: string[] = []) => options[0] ?? 'Apply',
+    } as unknown as IAgent);
+    const entryOfRun = (runId: string) => [...ks.listActive(), ...ks.listPending()].find(e => e.sourceRunId === runId);
+
+    await rememberTool.handler({ text: 'The bakery delivers on Tuesdays' }, stepAgent('t-step-chat', 'r-step'));
+    // Control: a headless step (scheduled run, no chat) on the same engine.
+    await rememberTool.handler({ text: 'The print shop invoices monthly' }, stepAgent(undefined, 'r-headless'));
+    const fromStep = entryOfRun('r-step');
+    const headless = entryOfRun('r-headless');
+    expect(fromStep?.sourceThreadId).toBe('t-step-chat');
+    expect(headless).toBeDefined();
+
+    expect((await setPrivate('t-step-chat')).status).toBe(200);
+
+    expect(ks.getEntry(fromStep!.id)).toBeNull();
+    expect(ks.getEntry(headless!.id)).not.toBeNull();
+  });
+
   it('a failed legacy purge answers 500 too, and the durable half still runs', async () => {
     const { ks, kl } = stores();
     const seeded = seedThread('t-legacy-fails');
