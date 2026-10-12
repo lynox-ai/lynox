@@ -65,7 +65,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
-import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
+import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
@@ -3473,7 +3473,10 @@ export class LynoxHTTPApi {
       // collapsing them to a space neutralises a pseudo-directive-on-its-own-line
       // injection that bypasses the client gate, WITHOUT touching legitimate
       // \n/\t/\r in a normal multi-line message.
-      const safeTaskText = stripUntrustedSeparators(taskText);
+      // A credential typed into the message is masked here, before the thread, the run history,
+      // the title or the model see it; the model is told to collect it with `ask_secret`. Only the
+      // typed text: a loaded context or a file is not something the user typed.
+      const safeTaskText = withoutTypedCredentials(stripUntrustedSeparators(taskText));
       const composedTask = `${contextPreamble}${safeTaskText}`;
 
       // Pre-flight: provider key must be configured before we hand off to the
