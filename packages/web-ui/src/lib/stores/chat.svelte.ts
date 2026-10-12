@@ -27,7 +27,7 @@ import { addToast } from './toast.svelte.js';
 import { privateToggleFailure, privateToggleNoAnswer, privateToggleOutcomeUnknown } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, trailingTurnNote, appendNoteOnce, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -1649,6 +1649,35 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 					await reconcileThread();
 					reconciledAfterDrop = true;
 				}
+			} else if (reattachOutcome === 'no-run' && dropped?.role === 'assistant' && !sawErrorEvent) {
+				// A partial answer stays standing — but the run that produced it is
+				// over, and the stream of an aborted run ends without `done`, so the
+				// note the server wrote for it ("Turn interrupted", a loop break, a
+				// cap) never arrived. Without this the user saw thinking or half a
+				// text and no word that the turn had stopped; only a reload showed it.
+				//
+				// NOT reconcileThread(): the server does not persist an answer the
+				// abort cut off, so adopting the transcript deletes text the user has
+				// already read. The note goes BEHIND the bubble instead.
+				//
+				// Only on `no-run`: the registry answered that nothing is live. On
+				// `unreachable` we do not know that, and a run still going would end
+				// on a note that is not there yet — so nothing is added. Not after an
+				// `error` event either: its banner and toast already said it.
+				try {
+					const r = await fetch(`${getApiBase()}/threads/${encodeURIComponent(sid)}/messages`);
+					if (r.ok) {
+						const localUserTurns = messages.filter((m) => m.role === 'user' && !m.queued && !m.failed && m.content.trim().length > 0).length;
+						const note = trailingTurnNote(await r.json(), localUserTurns);
+						// The bubble by object, after the awaits: opening the thread again
+						// in between replaces `messages` (same session id, so an id check
+						// would pass), and an index into the new list points elsewhere.
+						const bubbleIdx = turn.assistantMsg ? messages.indexOf(turn.assistantMsg) : -1;
+						if (note && bubbleIdx >= 0) {
+							appendNoteOnce(messages, bubbleIdx, note, (n) => ({ role: 'assistant' as const, content: '', note: n }));
+						}
+					}
+				} catch { /* transcript unreachable: the partial answer stays as it was */ }
 			}
 		}
 	}

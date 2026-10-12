@@ -183,3 +183,70 @@ export function selectReattachTarget(body: unknown, threadId: string): ReattachT
 	}
 	return null;
 }
+
+/** A failure note as the transcript carries it on a display-only assistant row. */
+export interface TurnNote {
+	code: string;
+	detail?: string;
+}
+
+/**
+ * The note an ended run left at the end of the transcript, read from the
+ * `/threads/:id/messages` body — or null when the thread does not end on one.
+ *
+ * Asked after a stream ended without a terminal event while the turn had already
+ * rendered something (thinking, text, tool calls). The server writes a note when
+ * a run stops early (interrupted, a loop break, a cap), but the `/run` stream of an
+ * aborted run ends without `done`, so the note never reaches the live client; only
+ * a reload showed it. Whatever the note is, a reload would show the same row.
+ *
+ * `localUserTurns` counts the user messages this client shows that the server
+ * holds too (the caller leaves out queued and unsent ones). The note must belong
+ * to THIS turn, and the only proof the transcript offers is that its user rows are
+ * the client's user rows: fewer means it ends on an EARLIER turn, more means
+ * someone else (another tab, another device) sent into the thread since, and the
+ * note may be theirs. Both are refused, never guessed — the cost of refusing is
+ * today's behaviour (no note until a reload). Blank user rows are left out of the
+ * server's count, because the client drops them too (they are ask_user answers).
+ */
+export function trailingTurnNote(body: unknown, localUserTurns: number): TurnNote | null {
+	if (typeof body !== 'object' || body === null) return null;
+	const rows = (body as { messages?: unknown }).messages;
+	if (!Array.isArray(rows) || rows.length === 0) return null;
+	const last: unknown = rows[rows.length - 1];
+	if (typeof last !== 'object' || last === null) return null;
+	const { role, note } = last as { role?: unknown; note?: unknown };
+	if (role !== 'assistant' || typeof note !== 'object' || note === null) return null;
+	const { code, detail } = note as { code?: unknown; detail?: unknown };
+	if (typeof code !== 'string' || code.length === 0) return null;
+	const userRows = rows.filter((r) => {
+		if (typeof r !== 'object' || r === null) return false;
+		const { role: rr, content } = r as { role?: unknown; content?: unknown };
+		return rr === 'user' && typeof content === 'string' && content.trim().length > 0;
+	}).length;
+	if (userRows !== localUserTurns) return null;
+	return typeof detail === 'string' ? { code, detail } : { code };
+}
+
+/**
+ * Put `note` as its own row right after the turn's bubble at `afterIdx`, unless
+ * that row already carries it. The bubble itself is left as it is: the server
+ * does not persist an answer the abort cut off, so replacing the bubble with the
+ * transcript would delete text the user has already read.
+ *
+ * Idempotent so that no path can stack the same note twice under one bubble.
+ * Today the caller runs once per turn; the check is the guard for the day a
+ * second pass appears. A later reconcile or reload replaces the rows from the
+ * server, which holds the note once. Returns whether a row was added.
+ */
+export function appendNoteOnce<M extends { role: string; content: string; note?: TurnNote | undefined }>(
+	rows: M[],
+	afterIdx: number,
+	note: TurnNote,
+	make: (note: TurnNote) => M,
+): boolean {
+	const next = rows[afterIdx + 1];
+	if (next && next.role === 'assistant' && next.note?.code === note.code) return false;
+	rows.splice(afterIdx + 1, 0, make(note));
+	return true;
+}
