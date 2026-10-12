@@ -148,9 +148,9 @@ export const load: PageServerLoad = async ({ cookies, url, request, getClientAdd
 			} catch { /* control plane unreachable — fallback to OTP */ }
 		}
 
+		// The address field starts empty: the owner's address is not part of the page.
 		return {
 			isManaged: true,
-			customerEmail: managed.customerEmail ?? undefined,
 			hasPasskeys,
 		};
 	}

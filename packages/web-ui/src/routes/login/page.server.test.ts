@@ -81,3 +81,26 @@ describe('login page — a mandate session is sent on before any owner login run
 		expect(existsSync(join(dataDir, '.onboarding-consumed'))).toBe(false);
 	});
 });
+
+describe('login page — the address field', () => {
+	it('a managed login page carries no address: the visitor types their own', async () => {
+		const OWNER = 'owner-address@example.test';
+		env['LYNOX_MANAGED_INSTANCE_ID'] = 'TEST-INSTANCE';
+		env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.test';
+		env['LYNOX_MANAGED_CUSTOMER_EMAIL'] = OWNER;
+		try {
+			const url = new URL('https://inst.example.test/login');
+			const data = await load({
+				cookies: { get: () => undefined, set: () => {} } as unknown as Cookies,
+				url, request: new Request(url), getClientAddress: () => '203.0.113.7', setHeaders: () => {},
+			} as unknown as Parameters<typeof load>[0]);
+			// Twin: this is the managed branch, not the self-hosted one.
+			expect(data).toMatchObject({ isManaged: true });
+			expect(JSON.stringify(data)).not.toContain(OWNER);
+		} finally {
+			delete env['LYNOX_MANAGED_INSTANCE_ID'];
+			delete env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+			delete env['LYNOX_MANAGED_CUSTOMER_EMAIL'];
+		}
+	});
+});
