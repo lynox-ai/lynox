@@ -52,32 +52,18 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
 /**
  * Default voice — English, reads DE text with a light English accent. Rafael
  * approved on the Phase 0 p300/p3000 DE samples. `de_*` are still NOT available:
- * re-checked 2026-08-02 against the live catalog (30 voices — 8 en_us, 16 en_gb,
+ * re-checked 2026-10-11 against the live catalog (30 voices — 8 en_us, 16 en_gb,
  * 6 fr_fr; no German).
  *
- * ⚠️ "The live fetch below will surface `de_*` automatically the moment Mistral
- * ships them — nothing to do here until then" used to stand here and is FALSE.
- * The fetch paginates with `page`, which this endpoint ignores, so it only ever
- * sees the first 10 slugs — a German voice would land past that and stay
- * invisible. There IS something to do first, and it is the pagination fix (see
- * VOICES_BASE_URL). The same false promise sat on FALLBACK_VOICES below.
+ * A German voice, once the catalog has one, is found by the offset/limit fetch
+ * (see VOICES_BASE_URL); nothing here needs to change for it.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
 const API_URL = 'https://api.mistral.ai/v1/audio/speech';
-// Mistral caps `page_size` at 10 regardless of what we request — confirmed
-// 2026-04-21 against the live API.
-//
-// ⚠️ "We paginate explicitly to fetch all voices" used to stand here and is
-// FALSE. Measured 2026-08-02 against the live API: the `page` parameter is
-// IGNORED. Pages 0, 1 and 7 return byte-identical items and `page_size=200`
-// also returns 10, while the response still reports `total: 30,
-// total_pages: 3` (and echoes `page: 1` whatever you send). The loop below
-// therefore fetches the same first 10 voices three times; the dedup-by-id
-// keeps the result honest, so the picker shows 10 of 30 rather than
-// duplicates — but 20 voices are unreachable, INCLUDING the six French
-// `fr_marie_*` ones. `offset`/`limit` is what actually paginates this
-// endpoint and returns all 30.
+// The endpoint pages by `offset`/`limit`. It ignores `page`/`page_size`: with
+// those it returns the same first 10 voices for every page (measured 2026-08-02),
+// which hid 20 of the 30, including the six `fr_marie_*` voices.
 const VOICES_BASE_URL = 'https://api.mistral.ai/v1/audio/voices';
 // Hard page ceiling so a buggy `total_pages` response can't spin forever.
 // 30 voices × 10/page = 3 pages today; 100 pages would be 1000 voices.
@@ -92,13 +78,9 @@ const VOICES_PAGE_LIMIT = 100;
  * call is unreachable. A representative EN subset; safe to stay out-of-date
  * because the live fetch overwrites this in the UI the moment Mistral is
  * reachable. Still do not add hardcoded DE entries — there is no German voice to
- * add (live catalog 2026-08-02: 8 en_us, 16 en_gb, 6 fr_fr).
+ * add (live catalog 2026-10-11: 8 en_us, 16 en_gb, 6 fr_fr).
  *
- * ⚠️ "`de_*` slugs will appear automatically once the catalog ships them" used
- * to stand here and is FALSE for the same reason as on DEFAULT_VOICE: the live
- * fetch paginates with `page`, which the endpoint ignores, so it sees only the
- * first 10 slugs. Note this list is also EN-only while six `fr_marie_*` voices
- * exist — the fallback mirrors what the broken fetch can see, not the catalog.
+ * The list is English-only; the live catalog also has six `fr_marie_*` voices.
  */
 const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
   { id: 'en_paul_neutral',    language: 'en', description: 'Paul — neutral' },
