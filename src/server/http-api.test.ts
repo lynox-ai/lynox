@@ -951,6 +951,71 @@ describe('LynoxHTTPApi', () => {
       expect(echo.status).toBe(200);
     });
 
+    // The three D2 tests below send more requests than the rest of this block; they give the
+    // rate-limit window back afterwards so the tests after them still start under the cap.
+    const rateWindow = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowAtStart = new Map<string, number>();
+    const keepWindow = (): void => { windowAtStart = new Map([...rateWindow()].map(([k, v]) => [k, v.count])); };
+    const giveWindowBack = (): void => { for (const [k, e] of rateWindow()) e.count = windowAtStart.get(k) ?? 0; };
+
+    it('rolls the owner onto the owner\'s principal, which a managed instance then accepts (D2)', async () => {
+      keepWindow();
+      const issuedAt = Math.floor(Date.now() / 1000) - (2 * DAY);
+      const res = await fetch(`${baseUrl}/api/secrets`, {
+        headers: { cookie: `lynox_session=${mintSessionToken(TEST_SECRET, issuedAt)}` },
+      });
+      const refreshed = extractFirstCookiePair(res, 'lynox_session')!.slice('lynox_session='.length);
+      const parts = refreshed.split('.');
+      expect(parts).toHaveLength(4);
+      expect(JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'))).toEqual({ v: 1, kind: 'owner' });
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      try {
+        const echo = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${refreshed}` } });
+        expect(echo.status).not.toBe(401);
+      } finally {
+        // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        giveWindowBack();
+      }
+    });
+
+    it.each([['LYNOX_BILLING_TIER', 'managed'], ['LYNOX_BILLING_TIER', 'hosted'], ['LYNOX_MANAGED_MODE', 'managed']])(
+      'refuses a cookie without a principal when %s=%s, and takes the owner\'s principal (D2)',
+      async (name, value) => {
+        const nowS = Math.floor(Date.now() / 1000);
+        keepWindow();
+        vi.stubEnv(name, value);
+        try {
+          for (const legacy of [mintSessionToken(TEST_SECRET, nowS), mintLegacySessionToken(TEST_SECRET, nowS)]) {
+            const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${legacy}` } });
+            expect(res.status).toBe(401);
+          }
+          const owner = mintPrincipalToken(TEST_SECRET, nowS, { v: 1, kind: 'owner' });
+          const ok = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${owner}` } });
+          expect(ok.status).not.toBe(401);
+        } finally {
+          vi.stubEnv(name, '');
+          giveWindowBack();
+        }
+      },
+    );
+
+    it('reads the owner\'s principal only in its exact form', async () => {
+      const nowS = Math.floor(Date.now() / 1000);
+      keepWindow();
+      try {
+        const exact = mintPrincipalToken(TEST_SECRET, nowS, { v: 1, kind: 'owner' });
+        expect((await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${exact}` } })).status).toBe(200);
+        for (const p of [{ v: 1, kind: 'owner', email: 'x@example.invalid' }, { v: 2, kind: 'owner' }, { kind: 'owner' }]) {
+          const res = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${mintPrincipalToken(TEST_SECRET, nowS, p)}` } });
+          expect(res.status, JSON.stringify(p)).toBe(401);
+        }
+      } finally {
+        giveWindowBack();
+      }
+    });
+
     it('does NOT emit a Set-Cookie refresh for a fresh cookie', async () => {
       const cookie = mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000));
       const res = await fetch(`${baseUrl}/api/secrets`, {

@@ -175,7 +175,7 @@ describe('decideMagicLinkOutcome — CP request shape', () => {
 		expect(body.token).toBe(VALID_TOKEN);
 		expect(body.instanceId).toBe('inst-1');
 		// Without it the CP admits only the owner: this caller reads the principal.
-		expect(body.principal_version).toBe(1);
+		expect(body.principal_version).toBe(2);
 		// The KEY SET, not just the two keys we care about: the control plane
 		// reads `instanceId` (camelCase) while the OAuth claim on the same
 		// boundary reads `instance_id`. An extra or renamed key here is a wire

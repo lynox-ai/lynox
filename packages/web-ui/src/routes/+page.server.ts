@@ -2,7 +2,7 @@ import type { PageServerLoad } from './$types.js';
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
 import {
-	createSessionToken,
+	createSessionToken, OWNER_SESSION_PRINCIPAL,
 	verifySessionToken,
 	isRateLimited,
 	recordFailedLogin,
@@ -38,7 +38,7 @@ export const load: PageServerLoad = async ({ cookies, url, getClientAddress, set
 			recordFailedLogin(ip);
 			redirect(303, '/login?error=rate_limited');
 		}
-		cookies.set('lynox_session', createSessionToken(secret), {
+		cookies.set('lynox_session', createSessionToken(secret, OWNER_SESSION_PRINCIPAL), {
 			path: '/',
 			httpOnly: true,
 			secure: url.protocol === 'https:',
