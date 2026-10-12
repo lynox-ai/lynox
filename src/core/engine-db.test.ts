@@ -206,6 +206,28 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     e.close();
   });
 
+  it('v31 migration adds an empty planner to a populated bulk_runs table', () => {
+    // A v30 database: the current schema with v31's columns and version taken back out.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig31-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'engine.db');
+    new EngineDb(dbPath, '').close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DELETE FROM schema_version WHERE version >= 31;
+      ALTER TABLE bulk_runs DROP COLUMN principal;
+      ALTER TABLE bulk_runs DROP COLUMN mandate_id;
+      INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase) VALUES ('r1', 'thread-1', 'h', 'workspace', 'none', 'previewed');
+    `);
+    raw.close();
+
+    const e = new EngineDb(dbPath, '');
+    expect(e.getDb().prepare('SELECT id, created_by, principal, mandate_id FROM bulk_runs').get())
+      .toEqual({ id: 'r1', created_by: 'thread-1', principal: null, mandate_id: null });
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(31);
+    e.close();
+  });
+
   it('v23 migration adds an empty created_by to a populated tasks table', () => {
     // A v22 database: the current schema with v23's column and version taken back out.
     const dir = mkdtempSync(join(tmpdir(), 'lynox-mig23-'));

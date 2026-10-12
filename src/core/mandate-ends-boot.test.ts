@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import { OWNER_PRINCIPAL } from './request-principal.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { MandateEnds } from './mandate-ends.js';
+import { BulkLedger } from './bulk-ledger.js';
 
 /**
  * The engine hands out a store for mandate ends, on its own engine.db.
@@ -56,12 +57,13 @@ describe('Engine boot — mandate ends', () => {
     expect(engine.getToolContext().mandateEnds?.isLive('M-1', 1_000)).toBe(true);
   });
 
-  async function boot(dir: string): Promise<Engine> {
+  async function boot(dir: string, before?: (e: Engine) => void): Promise<Engine> {
     if (!saved.has('LYNOX_DATA_DIR')) saved.set('LYNOX_DATA_DIR', process.env['LYNOX_DATA_DIR']);
     process.env['LYNOX_DATA_DIR'] = dir;
     reloadConfig();
     const engine = new Engine({} as LynoxConfig);
     engines.push(engine);
+    before?.(engine);
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try { await engine.init(); } finally { stderr.mockRestore(); }
     return engine;
@@ -154,5 +156,80 @@ describe('Engine boot — mandate ends', () => {
     // The next sweep, with engine.db readable again, closes it.
     second.getMandateEnds()!.revoke('M-other');
     expect(store!.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
+  });
+
+  describe('bulk runs (§3.13 B7)', () => {
+    const withBulk = (e: Engine): void => { e.getUserConfig().bulk_runs_enabled = true; };
+    const GRANT = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'M-bulk' };
+    const plan = (engine: Engine, principal: RequestPrincipal, createdBy = 't'): string =>
+      engine.getToolContext().bulkLedger!.recordDryRun({
+        createdBy, principal, targetSystem: 'workspace', scope: 'w',
+        targets: [{ key: '/ws/a.md', before: { absent: false, value: 'old' }, after: 'new' }],
+      }).id;
+    const phaseOf = (engine: Engine, id: string): string | undefined => engine.getToolContext().bulkLedger!.getStatus(id)?.phase;
+    afterEach(() => { for (const e of engines) delete e.getUserConfig().bulk_runs_enabled; });
+
+    it('withdraws a mandate\'s unapproved run the moment the mandate is revoked, and not the owner\'s', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-bulkrevokeboot-'));
+      dirs.push(dir);
+      const engine = await boot(dir, withBulk);
+      engine.getMandateEnds()!.record({ ...GRANT, mandateExp: Math.floor(Date.now() / 1000) + 3_600 }, 100);
+      const mine = plan(engine, GRANT);
+      const owners = plan(engine, OWNER_PRINCIPAL);
+      expect(phaseOf(engine, mine)).toBe('previewed');
+      engine.getMandateEnds()!.revoke('M-bulk');
+      expect(phaseOf(engine, mine)).toBe('aborted');
+      expect(phaseOf(engine, owners)).toBe('previewed');
+    });
+
+    it('at boot, keeps a run from before v31 in the owner\'s conversation and withdraws one whose conversation it cannot place', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-bulklegacyboot-'));
+      dirs.push(dir);
+      const first = await boot(dir, withBulk);
+      first.getThreadStore()!.createThread('owner-thread', { created_by: 'owner' });
+      const kept = plan(first, OWNER_PRINCIPAL, 'owner-thread');
+      const lost = plan(first, OWNER_PRINCIPAL, 'nowhere');
+      // As a run from before v31 looks: no planner.
+      const edb = (first as unknown as { engineDb: { getDb(): import('better-sqlite3').Database } }).engineDb.getDb();
+      edb.prepare(`UPDATE bulk_runs SET principal = NULL, created_at = '2026-10-13 08:00:00'`).run();
+      await first.shutdown();
+      engines.length = 0;
+      const second = await boot(dir, withBulk);
+      expect(phaseOf(second, kept)).toBe('previewed');
+      expect(phaseOf(second, lost)).toBe('aborted');
+    });
+
+    it('keeps the bulk tools working when the sweep at boot fails', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-bulksweepfail-'));
+      dirs.push(dir);
+      const broken = vi.spyOn(BulkLedger.prototype, 'expireEndedPlanners').mockImplementation(() => { throw new Error('engine.db busy'); });
+      let engine: Engine;
+      try { engine = await boot(dir, withBulk); } finally { broken.mockRestore(); }
+      expect(engine.getToolContext().bulkLedger).not.toBeNull();
+      expect(phaseOf(engine, plan(engine, OWNER_PRINCIPAL))).toBe('previewed');
+    });
+
+    it('withdraws, on its 5-minute sweep, a run whose grant ran out', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-bulksweepboot-'));
+      dirs.push(dir);
+      const real = globalThis.setInterval;
+      const sweeps: (() => void)[] = [];
+      const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+        if (ms === 5 * 60_000) sweeps.push(fn);
+        return real(fn, ms);
+      }) as typeof setInterval);
+      let engine: Engine;
+      try { engine = await boot(dir, withBulk); } finally { spy.mockRestore(); }
+      // The prompt sweep and the bulk sweep.
+      expect(sweeps).toHaveLength(2);
+      const now = Math.floor(Date.now() / 1000);
+      engine.getMandateEnds()!.record({ ...GRANT, mandateExp: now + 2 }, now);
+      const id = plan(engine, GRANT);
+      for (const s of sweeps) s();
+      expect(phaseOf(engine, id)).toBe('previewed');
+      const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
+      try { for (const s of sweeps) s(); } finally { clock.mockRestore(); }
+      expect(phaseOf(engine, id)).toBe('aborted');
+    });
   });
 });

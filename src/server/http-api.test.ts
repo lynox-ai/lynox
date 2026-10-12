@@ -8176,8 +8176,59 @@ describe('LynoxHTTPApi', () => {
     });
     afterEach(() => {
       bulkHolder.ledger = null;
+      bulkHolder.ownership = NO_OWNERSHIP;
       bulkDb.close();
       rmSync(bulkDir, { recursive: true, force: true });
+    });
+
+    describe('a run whose planner has ended (§3.13 B7)', () => {
+      const GRANT = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+      const live = (...ids: string[]): BulkOwnership => ({ isLive: (id) => ids.includes(id), threadCreator: () => undefined });
+      const mandateRun = (): string => bulkLedger.recordDryRun({
+        createdBy: 't', principal: GRANT, targetSystem: 'workspace', scope: 'mem',
+        targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
+      }).id;
+      const mandatePlan = (): string => {
+        const host = 'shop.example.com';
+        const key = `https://${host}/p/1`;
+        const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: GRANT, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
+        if (!planned.ok) throw new Error('not planned');
+        return planned.status.id;
+      };
+
+      it('is withdrawn instead of approved, with the code the client reads', async () => {
+        const id = mandateRun();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'mandate_ended' });
+        expect(bulkLedger.getStatus(id)!.phase).toBe('aborted');
+        expect(new TriggerStore(bulkDb).getById(`bulk-${id}`)).toBeUndefined();
+      });
+
+      it('control: the owner approves it while the grant lives', async () => {
+        bulkHolder.ownership = live('grant-1');
+        const id = mandateRun();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+        expect(res.status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('approved');
+      });
+
+      it('is withdrawn instead of started when its read would start', async () => {
+        const id = mandatePlan();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'mandate_ended' });
+        expect(bulkLedger.getStatus(id)!.phase).toBe('aborted');
+        expect(new TriggerStore(bulkDb).getById(`bulk-preview-${id}`)).toBeUndefined();
+      });
+
+      it('control: the owner starts its read while the grant lives', async () => {
+        bulkHolder.ownership = live('grant-1');
+        const id = mandatePlan();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(200);
+        expect(new TriggerStore(bulkDb).getById(`bulk-preview-${id}`)).toBeDefined();
+      });
     });
 
     it('answers 404 on every bulk route when bulk runs are off', async () => {

@@ -767,6 +767,19 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
 }
 
 describe('bulk_plan → trigger → worker tick → previewed', () => {
+  it('plans through the tool under the principal of the run that called it (§3.13 B7)', async () => {
+    const ws = join(dir, 'workspace');
+    mkdirSync(ws);
+    setTenantWorkspace(ws);
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: url(0), after: { price: '15.00' } }]));
+    const grant = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+    const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: grant } as unknown as IAgent;
+    const planned = await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent);
+    const runId = /Bulk run ([0-9a-f-]{36})/.exec(planned)![1]!;
+    expect(engineDb.getDb().prepare('SELECT created_by, principal, mandate_id FROM bulk_runs WHERE id = ?').get(runId))
+      .toEqual({ created_by: 'thread-1', principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' });
+  });
+
   it('plans through the tool, reads through the worker with the stored credential, reports counts only', async () => {
     const ws = join(dir, 'workspace');
     mkdirSync(ws);

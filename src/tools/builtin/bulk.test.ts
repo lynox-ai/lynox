@@ -129,6 +129,16 @@ describe('bulk_plan over workspace files', () => {
     }
   });
 
+  it('records the principal of the run that called it as the planner (§3.13 B7)', async () => {
+    writeFileSync(join(ws, 'one.md'), 'old\n');
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'one.md', after: 'new\n' }]));
+    const grant = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+    const asMandate = { ...agent(), principal: grant } as unknown as IAgent;
+    const id = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: join(ws, 'plan.json') }, asMandate));
+    expect(engineDb.getDb().prepare('SELECT created_by, principal, mandate_id FROM bulk_runs WHERE id = ?').get(id))
+      .toEqual({ created_by: 'thread-1', principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' });
+  });
+
   it('returns no target key, value or diff to the model — from bulk_plan or bulk_status', async () => {
     const { source } = seed();
     const planned = await bulkPlanTool.handler({ target_system: 'workspace', source_file: source }, agent());
