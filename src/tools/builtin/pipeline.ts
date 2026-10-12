@@ -9,7 +9,7 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
 import { getErrorMessage } from '../../core/utils.js';
-import { inferPipelineMode, asksOnlyViaAskUser } from '../../orchestrator/human-in-the-loop.js';
+import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
 import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
@@ -894,10 +894,20 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // (autonomy undefined) still prompts on each dangerous step, so the in-chat path
   // stays open, matching how run_workflow was always the safe way to trial an
   // imported workflow.
+  // Three answers, one per kind (PRD 3b-2 §4.3): an interactive workflow whose only question tool
+  // is ask_user does have an unattended run — its schedule, where the questions reach the owner —
+  // but not here, where its questions would have nobody to reach.
+  // A workflow that asks its owner runs only on its schedule, confirmed or not: scheduling it
+  // stamps `confirmedAt`, and a worker session that called it here would hand its steps the
+  // full `promptUser` — the channel the consent gates read — instead of the question channel.
+  if (deps.autonomy === 'autonomous' && planned.mode === 'interactive' && isSchedulableWorkflow(planned)) {
+    return `Error: Workflow "${planned.id}" asks its owner while it runs, and only its schedule gives those questions their own channel to the owner. It runs on a schedule from the workflow library (the consent step confirms it), or from an interactive chat.`;
+  }
   if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
-    return planned.mode === 'interactive'
-      ? `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`
-      : `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
+    if (planned.mode !== 'interactive') {
+      return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
+    }
+    return `Error: Workflow "${planned.id}" uses ask_user / ask_secret, so it has no unattended run to confirm. Run it from an interactive chat instead — scheduling it does not make it runnable here.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;

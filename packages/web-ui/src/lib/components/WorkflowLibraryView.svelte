@@ -44,6 +44,11 @@
 		// Slice B2: only `autonomous` workflows are cron-eligible; `capabilityContract`
 		// (if any) is rendered in the consent surface. All optional for back-compat.
 		mode?: string;
+		// Whether a schedule may run it, by the engine's one predicate (an autonomous workflow,
+		// or one whose only question tool is ask_user), and the steps that may ask the owner.
+		// Absent from an older engine: then only `autonomous` is schedulable, as before.
+		schedulable?: boolean;
+		askingSteps?: string[];
 		confirmedAt?: string;
 		capabilityContract?: WorkflowContract;
 	}
@@ -157,6 +162,12 @@
 
 	function dropGrantPreview(): void {
 		grantPreview = null;
+	}
+
+	// A workflow that asks its owner while it runs: it runs only on its schedule, so the library
+	// offers no Run for it (the engine refuses one), and its schedule names the asking steps.
+	function asksOwner(wf: SavedWorkflow): boolean {
+		return wf.mode === 'interactive' && wf.schedulable === true;
 	}
 
 	function onScheduleClick(wf: SavedWorkflow): void {
@@ -514,6 +525,7 @@
 								<button onclick={() => void saveRename(wf.id)} class="inline-flex items-center rounded-[var(--radius-sm)] border border-success/30 bg-success/10 {actionSize} text-success hover:bg-success/20 transition-colors">{t('workflow_library.save')}</button>
 								<button onclick={cancelRename} class="inline-flex items-center rounded-[var(--radius-sm)] border border-border bg-bg-muted {actionSize} text-text-muted hover:bg-bg transition-colors">{t('workflow_library.cancel')}</button>
 							{:else}
+								{#if !asksOwner(wf)}
 								<button
 									onclick={() => onRunClick(wf)}
 									disabled={runningId !== null}
@@ -522,7 +534,8 @@
 									<Icon name="bolt" size="xs" />
 									{runningId === wf.id ? t('workflow_library.running') : t('workflow_library.run')}
 								</button>
-								{#if wf.mode === 'autonomous'}
+								{/if}
+								{#if wf.schedulable ?? wf.mode === 'autonomous'}
 									<button
 										onclick={() => onScheduleClick(wf)}
 										class="flex items-center gap-1 {revealOnHover} rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 {actionSize} text-accent-text hover:bg-accent/20 transition-opacity"
@@ -613,7 +626,19 @@
 	>
 		<div class="w-full max-w-md rounded-[var(--radius-md)] border border-border bg-bg p-5 shadow-lg max-h-[85vh] overflow-y-auto">
 			<h2 class="text-sm font-medium mb-1">{t('workflow_library.schedule_title')}: {scheduleModalWf.name}</h2>
-			<p class="text-xs text-text-subtle mb-4">{t('workflow_library.schedule_hint')}</p>
+			<!-- "unattended" is false for a workflow that asks its owner while it runs. -->
+			<p class="text-xs text-text-subtle mb-4">{t(asksOwner(scheduleModalWf) ? 'workflow_library.schedule_hint_asks' : 'workflow_library.schedule_hint')}</p>
+
+			{#if asksOwner(scheduleModalWf) && (scheduleModalWf.askingSteps ?? []).length > 0}
+				<div class="rounded-[var(--radius-sm)] border border-border bg-bg-muted p-3 mb-4 text-xs">
+					<p class="font-medium mb-1 flex items-center gap-1"><Icon name="chat" size="xs" />{t('workflow_library.schedule_asks_title')}</p>
+					<ul class="space-y-0.5 text-text-subtle font-mono">
+						{#each scheduleModalWf.askingSteps ?? [] as stepId (stepId)}
+							<li>{stepId}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 
 			{#if scheduleModalWf.capabilityContract && contractHasRows(scheduleModalWf.capabilityContract)}
 				{@const c = scheduleModalWf.capabilityContract}

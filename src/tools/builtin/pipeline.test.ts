@@ -720,9 +720,60 @@ describe('run_workflow — stored workflow (workflow_id)', () => {
     // matched /ask_user \/ ask_secret/, which the interactive guard's own message
     // also contains — so it passed whether this gate answered or that one did,
     // and a mutant dropping the `&& !parentPromptUser` conjunct survived it.
-    expect(result).toMatch(/no unattended run to confirm/);
+    // A workflow that asks only through ask_user has an unattended run (its schedule), just
+    // not this one (PRD 3b-2 §4.3): the message says where it does run.
+    expect(result).toMatch(/only its schedule gives those questions their own channel/);
     expect(result).not.toMatch(/requires a live chat session/);
     expect(result).not.toMatch(/Schedule it/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...also once its schedule confirmed it: a worker never runs an asking workflow with its own prompter', async () => {
+    // Scheduling stamps `confirmedAt`. Gating on it alone let a run_agent worker run a scheduled
+    // asking workflow here, its steps holding the worker's full promptUser.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-worker-confirmed', {
+      id: 'interactive-worker-confirmed', name: 'asks', goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+      confirmedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-worker-confirmed' }, agent);
+    expect(result).toMatch(/only its schedule gives those questions their own channel/);
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('...while an interactive chat still runs the same confirmed workflow', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-chat-confirmed', {
+      id: 'interactive-chat-confirmed', name: 'asks', goal: 'pick',
+      steps: [{ id: 'q', task: 'ask_user something' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+      confirmedAt: '2026-10-01T00:00:00.000Z',
+    });
+    mockRunManifest.mockClear();
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-chat-confirmed' }, agent);
+    expect(result).not.toMatch(/only its schedule gives those questions their own channel/);
+    expect(mockRunManifest).toHaveBeenCalled();
+  });
+
+  it('...and one that may ask for a secret still has no unattended run to confirm', async () => {
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    (agent as Record<string, unknown>)['promptUser'] = vi.fn();
+    storePipeline('interactive-secret-worker', {
+      id: 'interactive-secret-worker', name: 'asks', goal: 'key',
+      steps: [{ id: 'k', task: 'ask_secret for the key' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'tracked', template: false, mode: 'interactive',
+    });
+    const result = await runWorkflowTool.handler({ workflow_id: 'interactive-secret-worker' }, agent);
+    expect(result).toMatch(/no unattended run to confirm/);
     expect(mockRunManifest).not.toHaveBeenCalled();
   });
 
