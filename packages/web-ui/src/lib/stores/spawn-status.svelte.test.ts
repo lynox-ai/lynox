@@ -35,8 +35,8 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-	// Resuming a thread arms a 12 s lost-prompt recheck; `newChat` cancels it so
-	// no timer outlives the test.
+	// A `turn_end` with `tool_use` arms a 12 s lost-prompt recheck; `newChat`
+	// cancels it so no timer outlives the test.
 	store.newChat();
 	vi.unstubAllGlobals();
 });
