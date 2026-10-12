@@ -12,7 +12,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode, asksOnlyViaAskUser, isSchedulableWorkflow } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { undeclaredInlineStepTier, newRunTaint, chatOriginOf, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
@@ -455,6 +455,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       secretStore: deps.secretStore,
       limits: resolveInSessionLimits(undefined),
       runTaint,
+      // The steps run in the caller's chat, so they keep its private mode, read live.
+      chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
     }));
 
     debitInSessionWorkflowCost(deps, state, steps);
@@ -978,6 +980,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         limits: resolveInSessionLimits(planned.limits),
         workflowId: planned.id,
         runTaint: retryTaint,
+        chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint });
@@ -1070,6 +1073,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       limits: resolveInSessionLimits(planned.limits),
       workflowId: planned.id,
       runTaint,
+      chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
     }));
 
     recordExecutedState(planned.id, { manifest, state, runTaint });

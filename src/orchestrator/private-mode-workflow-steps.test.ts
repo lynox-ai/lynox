@@ -22,6 +22,12 @@ import type { ThreadStore } from '../core/thread-store.js';
  * a real KnowledgeStore (see parallel-step-taint.test.ts); the gate it shares is what the
  * cases below pin.
  *
+ * Every way a chat starts steps is driven: inline steps (A–C), a nested pipeline (D, through
+ * the real `runManifest` → `spawnPipeline` → `spawnInline`), a saved workflow by id (E) and
+ * its retry (F). `spawnViaAgent` builds its agent without `memory`, so its capture already
+ * stands down as `no_memory` and its memory tools answer "not configured"; it gets the same
+ * origin so the step paths cannot diverge, but there is nothing in memory to observe there.
+ *
  * Compare spawn.ts, where a `spawn_agent` child already inherits `originThreadId` and the
  * flag from its parent.
  */
@@ -59,7 +65,11 @@ vi.mock('../core/stream.js', () => ({
   }),
 }));
 
-import { runWorkflowTool, _resetPipelineStore } from '../tools/builtin/pipeline.js';
+import { runWorkflowTool, _resetPipelineStore, storePipeline } from '../tools/builtin/pipeline.js';
+import { runManifest, buildRunCtx } from './runner.js';
+import { chatOriginOf, applyChatOrigin } from './runtime-adapter.js';
+import type { Agent } from '../core/agent.js';
+import type { PlannedPipeline } from '../types/index.js';
 import { memoryStoreTool } from '../tools/builtin/memory.js';
 import { createToolContext } from '../core/tool-context.js';
 
@@ -198,8 +208,7 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
     threadRows.set('t-pub', { id: 't-pub', skip_extraction: 0 });
   });
 
-  // fails until private mode reaches workflow steps
-  it.fails('A: a step started from a private chat neither stores nor captures into memory', async () => {
+  it('A: a step started from a private chat neither stores nor captures into memory', async () => {
     const memory = makeFakeMemory();
     const parent = makeParent({ threadId: 't-priv', privateMode: true, memory });
     scriptStep();
@@ -232,8 +241,7 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
     expect(String(memory.maybeUpdateCalls[0]![0])).toContain('preferred supplier for packaging');
   });
 
-  // fails until private mode reaches workflow steps
-  it.fails('C: private mode switched on while the step runs stops the step\'s end-of-turn capture', async () => {
+  it('C: private mode switched on while the step runs stops the step\'s end-of-turn capture', async () => {
     const memory = makeFakeMemory();
     const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
     // The user turns private mode on mid-run: the session flips the live agent's flag
@@ -247,5 +255,118 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
 
     expect(mockProcess).toHaveBeenCalledTimes(2);
     expect(memory.maybeUpdateCalls).toEqual([]);
+  });
+
+  it('D: a nested pipeline\'s step started from a private chat neither stores nor captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-priv', privateMode: true, memory });
+    scriptStep();
+
+    await runManifest({
+      manifest_version: '1.0',
+      name: 'nested-private-probe',
+      triggered_by: 'test',
+      context: {},
+      agents: [{
+        id: 'outer', agent: 'outer', runtime: 'pipeline',
+        pipeline: [{ id: 'inner', task: 'Record the supplier decision and summarise it.', tools: ['memory_store'] }],
+      }],
+      gate_points: [],
+      on_failure: 'stop',
+    }, config, buildRunCtx({
+      autonomy: undefined,
+      parentTools: [observedMemoryStore],
+      parentToolContext: parent.toolContext,
+      parentMemory: memory,
+      chatOrigin: chatOriginOf(parent),
+    }));
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(storeResults).toHaveLength(1);
+    expect(storeResults[0]).toContain(PRIVATE_REFUSAL_PREFIX);
+    expect(memory.writes).toEqual([]);
+    expect(memory.maybeUpdateCalls).toEqual([]);
+  });
+
+  function plannedProbe(): PlannedPipeline {
+    return {
+      id: 'wf-private-probe',
+      name: 'Supplier note',
+      goal: 'Record the supplier decision',
+      steps: [{ id: 'collect', task: 'Record the supplier decision and summarise it.', tools: ['memory_store'] }],
+      reasoning: 'probe',
+      estimatedCost: 0.01,
+      createdAt: '2026-10-12T12:00:00.000Z',
+      executed: false,
+      executionMode: 'orchestrated',
+      template: false,
+      mode: 'autonomous',
+    };
+  }
+
+  it('E: a saved workflow run by id from a private chat neither stores nor captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-priv', privateMode: true, memory });
+    storePipeline('wf-private-probe', plannedProbe());
+    scriptStep();
+
+    await runWorkflowTool.handler({ workflow_id: 'wf-private-probe' }, parent);
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(storeResults).toHaveLength(1);
+    expect(storeResults[0]).toContain(PRIVATE_REFUSAL_PREFIX);
+    expect(memory.writes).toEqual([]);
+    expect(memory.maybeUpdateCalls).toEqual([]);
+  });
+
+  it('F: a retry from a chat that went private since the first run neither stores nor captures', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    storePipeline('wf-private-probe', plannedProbe());
+    // First run: a step that fails, so the retry has something to re-run.
+    mockProcess.mockImplementationOnce(() => Promise.reject(new Error('provider down')));
+    await runWorkflowTool.handler({ workflow_id: 'wf-private-probe' }, parent);
+    expect(memory.writes).toEqual([]);
+
+    parent.skipMemoryExtraction = true;
+    threadRows.set('t-pub', { id: 't-pub', skip_extraction: 1 });
+    mockProcess.mockClear();
+    scriptStep();
+    const out = await runWorkflowTool.handler({ workflow_id: 'wf-private-probe', retry: true }, parent);
+    await new Promise(r => setTimeout(r, 0));
+
+    expect(out).not.toMatch(/^Error: No previous execution/);
+    expect(mockProcess).toHaveBeenCalledTimes(2);
+    expect(storeResults.at(-1)).toContain(PRIVATE_REFUSAL_PREFIX);
+    expect(memory.writes).toEqual([]);
+    expect(memory.maybeUpdateCalls).toEqual([]);
+  });
+});
+
+describe('applyChatOrigin', () => {
+  it('G: the step\'s own switch counts for the step only, and the chat\'s ON wins', () => {
+    const chat = { currentThreadId: 't-chat', originThreadId: undefined, skipMemoryExtraction: false };
+    const step = { originThreadId: undefined as string | undefined, skipMemoryExtraction: false };
+    applyChatOrigin(step as unknown as Agent, chatOriginOf(chat));
+
+    expect(step.originThreadId).toBe('t-chat');
+    expect(step.skipMemoryExtraction).toBe(false);
+    step.skipMemoryExtraction = true;
+    expect(step.skipMemoryExtraction).toBe(true);
+    expect(chat.skipMemoryExtraction).toBe(false);
+    step.skipMemoryExtraction = false;
+    chat.skipMemoryExtraction = true;
+    expect(step.skipMemoryExtraction).toBe(true);
+    step.skipMemoryExtraction = false;
+    expect(step.skipMemoryExtraction).toBe(true);
+  });
+
+  it('G2: no origin leaves the step as it was', () => {
+    const step = { originThreadId: undefined as string | undefined, skipMemoryExtraction: false };
+    applyChatOrigin(step as unknown as Agent, undefined);
+    expect(step.originThreadId).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(step, 'skipMemoryExtraction')?.get).toBeUndefined();
   });
 });
