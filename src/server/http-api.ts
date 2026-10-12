@@ -111,9 +111,11 @@ type RouteHandler = (
 ) => Promise<void>;
 
 /**
- * What a mandate may do at a route that writes (PRD customer-granted-operator-access §3.13).
- * Every `user` route that writes declares exactly one, at its registration; the route table
- * is checked for it (`routeStancesForTesting`), so a new route cannot arrive without one.
+ * What a mandate may do at a route (PRD customer-granted-operator-access §3.13). Every `user`
+ * route declares exactly one, at its registration, whatever its method; the route table is
+ * checked for it (`routeStancesForTesting`), so a new route cannot arrive without one. A GET
+ * is not exempt: a GET handler can write too (create a directory, set a cookie, mint a token),
+ * and a HEAD request runs it.
  *
  * - `owner-only`: a mandate is refused with 403 before the handler runs. The dispatcher
  *   enforces it, so for this stance "declared" also means "applied".
@@ -122,15 +124,18 @@ type RouteHandler = (
  * - `own`: a mandate may act only on what it set up or last changed itself; the handler
  *   checks that.
  * - `free`: a mandate may, for the reason given.
+ * - `reads`: a GET that only reads. Allowed on GET alone. A GET with any other effect
+ *   declares one of the four above instead, with the effect in its reason.
  *
- * Only `owner-only` is applied here. For the other three the declaration states what the
- * handler does; that the handler does it is for the handler's own tests.
+ * Only `owner-only` is applied here. For the others the declaration states what the handler
+ * does; that the handler does it is for the handler's own tests and a reviewer's call.
  */
 export type MandateStance =
   | { readonly kind: 'owner-only'; readonly what: string }
   | { readonly kind: 'mark' }
   | { readonly kind: 'own' }
-  | { readonly kind: 'free'; readonly why: string };
+  | { readonly kind: 'free'; readonly why: string }
+  | { readonly kind: 'reads' };
 
 /** A mandate may not; `what` completes "Only the owner of this instance can …". */
 const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what });
@@ -140,6 +145,8 @@ const MARK: MandateStance = { kind: 'mark' };
 const OWN: MandateStance = { kind: 'own' };
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
+/** A GET that only reads. */
+const READS: MandateStance = { kind: 'reads' };
 
 interface DynamicRoute {
   method: string;
@@ -155,7 +162,7 @@ interface DynamicRoute {
   pattern: RegExp;
   paramNames: string[];
   handler: RouteHandler;
-  /** Required on a `user` route that writes; see `MandateStance`. */
+  /** Required on every `user` route; see `MandateStance`. */
   stance?: MandateStance | undefined;
 }
 
@@ -4194,7 +4201,7 @@ export class LynoxHTTPApi {
         };
       });
       jsonResponse(res, 200, { runs });
-    }));
+    }, READS));
 
     // DELETE /runs/:runId — abort a live run by id (AC10). Works from any
     // connection, including for a headless run whose original SSE is gone (the
@@ -4290,7 +4297,7 @@ export class LynoxHTTPApi {
         clearInterval(keepalive);
         unsub();
       });
-    }));
+    }, READS));
 
     // GET /sessions/:id/pending-prompt — client checks for resumable prompts on reconnect
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/sessions/:id/pending-prompt', async (_req, res, params) => {
@@ -4353,7 +4360,7 @@ export class LynoxHTTPApi {
         timeoutMs: PROMPT_TIMEOUT_MS,
         createdAt: row.created_at,
       });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/reply', async (_req, res, params, body) => {
       const ps = this.engine?.getPromptStore();
@@ -4588,7 +4595,7 @@ export class LynoxHTTPApi {
         return { file: c.file, status: c.status, diff: c.diff, added, removed };
       });
       jsonResponse(res, 200, { hasChanges: true, files });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
       const session = this.sessionStore.get(params['id']!);
@@ -4721,7 +4728,7 @@ export class LynoxHTTPApi {
       const includeArchived = url.searchParams.get('includeArchived') === 'true';
       const threads = threadStore.listThreads({ limit, includeArchived });
       jsonResponse(res, 200, { threads });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/threads/:id', async (_req, res, params) => {
       const threadStore = engine.getThreadStore();
@@ -4735,7 +4742,7 @@ export class LynoxHTTPApi {
       // 404 — mutating a nonexistent thread IS an error.
       if (!thread) { jsonResponse(res, 200, { thread: null, threadMissing: true }); return; }
       jsonResponse(res, 200, { thread });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/threads/:id', async (_req, res, params, body) => {
       const threadStore = engine.getThreadStore();
@@ -4872,7 +4879,7 @@ export class LynoxHTTPApi {
         }
       }
       jsonResponse(res, 200, { messages, activeRun });
-    }));
+    }, READS));
 
     // Comprehensive thread DEBUG-EXPORT. The thin client export (AppShell
     // exportThreadJson) carries only the thread record + rendered messages;
@@ -5154,7 +5161,7 @@ export class LynoxHTTPApi {
       // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
       const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
       jsonResponse(res, 200, scrubbed);
-    }));
+    }, READS));
 
     // ── Memory ──
     const VALID_MEMORY_NS = new Set(['knowledge', 'methods', 'status', 'learnings']);
@@ -5167,7 +5174,7 @@ export class LynoxHTTPApi {
       const ns = params['ns'] as MemoryNs;
       const content = await memory.load(ns);
       jsonResponse(res, 200, { content });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/memory/:ns', async (_req, res, params, body) => {
       const memory = engine.getMemory();
@@ -5249,7 +5256,7 @@ export class LynoxHTTPApi {
       // on the response that already feeds the review surface, so a second surface
       // cannot serve the queue without the target.
       jsonResponse(res, 200, { entries: store.withHintTargets(entries), pendingCount: store.pendingCount() });
-    });
+    }, READS);
 
     // Cheap badge poll (the Intelligence-Hub tab pill). `?thread=` narrows it to one
     // conversation — the chat surface asks "is anything from HERE waiting", which the global
@@ -5268,7 +5275,7 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         pendingCount: thread === null ? store.pendingCount() : store.pendingCountForThread(thread),
       });
-    });
+    }, READS);
 
     // Capture funnel rates — the READ half of the
     // capture telemetry. The counters have shipped since v2.9.0 but nothing ever read
@@ -5386,13 +5393,13 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 200, 500));
       jsonResponse(res, 200, { entries: store.listActive(limit) });
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/knowledge/blocks', async (_req, res) => {
       const store = engine.getKnowledgeStore();
       if (!requireService(res, store, 'Durable memory')) return;
       jsonResponse(res, 200, store.readSurfaceBlocks());
-    });
+    }, READS);
 
     // Undo of a just-made trusted write (the inline "rückgängig" chip, DK-UX). A USER act
     // via the UI (user_asserted tier) — NOT an agent tool, so it is not agent-self-approvable.
@@ -5437,7 +5444,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, failOpen);
       }
-    });
+    }, READS);
 
     // Set (upsert) one flag. Set-only for the owner, never the model. `value` carries
     // the durable link (knowledge_done → onboarding thread-id; first_session_at →
@@ -5617,7 +5624,7 @@ export class LynoxHTTPApi {
         subjects: page.map(s => ({ id: s.id, kind: s.kind, name: s.name })),
         total: filtered.length,
       });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/subjects/:id/footprint', async (req, res, params) => {
       if (!requireService(res, engine.getSubjectStore(), 'Subject graph')) return;
@@ -5627,7 +5634,7 @@ export class LynoxHTTPApi {
       // null = stale/purged/unknown id (or flag off, already 503'd above) → 404.
       if (!footprint) { errorResponse(res, 404, 'Subject not found'); return; }
       jsonResponse(res, 200, footprint);
-    }));
+    }, READS));
 
     // ── Secrets ──
     // user scope: the name list for the Settings UI — `listNames()` returns key
@@ -5641,7 +5648,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, store, 'Secret store')) return;
       const names = store.listNames();
       jsonResponse(res, 200, { names });
-    });
+    }, READS);
 
     // Category-level booleans — available to all authenticated users
     this.addStatic('user', 'GET /api/secrets/status', async (_req, res) => {
@@ -5722,7 +5729,7 @@ export class LynoxHTTPApi {
         count: names.size,
         searxng_url: searxngUrl ?? null,
       });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PUT', '/api/secrets/:name', async (_req, res, params, body) => {
       const name = params['name']!;
@@ -5888,7 +5895,7 @@ export class LynoxHTTPApi {
     // this just mirrors it for the UI. No DB row, no settings flag.
     this.addStatic('user', 'GET /api/search/reranker/capability', async (_req, res) => {
       jsonResponse(res, 200, getRerankerCapability());
-    });
+    }, READS);
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (_req, res) => {
@@ -6273,7 +6280,7 @@ export class LynoxHTTPApi {
       }
 
       jsonResponse(res, 200, redacted);
-    });
+    }, READS);
 
     // Scope = 'user' so managed-mode cookie users (always user-scope per the
     // `adminSecret ? 'user' : 'admin'` logic) can reach the allowlist below.
@@ -6549,7 +6556,7 @@ export class LynoxHTTPApi {
         const runs = history.getRecentRuns(limit, offset, Object.keys(filters).length > 0 ? filters : undefined);
         jsonResponse(res, 200, { runs });
       }
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -6557,21 +6564,21 @@ export class LynoxHTTPApi {
       const run = history.getRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Run not found'); return; }
       jsonResponse(res, 200, run);
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/history/runs/:id/tool-calls', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const toolCalls = history.getRunToolCalls(params['id']!);
       jsonResponse(res, 200, { toolCalls });
-    }));
+    }, READS));
 
     this.addStatic('user', 'GET /api/history/stats', async (_req, res) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const stats = history.getStats();
       jsonResponse(res, 200, stats);
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/history/cost/daily', async (req, res) => {
       const history = engine.getRunHistory();
@@ -6586,7 +6593,7 @@ export class LynoxHTTPApi {
       const tzOffsetMin = Math.min(Math.max(rawTz, -14 * 60), 14 * 60);
       const data = history.getCostByDay(days, { tzOffsetMin });
       jsonResponse(res, 200, data);
-    });
+    }, READS);
 
     // ── Usage SSoT ──
     // PRD-SETTINGS-REFACTOR Phase 0e: `/api/usage/current` is the canonical
@@ -6596,10 +6603,10 @@ export class LynoxHTTPApi {
     // by (period, startIso) so repeated tab opens don't re-hammer SQLite.
     this.addStatic('user', 'GET /api/usage/current', async (req, res) => {
       await this._serveUsageCurrent(req, res, engine);
-    });
+    }, READS);
     this.addStatic('user', 'GET /api/usage/summary', async (req, res) => {
       await this._serveUsageCurrent(req, res, engine);
-    });
+    }, READS);
 
     // ── Workflows ──
     this.addStatic('user', 'GET /api/workflows', async (req, res) => {
@@ -6609,7 +6616,7 @@ export class LynoxHTTPApi {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const runs = history.getRecentPipelineRuns(limit);
       jsonResponse(res, 200, { runs });
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/workflows/stats/steps', async (req, res) => {
       const history = engine.getRunHistory();
@@ -6618,7 +6625,7 @@ export class LynoxHTTPApi {
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const stats = history.getPipelineStepStats(days);
       jsonResponse(res, 200, { stats });
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/workflows/stats/cost', async (req, res) => {
       const history = engine.getRunHistory();
@@ -6627,7 +6634,7 @@ export class LynoxHTTPApi {
       const days = Math.min(Math.max(parseInt(url.searchParams.get('days') ?? '30', 10) || 30, 1), 365);
       const stats = history.getPipelineCostStats(days);
       jsonResponse(res, 200, { stats });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
@@ -6635,14 +6642,14 @@ export class LynoxHTTPApi {
       const run = history.getPipelineRun(params['id']!);
       if (!run) { errorResponse(res, 404, 'Pipeline run not found'); return; }
       jsonResponse(res, 200, run);
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/workflows/:id/steps', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
       const steps = history.getPipelineStepResults(params['id']!);
       jsonResponse(res, 200, { steps });
-    }));
+    }, READS));
 
     // ── Saved Workflows library (PRD §6.8 / D13) ──
     // A "saved workflow" = an engine.db workflow definition whose deserialized
@@ -6713,7 +6720,7 @@ export class LynoxHTTPApi {
       // Whether the schedule dialog may offer a write grant at all (the feature switch).
       const { workflowGrantEnabled } = await import('../core/workflow-grant.js');
       jsonResponse(res, 200, { workflows: workflows.slice(0, limit), grantEnabled: workflowGrantEnabled() });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/workflows/:id/run', async (_req, res, params, body) => {
       // A mandate's run of a workflow must carry its tool lock (PRD customer-granted-
@@ -7139,7 +7146,7 @@ export class LynoxHTTPApi {
       const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
       const tasks = taskManager.list(status ? { status } : undefined);
       jsonResponse(res, 200, { tasks });
-    });
+    }, READS);
 
     // Agent-triggers (cron/watch/pipeline/reminder/backup) — split out of the
     // `tasks` table in v42. The UI fetches both and renders them together; the
@@ -7151,7 +7158,7 @@ export class LynoxHTTPApi {
       const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
       const triggers = taskManager.listTriggers(status ? { status } : undefined);
       jsonResponse(res, 200, { triggers });
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/tasks', async (_req, res, _params, body) => {
       const taskManager = engine.getTaskManager();
@@ -7649,7 +7656,7 @@ export class LynoxHTTPApi {
       const ledger = bulkLedger(res);
       if (!ledger) return;
       jsonResponse(res, 200, { runs: ledger.listRuns(50).map(withBinding) });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id', async (_req, res, params) => {
       const ledger = bulkLedger(res);
@@ -7660,7 +7667,7 @@ export class LynoxHTTPApi {
       // approving a preview or resuming an approved run.
       const actionable = status.phase === 'previewed' || status.phase === 'approved' || status.phase === 'writing';
       jsonResponse(res, 200, { ...withBinding(status), checksum: actionable ? ledger.computeChecksum(params['id']!) : null });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id/targets', async (req, res, params) => {
       const ledger = bulkLedger(res);
@@ -7672,7 +7679,7 @@ export class LynoxHTTPApi {
         return url.searchParams.has(name) && Number.isInteger(v) && v >= 0 ? v : undefined;
       };
       jsonResponse(res, 200, { targets: ledger.getPreview(params['id']!, { offset: num('offset'), limit: num('limit') }) });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/bulk/runs/:id/approve', async (req, res, params, body) => {
       // An approval arms an unattended external write: an owner's act (PRD customer-granted-operator-access §3.13 E6).
@@ -7789,7 +7796,7 @@ export class LynoxHTTPApi {
       const { getLynoxDir } = await import('../core/config.js');
       const { listMergeRuns } = await import('../core/subject-merge-runner.js');
       jsonResponse(res, 200, { merges: listMergeRuns(stores.store, join(getLynoxDir(), 'sweeps')) });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/merges/:id/rollback', async (_req, res, params) => {
       const stores = mergeStores(res);
@@ -7852,7 +7859,7 @@ export class LynoxHTTPApi {
       const store = engine.getArtifactStore();
       if (!requireService(res, store, 'Artifact store')) return;
       jsonResponse(res, 200, { artifacts: store.list() });
-    });
+    }, free('re-syncs the artifact index with the files on disk before listing'));
 
     this.addStatic('user', 'POST /api/artifacts', async (_req, res, _params, body) => {
       const store = engine.getArtifactStore();
@@ -7887,7 +7894,7 @@ export class LynoxHTTPApi {
       const artifact = store.get(params['id']!);
       if (!artifact) { errorResponse(res, 404, 'Artifact not found'); return; }
       jsonResponse(res, 200, artifact);
-    }));
+    }, free('re-syncs the artifact index with the files on disk before reading')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/artifacts/:id', async (_req, res, params) => {
       const store = engine.getArtifactStore();
@@ -7905,7 +7912,7 @@ export class LynoxHTTPApi {
         available: hasTranscribeProvider(),
         provider: provider?.name ?? null,
       });
-    });
+    }, READS);
 
     // ── Privacy & Data — stop-gap delete-request ──
     // PRD-SETTINGS-REFACTOR Phase 3 mailto stop-gap. Phase 6 replaces with
@@ -7941,7 +7948,7 @@ export class LynoxHTTPApi {
         return { name: e.definition.name, description };
       });
       jsonResponse(res, 200, { tools });
-    });
+    }, READS);
 
     // ── Provider status (singular) ──
     // Was unauthenticated, on the reasoning that it reported a vendor's public
@@ -7953,7 +7960,7 @@ export class LynoxHTTPApi {
     // consumer in core, web-ui or the control plane reads it.
     this.addStatic('user', 'GET /api/provider/status', async (_req, res) => {
       jsonResponse(res, 200, await this.getProviderStatus());
-    });
+    }, READS);
 
     // ── Multi-provider status ──
     // Primary provider plus every other one the router can reach (each hybrid
@@ -7967,7 +7974,7 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/providers/status', async (_req, res) => {
       const providers = await this.getProvidersStatus();
       jsonResponse(res, 200, { providers });
-    });
+    }, READS);
 
     // ── LLM model catalog ──
     // Static per BUILD, not per hour: the old `max-age=3600` claimed the response
@@ -7999,7 +8006,7 @@ export class LynoxHTTPApi {
       }
       res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
       res.end(payload);
-    });
+    }, READS);
 
     // ── LLM connection probe (PRD-SETTINGS-REFACTOR Phase 2) ──
     // 1-token health probe so the Settings → LLM page can show green/red BEFORE
@@ -8229,7 +8236,7 @@ export class LynoxHTTPApi {
           locked: cfgLocked('tts_provider'),
         },
       });
-    });
+    }, READS);
 
     // ── TTS (streaming via SSE) ──
     // Body: { text: string, voice?: string, model?: string }
@@ -8525,7 +8532,7 @@ export class LynoxHTTPApi {
         return;
       }
       jsonResponse(res, 200, { publicKey: this.pushChannel.getPublicKey() });
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/push/subscribe', async (_req, res, _params, body) => {
       if (!this.pushChannel) {
@@ -8682,7 +8689,7 @@ export class LynoxHTTPApi {
           : null,
         ...info,
       });
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/google/auth', async (_req, res, _params, body) => {
       // A grant started now would land after the erasure emptied the vault.
@@ -8841,7 +8848,7 @@ export class LynoxHTTPApi {
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
       }
-    });
+    }, free('answered before the dispatcher, so no stance would be applied here; it completes only the connect its signed state cookie names, and that cookie is set only by POST /api/google/auth, which is owner-only'));
 
     this.addStatic('user', 'POST /api/google/revoke', async (req, res, _params, body) => {
       const google = engine.getGoogleAuth();
@@ -8957,7 +8964,7 @@ export class LynoxHTTPApi {
         `?instance_id=${encodeURIComponent(instanceId)}` +
         `&token=${encodeURIComponent(token)}`;
       jsonResponse(res, 200, { url });
-    });
+    }, ownerOnly('start a Google connection'));
 
     // Claim Google tokens from managed control plane OAuth broker
     this.addStatic('user', 'POST /api/google/claim-managed', async (_req, res, _params, body) => {
@@ -9165,7 +9172,7 @@ export class LynoxHTTPApi {
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._buildProfileOAuthSetCookie(signed));
       res.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' });
       res.end();
-    }));
+    }, OWN));
 
     // The CALLBACK half. Unauthenticated by construction, and every input it
     // takes is listed here with the mechanism that bounds it — or with the
@@ -9556,7 +9563,7 @@ export class LynoxHTTPApi {
       } finally {
         this.profileGrantsPending--;
       }
-    });
+    }, free('answered before the dispatcher, so no stance would be applied here; it completes only the connect its signed state cookie names, and that cookie is set only by GET /api/oauth/connect/:id'));
 
     // ── Knowledge Graph ──────────────────────────────────────────
 
@@ -9565,7 +9572,7 @@ export class LynoxHTTPApi {
       if (!kg) { jsonResponse(res, 200, { entityCount: 0, relationCount: 0, memoryCount: 0, communityCount: 0 }); return; }
       const stats = await kg.stats();
       jsonResponse(res, 200, stats);
-    });
+    }, READS);
 
     // Admin: purge legacy mis-extracted entities (stopwords + pricing fragments).
     // Pre-v2 extractor wrote rows like "in" (person), "tools" (location),
@@ -9592,7 +9599,7 @@ export class LynoxHTTPApi {
         defaultPersona: defaultPersonaFor(type),
       }));
       jsonResponse(res, 200, { presets: listPresets(), accountTypes });
-    });
+    }, READS);
 
     // Autodiscover for custom preset: given an email address, try to find
     // IMAP/SMTP servers via autoconfig.thunderbird.net. Returns a draft config.
@@ -9618,7 +9625,7 @@ export class LynoxHTTPApi {
       const ctx = engine.getMailContext();
       if (!ctx) { jsonResponse(res, 200, { accounts: [] }); return; }
       jsonResponse(res, 200, { accounts: ctx.listAccounts() });
-    });
+    }, READS);
 
     // user scope: connecting/managing a mailbox is an instance-owner action. The
     // managed mail-connect flow drives this route through the customer's session
@@ -9912,7 +9919,7 @@ export class LynoxHTTPApi {
       const snoozedOnly = url.searchParams.get('snoozedOnly');
       if (snoozedOnly !== null) query.snoozedOnly = snoozedOnly;
       sendInbox(res, handleListItems(deps!, query));
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/inbox/counts', async (req, res) => {
       const deps = inboxDeps();
@@ -9921,14 +9928,14 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const tenantId = url.searchParams.get('tenantId');
       sendInbox(res, handleGetCounts(deps!, tenantId !== null ? { tenantId } : {}));
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/inbox/notification-prefs', async (_req, res) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetNotificationPrefs } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetNotificationPrefs(deps!));
-    });
+    }, READS);
 
     this.addStatic('user', 'PATCH /api/inbox/notification-prefs', async (_req, res, _params, body) => {
       const deps = inboxDeps();
@@ -9948,7 +9955,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetColdStart } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetColdStart(deps!));
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/inbox/cold-start/run', async (_req, res, _params, body) => {
       const deps = inboxDeps();
@@ -9986,7 +9993,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleListRecentBulks } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleListRecentBulks(deps!));
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/inbox/backfill-metadata', async (_req, res, _params, body) => {
       const deps = inboxDeps();
@@ -10004,14 +10011,14 @@ export class LynoxHTTPApi {
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItem } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItem(deps!, params['id']!));
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/full', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItemFull } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItemFull(deps!, params['id']!));
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/thread', async (req, res, params) => {
       const deps = inboxDeps();
@@ -10022,21 +10029,21 @@ export class LynoxHTTPApi {
       const parsedLimit = limitRaw !== null ? Number.parseInt(limitRaw, 10) : NaN;
       const opts = Number.isFinite(parsedLimit) && parsedLimit > 0 ? { limit: parsedLimit } : {};
       sendInbox(res, handleGetItemThread(deps!, params['id']!, opts));
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/audit', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleListItemAudit } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleListItemAudit(deps!, params['id']!));
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/inbox/items/:id/context', async (_req, res, params) => {
       const deps = inboxDeps();
       if (!requireService(res, deps, 'Inbox')) return;
       const { handleGetItemContext } = await import('../integrations/inbox/api.js');
       sendInbox(res, handleGetItemContext(deps!, params['id']!));
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/inbox/items/:id/action', async (_req, res, params, body) => {
       const deps = inboxDeps();
@@ -10091,7 +10098,7 @@ export class LynoxHTTPApi {
         return;
       }
       sendInbox(res, handleResolveContact(deps!, email));
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/inbox/items/:id/body/refresh', async (_req, res, params) => {
       const deps = inboxDeps();
@@ -10110,7 +10117,7 @@ export class LynoxHTTPApi {
       const tenantId = url.searchParams.get('tenantId');
       if (tenantId !== null) query.tenantId = tenantId;
       sendInbox(res, handleListRules(deps!, query));
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/inbox/rules', async (_req, res, _params, body) => {
       const deps = inboxDeps();
@@ -10160,7 +10167,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { entities: [] });
       }
-    }));
+    }, free('a search on the legacy retrieval path counts the retrieval on the memories it returns')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities/:id', async (_req, res, params) => {
       const kg = engine.getKnowledgeLayer();
@@ -10173,7 +10180,7 @@ export class LynoxHTTPApi {
       } catch {
         errorResponse(res, 404, 'Entity not found');
       }
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/graph', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
@@ -10186,7 +10193,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { nodes: [], edges: [] });
       }
-    }));
+    }, READS));
 
     // ── Thread Insights + Metrics ──────────────────────────────────
 
@@ -10197,7 +10204,7 @@ export class LynoxHTTPApi {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 1), 500);
       const threadInsights = rh.getThreadAggregates(limit);
       jsonResponse(res, 200, { threadInsights });
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/metrics', async (req, res) => {
       const kg = engine.getKnowledgeLayer();
@@ -10210,7 +10217,7 @@ export class LynoxHTTPApi {
         window as import('../types/index.js').MetricWindow | undefined,
       );
       jsonResponse(res, 200, { metrics });
-    });
+    }, READS);
 
     // ── CRM ──────────────────────────────────────────────────────
 
@@ -10224,7 +10231,7 @@ export class LynoxHTTPApi {
       if (typeFilter) filter['type'] = { $eq: typeFilter };
       const contacts = crm.listContacts(Object.keys(filter).length > 0 ? filter : undefined, limit);
       jsonResponse(res, 200, { contacts });
-    });
+    }, READS);
 
     // Removal — the CRM had no path of any kind. `contacts_save` upserts on email, so a wrong
     // contact could only be overwritten, and only if it HAS an email: a NULL email never
@@ -10259,7 +10266,7 @@ export class LynoxHTTPApi {
       if (stageFilter) filter['stage'] = { $eq: stageFilter };
       const result = crm.getAllDeals(filter, limit);
       jsonResponse(res, 200, { deals: result });
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/crm/stats', async (_req, res) => {
       const crm = engine.getCRM();
@@ -10267,21 +10274,21 @@ export class LynoxHTTPApi {
       const stats = crm.getContactStats();
       const pipeline = crm.getPipelineSummary();
       jsonResponse(res, 200, { contacts: stats, pipeline });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/crm/contacts/:name/interactions', async (_req, res, params) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { interactions: [] }); return; }
       const interactions = crm.getInteractions(decodeURIComponent(params['name']!), 50);
       jsonResponse(res, 200, { interactions });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/crm/contacts/:name/deals', async (_req, res, params) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
       const deals = crm.getDealsForContact(decodeURIComponent(params['name']!), 50);
       jsonResponse(res, 200, { deals });
-    }));
+    }, READS));
 
     // ── Backups ──────────────────────────────────────────────────
 
@@ -10290,7 +10297,7 @@ export class LynoxHTTPApi {
       if (!bm) { jsonResponse(res, 200, { backups: [] }); return; }
       const backups = bm.listBackups();
       jsonResponse(res, 200, { backups });
-    });
+    }, READS);
 
     this.addStatic('user', 'POST /api/backups', async (_req, res) => {
       const bm = engine.getBackupManager();
@@ -10338,7 +10345,7 @@ export class LynoxHTTPApi {
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
       const profiles = store.getAll();
       jsonResponse(res, 200, { profiles });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
       const store = engine.getApiStore();
@@ -10346,7 +10353,7 @@ export class LynoxHTTPApi {
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
       jsonResponse(res, 200, { profile });
-    }));
+    }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/api-profiles/:id', async (_req, res, params) => {
       const store = engine.getApiStore();
@@ -10388,7 +10395,7 @@ export class LynoxHTTPApi {
       // when empty — a non-empty user-owned table is legitimate.
       const collections = ds.listCollections().filter(c => !(CRM_OVERLAP_NAMES.has(c.name) && c.recordCount === 0));
       jsonResponse(res, 200, { collections });
-    });
+    }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/datastore/:collection', async (req, res, params) => {
       const ds = engine.getDataStore();
@@ -10402,7 +10409,7 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         errorResponse(res, 400, err instanceof Error ? err.message : 'Query failed');
       }
-    }));
+    }, READS));
 
     // ── Security-event aggregates (abuse detection, content-free) ──────
     //
@@ -11242,7 +11249,7 @@ export class LynoxHTTPApi {
       } else {
         jsonResponse(res, 200, { configured: true });
       }
-    });
+    }, READS);
 
     this.addStatic('admin', 'POST /api/vault/rotate', async (_req, res, _params, body) => {
       if (readEnvAlias('LYNOX_BILLING_TIER')) {
@@ -11294,7 +11301,7 @@ export class LynoxHTTPApi {
       } else {
         jsonResponse(res, 200, { configured: true });
       }
-    });
+    }, READS);
 
     // ── Files (workspace) ────────────────────────────────────────
 
@@ -11334,7 +11341,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { path: dirPath, entries: [] });
       }
-    });
+    }, free('creates the workspace directory when it is missing, and only reads otherwise'));
 
     /** Resolve a workspace-relative path, rejecting traversal and symlink escape.
      *  Delegates to the single shared file-area resolver in workspace.ts so this
@@ -11367,7 +11374,7 @@ export class LynoxHTTPApi {
       } catch {
         errorResponse(res, 404, 'File not found');
       }
-    });
+    }, READS);
 
     this.addStatic('user', 'GET /api/files/read', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -11385,7 +11392,7 @@ export class LynoxHTTPApi {
       } catch {
         errorResponse(res, 404, 'File not found');
       }
-    });
+    }, READS);
 
     this.addStatic('user', 'DELETE /api/files', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
@@ -11415,7 +11422,7 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         errorResponse(res, 500, err instanceof Error ? err.message : 'Preview failed');
       }
-    });
+    }, free('counts the secrets by opening the vault, which creates an empty vault file when none exists'));
 
     this.addStatic('admin', 'POST /api/migration/export', async (req, res, _params, body) => {
       // Orchestrated migration: engine handles ECDH + export + transfer to target.
