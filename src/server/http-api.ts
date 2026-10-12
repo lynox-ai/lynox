@@ -124,8 +124,10 @@ type RouteHandler = (
  * - `own`: a mandate may act only on what it set up or last changed itself; the handler
  *   checks that.
  * - `free`: a mandate may, for the reason given.
- * - `reads`: a GET that only reads. Allowed on GET alone. A GET with any other effect
- *   declares one of the four above instead, with the effect in its reason.
+ * - `reads`: a GET that only reads. Allowed on GET alone. Filling an in-process cache or
+ *   touching an in-memory last-used time counts as reading. A GET with any other effect
+ *   (disk, database, cookie, token, a call that leaves state elsewhere) declares one of the
+ *   four above instead, with the effect in its reason.
  *
  * Only `owner-only` is applied here. For the others the declaration states what the handler
  * does; that the handler does it is for the handler's own tests and a reviewer's call.
@@ -8848,7 +8850,7 @@ export class LynoxHTTPApi {
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
       }
-    }, free('answered before the dispatcher, so no stance would be applied here; it completes only the connect its signed state cookie names, and that cookie is set only by POST /api/google/auth, which is owner-only'));
+    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by POST /api/google/auth, which is owner-only'));
 
     this.addStatic('user', 'POST /api/google/revoke', async (req, res, _params, body) => {
       const google = engine.getGoogleAuth();
@@ -9563,7 +9565,7 @@ export class LynoxHTTPApi {
       } finally {
         this.profileGrantsPending--;
       }
-    }, free('answered before the dispatcher, so no stance would be applied here; it completes only the connect its signed state cookie names, and that cookie is set only by GET /api/oauth/connect/:id'));
+    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by GET /api/oauth/connect/:id, where a mandate connects only a profile it set up'));
 
     // ── Knowledge Graph ──────────────────────────────────────────
 
@@ -10167,7 +10169,7 @@ export class LynoxHTTPApi {
       } catch {
         jsonResponse(res, 200, { entities: [] });
       }
-    }, free('a search on the legacy retrieval path counts the retrieval on the memories it returns')));
+    }, free('a search off the subject graph runs a memory retrieval: it embeds the query, counts the retrieval on the memories it returns, and appends to the retrieval shadow log when that is on')));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/entities/:id', async (_req, res, params) => {
       const kg = engine.getKnowledgeLayer();
@@ -11228,7 +11230,10 @@ export class LynoxHTTPApi {
 
     // user scope: a managed customer's settings page reads configured-status.
     // reveal=true (the actual key) stays 403 on managed via the inline guard below,
-    // so user scope never exposes the secret.
+    // so user scope never exposes the secret. The stance is `reads` because a mandate may
+    // read the configured status; reveal=true is refused to any session that is not the
+    // owner's inside the handler, which a stance cannot express (it does not see the query).
+    // Witness: "reveals … to the owner's session only, on and off managed" (http-api.test.ts).
     this.addStatic('user', 'GET /api/vault/key', async (req, res) => {
       const key = process.env['LYNOX_VAULT_KEY'];
       if (!key) {
@@ -11282,7 +11287,9 @@ export class LynoxHTTPApi {
     // ── Access token (read-only, for Settings UI) ────────────────
 
     // user scope: status read for the Settings UI. reveal=true (the actual token)
-    // stays 403 on managed via the inline guard below, so user scope is safe.
+    // stays 403 on managed via the inline guard below, so user scope is safe. The stance
+    // is `reads` for the same reason as GET /api/vault/key: reveal=true is refused to any
+    // session that is not the owner's inside the handler, with the same witness.
     this.addStatic('user', 'GET /api/auth/token', async (req, res) => {
       const secret = process.env['LYNOX_HTTP_SECRET'];
       if (!secret) {
