@@ -15,7 +15,10 @@ export class ChangesetManager {
    *  private (0700) directory instead of re-creating the removed path with default modes. */
   private backupDir: string | null = null;
 
-  constructor(private readonly cwd: string, _runId: string) {}
+  /** `runId` names the session run this manager belongs to (one per user run, not the HTTP
+   *  run registry's id). The review shows it and its answer carries it back, so an answer to
+   *  one run's review never reaches the next run's files. */
+  constructor(private readonly cwd: string, readonly runId: string) {}
 
   /** One flat file per tracked path, named by its hash. Never a path relative to `cwd`: a
    *  file outside `cwd` would give `../…` and land outside the directory `cleanup()` removes. */

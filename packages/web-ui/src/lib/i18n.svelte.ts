@@ -1039,6 +1039,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'changeset.loading': { de: 'Änderungen laden...', en: 'Loading changes...' },
 	'changeset.sensitive_warning': { de: 'Sensitiver Pfad', en: 'Sensitive path' },
 	'changeset.review_pending': { de: 'Bitte prüfe die ausstehenden Änderungen bevor du weiterschreibst.', en: 'Please review the pending changes before sending another message.' },
+	'changeset.review_unsent': { de: 'Deine Antwort ist möglicherweise nicht angekommen. Bitte versuche es erneut.', en: 'Your answer may not have arrived. Please try again.' },
+	'changeset.review_failed': { de: 'Deine Antwort konnte nicht übernommen werden.', en: 'Your answer could not be applied.' },
+	'changeset.review_refused': { de: 'Deine Antwort wurde nicht übernommen: Diese Änderungen gehören zu einem früheren Lauf, oder ein Lauf ist gerade aktiv.', en: 'Your answer was not applied: these changes belong to an earlier run, or a run is in progress.' },
 
 	// Context management
 	'context.compacted': { de: 'Kontext automatisch komprimiert (war {pct}% voll)', en: 'Context auto-compacted (was {pct}% full)' },

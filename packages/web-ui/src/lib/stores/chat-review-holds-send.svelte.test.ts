@@ -18,6 +18,9 @@ const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await n
 
 let store: Store;
 let calls: string[];
+let reviewBodies: unknown[];
+let reviewStatus: number | 'network' = 200;
+let servedRunId = 'run-7';
 let listeners: Record<string, () => void>;
 let threadMessages: unknown = { messages: [], activeRun: null };
 let changed: Array<{ file: string; status: string; diff: string }> = [];
@@ -28,6 +31,11 @@ function serve(changedFiles: Array<{ file: string; status: string; diff: string 
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		calls.push(`${init?.method ?? 'GET'} ${url}`);
+		if (url.endsWith('/changeset/review')) {
+			reviewBodies.push(JSON.parse(String(init?.body)));
+			if (reviewStatus === 'network') throw new TypeError('Failed to fetch');
+			return json({ ok: reviewStatus === 200 }, reviewStatus);
+		}
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (url.endsWith('/runs/active')) {
 			if (holdActiveRuns) await holdActiveRuns;
@@ -44,7 +52,7 @@ function serve(changedFiles: Array<{ file: string; status: string; diff: string 
 			});
 			return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 		}
-		if (url.endsWith('/changeset')) return json({ hasChanges: changed.length > 0, files: changed });
+		if (url.endsWith('/changeset')) return json({ hasChanges: changed.length > 0, runId: servedRunId, files: changed });
 		return json(threadMessages);
 	}));
 }
@@ -68,6 +76,9 @@ beforeEach(async () => {
 	store = await import('./chat.svelte.js');
 	toasts.length = 0;
 	calls = [];
+	reviewBodies = [];
+	reviewStatus = 200;
+	servedRunId = 'run-7';
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -188,5 +199,57 @@ describe('an open changeset review holds the next send', () => {
 		expect(store.getRunInterrupted(), 'the banner and its Retry stay').toEqual({ runId: 'r-int' });
 		expect(calls.filter((c) => c.startsWith('DELETE'))).toEqual([]);
 		expect(runPosts()).toBe(1);
+	});
+
+	// The server refuses an answer that does not name the run whose changes it showed: a tab
+	// can still show one run's review after another tab ran again.
+	for (const [action, files, sent] of [
+		['rollback', undefined, { action: 'rollback', runId: 'run-7' }],
+		['partial', ['notes.md'], { action: 'partial', runId: 'run-7', rolledBackFiles: ['notes.md'] }],
+	] as const) {
+		it(`the ${action} answer names the run whose review was shown`, async () => {
+			await reviewOpen();
+			await store.submitChangesetReview(action, files ? [...files] : undefined);
+			expect(reviewBodies).toEqual([sent]);
+			expect(store.getPendingChangeset(), 'an applied answer closes the review').toBeNull();
+			expect(toasts).toEqual([]);
+		});
+	}
+
+	// A refused answer did nothing. Closing the review without a word would read as done.
+	it('an answer to an earlier run\'s review says so, shows what is pending now, and answers that', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		await reviewOpen();
+		reviewStatus = 409;
+		changed = [{ file: 'later.md', status: 'modified', diff: '-x\n+y' }];
+		servedRunId = 'run-8';
+		toasts.length = 0;
+		await store.submitChangesetReview('rollback');
+		expect(toasts.map((x) => x.message), 'the user is told why').toEqual([t('changeset.review_refused')]);
+		expect(store.getPendingChangeset(), 'the current review is shown').toEqual(changed);
+		reviewStatus = 200;
+		await store.submitChangesetReview('accept');
+		expect(reviewBodies.at(-1), 'the next answer names the run now shown').toEqual({ action: 'accept', runId: 'run-8' });
+	});
+
+	it('another refusal is not blamed on an earlier run', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		await reviewOpen();
+		reviewStatus = 400;
+		changed = [];
+		toasts.length = 0;
+		await store.submitChangesetReview('rollback');
+		expect(toasts.map((x) => x.message)).toEqual([t('changeset.review_failed')]);
+		expect(store.getPendingChangeset(), 'nothing is pending any more').toBeNull();
+	});
+
+	it('an answer that may not have arrived keeps the review open', async () => {
+		const { t } = await import('../i18n.svelte.js');
+		await reviewOpen();
+		reviewStatus = 'network';
+		toasts.length = 0;
+		await store.submitChangesetReview('rollback');
+		expect(store.getPendingChangeset(), 'the user can answer again').not.toBeNull();
+		expect(toasts.map((x) => x.message), 'the user is told it may not have arrived').toEqual([t('changeset.review_unsent')]);
 	});
 });

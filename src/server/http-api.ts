@@ -4201,7 +4201,7 @@ export class LynoxHTTPApi {
           // Notify client if changeset has pending file changes for review
           const csm = session.getChangesetManager();
           if (csm?.hasChanges()) {
-            res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size })}\n\n`);
+            res.write(`event: changeset_ready\ndata: ${JSON.stringify({ fileCount: csm.size, runId: csm.runId })}\n\n`);
           }
           res.write(`event: done\ndata: ${JSON.stringify({ result, usage: session.getLastRunUsage() ?? undefined })}\n\n`);
           res.end();
@@ -4683,7 +4683,7 @@ export class LynoxHTTPApi {
         }
         return { file: c.file, status: c.status, diff: c.diff, added, removed };
       });
-      jsonResponse(res, 200, { hasChanges: true, files });
+      jsonResponse(res, 200, { hasChanges: true, runId: csm.runId, files });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/changeset/review', async (_req, res, params, body) => {
@@ -4707,6 +4707,13 @@ export class LynoxHTTPApi {
       }
 
       const b = body as Record<string, unknown> | null;
+      // The answer names the run whose review it answers. A review can still be open in one
+      // tab after another tab ran again: its rollback would then reset files of a run it never
+      // showed. An answer without the id is refused too — it cannot say which run it saw.
+      if (b?.['runId'] !== csm.runId) {
+        errorResponse(res, 409, 'The changes under review belong to an earlier run');
+        return;
+      }
       const action = typeof b?.['action'] === 'string' ? b['action'] : '';
       if (!['accept', 'rollback', 'partial'].includes(action)) {
         errorResponse(res, 400, 'Invalid action — must be accept, rollback, or partial');

@@ -1783,6 +1783,7 @@ describe('LynoxHTTPApi', () => {
         const realWrite = await runOnce('as it is now');
         expect(realWrite).toContain('event: changeset_ready');
         expect(realWrite).toContain('"fileCount":1');
+        expect(realWrite, 'the review learns which run it shows').toContain('"runId":"run"');
       } finally {
         mockSessionInstance.getChangesetManager.mockReturnValue(null);
         rmSync(cwd, { recursive: true, force: true });
@@ -1803,11 +1804,11 @@ describe('LynoxHTTPApi', () => {
         mockSessionInstance.getChangesetManager.mockReturnValue(csm);
         runningSessions().set('test', { streamAlive: true, lastEventAt: Date.now(), takeover: () => {} });
         try {
-          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          const res = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
           expect(res.status).toBe(409);
           expect(readFileSync(file, 'utf-8')).toBe('during the run');
           runningSessions().delete('test');
-          const after = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          const after = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
           expect(after.status, 'positive control: the same request works once the run is over').toBe(200);
           expect(readFileSync(file, 'utf-8')).toBe('before');
         } finally {
@@ -1827,13 +1828,55 @@ describe('LynoxHTTPApi', () => {
         writeFileSync(file, 'accepted', 'utf-8');
         mockSessionInstance.getChangesetManager.mockReturnValue(csm);
         try {
-          const first = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'accept' }) });
+          const first = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'accept', runId: 'run' }) });
           expect(first.status, 'positive control').toBe(200);
-          const second = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          const second = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run' }) });
           expect(second.status).toBe(400);
           expect(readFileSync(file, 'utf-8')).toBe('accepted');
         } finally {
           mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          rmSync(cwd, { recursive: true, force: true });
+        }
+      });
+
+      // A review can stay open in one tab while another tab runs again in the same session.
+      // Its answer must not reach the next run's changes, which it never showed.
+      it('an answer to an earlier run\'s review is refused, and the next run\'s change stays', async () => {
+        const cwd = mkdtempSync(join(tmpdir(), 'lynox-cs-bound-'));
+        const file = join(cwd, 'a.txt');
+        writeFileSync(file, 'before', 'utf-8');
+        const earlier = new ChangesetManager(cwd, 'run-n');
+        earlier.backupBeforeWrite(file);
+        writeFileSync(file, 'by run n', 'utf-8');
+        mockSessionInstance.getChangesetManager.mockReturnValue(earlier);
+        const later = new ChangesetManager(cwd, 'run-n+1');
+        try {
+          const shown = await jsonFetch('/api/sessions/test/changeset');
+          const seenRunId = ((await shown.json()) as { runId?: string }).runId;
+          expect(seenRunId, 'the review shows its run').toBe('run-n');
+          // The next run replaces the manager (session.run cleans up the previous one).
+          earlier.cleanup();
+          later.backupBeforeWrite(file);
+          writeFileSync(file, 'by run n+1', 'utf-8');
+          mockSessionInstance.getChangesetManager.mockReturnValue(later);
+          for (const action of ['rollback', 'accept', 'partial'] as const) {
+            const res = await jsonFetch('/api/sessions/test/changeset/review', {
+              method: 'POST', body: JSON.stringify({ action, runId: seenRunId, rolledBackFiles: ['a.txt'] }),
+            });
+            expect(res.status, action).toBe(409);
+            expect(readFileSync(file, 'utf-8'), action).toBe('by run n+1');
+          }
+          const unnamed = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback' }) });
+          expect(unnamed.status, 'an answer that names no run').toBe(409);
+          expect(readFileSync(file, 'utf-8')).toBe('by run n+1');
+          // The refused accept did not end the review: the current run's own answer still rolls back.
+          const own = await jsonFetch('/api/sessions/test/changeset/review', { method: 'POST', body: JSON.stringify({ action: 'rollback', runId: 'run-n+1' }) });
+          expect(own.status, 'positive control: the answer to the current run').toBe(200);
+          expect(readFileSync(file, 'utf-8')).toBe('by run n');
+        } finally {
+          mockSessionInstance.getChangesetManager.mockReturnValue(null);
+          earlier.cleanup();
+          later.cleanup();
           rmSync(cwd, { recursive: true, force: true });
         }
       });
@@ -1853,7 +1896,7 @@ describe('LynoxHTTPApi', () => {
         mockSessionInstance.getChangesetManager.mockReturnValue(csm);
         try {
           const res = await jsonFetch('/api/sessions/test/changeset/review', {
-            method: 'POST', body: JSON.stringify({ action: 'partial', rolledBackFiles: ['back.txt'] }),
+            method: 'POST', body: JSON.stringify({ action: 'partial', runId: 'run', rolledBackFiles: ['back.txt'] }),
           });
           expect(res.status).toBe(200);
           expect(await res.json()).toMatchObject({ rolledBack: 1, accepted: 1 });
