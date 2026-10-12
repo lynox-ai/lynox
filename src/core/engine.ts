@@ -1462,6 +1462,8 @@ export class Engine {
     setupMemoryStoreSubscription(
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
       this.context?.id ?? '',
+      // Read per write, not captured: the store and the flag can change after boot.
+      (threadId) => this._threadStore?.getThread(threadId)?.skip_extraction === 1,
     );
 
     // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the

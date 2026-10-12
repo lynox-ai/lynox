@@ -489,7 +489,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -601,6 +601,13 @@ export class Memory implements IMemory {
         return;
       }
       this._emptyExtractionStreak = 0;
+
+      // Re-read after the extraction call, as the durable capture does: the caller's gate ran
+      // before it, and private mode can be switched on while the call is out. A chat in private
+      // mode writes nothing new — neither these flat-file lines (they carry no thread id) nor the
+      // `memory:store` publish below, whose subscriber would write a thread-tagged row after the
+      // switch's purge has run.
+      if (cancelled?.()) return;
 
       const useAutoScope = this._autoScope && this._activeScopes.length > 1;
 

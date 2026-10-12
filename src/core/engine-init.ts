@@ -814,6 +814,12 @@ export function setupMemoryStoreSubscription(
   _embeddingProvider: EmbeddingProvider | null,
   _runHistory: RunHistory | null,
   contextId: string,
+  /**
+   * Whether a thread is in private mode NOW. Asked when the write starts and again inside
+   * `store` after each await: a publish from a chat that turned private while its
+   * extraction was out must not land after the switch's purge.
+   */
+  isThreadPrivate: (threadId: string) => boolean,
 ): void {
   if (!knowledgeLayer) return;
 
@@ -838,6 +844,14 @@ export function setupMemoryStoreSubscription(
         await Promise.race(activeEmbeddings);
       }
 
+      const threadId = data.sourceThreadId;
+      // A thread store that throws (closed during shutdown, busy) answers "private": the write
+      // is dropped rather than risked, and nothing escapes this un-awaited function.
+      const cancelled = threadId
+        ? (): boolean => { try { return isThreadPrivate(threadId); } catch { return true; } }
+        : undefined;
+      if (cancelled?.()) return;
+
       const embedTask = (async () => {
         try {
           const scope: MemoryScopeRef = data.scopeType && data.scopeId
@@ -858,6 +872,7 @@ export function setupMemoryStoreSubscription(
               sourceChannel: data.sourceChannel,
               sourceUntrusted: data.sourceUntrusted,
               sourceToolName: data.sourceToolName,
+              cancelled,
             },
           );
         } catch (err: unknown) {

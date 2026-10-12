@@ -542,7 +542,13 @@ describe('Agent', () => {
       });
       const result = await agent.send('Question');
       expect(result).toBe('The answer is 42');
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined);
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', 0, undefined, undefined, expect.any(Function));
+      // The fifth argument is read when the extraction RETURNS, so it must follow the agent's
+      // flag after the call, not report the value it had when the call was made.
+      const cancelled = memory.maybeUpdate.mock.calls[0]?.[4] as () => boolean;
+      expect(cancelled()).toBe(false);
+      agent.skipMemoryExtraction = true;
+      expect(cancelled()).toBe(true);
     });
 
     it('max_tokens with continuationPrompt: continues the loop', async () => {
@@ -839,7 +845,7 @@ describe('Agent', () => {
 
       // The end_turn path passes the turn text to maybeUpdate; the endsTurn path
       // must do the same (only the tool-count differs — one tool ran this turn).
-      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined);
+      expect(memory.maybeUpdate).toHaveBeenCalledWith('The answer is 42', expect.any(Number), undefined, undefined, expect.any(Function));
     });
 
     it('a non-endsTurn tool still continues the loop (contrast)', async () => {
@@ -1131,7 +1137,7 @@ describe('Agent', () => {
       const viaGuard = makeMemory();
       const b = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], memory: viaGuard, costGuard: { maxBudgetUSD: 100, maxIterations: 2 } });
       expect(await b.send('go')).toContain('Response stopped');
-      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined);
+      expect(viaGuard.maybeUpdate).toHaveBeenCalledWith('Let me check.', expect.any(Number), undefined, undefined, expect.any(Function));
     });
 
     it('safeToolNames: allowlist, dedupe, order, cap at 8', () => {

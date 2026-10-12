@@ -316,6 +316,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
+      /**
+       * Asked after every await, before the writes that follow it: `true` drops the write.
+       * The private-mode switch purges what carries a thread's id in the same synchronous
+       * step that stores the flag, so a `true` here means that purge has already run. A write
+       * whose embedding, contradiction check, gate or entity extraction was still out would
+       * otherwise land after it — and a stub written after the legacy row was purged is one
+       * no later purge reaches, because purges find stubs through the legacy ids. Each check
+       * sits directly after the await it answers; the only await between a check and its writes
+       * is `store`'s own on the extraction helper, which has already made its check and
+       * returned.
+       */
+      cancelled?: (() => boolean) | undefined;
     },
   ): Promise<KnowledgeStoreResult> {
     const trimmedText = text.trim();
@@ -344,6 +356,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
+    if (options?.cancelled?.()) {
+      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+    }
 
     // 2. Dedup check — but bypass dedup when contradiction signals are present.
     // Filter by `scopeIds:[scope.id]` so a `context:acme` memory cannot dedup
@@ -423,6 +438,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         (emb, topK, thr, f) => this._dedupRecall(emb, topK, thr, f),
         this.embeddingProvider, embedding,
       );
+      if (options?.cancelled?.()) {
+        return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+      }
     }
 
     // 3b. Memory Foundation Wave 2 (P1a — trust-aware conflict, DECIDED AT SOURCE).
@@ -518,6 +536,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const extractGate = this.meteredHost && this.anthropicClient
       ? await fireBeforeRunGate(this.meteredHost, 'fast')
       : null;
+    // The legacy row above is committed. If the switch flipped during the gate, its purge
+    // already removed that row (it runs synchronously with the flag write); writing the
+    // stub now would leave one no purge can reach — purges find stubs through legacy ids.
+    if (options?.cancelled?.()) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
     const extractionAllowed = !extractGate || extractGate.blockedReason === null;
 
     // Slice B (Context-Hierarchy Scoping): if this memory's source thread is anchored
@@ -529,7 +551,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       ? this._readThreadAnchor(options?.sourceThreadId)
       : null;
 
-    let extracted: { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined };
+    let extracted: { resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true };
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
       // S5b'-b entity write-cutover: the extraction persists to the subject graph as the
       // AUTHORITATIVE entity store — the legacy entities/mentions/relations writes are
@@ -551,7 +573,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       try {
         extracted = await this._extractAndPersistToSubjects(
           trimmedText, namespace, scope, memoryId, embedding, stubEvidence, contradictions, createdAt, extractionAllowed,
-          threadAnchorSubjectId,
+          threadAnchorSubjectId, options?.cancelled,
         );
       } catch (err: unknown) {
         this._reportMirrorParityLoss('store', memoryId, err);
@@ -564,7 +586,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // write did not already report a loss above (no double signal for one memory),
       // and the read-back itself is tolerated — a getStub throw must NOT escape store()
       // and defeat the preserve-and-continue intent.
-      if (stubWritten) {
+      if (stubWritten && !extracted.cancelled) {
         try {
           if (!this.memoryGraphStore.getStub(memoryId)) {
             this._reportMirrorParityLoss('store', memoryId, new Error('stub absent in engine.db after write'));
@@ -584,11 +606,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         const legacy = this.useV2Extractor
           && this.anthropicClient
           && shouldExtractV2(trimmedText, namespace)
-          ? await this._extractAndPersistV2(trimmedText, scope, memoryId)
-          : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId);
+          ? await this._extractAndPersistV2(trimmedText, scope, memoryId, options?.cancelled)
+          : await this._extractAndPersistV1(trimmedText, namespace, scope, memoryId, options?.cancelled);
         resolvedEntities = legacy.resolvedEntities;
         resolvedRelations = legacy.resolvedRelations;
         costUsd = legacy.costUsd;
+        if (legacy.cancelled) {
+          if (extractGate && this.meteredHost && costUsd) reportMeteredCost(this.meteredHost, extractGate.runId, costUsd, 'fast');
+          return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+        }
       }
 
       // 9. Foundation Rework v2 (S1b): additively mirror the extraction into the
@@ -616,6 +642,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (extractGate && this.meteredHost && extracted.costUsd) {
       reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
     }
+    if (extracted.cancelled) return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
 
     // 10. Publish event
     if (channels.knowledgeGraph.hasSubscribers) {
@@ -639,8 +666,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     namespace: MemoryNamespace,
     scope: MemoryScopeRef,
     memoryId: string,
-  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
+    cancelled?: (() => boolean) | undefined,
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
     const extraction = await extractEntities(trimmedText, namespace, this.anthropicClient);
+    if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], costUsd: extraction.costUsd, cancelled: true };
 
     const persisted = this.db.transaction(() => {
       const entities: EntityRecord[] = [];
@@ -699,8 +728,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     trimmedText: string,
     scope: MemoryScopeRef,
     memoryId: string,
-  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
+    cancelled?: (() => boolean) | undefined,
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
     const extraction = await extractEntitiesV2(trimmedText, this.anthropicClient!);
+    if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], costUsd: extraction.costUsd, cancelled: true };
 
     const persisted = this.db.transaction(() => {
       const entities: EntityRecord[] = [];
@@ -1046,7 +1077,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     createdAt: string | undefined,
     extractionAllowed: boolean,
     threadAnchorSubjectId: string | null,
-  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined }> {
+    cancelled?: (() => boolean) | undefined,
+  ): Promise<{ resolvedEntities: EntityRecord[]; resolvedRelations: RelationRecord[]; costUsd?: number | undefined; cancelled?: true }> {
     // Normalize both extractor shapes to one name-keyed form. The aliases carried
     // MATCH what the mirror passed to findOrCreate — V1: [name]; V2: [canonical, ...aliases].
     // When the extractor is gated off (exhausted tenant) we skip it entirely and still
@@ -1067,6 +1099,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         costUsd = ex.costUsd;
       }
     }
+    // After the extraction call and before the first write: see `store`'s `cancelled`.
+    if (cancelled?.()) return { resolvedEntities: [], resolvedRelations: [], cancelled: true, ...(costUsd === undefined ? {} : { costUsd }) };
 
     const { resolvedEntities, resolvedRelations } = this._writeSubjectsFromExtraction(
       memoryId, trimmedText, namespace, scope, options, entities, relations, contradictions, embedding, createdAt,
