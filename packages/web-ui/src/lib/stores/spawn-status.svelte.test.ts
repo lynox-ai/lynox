@@ -35,6 +35,9 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	// Resuming a thread arms a 12 s lost-prompt recheck; `newChat` cancels it so
+	// no timer outlives the test.
+	store.newChat();
 	vi.unstubAllGlobals();
 });
 
@@ -65,21 +68,28 @@ function delegation(): { status?: string } | undefined {
 }
 
 describe('delegation row: no check mark while sub-agents run', () => {
-	it('stays running through the tool_use turn end and a child result, and is done only on its own result', async () => {
+	it('stays running through the tool_use turn end, a child\'s same-named result and the child finishing, and is done only on its own result', async () => {
 		const stream = await attachRun();
 
 		stream.send('tool_call', { name: 'spawn_agent', input: { agents: [{ name: 'scout', task: 'find vendors' }] }, agent: 'lynox' }, 1);
 		// The model stops in order to RUN the tool: nothing has finished yet.
 		stream.send('turn_end', { stop_reason: 'tool_use', usage, agent: 'lynox' }, 2);
 		stream.send('spawn', { spawnId: 's1', subAgents: [{ id: 's1:0', name: 'scout' }], agent: 'lynox' }, 3);
-		// A child's own call and result, tagged with its origin, while it works.
-		stream.send('tool_call', { name: 'web_research', input: { query: 'vendors' }, agent: 'scout', subAgent: 'scout', subAgentId: 's1:0' }, 4);
-		stream.send('tool_result', { name: 'web_research', result: 'three found', agent: 'scout', subAgent: 'scout', subAgentId: 's1:0' }, 5);
+		// The child delegates in turn (nested spawns exist): its own `spawn_agent`
+		// call and result carry the parent's tool name, so only the child tag keeps
+		// that result from closing the parent's delegation.
+		stream.send('tool_call', { name: 'spawn_agent', input: { agents: [{ name: 'reader', task: 'read pages' }] }, agent: 'scout', subAgent: 'scout', subAgentId: 's1:0' }, 4);
+		stream.send('tool_result', { name: 'spawn_agent', result: '## reader\npages read', agent: 'scout', subAgent: 'scout', subAgentId: 's1:0' }, 5);
 		await settle();
 
 		expect(delegation()?.status).toBe('running');
 
+		// A child reporting done is not the delegation's result either.
 		stream.send('spawn_child_done', { spawnId: 's1', subAgent: 'scout', subAgentId: 's1:0', ok: true, elapsedS: 3, costUsd: 0.01, agent: 'lynox' }, 6);
+		await settle();
+
+		expect(delegation()?.status).toBe('running');
+
 		stream.send('tool_result', { name: 'spawn_agent', result: '## scout\nthree found', agent: 'lynox' }, 7);
 		await settle();
 
