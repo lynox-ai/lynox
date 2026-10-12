@@ -2565,6 +2565,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2656,6 +2657,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2773,6 +2775,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -3353,6 +3356,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -3465,6 +3469,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -5884,6 +5889,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
