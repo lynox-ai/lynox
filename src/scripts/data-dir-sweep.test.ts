@@ -42,6 +42,16 @@ describe('data-dir sweep', () => {
     expect(sweepDataDir(dir).undeclared).toEqual([]);
   });
 
+  // The erasure files a measurement log's rotation under the live log; the sweep must not
+  // call the same file undeclared, or it fails on every instance whose log rotated once.
+  it('does not flag the rotation of a declared measurement log', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, 'retrieval-shadow.jsonl'), 'x', 'utf-8');
+    writeFileSync(join(dir, 'retrieval-shadow.jsonl.1'), 'x', 'utf-8');
+    writeFileSync(join(dir, 'notes.jsonl.1'), 'x', 'utf-8');            // not ours
+    expect(sweepDataDir(dir).undeclared.map(f => f.name)).toEqual(['notes.jsonl.1']);
+  });
+
   it('sorts by size, so the expensive surprise is the first line an operator reads', () => {
     const dir = tmp();
     writeFileSync(join(dir, 'small-unknown.json'), 'x', 'utf-8');

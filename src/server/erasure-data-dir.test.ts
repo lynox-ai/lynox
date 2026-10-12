@@ -7,6 +7,7 @@ import type { Server } from 'node:http';
 import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
+import { isBoundedJsonlQuiesced } from '../core/bounded-jsonl-log.js';
 import { scopeToDir } from '../core/scope-resolver.js';
 import type { Memory } from '../core/memory.js';
 import type { ArtifactStore } from '../core/artifact-store.js';
@@ -166,8 +167,9 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
         writeFileSync(path, m);
       }
     }
-    // The engine's own residue, and a crash-left atomic temp of the config.
-    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp']) {
+    // The engine's own residue, a crash-left atomic temp of the config, and the rotated
+    // generation of a measurement log.
+    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp', 'retrieval-shadow.jsonl.1']) {
       writeFileSync(join(dir, name), mark(name));
     }
     // The stores held open: mail-state, push, flat-file memory (and its cache), artifacts.
@@ -212,7 +214,7 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
       if (st.isDirectory()) expect(readdirSync(path), `${name} kept content`).toEqual([]);
       else expect(readFileSync(path, 'utf8'), `${name} survived`).not.toBe(m);
     }
-    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp']) {
+    for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp', 'retrieval-shadow.jsonl.1']) {
       expect(existsSync(join(dir, name)), `${name} survived`).toBe(false);
     }
     for (const [name, bytes] of before) expect(readFileSync(join(dir, name), 'utf8'), `${name} was changed`).toBe(bytes);
@@ -226,6 +228,36 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(await e.getBatchIndex().get('zz-batch')).toBeNull();
     expect(readdirSync(managerDir)).toEqual([]);
     rmSync(managerDir, { recursive: true, force: true });
+  }, 60_000);
+
+  // A measurement log append queued in a run's last moment would otherwise recreate the
+  // log after the file pass. Observed at the route's first check after the run drain.
+  it('holds the measurement logs while it erases, and releases them afterwards', async () => {
+    const target = api as unknown as { erasureBlockedBy: (...a: unknown[]) => unknown };
+    const original = target.erasureBlockedBy;
+    let heldDuring: boolean | null = null;
+    target.erasureBlockedBy = function (this: unknown, ...a: unknown[]) {
+      heldDuring = isBoundedJsonlQuiesced();
+      return original.apply(this, a);
+    };
+    // The config reload runs after the file pass: a hold released early fails here.
+    const engine = (api as unknown as { engine: { reloadUserConfig: (...a: unknown[]) => unknown } }).engine;
+    const reload = engine.reloadUserConfig;
+    let heldAfterFiles: boolean | null = null;
+    engine.reloadUserConfig = function (this: unknown, ...a: unknown[]) {
+      heldAfterFiles = isBoundedJsonlQuiesced();
+      return reload.apply(this, a);
+    };
+    try {
+      const res = await erase();
+      expect(res.status).toBe(200);
+    } finally {
+      target.erasureBlockedBy = original;
+      engine.reloadUserConfig = reload;
+    }
+    expect(heldDuring).toBe(true);
+    expect(heldAfterFiles).toBe(true);
+    expect(isBoundedJsonlQuiesced()).toBe(false);
   }, 60_000);
 
   it('checks an unknown entry once it is acknowledged, and refuses one it cannot check', async () => {

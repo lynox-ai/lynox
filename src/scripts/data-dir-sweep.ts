@@ -18,6 +18,7 @@ import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
+import { classifyEntry } from '../core/data-dir-erase.js';
 
 export interface SweepFinding {
   name: string;
@@ -65,7 +66,9 @@ export function sweepDataDir(dataDir: string): SweepResult {
 
   for (const name of existsSync(dataDir) ? readdirSync(dataDir) : []) {
     present.add(name);
-    if (declared.has(name) || SIDECAR.test(name) || ENGINE_BACKUP.test(name)) continue;
+    // `classifyEntry` is the erasure's own classifier: what it files under a declared entry
+    // (a log's `.1` rotation) is not undeclared here either.
+    if (declared.has(name) || SIDECAR.test(name) || ENGINE_BACKUP.test(name) || classifyEntry(name).kind === 'sidecar') continue;
     const path = join(dataDir, name);
     let isDir = false;
     try { isDir = statSync(path).isDirectory(); } catch { continue; }

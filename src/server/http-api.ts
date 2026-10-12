@@ -99,6 +99,7 @@ import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
 import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from '../core/data-dir-erase.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
+import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -10905,6 +10906,7 @@ export class LynoxHTTPApi {
         return;
       }
       this.erasureInProgress = true;
+      let resumeLogs: (() => void) | null = null;
       try {
         // Before the synchronous stretch: the stores' files are looked up by name below.
         const { getLynoxDir } = await import('../core/config.js');
@@ -10922,6 +10924,10 @@ export class LynoxHTTPApi {
           jsonResponse(res, 409, { error: 'A running chat did not stop, so nothing was erased; try again', code: 'runs_did_not_stop' });
           return;
         }
+        // The measurement logs are written fire-and-forget, so a stopped run can still have
+        // an append queued. Held until the route ends, so no append issued while it runs
+        // lands after the file pass; one issued after the answer starts a fresh log.
+        resumeLogs = await quiesceBoundedJsonl();
 
         // What would write the stores again AFTER they are emptied, or carry mail content to a
         // model, refuses the erasure instead of being stopped by it: stopping a mail watcher or
@@ -11418,6 +11424,7 @@ export class LynoxHTTPApi {
         }
         jsonResponse(res, 200, { deleted: true, message: 'All user data has been permanently deleted' });
       } finally {
+        resumeLogs?.();
         this.erasureInProgress = false;
       }
     });

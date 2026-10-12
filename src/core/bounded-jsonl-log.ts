@@ -1,8 +1,8 @@
 import { createReadStream } from 'node:fs';
 import { appendFile, rename, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { getLynoxDir } from './config.js';
 
 /**
  * Bounded append-only JSONL telemetry sink — the shared retention primitive for the
@@ -30,8 +30,10 @@ import { createInterface } from 'node:readline';
  *    ENOTDIR) is swallowed — a telemetry failure must never surface into the caller's run.
  *    The read side is best-effort about the FILES but not about its caller's visitor; see
  *    `scanBoundedJsonl` for exactly which failures it absorbs and which it propagates.
- *  - Deploy-safe path: written under the persistent data dir (`LYNOX_DATA_DIR`/`LYNOX_DIR`,
- *    else `~/.lynox`), the one volume writable in the managed read-only container.
+ *  - Deploy-safe path: written under the persistent data dir (`getLynoxDir()`: `--data-dir`,
+ *    else `LYNOX_DATA_DIR`/`LYNOX_DIR`, else `~/.lynox`), the one volume writable in the
+ *    managed read-only container. Each sink is declared in `DATA_DIR_INVENTORY`, so the
+ *    erasure removes it and its `.1` rotation.
  *  - Serialized per file so concurrent fire-and-forget writers cannot interleave a
  *    rotation with an append (which would split or drop a line).
  */
@@ -43,10 +45,14 @@ const MIN_MAX_BYTES = 64 * 1024;
 /** Ceiling for an operator override — above this the bound is effectively disabled (typo guard). */
 const MAX_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 
-/** Resolve the data dir the same way the rest of the engine does. */
+/**
+ * The engine's data dir, through the one resolver the rest of the engine uses. This used
+ * to re-read the env vars itself and so missed a `--data-dir` override: an instance
+ * started with one wrote its logs into `~/.lynox`, where the erasure of its data dir
+ * never looked.
+ */
 function dataDir(): string {
-  const fromEnv = process.env['LYNOX_DATA_DIR'] ?? process.env['LYNOX_DIR'];
-  return fromEnv && fromEnv.length > 0 ? fromEnv : path.join(homedir(), '.lynox');
+  return getLynoxDir();
 }
 
 /** Resolve the byte cap, honouring an env override but clamped to [floor, ceiling]. */
@@ -64,6 +70,46 @@ function maxBytes(): number {
  * entry per distinct sink file (a handful total), each holding the latest tail.
  */
 const chains = new Map<string, Promise<void>>();
+
+/**
+ * While above zero, every append is dropped — also one already queued, because the check
+ * runs when the append executes. The erasure holds it across its whole run: an append
+ * queued in a run's last moment would otherwise recreate a log, with the thread or subject
+ * id of the data just erased, after the route removed the file.
+ */
+let quiesced = 0;
+
+/** How long a hold waits for writes in flight before it gives up waiting. */
+const QUIESCE_WAIT_MS = 2_000;
+
+/** Whether the sinks are held by `quiesceBoundedJsonl`. */
+export function isBoundedJsonlQuiesced(): boolean {
+  return quiesced > 0;
+}
+
+/**
+ * Stop the sinks and wait until no write is in flight. Returns the call that resumes them;
+ * calling it more than once resumes once.
+ *
+ * The wait is bounded: a write stuck on a hung volume would otherwise hold the erasure
+ * forever. After `maxWaitMs` the hold stands and the caller goes on; a write that was
+ * already past its check can still finish later.
+ */
+export async function quiesceBoundedJsonl(maxWaitMs: number = QUIESCE_WAIT_MS): Promise<() => void> {
+  quiesced++;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.all([...chains.values()]),
+    new Promise<void>((r) => { timer = setTimeout(r, maxWaitMs); }),
+  ]);
+  clearTimeout(timer);
+  let resumed = false;
+  return () => {
+    if (resumed) return;
+    resumed = true;
+    quiesced--;
+  };
+}
 
 /** Rotate the live file to `<file>.1` if it has reached the cap. Best-effort. */
 async function rotateIfNeeded(file: string, cap: number): Promise<void> {
@@ -102,6 +148,7 @@ export function appendBoundedJsonl(fileName: string, entry: unknown): Promise<vo
   }
   const prev = chains.get(file) ?? Promise.resolve();
   const next = prev.then(async () => {
+    if (quiesced > 0) return;
     try {
       await rotateIfNeeded(file, cap);
       await appendFile(file, JSON.stringify(entry) + '\n', 'utf8');

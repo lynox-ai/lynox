@@ -8,7 +8,7 @@ import { KnowledgeLayer } from './knowledge-layer.js';
 import { AgentMemoryDb } from './agent-memory-db.js';
 import { LocalProvider } from './embedding.js';
 import { EntityResolver } from './entity-resolver.js';
-import { appendRetrievalShadowLog, RETRIEVAL_SHADOW_LOG_FILE } from './retrieval-shadow-log.js';
+import { appendRetrievalShadowLog, RETRIEVAL_SHADOW_LOG_FILE, shadowQueryHash } from './retrieval-shadow-log.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 /**
@@ -309,7 +309,7 @@ describe('Wave 0 — §5.1 shadow mode: measured distribution, filters nothing',
       candidates: Array<{ id: string; rawCosine: number; sourceType: string; subjectId: string | null; wouldPass: boolean }>;
     };
     expect(entry.threadId).toBe('thread-xyz');
-    expect(entry.queryHash).toMatch(/^[0-9a-f]{16}$/); // hashed, never raw query text
+    expect(entry.queryHash).toBe(shadowQueryHash(text)); // the salted hash, never raw query text
     expect(entry.embeddingModel).toBe('local');
     expect(entry.embeddingProvider).toBe('local');
     const c = entry.candidates.find(x => x.id === id)!;

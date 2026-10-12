@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, writeFileSync, lstatSync, readdirSync, unlinkSyn
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
+import { getDataDirOverride } from './config.js';
 import { maskSecretPatterns } from './secret-store.js';
 
 /** One captured outbound request. `userMessage` is REDACTED (see `redactWireUserMessage`). */
@@ -172,8 +173,14 @@ function defaultSinkDir(env: NodeJS.ProcessEnv): string {
   return join(dataDir(env), 'wire-sink');
 }
 
-/** Resolve the data dir the way the rest of the engine does (`config.ts:112-113`). */
+/**
+ * Resolve the data dir the way `getLynoxDir()` does, reading the env passed in. The
+ * `--data-dir` override comes first: without it an instance started with one wrote its
+ * captures into `~/.lynox`, where the erasure of its data dir never looked.
+ */
 function dataDir(env: NodeJS.ProcessEnv): string {
+  const override = getDataDirOverride();
+  if (override !== null) return override;
   const fromEnv = env['LYNOX_DATA_DIR'] ?? env['LYNOX_DIR'];
   return fromEnv && fromEnv.length > 0 ? fromEnv : join(homedir(), '.lynox');
 }

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendBoundedJsonl } from './bounded-jsonl-log.js';
+import { appendBoundedJsonl, isBoundedJsonlQuiesced, quiesceBoundedJsonl } from './bounded-jsonl-log.js';
+import { setDataDir } from './config.js';
 
 /**
  * The shared size-rotation that bounds the opt-in telemetry sinks
@@ -151,5 +152,40 @@ describe('bounded-jsonl-log — retention + best-effort', () => {
     // the cap on every FUTURE successful rotate) — the data was never lost or thrown away.
     const live = await readFile(join(dir, FILE), 'utf8');
     expect(live.trim().split('\n').length).toBe(12);
+  });
+
+  // An instance started with `--data-dir` sets the override and no env var. The sink used
+  // to read the env itself and wrote into `~/.lynox` there, outside the directory the
+  // erasure clears.
+  it('writes under a --data-dir override, not under LYNOX_DATA_DIR', async () => {
+    const override = await mkdtemp(join(tmpdir(), 'lynox-bjl-override-'));
+    setDataDir(override);
+    try {
+      await appendBoundedJsonl(FILE, { seq: 1 });
+      expect((await readFile(join(override, FILE), 'utf8')).trim()).toBe('{"seq":1}');
+      await expect(stat(join(dir, FILE))).rejects.toThrow();
+    } finally {
+      setDataDir(null);
+      await rm(override, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  // The erasure holds the sinks: an append queued before the hold, or issued during it,
+  // must not write — else it recreates a log the erasure just removed.
+  it('drops queued and new appends while quiesced, and writes again once resumed', async () => {
+    const queued = appendBoundedJsonl(FILE, { seq: 1 });
+    const resume = await quiesceBoundedJsonl();
+    expect(isBoundedJsonlQuiesced()).toBe(true);
+    await queued;
+    await appendBoundedJsonl(FILE, { seq: 2 });
+    await expect(stat(join(dir, FILE))).rejects.toThrow();
+    resume();
+    resume();                                      // a second call must not release a second hold
+    expect(isBoundedJsonlQuiesced()).toBe(false);
+    const next = await quiesceBoundedJsonl();
+    expect(isBoundedJsonlQuiesced()).toBe(true);   // a released-twice counter would read 0 here
+    next();
+    await appendBoundedJsonl(FILE, { seq: 3 });
+    expect((await readFile(join(dir, FILE), 'utf8')).trim()).toBe('{"seq":3}');
   });
 });

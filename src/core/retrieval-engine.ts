@@ -11,7 +11,7 @@ import { NAMESPACE_HALF_LIFE } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { calculateCost } from './pricing.js';
 import { reportMeteredCost, type HookHost } from './metered-request.js';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
@@ -26,7 +26,7 @@ import type { SubjectStore, SubjectRow } from './subject-store.js';
 import type { RunHistory } from './run-history.js';
 import { compose, engineText, type Part, escapeXml, renderProvenanceFact, detectInjectionAttempt, renderFence } from './data-boundary.js';
 import { channels } from './observability.js';
-import { appendRetrievalShadowLog } from './retrieval-shadow-log.js';
+import { appendRetrievalShadowLog, shadowQueryHash } from './retrieval-shadow-log.js';
 
 /** Default retrieval options. */
 const DEFAULT_TOP_K = 10;
@@ -580,7 +580,7 @@ export class RetrievalEngine {
    * Records the raw cosine, tier, subject and current-gate verdict of every scored
    * candidate so an operator can pick the Wave-2 per-tier FLOOR from the real
    * distribution. Writes the JSONL sink AND publishes `channels.retrievalGate` for
-   * live subscribers. Fire-and-forget; the query is stored only as a hashed prefix,
+   * live subscribers. Fire-and-forget; the query is stored only as a salted hash prefix,
    * and any error is swallowed so telemetry never affects the retrieval.
    */
   private _emitRetrievalShadow(
@@ -591,7 +591,7 @@ export class RetrievalEngine {
   ): void {
     try {
       const gate = threshold * 0.3;
-      const queryHash = createHash('sha256').update(query).digest('hex').slice(0, 16);
+      const queryHash = shadowQueryHash(query);
       const entry = {
         ts: Date.now(),
         threadId,

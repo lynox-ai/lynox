@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR_INVENTORY, ERASE_BY_REMOVE, ERASE_BY_STEP, ERASE_KEPT } from './data-dir-inventory.js';
+import { classifyEntry } from './data-dir-erase.js';
 
 /**
  * The erasure's decision per data-dir entry, held against a SECOND source.
@@ -74,5 +75,19 @@ describe('data-dir erasure decisions', () => {
     expect(named).toContain('.env');
     const declared = new Set(DATA_DIR_INVENTORY.map(e => e.name));
     expect([...named].filter(n => !declared.has(n))).toEqual([]);
+  });
+});
+
+describe('measurement logs and their rotation', () => {
+  // The rotated generation holds the same records as the live file, so it must go with it;
+  // classified as unknown it would stop the erasure until someone acknowledged it.
+  it('treats the .1 rotation of a declared log as part of that log', () => {
+    expect(classifyEntry('retrieval-shadow.jsonl')).toMatchObject({ kind: 'declared', entry: { erase: { by: 'remove' } } });
+    expect(classifyEntry('retrieval-shadow.jsonl.1')).toEqual({ kind: 'sidecar', of: 'retrieval-shadow.jsonl' });
+  });
+
+  // Anchored to a DECLARED live name: a broad data dir may hold someone's own `notes.jsonl.1`.
+  it('leaves the .1 of an undeclared file unknown', () => {
+    expect(classifyEntry('notes.jsonl.1')).toEqual({ kind: 'unknown' });
   });
 });
