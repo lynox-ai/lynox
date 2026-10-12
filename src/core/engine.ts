@@ -1249,9 +1249,25 @@ export class Engine {
         // ones a trigger is parked on, which are exactly the questions whose
         // answers are allowed to arrive in a later process (§0 A1/A2).
         this._promptStore.expireUnparked();
+        // A mandate's question ends with its grant (§3.13 B4): on every sweep for a grant that
+        // ran out, at once for a revoke. With no store of ends, every mandate counts as ended.
+        // The sweep reads engine.db as well; it fails on its own, so a failure there leaves the
+        // questions working and is tried again on the next sweep.
+        const promptStore = this._promptStore;
+        const mandateLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
+        const sweepEnded = (): void => {
+          try {
+            promptStore.expireEndedMandates(mandateLive);
+          } catch (err: unknown) {
+            process.stderr.write(`[lynox] closing ended mandates' questions failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
+        };
+        sweepEnded();
+        this._mandateEnds?.onRevoke(sweepEnded);
         // Periodic cleanup every 5 minutes
         this._promptCleanupTimer = setInterval(() => {
           this._promptStore?.expireOld();
+          sweepEnded();
         }, 5 * 60_000);
       } catch (err) {
         process.stderr.write(`[lynox] PromptStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);

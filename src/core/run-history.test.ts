@@ -2908,13 +2908,13 @@ describe('history.db v58 — who created a to-do', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.insertTask({ id: 'old1', title: 'kept' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(59);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(60);
     } finally { after.close(); }
   });
 });
@@ -2930,13 +2930,36 @@ describe('history.db v59 — why a question was closed', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id;');
     before.close();
 
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(59);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(60);
+    } finally { after.close(); }
+  });
+});
+
+describe('history.db v60 — which mandate asked a question', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+
+  it('adds an empty mandate_id to a populated pending_prompts table', () => {
+    // A v59 database: the current schema with v60's column and version taken back out.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mig60-'));
+    dirs.push(dir);
+    const path = join(dir, 'history.db');
+    const before = new RunHistory(path);
+    before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at, created_by) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z', 'mandate:old@example.org')").run();
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id;');
+    before.close();
+
+    const after = new RunHistory(path);
+    try {
+      expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
+        .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(60);
     } finally { after.close(); }
   });
 });

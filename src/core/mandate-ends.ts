@@ -36,6 +36,8 @@ export class MandateEnds {
    * same login, so without this each one would take engine.db's write lock to change nothing.
    */
   private readonly recorded = new Map<string, { issuedAt: number; endsAt: number }>();
+  /** Who is told of a revoke, to end what the mandate still holds (B4) at once instead of on the next sweep. */
+  private readonly revokeListeners = new Set<(mandateId: string) => void>();
 
   constructor(db: Database.Database) {
     this.upsert = db.prepare(
@@ -66,9 +68,26 @@ export class MandateEnds {
     this.recorded.set(p.mandateId, { issuedAt: issuedAtS, endsAt: p.mandateExp });
   }
 
-  /** The mandate was revoked at `atS`. Final: no later `record` revives it. */
+  /**
+   * The mandate was revoked at `atS`. Final: no later `record` revives it. Written first, then
+   * every listener is told; a listener that throws is logged and does not undo the revoke or
+   * stop the others, because the row is what every later reader asks.
+   */
   revoke(mandateId: string, atS: number = Math.floor(Date.now() / 1000)): void {
     this.revokeStmt.run(mandateId, atS, atS);
+    for (const listener of this.revokeListeners) {
+      try {
+        listener(mandateId);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox] a revoke listener failed for a mandate: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+  }
+
+  /** Be told of every later revoke. Returns the call that stops it. */
+  onRevoke(listener: (mandateId: string) => void): () => void {
+    this.revokeListeners.add(listener);
+    return () => { this.revokeListeners.delete(listener); };
   }
 
   /** The end recorded with this mandate's latest login, in unix seconds; undefined when none is. */

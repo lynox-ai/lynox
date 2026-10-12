@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -132,5 +132,28 @@ describe('MandateEnds', () => {
     ends.record(M({ mandateExp: undefined }), 100);
     ends.record(M({ mandateId: undefined }), 100);
     expect(rows()).toEqual([]);
+  });
+
+  it('tells every listener of a revoke, after the row is written; a throwing listener undoes nothing', () => {
+    ends.record(M(), 100);
+    const seen: string[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      ends.onRevoke((id) => { expect(ends.isLive(id, 1_000)).toBe(false); throw new Error('boom'); });
+      ends.onRevoke((id) => { seen.push(id); });
+      ends.revoke('M-1', 500);
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('revoke listener failed'));
+    } finally { stderr.mockRestore(); }
+    expect(seen).toEqual(['M-1']);
+    expect(ends.isLive('M-1', 1_000)).toBe(false);
+  });
+
+  it('stops telling a listener once it is removed', () => {
+    const seen: string[] = [];
+    const stop = ends.onRevoke((id) => { seen.push(id); });
+    ends.revoke('M-1', 500);
+    stop();
+    ends.revoke('M-2', 500);
+    expect(seen).toEqual(['M-1']);
   });
 });

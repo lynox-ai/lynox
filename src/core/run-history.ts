@@ -1427,6 +1427,12 @@ const MIGRATIONS: string[] = [
   // "expired". NULL on every other row, older ones included.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
    ALTER TABLE pending_prompts ADD COLUMN closed_reason TEXT;`,
+  // v60: the grant a mandate's question was asked under (PRD customer-granted-operator-access
+  // §3.13 B4), beside its `created_by`. The tag binds the question to the address; the grant
+  // ends it. NULL on the owner's questions and on every older row; a mandate's question
+  // without one is read as ended (`PromptStore.expireEndedMandates`).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
+   ALTER TABLE pending_prompts ADD COLUMN mandate_id TEXT;`,
 ];
 
 export class RunHistory {

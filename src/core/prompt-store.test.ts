@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL, principalFromTag } from './request-principal.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson, originWireFields } from './prompt-store.js';
+import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson, originWireFields, principalOfPrompt } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 
 /**
@@ -41,9 +42,68 @@ describe('PromptStore', () => {
     closeDb();
   });
 
+  describe('a mandate\'s question ends with its grant (v60)', () => {
+    const GRANT = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'grant-1' };
+    const OTHER = { kind: 'mandate' as const, email: 'other@example.org', mandateId: 'grant-2' };
+
+    it('writes the grant of the mandate that asked, on every kind of question, and none for the owner', () => {
+      const stamp = { principal: GRANT };
+      const ids = [
+        store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, undefined, stamp),
+        store.insertAskUserTabs('s-2', [{ question: 'a?' }], undefined, stamp),
+        store.insertAskSecret('s-3', 'KEY', 'secret?', undefined, undefined, stamp),
+        store.insertConnectMail('s-4', 'mail?', '{}', undefined, stamp),
+        store.insertOnboardingBasics('s-5', [{ question: 'b?' }], ['k'], stamp),
+      ];
+      for (const id of ids) expect(store.getById(id)!.mandate_id).toBe('grant-1');
+      expect(store.getById(store.insertAskUser('s-6', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: OWNER_PRINCIPAL }))!.mandate_id).toBeNull();
+      expect(store.getById(store.insertAskUser('s-7', 'q?'))!.mandate_id).toBeNull();
+    });
+
+    it('reads the grant back with who asked', () => {
+      const row = store.getById(store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT }))!;
+      expect(principalOfPrompt(row)).toEqual({ kind: 'mandate', email: 'setup@example.org', mandateId: 'grant-1' });
+      expect(principalOfPrompt({ created_by: 'mandate:setup@example.org', mandate_id: null })).toEqual({ kind: 'mandate', email: 'setup@example.org' });
+      expect(principalOfPrompt({ created_by: 'owner', mandate_id: 'grant-1' })).toEqual(OWNER_PRINCIPAL);
+    });
+
+    it('closes the pending questions of an ended grant and of a mandate that names none, and nothing else', () => {
+      const ended = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT });
+      const live = store.insertAskUser('s-2', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: OTHER });
+      const owner = store.insertAskUser('s-3', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: OWNER_PRINCIPAL });
+      const unstamped = store.insertAskUser('s-4', 'q?');
+      const before60 = store.insertAskUser('s-5', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT });
+      db.prepare('UPDATE pending_prompts SET mandate_id = NULL WHERE id = ?').run(before60);
+      const answered = store.insertAskUser('s-6', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT });
+      expect(store.answerUser(answered, 'yes')).toBe(true);
+
+      const asked: string[] = [];
+      expect(store.expireEndedMandates((id) => { asked.push(id); return id === 'grant-2'; })).toBe(2);
+      for (const id of [ended, before60]) {
+        const row = store.getById(id)!;
+        expect(row.status).toBe('expired');
+        expect(row.closed_reason).toBe('mandate_ended');
+      }
+      for (const id of [live, owner, unstamped]) expect(store.getById(id)!.status).toBe('pending');
+      expect(store.getById(answered)!.status).toBe('answered');
+      // The owner's and the unstamped question are not asked about at all.
+      expect(asked.sort()).toEqual(['grant-1', 'grant-2']);
+      // Once the other grant ends as well, the next pass closes its question too.
+      expect(store.expireEndedMandates(() => false)).toBe(1);
+      expect(store.getById(live)!.closed_reason).toBe('mandate_ended');
+    });
+
+    it('releases a run waiting on the question at once, as an expiry', async () => {
+      const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: GRANT });
+      const wait = store.waitForSettled(id);
+      store.expireEndedMandates(() => false);
+      await expect(wait).resolves.toEqual({ status: 'expired' });
+    });
+  });
+
   describe('who asked (v57)', () => {
     it('records the asker and a run by hand on every kind of question', () => {
-      const stamp = { createdBy: 'mandate:setup@example.org', handRun: true };
+      const stamp = { principal: principalFromTag('mandate:setup@example.org'), handRun: true };
       const ids = [
         store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1', stamp),
         store.insertAskUserTabs('s-2', [{ question: 'a?' }], undefined, stamp),
@@ -62,7 +122,7 @@ describe('PromptStore', () => {
     });
 
     it('finds a trigger\'s newest question whatever became of it — also after the engine\'s own expiry', () => {
-      const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1', { createdBy: 'owner', handRun: true });
+      const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, 'trg-1', { principal: principalFromTag('owner'), handRun: true });
       db.prepare(`UPDATE pending_prompts SET expires_at = datetime('now', '-1 minute') WHERE id = ?`).run(id);
       store.expireOld();
       expect(store.getPendingForTrigger('trg-1')).toBeUndefined();
@@ -74,9 +134,9 @@ describe('PromptStore', () => {
     });
 
     it('of two questions of one trigger, finds the newer', () => {
-      const older = store.insertAskUser('s-7', 'first?', undefined, undefined, undefined, undefined, 'trg-2', { createdBy: 'owner' });
+      const older = store.insertAskUser('s-7', 'first?', undefined, undefined, undefined, undefined, 'trg-2', { principal: principalFromTag('owner') });
       db.prepare(`UPDATE pending_prompts SET created_at = datetime('now', '-1 hour'), status = 'answered' WHERE id = ?`).run(older);
-      const newer = store.insertAskUser('s-7', 'second?', undefined, undefined, undefined, undefined, 'trg-2', { createdBy: 'mandate:setup@example.org', handRun: true });
+      const newer = store.insertAskUser('s-7', 'second?', undefined, undefined, undefined, undefined, 'trg-2', { principal: principalFromTag('mandate:setup@example.org'), handRun: true });
       expect(store.getLatestForTrigger('trg-2')!.id).toBe(newer);
     });
   });

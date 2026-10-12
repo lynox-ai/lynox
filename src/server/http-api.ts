@@ -1911,10 +1911,17 @@ export class LynoxHTTPApi {
     sessionId: string,
     promptId: string | undefined,
   ): boolean {
-    if (isOwnerPrincipal(this._principalOf(req))) return false;
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return false;
     const candidates = [promptId ? ps.getById(promptId) : undefined, ps.getPending(sessionId)]
       .filter((row): row is PendingPromptRow => row !== undefined);
     if (candidates.length === 0) return false;
+    // A question names the grant it was asked under (v60). A later grant for the same address is
+    // another grant (§3.13 B4): it does not answer what the earlier one left open.
+    if (principal.kind === 'mandate' && candidates.some((row) => row.mandate_id !== null && row.mandate_id !== principal.mandateId)) {
+      errorResponse(res, 403, 'Only the owner of this instance, or the person who started it, can answer this question.');
+      return true;
+    }
     return this._refuseUnlessOwns(req, res, 'answer this question', () => candidates);
   }
 
@@ -3539,7 +3546,7 @@ export class LynoxHTTPApi {
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on
       // with the next run.
-      const askStamp = { createdBy: principalTag(this._principalOf(req)) };
+      const askStamp = { principal: this._principalOf(req) };
 
       // User's IANA timezone for the per-turn `[Now: …]` marker. The client
       // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
@@ -4201,7 +4208,7 @@ export class LynoxHTTPApi {
         // Register the run as live (replaces any prior/interrupted row for this
         // thread). A crash before the finally leaves this row 'running' → the
         // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
-        runRegistry?.start(sessionId, runId, askStamp.createdBy);
+        runRegistry?.start(sessionId, runId, principalTag(askStamp.principal));
         const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
@@ -5640,7 +5647,7 @@ export class LynoxHTTPApi {
       }));
       const keys = ONBOARDING_BASICS.map(basic => basic.key);
       try {
-        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys, { createdBy: principalTag(this._principalOf(_req)) });
+        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys, { principal: this._principalOf(_req) });
         void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
           ts: Date.now(), event: 'onboarding_started', thread: sessionId,
           model: undefined, untrusted: false, step: 0,

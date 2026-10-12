@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
@@ -2633,6 +2633,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2724,6 +2725,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2841,6 +2843,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -3421,6 +3424,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -3533,6 +3537,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -5952,6 +5957,7 @@ describe('LynoxHTTPApi', () => {
         trigger_id TEXT,
         created_by TEXT,
         hand_run INTEGER NOT NULL DEFAULT 0,
+        mandate_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -15574,7 +15580,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
 
   describe('answering a question (E2)', () => {
     it('refuses a mandate the owner\'s question, by id and through the session fallback, and leaves it open', async () => {
-      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { createdBy: 'owner' });
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
       asMandate();
       await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) }));
       await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ answer: 'A' }) }));
@@ -15590,10 +15596,10 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
 
     it('refuses a mandate the owner\'s question named by id while its own question is the newest open one', async () => {
-      const foreign = prompts.insertAskUser(OWN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { createdBy: 'owner' });
+      const foreign = prompts.insertAskUser(OWN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
       history.getDb().prepare(`UPDATE pending_prompts SET created_at = datetime('now','-1 hour') WHERE id = ?`).run(foreign);
       history.getDb().prepare(`DROP INDEX IF EXISTS idx_pending_prompts_session_unique`).run();
-      const own = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { createdBy: M });
+      const own = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag(M) });
       expect(prompts.getPending(OWN)!.id).toBe(own);
       asMandate();
       await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: foreign, answer: 'A' }) }));
@@ -15601,8 +15607,20 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
 
     it('control: a mandate answers its own run\'s question', async () => {
-      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { createdBy: M });
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag(M) });
       asMandate();
+      expect((await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) })).status).toBe(200);
+      expect(prompts.getById(id)!.status).toBe('answered');
+    });
+
+    it('refuses a later grant for the same address the question an earlier grant asked, by id and through the fallback', async () => {
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: { ...MANDATE, mandateId: 'grant-old' } });
+      api.setPrincipalResolverForTesting(() => ({ ...MANDATE, mandateId: 'grant-new' }));
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) }));
+      await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ answer: 'A' }) }));
+      expect(prompts.getById(id)!.status).toBe('pending');
+      // The grant that asked answers it.
+      api.setPrincipalResolverForTesting(() => ({ ...MANDATE, mandateId: 'grant-old' }));
       expect((await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) })).status).toBe(200);
       expect(prompts.getById(id)!.status).toBe('answered');
     });

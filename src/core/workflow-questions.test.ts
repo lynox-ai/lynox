@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunHistory } from './run-history.js';
 import { PromptStore } from './prompt-store.js';
+import { principalFromTag } from './request-principal.js';
 import { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
 import { WorkflowQuestions, type WorkflowQuestionDeps } from './workflow-questions.js';
@@ -51,7 +52,7 @@ function makeHarness(overrides?: Partial<WorkflowQuestionDeps>): Harness {
     runId: RUN_ID,
     scheduleId: 'trg-wf',
     title: 'Weekly offer',
-    createdBy: 'owner',
+    principal: principalFromTag('owner'),
     handRun: false,
     promptStore: () => prompts,
     threadStore: () => threads,
