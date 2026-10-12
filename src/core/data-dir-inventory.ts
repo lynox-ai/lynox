@@ -192,27 +192,27 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   // `data-dir-erase.ts` treats as part of the live file. Neither backed up nor migrated:
   // they describe this container's measurement window, not the user's data.
   {
-    name: 'capture-telemetry.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    name: 'capture-telemetry.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
     why: 'opt-in measurement log of this container (`capture-telemetry.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'context-cost.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    name: 'context-cost.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
     why: 'opt-in measurement log of this container (`context-cost-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'memory-write.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    name: 'memory-write.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
     why: 'opt-in measurement log of this container (`memory-write-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'memory-write-decision.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    name: 'memory-write-decision.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
     why: 'opt-in measurement log of this container (`memory-write-decision-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'retrieval-shadow.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    name: 'retrieval-shadow.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
     why: 'opt-in measurement log of this container (`retrieval-shadow-log.ts`); a measurement window does not travel with the data',
   },
   {
-    name: 'untrusted-cause.jsonl', kind: 'file', backup: false, migrate: false, erase: REMOVE,
+    name: 'untrusted-cause.jsonl', kind: 'file', secret: false, backup: false, migrate: false, erase: REMOVE,
     why: 'opt-in measurement log of this container (`untrusted-cause-log.ts`); a measurement window does not travel with the data',
   },
   {
