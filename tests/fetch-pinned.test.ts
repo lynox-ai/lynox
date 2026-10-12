@@ -4,9 +4,11 @@
  * stage and on the Ubuntu CI runners; on macOS `sh` is bash).
  *
  * Two claims, each with both directions:
- *   - Fallback: a source that fails — an error status, or a connection that goes
- *     quiet — hands over to the next one; a source that answers is used and the
- *     next one is never asked. A 504 is retried on the same source, a 404 is not.
+ *   - Fallback: a source that fails — an error status, a connection that goes
+ *     quiet, one that trickles for too long — hands over to the next one; a
+ *     source that answers is used and the next one is never asked. A 504 and a
+ *     connection reset in the middle of the transfer are retried on the same
+ *     source first.
  *   - Pin: wrong bytes fail the run on EITHER path (first source, or the
  *     fallback), and leave nothing at the destination.
  *
@@ -44,6 +46,23 @@ beforeAll(async () => {
     if (req.url === '/other') { res.end(OTHER); return; }
     if (req.url === '/504') { res.statusCode = 504; res.end('gateway timeout'); return; }
     if (req.url === '/stall') return; // accepts the request, never answers
+    if (req.url === '/reset') {
+      // The first request breaks off mid-body; the retry gets the whole file.
+      if (hits.filter((h) => h === '/reset').length === 1) {
+        res.writeHead(200, { 'content-length': String(GOOD.length) });
+        res.write(GOOD.slice(0, 4));
+        setTimeout(() => res.destroy(), 50);
+        return;
+      }
+      res.end(GOOD); return;
+    }
+    if (req.url === '/trickle') {
+      // Fast enough to pass the 1 KiB/s floor, never finished: only --max-time ends it.
+      res.writeHead(200, { 'content-length': String(10_000_000) });
+      const t = setInterval(() => { if (!res.write('x'.repeat(4096))) return; }, 500);
+      res.on('close', () => clearInterval(t));
+      return;
+    }
     res.statusCode = 404; res.end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -67,7 +86,7 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 /** The test env: no retries, a short stall cut-off, and no proxy between curl and the local server. */
 function testEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, FETCH_RETRIES: '0', FETCH_RETRY_DELAY: '0', FETCH_SPEED_TIME: '2', ...extra };
+  const env: NodeJS.ProcessEnv = { ...process.env, FETCH_RETRIES: '0', FETCH_RETRY_DELAY: '0', FETCH_SPEED_TIME: '2', FETCH_MAX_TIME: '30', ...extra };
   for (const k of ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']) delete env[k];
   return env;
 }
@@ -112,10 +131,33 @@ describe('fetch-pinned.sh — fallback', () => {
     expect(hits).toEqual(['/stall', '/good']);
   }, 15_000);
 
-  it('retries a 504 on the same source, but hands a 404 over at once', async () => {
-    const r = await runWith({ FETCH_RETRIES: '2', FETCH_RETRY_DELAY: '1' }, GOOD_SHA, '/504', '/missing', '/good');
+  it('retries a 504 on the same source before handing over', async () => {
+    const r = await runWith({ FETCH_RETRIES: '2', FETCH_RETRY_DELAY: '1' }, GOOD_SHA, '/504', '/good');
     expect(r.code).toBe(0);
-    expect(hits).toEqual(['/504', '/504', '/504', '/missing', '/good']);
+    expect(hits).toEqual(['/504', '/504', '/504', '/good']);
+  }, 15_000);
+
+  it('retries a connection reset in the middle of the transfer on the same source', async () => {
+    const r = await runWith({ FETCH_RETRIES: '2', FETCH_RETRY_DELAY: '1' }, GOOD_SHA, '/reset', '/other');
+    expect(r.code).toBe(0);
+    expect(readFileSync(dest, 'utf8')).toBe(GOOD);
+    expect(hits).toEqual(['/reset', '/reset']);
+  }, 15_000);
+
+  it('starts no new retry once the retry window is spent', async () => {
+    // 10 retries 1 s apart would ask 11 times; a 2 s window allows a few.
+    const r = await runWith({ FETCH_RETRIES: '10', FETCH_RETRY_DELAY: '1', FETCH_RETRY_MAX_TIME: '2' }, GOOD_SHA, '/504', '/good');
+    expect(r.code).toBe(0);
+    const asked = hits.filter((h) => h === '/504').length;
+    expect(asked).toBeGreaterThanOrEqual(2);
+    expect(asked).toBeLessThanOrEqual(5);
+  }, 20_000);
+
+  it('cuts off a source that keeps trickling, and moves on', async () => {
+    const r = await runWith({ FETCH_MAX_TIME: '3' }, GOOD_SHA, '/trickle', '/good');
+    expect(r.code).toBe(0);
+    expect(readFileSync(dest, 'utf8')).toBe(GOOD);
+    expect(hits).toEqual(['/trickle', '/good']);
   }, 15_000);
 
   it('fails when every source fails, and leaves nothing behind', async () => {

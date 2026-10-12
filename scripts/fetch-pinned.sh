@@ -10,18 +10,23 @@
 # bytes fail the build no matter which source served them, and nothing is left
 # at <dest>.
 #
-# Per source, curl retries only what can pass on its own — 408, 429, 5xx,
-# timeouts, a refused connection — so a 404 hands over at once. A source that
-# connects and then goes quiet is cut off after FETCH_SPEED_TIME seconds below
-# 1 KiB/s, instead of holding the build until the job times out.
+# Per source, curl retries every error (`--retry-all-errors`): a connection
+# reset in the middle of a 148 MB transfer is the likeliest transient failure,
+# and plain `--retry` does not retry it. The price is that a 404 is retried too
+# before the next source is asked. A source that goes quiet, or trickles below
+# 1 KiB/s for FETCH_SPEED_TIME seconds, is cut off; no attempt runs longer than
+# FETCH_MAX_TIME seconds, and no new attempt starts after FETCH_RETRY_MAX_TIME.
+# With the defaults a source that only ever fails fast (5xx, 404) costs about a
+# minute (6 retries × 10 s); the worst case — every attempt running into a
+# limit — is bounded by roughly 300 s + 300 s per source.
 #
 # Why more than one source: a single source gave up the whole image build when
 # it answered 504 for longer than its retry window. The sources must serve the
 # same bytes — the pin is what says so, not the URL.
 #
-# FETCH_RETRIES, FETCH_RETRY_DELAY, FETCH_CONNECT_TIMEOUT and FETCH_SPEED_TIME
-# (seconds) default to what the image build uses; the tests lower them. `-q`
-# keeps a ~/.curlrc out of it.
+# FETCH_RETRIES, FETCH_RETRY_DELAY, FETCH_RETRY_MAX_TIME, FETCH_CONNECT_TIMEOUT,
+# FETCH_SPEED_TIME and FETCH_MAX_TIME (seconds) default to what the image build
+# uses; the tests lower them. `-q` keeps a ~/.curlrc out of it.
 #
 # POSIX sh on purpose: it runs in the build stage's /bin/sh (dash).
 
@@ -40,13 +45,16 @@ retries=${FETCH_RETRIES:-6}
 delay=${FETCH_RETRY_DELAY:-10}
 connect=${FETCH_CONNECT_TIMEOUT:-20}
 stall=${FETCH_SPEED_TIME:-60}
+maxtime=${FETCH_MAX_TIME:-300}
+retrymax=${FETCH_RETRY_MAX_TIME:-300}
 tmp="$dest.partial"
 
 got=
 for url in "$@"; do
-  if curl -q -fL --retry "$retries" --retry-delay "$delay" --retry-connrefused \
+  if curl -q -fL --retry "$retries" --retry-delay "$delay" --retry-all-errors \
+      --retry-max-time "$retrymax" \
       --connect-timeout "$connect" --speed-limit 1024 --speed-time "$stall" \
-      -o "$tmp" "$url"; then
+      --max-time "$maxtime" -o "$tmp" "$url"; then
     got=$url
     break
   fi
