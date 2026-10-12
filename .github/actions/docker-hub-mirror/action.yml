@@ -3,16 +3,21 @@ description: >
   Point the runner's Docker daemon at mirror.gcr.io for docker.io pulls, then
   restart it and check that it took the setting.
 
-# For the jobs that pull or build through the daemon itself: `docker run`,
-# `docker compose up --build`, and `docker/build-push-action` without a
-# setup-buildx step. Builders made by setup-buildx run their own BuildKit and
-# read .github/buildkitd.toml instead — the reason for both is written there.
+# For every pull the runner's own daemon makes: `docker run`, `docker compose
+# up --build`, `docker/build-push-action` without a setup-buildx step, and the
+# `moby/buildkit` image that setup-buildx pulls when it boots a builder. Pulls
+# made INSIDE that builder go through .github/buildkitd.toml instead — the
+# reason for both is written there.
 #
 # The daemon tries the mirror first and falls back to Docker Hub on its own, so
 # an outage at the mirror costs a retry, not the job.
 #
+# Not every image this covers is pinned by digest (the CI test containers use
+# tags), so for those the mirror's copy of the tag is what runs.
+#
 # Merged, not overwritten: hosted runners ship a daemon.json of their own, and
-# replacing it would drop whatever the image put there.
+# replacing it would drop whatever the image put there. A file that is not valid
+# JSON stops the step before anything is replaced.
 
 runs:
   using: composite
@@ -22,8 +27,10 @@ runs:
       run: |
         set -euo pipefail
         cfg=/etc/docker/daemon.json
-        current='{}'
-        if [ -s "$cfg" ]; then current=$(sudo cat "$cfg"); fi
+        current=$(sudo cat "$cfg" 2>/dev/null || true)
+        # Absent, empty or whitespace-only: start from an empty object. jq on
+        # empty input prints nothing, which would empty the file.
+        if [ -z "${current//[[:space:]]/}" ]; then current='{}'; fi
         printf '%s' "$current" \
           | jq '.["registry-mirrors"] = ((.["registry-mirrors"] // []) + ["https://mirror.gcr.io"] | unique)' \
           | sudo tee "$cfg.new" > /dev/null

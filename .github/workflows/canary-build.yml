@@ -42,6 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The daemon pulls the BuildKit image itself when setup-buildx boots the
+      # builder, so it needs the mirror too.
+      - uses: ./.github/actions/docker-hub-mirror
+
       # Base image via mirror.gcr.io, Docker Hub as fallback — see the file.
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
