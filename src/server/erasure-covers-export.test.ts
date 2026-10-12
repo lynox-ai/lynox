@@ -322,7 +322,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     const afterJson = JSON.parse(after) as Record<string, unknown>;
     expect(Object.keys(afterJson).sort()).toEqual([
       'config', 'contacts', 'datastore', 'deals', 'durable_knowledge', 'exported_at',
-      'knowledge_graph', 'memory', 'secrets', 'threads', 'threads_may_be_incomplete', 'version',
+      'knowledge_graph', 'memory', 'memory_scopes', 'memory_scopes_may_be_incomplete', 'secrets',
+      'threads', 'threads_may_be_incomplete', 'version',
     ]);
 
     const survivors = Object.entries(MARK).filter(([, v]) => after.includes(v)).map(([k]) => k);

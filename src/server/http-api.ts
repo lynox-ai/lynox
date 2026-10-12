@@ -10607,10 +10607,13 @@ export class LynoxHTTPApi {
         // for compatibility, but `memory_store` and the extraction also write into user and
         // context scopes, and an Art. 15 answer that shows one directory of several looks
         // complete while it is not.
-        exportData['memory_scopes'] = await memory.exportAllScopes();
+        const all = await memory.exportAllScopes();
+        exportData['memory_scopes'] = all.scopes;
+        exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       } else {
         exportData['memory'] = {};
         exportData['memory_scopes'] = {};
+        exportData['memory_scopes_may_be_incomplete'] = false;
       }
 
       // Knowledge graph (entities + relations)

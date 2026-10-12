@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,8 +8,11 @@ import { LynoxHTTPApi } from './http-api.js';
 import { reloadConfig } from '../core/config.js';
 import { memoryStoreTool } from '../tools/builtin/memory.js';
 import { createToolContext } from '../core/tool-context.js';
-import type { Memory } from '../core/memory.js';
+import { Memory } from '../core/memory.js';
+import { saveManifest } from '../core/project.js';
 import type { IAgent } from '../types/index.js';
+
+type Scopes = Record<string, Record<string, string>>;
 
 /**
  * Flat-file memory lives in one directory per scope (`global`, `<contextId>`, `user-<id>`),
@@ -22,7 +25,8 @@ describe('Art. 15 export and Art. 17 erasure see every flat-file memory scope (r
   // scan looks for, and this repo is public.
   const SECRET = `t-${randomBytes(12).toString('hex')}`;
   const USER_ID = `zz${randomBytes(3).toString('hex')}`;
-  const FACT = `Kornfeld Sattlerei prefers invoices in CHF ${randomBytes(3).toString('hex')}`;
+  const USER_FACT = `ZZMARKER-user-scope-${randomBytes(3).toString('hex')}`;
+  const DEFAULT_FACT = `ZZMARKER-default-scope-${randomBytes(3).toString('hex')}`;
   let api: LynoxHTTPApi;
   let baseUrl: string;
   let dir: string;
@@ -75,27 +79,128 @@ describe('Art. 15 export and Art. 17 erasure see every flat-file memory scope (r
     }
   });
 
-  it('exports a fact memory_store wrote into a user scope, and the erasure removes it', async () => {
+  it('exports a fact memory_store wrote into a user scope next to the default one, and the erasure removes both', async () => {
     const agent: IAgent = {
       name: 'test', model: 'test-model', memory: memoryOf(), tools: [], onStream: null,
       toolContext: createToolContext({}),
     };
-    const stored = await memoryStoreTool.handler({ namespace: 'knowledge', content: FACT, scope: `user:${USER_ID}` }, agent);
+    const stored = await memoryStoreTool.handler({ namespace: 'knowledge', content: USER_FACT, scope: `user:${USER_ID}` }, agent);
     expect(stored).toMatch(/^Stored in knowledge \(scope: user:/);
+    await memoryOf().save('knowledge', DEFAULT_FACT);
 
     const before = await call('GET', '/api/export');
     expect(before.status).toBe(200);
-    // Positive control: the current scope is not where the fact went.
-    expect(JSON.stringify(before.body['memory'])).not.toContain(FACT);
-    const scopes = before.body['memory_scopes'] as Record<string, Record<string, string>>;
-    expect(scopes[`user-${USER_ID}`]?.['knowledge']).toContain(FACT);
+    expect(before.body['memory_scopes_may_be_incomplete']).toBe(false);
+    // The default scope is where the old `memory` key looks, and it holds only its own fact:
+    // the user-scope fact can only reach the export through `memory_scopes`.
+    const current = JSON.stringify(before.body['memory']);
+    expect(current).toContain(DEFAULT_FACT);
+    expect(current).not.toContain(USER_FACT);
+    const scopes = before.body['memory_scopes'] as Scopes;
+    expect(scopes[`user-${USER_ID}`]?.['knowledge.txt']).toContain(USER_FACT);
+    // And `memory_scopes` carries the default scope too, not only the ones `memory` misses.
+    const holding = Object.entries(scopes).filter(([, files]) => files['knowledge.txt']?.includes(DEFAULT_FACT)).map(([k]) => k);
+    expect(holding).toHaveLength(1);
+    expect(holding[0]).not.toBe(`user-${USER_ID}`);
 
     const erased = await call('DELETE', '/api/data', { confirm: 'DELETE_ALL_DATA' });
     expect(erased.body['failed'] ?? []).toEqual([]);
     expect(erased.status).toBe(200);
 
     const after = await call('GET', '/api/export');
+    expect(after.status).toBe(200);
     expect(after.body['memory_scopes']).toEqual({});
+    expect(after.body['memory_scopes_may_be_incomplete']).toBe(false);
     expect(await memoryOf().loadScoped('knowledge', { type: 'user', id: USER_ID })).toBeNull();
   }, 60_000);
+});
+
+/**
+ * The export reads what `eraseAll` removes — every regular file under the store's directory —
+ * and says so when it could not read something, instead of returning a shorter answer.
+ */
+describe('Memory.exportAllScopes', () => {
+  let dir: string;
+  let mem: Memory;
+  const base = (): string => join(dir, 'memory');
+
+  const fresh = (): void => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-export-all-scopes-'));
+    mem = new Memory(dir);
+    mkdirSync(join(base(), 'global'), { recursive: true });
+    writeFileSync(join(base(), 'global', 'knowledge.txt'), 'ZZMARKER-global');
+  };
+  afterEach(() => {
+    // Restore permissions first, or the cleanup itself cannot descend.
+    for (const p of [join(base(), 'global'), join(base(), 'global', 'knowledge.txt')]) {
+      if (existsSync(p)) chmodSync(p, 0o700);
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('is empty and complete when the store directory does not exist', async () => {
+    fresh();
+    rmSync(base(), { recursive: true, force: true });
+    expect(await mem.exportAllScopes()).toEqual({ scopes: {}, mayBeIncomplete: false });
+  });
+
+  it('carries the manifest the engine writes and a loose file, both of which the erasure deletes', async () => {
+    fresh();
+    saveManifest(dir, 'ctx-zz', new Map([['notes/plan.md', 1700000000000]]));
+    writeFileSync(join(base(), 'loose.txt'), 'ZZMARKER-loose');
+    const { scopes, mayBeIncomplete } = await mem.exportAllScopes();
+    expect(mayBeIncomplete).toBe(false);
+    expect(scopes['ctx-zz']?.['manifest.json']).toContain('notes/plan.md');
+    expect(scopes['.']?.['loose.txt']).toBe('ZZMARKER-loose');
+    expect(scopes['global']?.['knowledge.txt']).toBe('ZZMARKER-global');
+
+    mem.eraseAll();
+    expect(await mem.exportAllScopes()).toEqual({ scopes: {}, mayBeIncomplete: false });
+  });
+
+  it('does not follow a symlinked scope or file out of the store', async () => {
+    fresh();
+    const outside = mkdtempSync(join(tmpdir(), 'lynox-export-outside-'));
+    try {
+      writeFileSync(join(outside, 'knowledge.txt'), 'ZZMARKER-outside');
+      symlinkSync(outside, join(base(), 'linked-scope'));
+      symlinkSync(join(outside, 'knowledge.txt'), join(base(), 'global', 'linked.txt'));
+      const { scopes, mayBeIncomplete } = await mem.exportAllScopes();
+      expect(JSON.stringify(scopes)).not.toContain('ZZMARKER-outside');
+      // Shown to be reachable, so the absence above is the filter and not a broken link.
+      expect(scopes['global']?.['knowledge.txt']).toBe('ZZMARKER-global');
+      expect(mayBeIncomplete).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a nested directory instead of claiming the scope is complete', async () => {
+    fresh();
+    mkdirSync(join(base(), 'global', 'nested'));
+    const { scopes, mayBeIncomplete } = await mem.exportAllScopes();
+    expect(scopes['global']?.['knowledge.txt']).toBe('ZZMARKER-global');
+    expect(mayBeIncomplete).toBe(true);
+  });
+
+  // Permission bits do not stop root, so the unreadable cases have no meaning there.
+  const asRoot = process.getuid?.() === 0;
+
+  it.skipIf(asRoot)('flags an unreadable file instead of leaving it out silently', async () => {
+    fresh();
+    writeFileSync(join(base(), 'global', 'status.txt'), 'ZZMARKER-status');
+    chmodSync(join(base(), 'global', 'knowledge.txt'), 0o000);
+    const { scopes, mayBeIncomplete } = await mem.exportAllScopes();
+    expect(scopes['global']?.['status.txt']).toBe('ZZMARKER-status');
+    expect(scopes['global']?.['knowledge.txt']).toBeUndefined();
+    expect(mayBeIncomplete).toBe(true);
+  });
+
+  it.skipIf(asRoot)('flags an unlistable scope directory', async () => {
+    fresh();
+    chmodSync(join(base(), 'global'), 0o000);
+    const { scopes, mayBeIncomplete } = await mem.exportAllScopes();
+    expect(scopes['global']).toBeUndefined();
+    expect(mayBeIncomplete).toBe(true);
+  });
 });
