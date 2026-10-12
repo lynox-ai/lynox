@@ -1219,7 +1219,7 @@ describe('LynoxHTTPApi', () => {
         expect(((await res.json()) as { code?: string }).code).toBe('mandate_revoked');
       });
 
-      it('lets a later request in when its write fails but the end of an earlier one stands', async () => {
+      it('passes a later request on to the route (its owner check answers) when its write fails but an earlier end stands', async () => {
         const token = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
         expect((await approve(token)).status).toBe(403); // records the end
         engineRef()['getMandateEnds'] = () => ({ record: (): void => { throw new Error('disk full'); }, isLive: (id: string) => ends.isLive(id) });
