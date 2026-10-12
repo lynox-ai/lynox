@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { onBoxBlock, pv } from './prompt-value.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { PromptStore } from './prompt-store.js';
+import { PromptStore, type PromptStamp } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
 import { TaskManager as RealTaskManager } from './task-manager.js';
@@ -3587,7 +3588,10 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   // it the in-memory hand-run mark; only the question row still says who asked and whether a
   // run by hand did. Each case below is the state a restart leaves — a proposal the owner
   // stamped while its test question was open — read by a loop that never ran it.
-  function parkedAfterRestart(stamp: { createdBy: string; handRun?: boolean }, stamped = true, maxRetries?: number): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
+  // The mandate's grant, as a question written since v60 carries it; `live` says which grants
+  // the engine's store of mandate ends still reads as live.
+  const EVA_GRANT = { ...EVA, mandateId: 'grant-eva' };
+  function parkedAfterRestart(stamp: PromptStamp, stamped = true, maxRetries?: number, live: ReadonlySet<string> = new Set(['grant-eva'])): { loop: WorkerLoop; store: PromptStore; t: TriggerRecord; promptId: string; engine: Engine } {
     const store = new PromptStore(history.getDb());
     const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, ...(maxRetries !== undefined ? { maxRetries } : {}) }) as TriggerRecord;
     const promptId = store.insertAskUser(`ask-${t.id}`, 'Which list?', ['A', 'B'], undefined, undefined, undefined, t.id, stamp);
@@ -3596,7 +3600,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const session = makeSession('Resumed.');
     const engine = Object.assign(
       makeEngine({ taskManager: tm as unknown as TaskManager, session, promptStore: store }),
-      { getRunHistory: () => history },
+      { getRunHistory: () => history, getMandateEnds: () => ({ isLive: (id: string) => live.has(id) }) },
     ) as unknown as Engine;
     return { loop: new WorkerLoop(engine, makeNotificationRouter(false), 60_000), store, t, promptId, engine };
   }
@@ -3620,7 +3624,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-b: after a restart, the engine expired the test question first — the stamped one-shot ends open and keeps its time', async () => {
-    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true });
     expireQuestion(h.store, h.promptId, h.t.id);
     await h.loop.tick();
     const after = tm.getTrigger(h.t.id)!;
@@ -3631,7 +3635,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-b twin: an ordinary question expired the same way ends the wait failed, as before', async () => {
-    const h = parkedAfterRestart({ createdBy: 'owner' });
+    const h = parkedAfterRestart({ principal: OWNER_PRINCIPAL });
     expireQuestion(h.store, h.promptId, h.t.id);
     await h.loop.tick();
     const after = tm.getTrigger(h.t.id)!;
@@ -3643,7 +3647,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   it('255-b2: after a restart, an expired question a mandate\'s own run asked is not retried as the owner\'s schedule', async () => {
     // The mandate started the stamped schedule by hand (no test, so no hand_run), it parked,
     // the process restarted. No run holds the starter any more; the question does.
-    const h = parkedAfterRestart({ createdBy: M }, true, 2);
+    const h = parkedAfterRestart({ principal: EVA_GRANT }, true, 2);
     expireQuestion(h.store, h.promptId, h.t.id);
     await h.loop.tick();
     const after = tm.getTrigger(h.t.id)!;
@@ -3654,7 +3658,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-b2 twin: the owner\'s question expired the same way keeps its retry', async () => {
-    const h = parkedAfterRestart({ createdBy: 'owner' }, true, 2);
+    const h = parkedAfterRestart({ principal: OWNER_PRINCIPAL }, true, 2);
     expireQuestion(h.store, h.promptId, h.t.id);
     await h.loop.tick();
     const after = tm.getTrigger(h.t.id)!;
@@ -3664,7 +3668,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-c: after a restart, the test question is answered — the stamped proposal keeps its own time', async () => {
-    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true });
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     await h.loop.tick();
     const after = tm.getTrigger(h.t.id)!;
@@ -3674,7 +3678,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-c twin: an ordinary answered question is due again at once', async () => {
-    const h = parkedAfterRestart({ createdBy: 'owner' });
+    const h = parkedAfterRestart({ principal: OWNER_PRINCIPAL });
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const before = Date.now();
     // Stop the dispatch the re-arm makes possible from reaching the row in this tick.
@@ -3691,7 +3695,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-d: the run that picks up a mandate\'s answer after a restart runs under the mandate, never as a hand run', async () => {
-    const h = parkedAfterRestart({ createdBy: M, handRun: true });
+    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true });
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     let seen: string | undefined;
     const session = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>)() as Session;
@@ -3699,7 +3703,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
     const opts = (h.engine.createSession as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined;
-    expect(opts?.['principal']).toEqual(EVA);
+    expect(opts?.['principal']).toEqual(EVA_GRANT);
     // The resumed run is the mandate's: it may stop it, and it is not retried. The principal
     // read from a question mints no hand-run marker; it narrows the tools and nothing else.
     expect(seen).toBe(M);
@@ -3707,7 +3711,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
   });
 
   it('255-d twin: an owner\'s answered question resumes as the owner\'s run', async () => {
-    const h = parkedAfterRestart({ createdBy: 'owner' });
+    const h = parkedAfterRestart({ principal: OWNER_PRINCIPAL });
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
     await exec.executeTask(tm.getTrigger(h.t.id)!, null);
@@ -3716,7 +3720,36 @@ describe('a test run by hand while the stamp changes underneath it', () => {
     h.loop.stop();
   });
 
-  it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
+    it('255-e: a mandate\'s answer picked up after its grant ended makes no run, and the answer is let go', async () => {
+    // Answered while the grant lived; revoked (or run out) before the pickup.
+    const h = parkedAfterRestart({ principal: EVA_GRANT, handRun: true }, true, 2, new Set());
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
+    const calls = create.mock.calls.length;
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    expect(create.mock.calls.length).toBe(calls);
+    expect(h.store.getAnsweredForTrigger(h.t.id)).toBeUndefined();
+    const after = tm.getTrigger(h.t.id)!;
+    expect(after.last_run_status).toBe('failed');
+    expect(after.last_run_result).toContain('access ended');
+    expect(after.retry_count ?? 0).toBe(0);
+    h.loop.stop();
+  });
+
+  it('255-e twin: a mandate\'s answer from before v60 names no grant and is let go the same way', async () => {
+    const h = parkedAfterRestart({ principal: EVA, handRun: true });
+    expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
+    const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
+    const calls = create.mock.calls.length;
+    const exec = h.loop as unknown as { executeTask: (x: TriggerRecord, c: number | null) => Promise<void> };
+    await exec.executeTask(tm.getTrigger(h.t.id)!, null);
+    expect(create.mock.calls.length).toBe(calls);
+    expect(tm.getTrigger(h.t.id)!.last_run_status).toBe('failed');
+    h.loop.stop();
+  });
+
+it('E-3: a failed test of a proposal with retries left still tells the owner, since it is not retried', async () => {
     const t = tm.create({ title: 'Check once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z', createdBy: M, maxRetries: 2 }) as TriggerRecord;
     const { session, started, release } = heldSession(new Error('provider down'));
     const router = makeNotificationRouter(true);

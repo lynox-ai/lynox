@@ -16,13 +16,14 @@ import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
+import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export type PromptType = 'ask_user' | 'ask_secret' | 'connect_mail';
 export type PromptStatus = 'pending' | 'answered' | 'expired';
 /** Why a question was closed without an answer, where that was not its own expiry. */
-export type PromptClosedReason = 'process_restarted';
+export type PromptClosedReason = 'process_restarted' | 'mandate_ended';
 
 export interface PendingPromptRow {
   id: string;
@@ -64,6 +65,9 @@ export interface PendingPromptRow {
   created_by: string | null;
   /** 1 when a run started by hand asked (v57). */
   hand_run: number;
+  /** The grant a mandate's question was asked under (v60). NULL for the owner's questions and
+   *  for a mandate's question written before v60, which `expireEndedMandates` reads as ended. */
+  mandate_id: string | null;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -218,14 +222,27 @@ export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
 }
 
 /**
- * Who asked a question (v57, PRD customer-granted-operator-access §3.13 E2): the
- * `principalTag` of the run that raised it. A mandate answers only questions its own runs
- * asked; a question without a stamp is the owner's. `handRun` marks a question asked by a run
- * started by hand, so the worker can tell it apart after a restart (the run that knew is gone).
+ * Who asked a question (v57, PRD customer-granted-operator-access §3.13 E2): the principal of
+ * the run that raised it. The row keeps its `principalTag` (`created_by`) for the binding — a
+ * mandate answers only questions its own runs asked — and, for a mandate, the grant it asked
+ * under (`mandate_id`, v60) for the end: the question closes with that grant (§3.13 B4). Both
+ * come from the one principal, so no writer can stamp the one without the other. A question
+ * without a stamp is the owner's. `handRun` marks a question asked by a run started by hand,
+ * so the worker can tell it apart after a restart (the run that knew is gone).
  */
 export interface PromptStamp {
-  readonly createdBy: string;
+  readonly principal: RequestPrincipal;
   readonly handRun?: boolean | undefined;
+}
+
+/**
+ * Who asked this question, as a principal: the owner, or the mandate with the grant it asked
+ * under. For the worker, which picks up a question after the run that asked it is gone.
+ */
+export function principalOfPrompt(row: Pick<PendingPromptRow, 'created_by' | 'mandate_id'>): RequestPrincipal {
+  if (!isMandateTag(row.created_by)) return OWNER_PRINCIPAL;
+  const p = principalFromTag(row.created_by);
+  return p.kind === 'mandate' && row.mandate_id !== null ? { ...p, mandateId: row.mandate_id } : p;
 }
 
 export class PromptConflictError extends Error {
@@ -431,8 +448,9 @@ export class PromptStore {
         args.payloadJson,
         args.origin ? JSON.stringify(args.origin) : null,
         args.triggerId ?? null,
-        args.stamp?.createdBy ?? null,
+        args.stamp ? principalTag(args.stamp.principal) : null,
         args.stamp?.handRun === true ? 1 : 0,
+        args.stamp?.principal.kind === 'mandate' ? args.stamp.principal.mandateId ?? null : null,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -643,6 +661,35 @@ export class PromptStore {
   }
 
   /**
+   * Close every pending question a mandate asked whose grant has ended (PRD
+   * customer-granted-operator-access §3.13 B4): expired, revoked, or not known to `isLive`.
+   * A mandate's question without a grant (written before v60) counts as ended. Each row
+   * closes with `closed_reason = 'mandate_ended'`, for the owner as well: the question was the
+   * mandate's, and the run waiting on it is released (`waitForSettled` reads `expired`).
+   *
+   * `isLive` is passed in because the ends live in engine.db and this table in history.db,
+   * with no join between them. Called from the engine's prompt sweep and on a revoke.
+   */
+  expireEndedMandates(isLive: (mandateId: string) => boolean): number {
+    const rows = this.db
+      .prepare(`SELECT id, created_by, mandate_id FROM pending_prompts WHERE status = 'pending'`)
+      .all() as { id: string; created_by: string | null; mandate_id: string | null }[];
+    const close = this.db.prepare(
+      `UPDATE pending_prompts SET status = 'expired', closed_reason = 'mandate_ended' WHERE id = ? AND status = 'pending'`,
+    );
+    let closed = 0;
+    for (const row of rows) {
+      if (!isMandateTag(row.created_by)) continue;
+      if (row.mandate_id !== null && isLive(row.mandate_id)) continue;
+      if (close.run(row.id).changes > 0) {
+        closed += 1;
+        this._emitSettled(row.id);
+      }
+    }
+    return closed;
+  }
+
+  /**
    * Settle every pending prompt a given trigger raised (§0 E6). Best-effort by
    * design: the caller is the expiry sweep, whose job is to END a wait, and a
    * prompt row that cannot be settled must not stop it — the alternative is a
@@ -849,8 +896,8 @@ export class PromptStore {
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
          secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select,
-         payload_json, origin_json, trigger_id, created_by, hand_run)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         payload_json, origin_json, trigger_id, created_by, hand_run, mandate_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

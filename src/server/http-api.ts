@@ -3534,7 +3534,7 @@ export class LynoxHTTPApi {
       // Every question this run asks carries who runs it (§3.13 E2): taken from the request
       // that started the run, never read later from the session, whose principal moves on
       // with the next run.
-      const askStamp = { createdBy: principalTag(this._principalOf(req)) };
+      const askStamp = { principal: this._principalOf(req) };
 
       // User's IANA timezone for the per-turn `[Now: …]` marker. The client
       // sends `Intl.DateTimeFormat().resolvedOptions().timeZone` per /run.
@@ -4196,7 +4196,7 @@ export class LynoxHTTPApi {
         // Register the run as live (replaces any prior/interrupted row for this
         // thread). A crash before the finally leaves this row 'running' → the
         // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
-        runRegistry?.start(sessionId, runId, askStamp.createdBy);
+        runRegistry?.start(sessionId, runId, principalTag(askStamp.principal));
         const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
@@ -5628,7 +5628,7 @@ export class LynoxHTTPApi {
       }));
       const keys = ONBOARDING_BASICS.map(basic => basic.key);
       try {
-        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys, { createdBy: principalTag(this._principalOf(_req)) });
+        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys, { principal: this._principalOf(_req) });
         void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
           ts: Date.now(), event: 'onboarding_started', thread: sessionId,
           model: undefined, untrusted: false, step: 0,

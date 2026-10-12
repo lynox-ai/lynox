@@ -3,6 +3,7 @@ import type { PromptMeta, PromptText, PromptUserFn } from '../types/index.js';
 import type { AbortScope } from '../types/config.js';
 import type { PromptStore } from './prompt-store.js';
 import { promptOriginOf } from './prompt-store.js';
+import { principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ThreadStore } from './thread-store.js';
 import type { NotificationMessage, NotifyReport, DeliverySummary } from './notification-router.js';
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
@@ -26,8 +27,8 @@ export interface WorkflowQuestionDeps {
   scheduleId: string;
   /** The schedule's title: the thread's title and the notification's. */
   title: string;
-  /** Who started the run (`principalTag`), stamped on the prompt row and the thread. */
-  createdBy: string;
+  /** Who started the run, stamped on the prompt row (tag and, for a mandate, its grant) and the thread (tag). */
+  principal: RequestPrincipal;
   handRun: boolean;
   /** Read when a question is asked, not when the run starts: both stores can come and go
    *  with the engine's init. */
@@ -123,7 +124,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     let promptId: string;
     try {
       promptId = store.insertAskUser(deps.runId, question, options, undefined, storedSegments, promptOriginOf(meta), undefined, {
-        createdBy: deps.createdBy,
+        principal: deps.principal,
         handRun: deps.handRun,
       });
     } catch (err: unknown) {
@@ -214,7 +215,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     const id = this.#deps.runId;
     try {
       if (!this.#threadReady) {
-        threads.createThread(id, { title: this.#deps.title, created_by: this.#deps.createdBy });
+        threads.createThread(id, { title: this.#deps.title, created_by: principalTag(this.#deps.principal) });
         this.#threadReady = true;
       }
       // A resumable conversation starts with a user turn and alternates, as an escalation

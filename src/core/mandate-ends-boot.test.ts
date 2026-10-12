@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 /**
  * The engine hands out a store for mandate ends, on its own engine.db.
@@ -52,5 +53,48 @@ describe('Engine boot — mandate ends', () => {
     // from it, and a tool context without it would call every mandate ended.
     expect(engine.getToolContext().mandateEnds).toBe(ends);
     expect(engine.getToolContext().mandateEnds?.isLive('M-1', 1_000)).toBe(true);
+  });
+
+  async function boot(dir: string): Promise<Engine> {
+    if (!saved.has('LYNOX_DATA_DIR')) saved.set('LYNOX_DATA_DIR', process.env['LYNOX_DATA_DIR']);
+    process.env['LYNOX_DATA_DIR'] = dir;
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try { await engine.init(); } finally { stderr.mockRestore(); }
+    return engine;
+  }
+
+  it('closes a mandate\'s pending question the moment the mandate is revoked', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mandaterevokeboot-'));
+    dirs.push(dir);
+    const engine = await boot(dir);
+    const ends = engine.getMandateEnds()!;
+    const store = engine.getPromptStore()!;
+    const farEnd = Math.floor(Date.now() / 1000) + 3_600;
+    ends.record({ kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-1', mandateExp: farEnd }, 100);
+    const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, undefined,
+      { principal: { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-1' } });
+    const owner = store.insertAskUser('s-2', 'q?', undefined, undefined, undefined, undefined, undefined, { principal: OWNER_PRINCIPAL });
+    expect(store.getById(id)!.status).toBe('pending');
+    ends.revoke('M-1');
+    expect(store.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
+    expect(store.getById(owner)!.status).toBe('pending');
+  });
+
+  it('closes, when it boots, a mandate\'s question whose grant ended while it was down', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mandateendboot-'));
+    dirs.push(dir);
+    const first = await boot(dir);
+    // A parked question survives the restart (`expireUnparked` spares it); its grant does not.
+    const tm = first.getTaskManager()!;
+    const t = tm.create({ title: 'Ask once', taskType: 'scheduled', nextRunAt: '2030-01-01T00:00:00.000Z' });
+    const id = first.getPromptStore()!.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, t.id,
+      { principal: { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-gone' } });
+    await first.shutdown();
+    engines.length = 0;
+    const second = await boot(dir);
+    expect(second.getPromptStore()!.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
   });
 });

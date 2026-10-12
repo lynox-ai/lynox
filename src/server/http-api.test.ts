@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
@@ -15476,7 +15476,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
 
   describe('answering a question (E2)', () => {
     it('refuses a mandate the owner\'s question, by id and through the session fallback, and leaves it open', async () => {
-      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { createdBy: 'owner' });
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
       asMandate();
       await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) }));
       await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ answer: 'A' }) }));
@@ -15492,10 +15492,10 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
 
     it('refuses a mandate the owner\'s question named by id while its own question is the newest open one', async () => {
-      const foreign = prompts.insertAskUser(OWN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { createdBy: 'owner' });
+      const foreign = prompts.insertAskUser(OWN, 'Owner asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag('owner') });
       history.getDb().prepare(`UPDATE pending_prompts SET created_at = datetime('now','-1 hour') WHERE id = ?`).run(foreign);
       history.getDb().prepare(`DROP INDEX IF EXISTS idx_pending_prompts_session_unique`).run();
-      const own = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { createdBy: M });
+      const own = prompts.insertAskUser(OWN, 'Mandate asks', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag(M) });
       expect(prompts.getPending(OWN)!.id).toBe(own);
       asMandate();
       await refusal(await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: foreign, answer: 'A' }) }));
@@ -15503,7 +15503,7 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
 
     it('control: a mandate answers its own run\'s question', async () => {
-      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { createdBy: M });
+      const id = prompts.insertAskUser(OWN, 'Which list?', undefined, undefined, undefined, undefined, undefined, { principal: principalFromTag(M) });
       asMandate();
       expect((await jsonFetch(`/api/sessions/${OWN}/reply`, { method: 'POST', body: JSON.stringify({ promptId: id, answer: 'A' }) })).status).toBe(200);
       expect(prompts.getById(id)!.status).toBe('answered');

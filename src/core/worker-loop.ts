@@ -10,7 +10,8 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalFromTag, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
+import { principalOfPrompt } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -123,6 +124,7 @@ export function reminderTitle(title: string): string {
 /** What a swept run's result reads as. It is a RESULT, not a status: the status
  *  the sweep writes is `failed`, and this is the line a human sees next to it. */
 const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
+const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 
@@ -976,7 +978,7 @@ export class WorkerLoop {
               // schedule stays as it was.
               // After a restart no run holds the starter; the question still says who asked.
               const run = this.activeTasks.get(parked.id)
-                ?? (isMandateTag(asked?.created_by) ? { starter: principalFromTag(asked?.created_by) } : null);
+                ?? (asked && isMandateTag(asked.created_by) ? { starter: principalOfPrompt(asked) } : null);
               if (proposal) await runAsHandRun(parked.id, async () => { this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run); });
               else this.#recordRun(taskManager, parked.id, WAIT_EXPIRED_RESULT, 'failed', run);
             } catch (err: unknown) {
@@ -1755,10 +1757,21 @@ export class WorkerLoop {
     // (register: hand-run question origin, second half). A mandate's question keeps the
     // mandate's tool lock across a restart instead of coming back as the owner's run. It
     // only narrows the tools: nothing that grants a hand run reads it.
-    const starter = handStarter ?? (isMandateTag(answered?.created_by) ? principalFromTag(answered?.created_by) : undefined);
+    const starter = handStarter ?? (answered && isMandateTag(answered.created_by) ? principalOfPrompt(answered) : undefined);
     // And the run is that mandate's from here on: it may stop it, and it is not retried.
     const running = this.#runSlotOf(task.id);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
+    // A mandate's answer is picked up only while its grant lives (§3.13 B4). The answering
+    // request was checked, but a revoke or the grant's end can come between the answer and
+    // this pickup. Then the answer is released unread and no run is made in the mandate's
+    // name; the run is recorded as failed, with no retry, like any run a mandate started.
+    if (handStarter === undefined && answered !== undefined && starter?.kind === 'mandate'
+      && !(starter.mandateId !== undefined && (this.engine.getMandateEnds()?.isLive(starter.mandateId) ?? false))) {
+      this.engine.getPromptStore()?.releaseTrigger(answered.id);
+      this.#recordRun(this.engine.getTaskManager(), task.id, MANDATE_ENDED_RESULT, 'failed');
+      process.stderr.write(`[lynox:worker] "${task.title}" (${task.id}) was answered under an access that has since ended — not run\n`);
+      return;
+    }
     const triggerTier = admittedTriggerTier(task.model_tier);
     const session = this.engine.createSession({
       autonomy: 'autonomous',
@@ -1859,7 +1872,7 @@ export class WorkerLoop {
       // Who asked, and whether a run by hand did: what the sweep and the re-arm read after
       // a restart, when this run is gone (register: hand-run question origin).
       const promptId = promptStore.insertAskUser(session.sessionId, question, options, undefined, storedSegments, undefined, task.id, {
-        createdBy: principalTag(starter ?? OWNER_PRINCIPAL),
+        principal: starter ?? OWNER_PRINCIPAL,
         handRun: active?.handRun === true,
       });
       // §0 A8/A11 — PARK the trigger. Until now the pairing between this trigger
@@ -2487,7 +2500,7 @@ export class WorkerLoop {
       runId,
       scheduleId: task.id,
       title: task.title,
-      createdBy: principalTag(starter ?? OWNER_PRINCIPAL),
+      principal: starter ?? OWNER_PRINCIPAL,
       handRun: active?.handRun === true,
       promptStore: () => this.engine.getPromptStore(),
       threadStore: () => this.engine.getThreadStore(),
