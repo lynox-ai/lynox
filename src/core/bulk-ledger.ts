@@ -22,6 +22,8 @@ import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
+import type { BulkListSource } from './bulk-list.js';
+import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 /** Local target systems a run can plan and write. An external run's system is
@@ -135,6 +137,19 @@ export interface BulkRunStatus {
   /** Relayed to the model by `bulk_status`, so only ENGINE-authored text may ever be
    *  written here — a {@link BULK_HALT_REASONS} value, never an API response or error. */
   haltReason: string | null;
+  /** A list run's source and how far its read got; null on any other run. Planner-authored
+   *  and engine-counted only — nothing the list's provider returned. */
+  list: BulkListStatus | null;
+}
+
+export interface BulkListStatus {
+  state: ListState;
+  path: string;
+  filters: Record<string, string>;
+  idField: string;
+  method: string;
+  after: ExternalImage;
+  pagesRead: number;
 }
 
 /** Shown wherever a run is approved or its checksum presented, when the instance has no
@@ -169,6 +184,12 @@ export const BULK_HALT_REASONS = {
   contract: 'a target lies outside the run\'s contract',
   stoppedByOwner: 'the owner stopped the run',
   mandateEnded: 'the access that planned this run has ended before it was approved',
+  // A list source (`bulk-list.ts`):
+  listed: 'the list is read; waiting for the owner to review its targets and start reading them',
+  listNotAList: 'a page of the list is not a JSON array',
+  listUnreadable: 'a page of the list could not be read',
+  listTooLarge: 'the list is longer, or larger, than a bulk run may hold',
+  listNoProgress: 'a full page of the list held no target not seen before',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
@@ -227,7 +248,30 @@ interface RunRow {
   atomic: number; kind: BulkRunKind; source_run_id: string | null; target_collection: string | null;
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
   contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
+  list_source: string | null; list_state: ListState | null; list_page: number; list_calls: number; list_bytes: number;
 }
+
+/** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
+ *  and write contract stand. NULL on a run without a list source. */
+export type ListState = 'pending' | 'done';
+
+/** A list run as its read needs it. */
+export interface BulkListRun {
+  id: string;
+  host: string;
+  source: BulkListSource;
+  state: ListState;
+  /** The last page whose elements are recorded; the next read is this plus one. */
+  page: number;
+  calls: number;
+  bytes: number;
+  phase: BulkPhase;
+  haltReason: string | null;
+  contractJson: string | null;
+}
+
+/** What one page of the list adds, as the read hands it to the ledger. */
+export type ListPageItem = { key: string; id: string } | { invalid: BulkInvalidReason };
 
 /**
  * What decides whether a run's planner still stands behind it (§3.13 B7): whether a mandate's
@@ -619,6 +663,170 @@ export class BulkLedger {
     return { ok: true, status: this.getStatus(id)! };
   }
 
+  /**
+   * Record an external plan whose targets come from a list (PRD bulk-loop §3.2): the run in
+   * `planned` with no target yet, its list source and its READ contract (GET on the list's
+   * path), halted with {@link BULK_HALT_REASONS.awaitingStart} — always, though it holds no
+   * target: a list plan has none until it is read, and a run that is not halted counts as
+   * reading. Nothing is sent until the owner starts it ({@link resumePreview}) with the
+   * checksum of what they were shown ({@link listStartChecksum}).
+   */
+  recordExternalListPlan(params: {
+    createdBy: string | undefined;
+    principal: RequestPrincipal;
+    host: string;
+    source: BulkListSource;
+    readContract: CapabilityContract;
+  }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
+    const db = this.engineDb.getDb();
+    const id = randomUUID();
+    const targetSystem = `http:${params.host}`;
+    const sourceJson = canonicalJson(params.source);
+    const recorded = db.transaction((): boolean => {
+      const reading = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL AND target_system LIKE 'http:%'`,
+      ).get() as { n: number };
+      if (reading.n > 0) return false;
+      db.prepare(
+        `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
+           principal, mandate_id, list_source, list_state)
+         VALUES (?, ?, ?, ?, 'restorable', 'planned', 0, 0, ?, ?, ?, ?, ?, 'pending')`,
+      ).run(
+        id, params.createdBy ?? null,
+        // Until the list is read there are no (key, after) pairs: the rule is the source itself.
+        // `finishList` rewrites it over the pairs, which is what `approve` and `resume` compare.
+        this.engineDb.keyedHash(['bulk-list-rule-v1', targetSystem, sourceJson]),
+        targetSystem, JSON.stringify(params.readContract), BULK_HALT_REASONS.awaitingStart,
+        ...planner(params.principal), this.engineDb.enc(sourceJson),
+      );
+      this.pruneUnapproved();
+      return true;
+    })();
+    if (!recorded) return { ok: false, reason: 'external_in_progress' };
+    return { ok: true, status: this.getStatus(id)! };
+  }
+
+  /**
+   * The checksum the owner's start of a list read must present: over the run's system, its
+   * list source and its read contract — what the start sends requests for, with the host's
+   * credential. Null unless the run's list is still to be read.
+   */
+  listStartChecksum(runId: string): string | null {
+    const run = this.runRow(runId);
+    if (!run || run.list_state !== 'pending' || run.list_source === null) return null;
+    return this.engineDb.keyedHash(['bulk-list-start-v1', run.target_system, this.engineDb.dec(run.list_source), run.contract_json ?? '']);
+  }
+
+  /** A run whose list is being read, or null. */
+  getListRun(runId: string): BulkListRun | null {
+    const r = this.runRow(runId);
+    if (!r || r.list_source === null || r.list_state === null) return null;
+    const host = externalHostOf(r.target_system);
+    if (host === null) return null;
+    return {
+      id: r.id, host, source: JSON.parse(this.engineDb.dec(r.list_source)) as BulkListSource, state: r.list_state,
+      page: r.list_page, calls: r.list_calls, bytes: r.list_bytes, phase: r.phase, haltReason: r.halt_reason,
+      contractJson: r.contract_json,
+    };
+  }
+
+  /**
+   * Count one request of a list read before it is sent, up to `max`. False when the run has
+   * spent its requests, or is no longer reading its list — then nothing may be sent.
+   */
+  takeListCall(runId: string, max: number): boolean {
+    return this.engineDb.getDb().prepare(
+      `UPDATE bulk_runs SET list_calls = list_calls + 1
+       WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL AND list_state = 'pending' AND list_calls < ?`,
+    ).run(runId, max).changes === 1;
+  }
+
+  /**
+   * Record one page of a run's list, in one transaction, only as the page after the last one
+   * recorded and only while the run is reading its list — so two loops, or a loop after a
+   * lost lease, cannot record a page twice. A key seen before (the list moved under the read)
+   * is passed over. An element without a usable id becomes an `invalid` target under an
+   * engine-made key, never one built from the provider's text. `too_large` when the targets,
+   * or their after-states, would pass the run's caps; then nothing is recorded.
+   */
+  recordListPage(runId: string, page: { page: number; items: readonly ListPageItem[]; bytes: number }):
+    { ok: true; added: number; total: number } | { ok: false; reason: 'moved' | 'too_large' } {
+    const db = this.engineDb.getDb();
+    return db.transaction((): { ok: true; added: number; total: number } | { ok: false; reason: 'moved' | 'too_large' } => {
+      const run = db.prepare(
+        `SELECT * FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL AND list_state = 'pending' AND list_page = ?`,
+      ).get(runId, page.page - 1) as RunRow | undefined;
+      if (!run || run.list_source === null) return { ok: false, reason: 'moved' };
+      const source = JSON.parse(this.engineDb.dec(run.list_source)) as BulkListSource;
+      const afterText = JSON.stringify(source.after);
+      // Keys are stored encrypted, so no index can say which are known: read them back.
+      const known = new Set((db.prepare(`SELECT target_key FROM bulk_targets WHERE run_id = ? AND change != 'invalid'`)
+        .all(runId) as { target_key: string }[]).map((r) => this.engineDb.dec(r.target_key)));
+      const fresh: { key: string; error: BulkInvalidReason | null }[] = [];
+      page.items.forEach((item, index) => {
+        if ('invalid' in item) fresh.push({ key: `#${String(page.page)}.${String(index)}`, error: item.invalid });
+        else if (!known.has(item.key)) {
+          known.add(item.key);
+          fresh.push({ key: item.key, error: null });
+        }
+      });
+      const total = run.targets_total + fresh.length;
+      const valid = known.size;
+      if (total > BULK_MAX_TARGETS || valid * Buffer.byteLength(afterText, 'utf8') > BULK_MAX_TOTAL_BYTES) {
+        return { ok: false, reason: 'too_large' };
+      }
+      const insert = db.prepare(
+        `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
+         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`,
+      );
+      const encAfter = this.engineDb.enc(afterText);
+      fresh.forEach((t, i) => {
+        const seq = run.targets_total + i;
+        if (t.error !== null) insert.run(runId, seq, this.engineDb.enc(t.key), 'invalid', null, null, t.error);
+        else insert.run(runId, seq, this.engineDb.enc(t.key), 'update', 'restorable', encAfter, null);
+      });
+      db.prepare(`UPDATE bulk_runs SET list_page = ?, list_bytes = list_bytes + ?, targets_total = ? WHERE id = ?`)
+        .run(page.page, page.bytes, total, runId);
+      return { ok: true, added: fresh.filter((t) => t.error === null).length, total };
+    })();
+  }
+
+  /**
+   * Close the read of a run's list: its write contract over the keys now known (`mint`, the
+   * caller's — `mintBulkContract`), its rule over the (key, after) pairs, and a halt
+   * ({@link BULK_HALT_REASONS.listed}) so the owner sees how many targets the list holds
+   * before any of them is read. A list with no usable target ends the run as planned, with
+   * nothing to read. One transaction, only while the run is reading its list.
+   */
+  finishList(runId: string, mint: (keys: readonly string[]) => CapabilityContract): 'listed' | 'empty' | 'moved' {
+    const db = this.engineDb.getDb();
+    return db.transaction((): 'listed' | 'empty' | 'moved' => {
+      const run = db.prepare(
+        `SELECT * FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL AND list_state = 'pending'`,
+      ).get(runId) as RunRow | undefined;
+      const host = run ? externalHostOf(run.target_system) : null;
+      if (!run || host === null) return 'moved';
+      const rows = db.prepare(`SELECT target_key, change, after_planned FROM bulk_targets WHERE run_id = ? ORDER BY seq`)
+        .all(runId) as { target_key: string; change: BulkChange; after_planned: string | null }[];
+      const targets = rows.map((r) => {
+        const key = this.engineDb.dec(r.target_key);
+        return r.change === 'invalid' || r.after_planned === null
+          ? { key, invalid: 'list_item_bad_id' as BulkInvalidReason }
+          : { key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as unknown };
+      });
+      const keys = targets.filter((t) => !('invalid' in t)).map((t) => t.key);
+      const empty = keys.length === 0;
+      db.prepare(
+        `UPDATE bulk_runs SET contract_json = ?, rule_hash = ?, list_state = 'done', phase = ?, undo = ?, halt_reason = ?
+         WHERE id = ?`,
+      ).run(
+        JSON.stringify(mint(keys)), this.engineDb.keyedHash(rulePairs(run.target_system, host, targets)),
+        empty ? 'previewed' : 'planned', empty ? 'none' : 'restorable', empty ? null : BULK_HALT_REASONS.listed, runId,
+      );
+      return empty ? 'empty' : 'listed';
+    })();
+  }
+
   private armPreviewTrigger(runId: string, now: number): string {
     return new TriggerStore(this.engineDb).armBulkEffect({
       runId,
@@ -739,6 +947,17 @@ export class BulkLedger {
       probeConfirmed: this.probeHolds(row),
       checksumBinding: this.engineDb.hashIsKeyed ? 'keyed' : 'unkeyed',
       haltReason: row.halt_reason,
+      list: this.listStatus(row),
+    };
+  }
+
+  /** What a list run's owner is shown before starting it: the source as the planner gave it. */
+  private listStatus(row: RunRow): BulkListStatus | null {
+    if (row.list_source === null || row.list_state === null) return null;
+    const source = JSON.parse(this.engineDb.dec(row.list_source)) as BulkListSource;
+    return {
+      state: row.list_state, path: source.path, filters: source.filters, idField: source.idField,
+      method: source.method, after: source.after, pagesRead: row.list_page,
     };
   }
 
@@ -778,6 +997,11 @@ export class BulkLedger {
       if (run!.contract_json !== null) {
         yield 'contract';
         yield run!.contract_json;
+      }
+      // Only on a list run, so every other run's digest is what it was before lists existed.
+      if (run!.list_source !== null) {
+        yield 'list';
+        yield db.dec(run!.list_source);
       }
       for (const r of rows) {
         yield String(r.seq);
@@ -884,7 +1108,7 @@ export class BulkLedger {
     | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
-    if (run.phase !== 'previewed') return { ok: false, reason: 'wrong_phase' };
+    if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
     const writing = this.countWriting(runId);
@@ -1209,7 +1433,10 @@ export class BulkLedger {
       if (unread.n > 0) return false;
       const valid = db.prepare(`SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change != 'invalid'`).get(runId) as { n: number };
       return db.prepare(
-        `UPDATE bulk_runs SET phase = 'previewed', undo = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL`,
+        // A run whose list is still being read has none of its targets yet: an empty unread set
+        // says nothing about it.
+        `UPDATE bulk_runs SET phase = 'previewed', undo = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL
+           AND (list_state IS NULL OR list_state = 'done')`,
       ).run(valid.n > 0 ? 'restorable' : 'none', runId).changes === 1;
     })();
   }
@@ -1219,11 +1446,16 @@ export class BulkLedger {
    * route clears the halt — the start gate included — and the preview trigger is due at
    * once. Targets already read stay read.
    */
-  resumePreview(runId: string, now: number = Date.now()):
-    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' } {
+  resumePreview(runId: string, now: number = Date.now(), opts: { listChecksum?: string | undefined } = {}):
+    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false, reason: 'wrong_phase' };
+    // Starting a list read sends requests with the host's credential to an address the planner
+    // chose: the owner presents the checksum of the list they were shown (PRD bulk-loop §3.2).
+    if (run.list_state === 'pending' && (opts.listChecksum === undefined || opts.listChecksum !== this.listStartChecksum(runId))) {
+      return { ok: false, reason: 'checksum' };
+    }
     const db = this.engineDb.getDb();
     let triggerId = '';
     const moved = db.transaction((): 'moved' | 'busy' | 'gone' => {
