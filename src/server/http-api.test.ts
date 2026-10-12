@@ -1496,6 +1496,14 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('POST /api/tasks — schedule a saved workflow (Slice B2)', () => {
+    // This file shares ONE per-IP rate window; the requests of this block are paid back so a
+    // test thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
     beforeEach(() => {
       mockTaskCreatePipeline.mockClear();
       mockSetWorkflowConfirmedAt.mockClear();
@@ -8230,6 +8238,14 @@ describe('LynoxHTTPApi', () => {
 
   // PRD-WORKFLOW-UX D13 — Saved Workflows library endpoints.
   describe('saved workflows library', () => {
+    // This file shares ONE per-IP rate window; the requests of this block are paid back so a
+    // test thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
     beforeEach(() => {
       // The Run path now consent-gates on confirmedAt (F1). Default the resolved
       // workflow to CONFIRMED so these tests exercise their real subject (params,
