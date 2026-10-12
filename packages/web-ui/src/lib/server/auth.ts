@@ -163,6 +163,18 @@ export function verifySessionToken(token: string, secret: string): boolean {
 	return readSessionToken(token, secret) !== null;
 }
 
+/**
+ * Whether a session token is the owner's: correctly signed, not expired, and
+ * carrying no principal. A mandate session is valid but not the owner's, so it
+ * may not create a way back in that mints an owner session (a passkey on the
+ * owner's account, a one-time link code).
+ */
+export function isOwnerSession(token: string | undefined, secret: string | undefined): boolean {
+	if (!token || !secret) return false;
+	const session = readSessionToken(token, secret);
+	return session !== null && session.principal === null;
+}
+
 /** Constant-time comparison that hashes both sides first (no length oracle). */
 export function secretEquals(input: string, secret: string): boolean {
 	const a = createHmac('sha256', 'lynox-auth').update(input).digest();

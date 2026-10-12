@@ -24,6 +24,9 @@
 
 	let managed = $state<boolean | null>(null);
 	let hasPasskeys = $state<boolean | null>(null);
+	// Only the owner's own session may add a passkey; the server says so in `canRegister`.
+	// `null` while unknown: the button stays, and the server refuses a session that may not.
+	let canRegister = $state<boolean | null>(null);
 	let webauthnSupported = $state(true);
 	let loaded = $state(false);
 	let registering = $state(false);
@@ -51,8 +54,11 @@
 				body: JSON.stringify({ action: 'status' }),
 			});
 			if (res.ok) {
-				const data = (await res.json()) as { hasPasskeys?: boolean; error?: string };
-				if (!data.error) hasPasskeys = !!data.hasPasskeys;
+				const data = (await res.json()) as { hasPasskeys?: boolean; canRegister?: boolean; error?: string };
+				if (!data.error) {
+					hasPasskeys = !!data.hasPasskeys;
+					canRegister = data.canRegister === true;
+				}
 			}
 		} catch {
 			// /auth/passkey unreachable means non-managed instance or proxy gap.
@@ -155,15 +161,20 @@
 						{hasPasskeys ? t('account.security.passkey_enrolled_hint') : t('account.security.passkey_none_hint')}
 					</p>
 				</div>
-				<button type="button" onclick={enrol} disabled={registering}
-					class="shrink-0 px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50 transition-opacity">
-					{registering
-						? t('account.security.passkey_registering')
-						: hasPasskeys
-							? t('account.security.passkey_replace_cta')
-							: t('account.security.passkey_enrol_cta')}
-				</button>
+				{#if canRegister !== false}
+					<button type="button" onclick={enrol} disabled={registering}
+						class="shrink-0 px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50 transition-opacity">
+						{registering
+							? t('account.security.passkey_registering')
+							: hasPasskeys
+								? t('account.security.passkey_replace_cta')
+								: t('account.security.passkey_enrol_cta')}
+					</button>
+				{/if}
 			</div>
+			{#if canRegister === false}
+				<p class="text-xs text-text-muted">{t('account.security.passkey_owner_only')}</p>
+			{/if}
 		</section>
 	{/if}
 </div>

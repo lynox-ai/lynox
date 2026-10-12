@@ -5,4 +5,4 @@
 	let { data }: { data: PageData } = $props();
 </script>
 
-<MobileAccess hasSecret={data.hasSecret} linkCode={data.linkCode} />
+<MobileAccess hasSecret={data.hasSecret} linkCode={data.linkCode} ownerOnly={data.ownerOnly} />
