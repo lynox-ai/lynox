@@ -58,6 +58,13 @@ describe('session-budget', () => {
     expect(getSessionCost(counters)).toBe(5);
   });
 
+  it('recordSessionCost adds nothing that is not a finite amount above zero, so the cap keeps holding', () => {
+    recordSessionCost(counters, 45);
+    for (const bad of [NaN, -10, Infinity, 0]) recordSessionCost(counters, bad);
+    expect(getSessionCost(counters)).toBe(45);
+    expect(() => checkSessionBudget(counters, 10)).toThrow(/Session cost ceiling/);
+  });
+
   it('fresh counters object starts at zero (replaces process-wide reset)', () => {
     recordSessionCost(counters, 25);
     counters = makeCounters();

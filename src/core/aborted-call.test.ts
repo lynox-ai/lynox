@@ -61,6 +61,21 @@ describe('abortedCallCost — no count from the provider (aborted before the fir
     const c = abortedCallCost({ model: MODEL, maxTokens: 512, request: REQUEST, partial: { usage: { input_tokens: 0 } } });
     expect(c.fromSnapshot).toBe(false);
   });
+
+  it.each([
+    ['a non-numeric cache-write count', { cache_creation_input_tokens: 'many' }],
+    ['a negative cache-write count', { cache_creation_input_tokens: -1_000_000 }],
+    ['a non-numeric cache-read count', { cache_read_input_tokens: 'many' }],
+    ['a negative cache-read count', { cache_read_input_tokens: -1_000_000 }],
+    ['an infinite prompt count', { input_tokens: Infinity }],
+  ])('treats a snapshot with %s like no snapshot, so the bound stays a finite amount above zero', (_label, bad) => {
+    const usage = { input_tokens: 1200, ...bad } as unknown as { input_tokens: number };
+    const c = abortedCallCost({ model: MODEL, maxTokens: 512, request: REQUEST, partial: { usage } });
+    const unmeasured = abortedCallCost({ model: MODEL, maxTokens: 512, request: REQUEST });
+    expect(c.fromSnapshot).toBe(false);
+    expect(Number.isFinite(c.upperBoundUsd)).toBe(true);
+    expect(c.upperBoundUsd).toBe(unmeasured.upperBoundUsd);
+  });
 });
 
 describe('partialMessageOf', () => {

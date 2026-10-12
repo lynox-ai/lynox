@@ -12,7 +12,8 @@
  *   cap, overstating is safe and understating lets money through, so it is a bound that
  *   cannot be below the real cost: the prompt priced at the higher of the input and the
  *   cache-write rate, and the whole `max_tokens` as output.
- * - `estimateUsd` is for DISPLAY: the run's own cost line. It is a best guess, not a bound.
+ * - `estimateUsd` is for the run's own cost line: the run-history row, which the daily and
+ *   monthly caps also sum. It is a best guess, not a bound.
  *
  * Neither number goes to the tenant debit. The customer has never paid for an aborted
  * helper call, and still does not; the provider bills us for it. {@link reportAbortedCall}
@@ -63,6 +64,11 @@ export function partialMessageOf(stream: unknown): PartialMessage | undefined {
   }
 }
 
+/** A token count a price can be computed from: absent, or a finite number of at least zero. */
+function isTokenCount(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}
+
 function utf8Bytes(value: unknown): number {
   try {
     return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8');
@@ -77,7 +83,9 @@ function utf8Bytes(value: unknown): number {
  *
  * The prompt: the provider's own count when the stream got as far as its first event;
  * otherwise the request's UTF-8 size plus {@link TOOL_USE_OVERHEAD_TOKENS} — a token is at
- * least one byte, so that cannot be below the real count.
+ * least one byte, so that cannot be below the real count. A count with any field that is not
+ * a finite number of at least zero is not used: it would price the call at NaN or below zero,
+ * and the request-size bound is what the call cannot have exceeded.
  */
 export function abortedCallCost(input: {
   model: string;
@@ -87,7 +95,10 @@ export function abortedCallCost(input: {
 }): AbortedCallCost {
   const { model, maxTokens, request, partial } = input;
   const usage = partial?.usage ?? undefined;
-  const counted = typeof usage?.input_tokens === 'number' && usage.input_tokens > 0;
+  const counted = typeof usage?.input_tokens === 'number' && usage.input_tokens > 0
+    && Number.isFinite(usage.input_tokens)
+    && isTokenCount(usage.cache_creation_input_tokens)
+    && isTokenCount(usage.cache_read_input_tokens);
   const requestBytes = utf8Bytes(request);
 
   const outputSoFar = Math.min(maxTokens, Math.ceil(utf8Bytes(partial?.content ?? []) / ESTIMATE_BYTES_PER_TOKEN));

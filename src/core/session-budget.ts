@@ -46,8 +46,13 @@ export function checkSessionBudget(counters: SessionCounters, estimatedCostUSD: 
   counters.costUSD += estimatedCostUSD; // reserve immediately
 }
 
-/** Record cost spent by an agent (spawn or pipeline step). */
+/**
+ * Record cost spent by an agent (spawn or pipeline step). Only a finite amount above zero
+ * is added: `costUSD += NaN` would leave the counter NaN for the rest of the session, and
+ * `NaN + estimate > cap` is false, so {@link checkSessionBudget} would never stop again.
+ */
 export function recordSessionCost(counters: SessionCounters, costUSD: number): void {
+  if (!(Number.isFinite(costUSD) && costUSD > 0)) return;
   counters.costUSD += costUSD;
 }
 
