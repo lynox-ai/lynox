@@ -630,11 +630,11 @@ export class BulkLedger {
   /** Whether this run's planner has ended; if so the run is ended as {@link expireEndedPlanners} ends it. */
   endIfPlannerEnded(runId: string, own: BulkOwnership): boolean {
     const row = this.runRow(runId);
-    if (!row || (row.phase !== 'planned' && row.phase !== 'previewed') || !plannerHasEnded(row, own)) return false;
-    this.endRun(runId);
-    return true;
+    if (!row || !plannerHasEnded(row, own)) return false;
+    return this.endRun(runId);
   }
 
+  /** Ends an unapproved run; its own phase guard is what keeps an approved run, the owner's act, as it is. */
   private endRun(runId: string): boolean {
     const db = this.engineDb.getDb();
     return db.transaction((): boolean => {

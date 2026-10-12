@@ -154,6 +154,14 @@ describe('ending the runs of an ended grant', () => {
     expect(triggers.get(bulkPreviewTriggerId(id))).toBeUndefined();
   });
 
+  it('leaves an approved run of an ended grant as approved, at the route\'s check too', () => {
+    const id = dryRun(GRANT);
+    const ok = ledger.approve(id, { checksum: ledger.computeChecksum(id)!, maxTargets: 1 });
+    if (!ok.ok) throw new Error(ok.reason);
+    expect(ledger.endIfPlannerEnded(id, ownership())).toBe(false);
+    expect(row(id).phase).toBe('approved');
+  });
+
   it('leaves a live grant\'s run to be started', () => {
     const id = externalPlan(GRANT);
     expect(ledger.endIfPlannerEnded(id, ownership(['grant-1']))).toBe(false);
