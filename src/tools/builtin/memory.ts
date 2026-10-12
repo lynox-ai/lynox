@@ -6,7 +6,7 @@ import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTI
 import { estimateTokens } from '../../core/llm-helper.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
-import { privateThreadRefusal } from './private-thread.js';
+import { chatThreadOf, privateThreadRefusal } from './private-thread.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
@@ -293,12 +293,12 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     });
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
-      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
+      channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
       return `Stored in ${input.namespace} (scope: ${input.scope}). Entities and relationships are extracted automatically for future cross-referencing.`;
     }
 
     await agent.memory.append(input.namespace, input.content);
-    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
+    channels.memoryStore.publish({ namespace: input.namespace, content: input.content, sourceThreadId: chatThreadOf(agent), sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
     return `Stored in ${input.namespace}. Entities and relationships are extracted automatically for future cross-referencing.`;
   },
 };
@@ -585,7 +585,7 @@ export const memoryUpdateTool: ToolEntry<MemoryUpdateInput> = {
         content: input.new_content,
         scopeType: defaultScope.type,
         scopeId: defaultScope.id,
-        sourceThreadId: agent.currentThreadId,
+        sourceThreadId: chatThreadOf(agent),
         // Wave 0.6: force-floored — no agent-declared provenance (PRD §2.8).
         // Write-trust derived from the FULL union, not the bare marker (deriveTurnUntrusted).
         sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted: deriveTurnUntrusted(agent),
@@ -784,7 +784,7 @@ export const memoryPromoteTool: ToolEntry<MemoryPromoteInput> = {
       content: matchedLine,
       scopeType: toRef.type,
       scopeId: toRef.id,
-      sourceThreadId: agent.currentThreadId,
+      sourceThreadId: chatThreadOf(agent),
       // Promotion moves an existing line across scopes. The original tier
       // isn't available from the flat-file line without a KG lookup, so the
       // re-embedded copy lands at the conservative default — never falsely

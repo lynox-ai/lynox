@@ -1,6 +1,17 @@
 import type { IAgent } from '../../types/index.js';
 
 /**
+ * The chat a memory write belongs to: the agent's own thread, or for a workflow step or a
+ * `spawn_agent` child — which have no `currentThreadId` — the chat it runs for. The memory and
+ * knowledge tools and the end-of-turn capture stamp this as the source thread of the entries
+ * they create, so that switching the chat to private, which removes what is stored under its
+ * id, reaches them.
+ */
+export function chatThreadOf(agent: Pick<IAgent, 'currentThreadId' | 'originThreadId'>): string | undefined {
+  return agent.currentThreadId ?? agent.originThreadId;
+}
+
+/**
  * The answer a memory-writing tool gives in a private chat, or `null` when the chat is not
  * private.
  *
@@ -20,7 +31,7 @@ import type { IAgent } from '../../types/index.js';
  * A sub-agent has no `currentThreadId`; it is checked against the chat it was spawned from.
  */
 export function privateThreadRefusal(agent: IAgent): string | null {
-  const threadId = agent.currentThreadId ?? agent.originThreadId;
+  const threadId = chatThreadOf(agent);
   if (!threadId) return null;
   const thread = agent.toolContext.threadStore?.getThread(threadId);
   if (thread?.skip_extraction !== 1) return null;

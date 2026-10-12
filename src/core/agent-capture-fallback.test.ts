@@ -131,6 +131,28 @@ describe('turn-end capture — which model it runs on', () => {
   });
 });
 
+describe('turn-end capture — the chat a fact is stamped with', () => {
+  // A workflow step or `spawn_agent` child has no thread of its own. Its fact must carry the
+  // chat it runs for: switching that chat private removes what is stored under its id, and
+  // a fact stamped with nothing stays.
+  it('a step stamps the chat it runs for', async () => {
+    const { inner, write } = makeAgent();
+    inner.currentThreadId = undefined;
+    (inner as unknown as { originThreadId: string | undefined }).originThreadId = 't-chat';
+    await inner._captureFallback(ANSWER, false, 'none');
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write.mock.calls[0]![0]).toMatchObject({ sourceThreadId: 't-chat' });
+  });
+
+  it('an agent with its own thread keeps it', async () => {
+    const { inner, write } = makeAgent();
+    inner.currentThreadId = 't-own';
+    (inner as unknown as { originThreadId: string | undefined }).originThreadId = 't-chat';
+    await inner._captureFallback(ANSWER, false, 'none');
+    expect(write.mock.calls[0]![0]).toMatchObject({ sourceThreadId: 't-own' });
+  });
+});
+
 describe('turn-end capture — the two routes rafael asked for', () => {
   it('a CLEAN turn writes the fact as trusted', async () => {
     const { inner, write } = makeAgent();

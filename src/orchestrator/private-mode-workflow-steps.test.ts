@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { IAgent, IMemory, LynoxUserConfig, ToolEntry } from '../types/index.js';
 import type { ThreadStore } from '../core/thread-store.js';
+import { channels } from '../core/observability.js';
 
 /**
  * Private mode on a chat must reach the steps of a workflow that chat starts.
@@ -239,6 +240,27 @@ describe('run_workflow steps inherit the chat\'s private mode', () => {
     expect(memory.writes[0]!.args).toEqual(['knowledge', 'Preferred packaging supplier has a 14-day delivery window.']);
     expect(memory.maybeUpdateCalls).toHaveLength(1);
     expect(String(memory.maybeUpdateCalls[0]![0])).toContain('preferred supplier for packaging');
+  });
+
+  it('H: a step\'s writes in a normal chat are stamped with that chat, so switching it private later can remove them', async () => {
+    const memory = makeFakeMemory();
+    const parent = makeParent({ threadId: 't-pub', privateMode: false, memory });
+    scriptStep();
+    const published: Array<{ sourceThreadId?: string }> = [];
+    const onStore = (msg: unknown): void => { published.push(msg as { sourceThreadId?: string }); };
+    channels.memoryStore.subscribe(onStore);
+    try {
+      await runOneStepWorkflow(parent);
+    } finally {
+      channels.memoryStore.unsubscribe(onStore);
+    }
+
+    // The explicit write: what the knowledge layer mirrors carries the chat.
+    expect(storeResults[0]).toMatch(/^Stored in knowledge\./);
+    expect(published.map(m => m.sourceThreadId)).toEqual(['t-pub']);
+    // The end-of-turn capture: the legacy store is handed the chat as the source thread.
+    expect(memory.maybeUpdateCalls).toHaveLength(1);
+    expect(memory.maybeUpdateCalls[0]![2]).toBe('t-pub');
   });
 
   it('C: private mode switched on while the step runs stops the step\'s end-of-turn capture', async () => {

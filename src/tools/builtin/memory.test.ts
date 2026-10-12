@@ -1189,3 +1189,71 @@ describe('memoryUpdateTool fallback ([SUPERSEDED] marker)', () => {
     expect(store).toContain('Now using PostgreSQL 17');
   });
 });
+
+// A workflow step or `spawn_agent` child has no thread of its own; every memory write it makes
+// must carry the chat it runs for. Switching that chat private removes what is stored under
+// its id — a write stamped with nothing stays.
+describe('memory tools in a step stamp the chat it runs for', () => {
+  const stepAgent = (memory: NonNullable<IAgent['memory']>, extra: Partial<IAgent> = {}): IAgent => ({
+    ...makeAgent(memory),
+    currentThreadId: undefined,
+    originThreadId: 't-chat',
+    activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }],
+    ...extra,
+  });
+
+  it('memory_store, scoped', async () => {
+    const { channels } = await import('../../core/observability.js');
+    await memoryStoreTool.handler(
+      { namespace: 'knowledge', content: 'the warehouse closes at 17:00', scope: 'context:proj1' } as unknown as Parameters<typeof memoryStoreTool.handler>[0],
+      stepAgent(makeMockMemory({ appendScoped: vi.fn().mockResolvedValue(undefined) })),
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ scopeType: 'context', sourceThreadId: 't-chat' }));
+  });
+
+  it('an agent with its own thread keeps it, origin or not', async () => {
+    const { channels } = await import('../../core/observability.js');
+    await memoryStoreTool.handler(
+      { namespace: 'knowledge', content: 'the warehouse closes at 17:00' },
+      stepAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { currentThreadId: 't-own' }),
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceThreadId: 't-own' }));
+  });
+
+  it('memory_store, unscoped', async () => {
+    const { channels } = await import('../../core/observability.js');
+    await memoryStoreTool.handler(
+      { namespace: 'knowledge', content: 'the warehouse closes at 17:00' },
+      stepAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) })),
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceThreadId: 't-chat' }));
+  });
+
+  it('memory_update, the mirrored write on the fallback path', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const memory = makeMockMemory({
+      load: vi.fn(async () => 'ProjectAlpha launch is in November'),
+      update: vi.fn(async () => false),
+      delete: vi.fn(async () => 1),
+      append: vi.fn(async () => undefined),
+    });
+    await memoryUpdateTool.handler(
+      { namespace: 'learnings', old_content: 'ProjectAlpha launch November', new_content: 'ProjectAlpha launch postponed to December' },
+      stepAgent(memory, { toolContext: { ...createToolContext({}), knowledgeLayer: makeKg() } }),
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceThreadId: 't-chat' }));
+  });
+
+  it('memory_promote, the copy in the broader scope', async () => {
+    const { channels } = await import('../../core/observability.js');
+    await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      stepAgent(makeMockMemory({
+        loadScoped: vi.fn().mockResolvedValue('User pattern A\nUser pattern B'),
+        appendScoped: vi.fn().mockResolvedValue(undefined),
+        deleteScoped: vi.fn().mockResolvedValue(1),
+      })),
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ scopeType: 'context', sourceThreadId: 't-chat' }));
+  });
+});
