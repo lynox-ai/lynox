@@ -10613,8 +10613,9 @@ export class LynoxHTTPApi {
       } else {
         exportData['memory'] = {};
         // No instance with `memory: false`, but the directory can still hold files from runs
-        // with it on, and the engine writes its manifest there on shutdown either way. Read by
-        // path, so the export does not answer "nothing" over files it never looked at.
+        // with it on, and the engine's shutdown writes its manifest there without asking the
+        // memory setting. Read by path, so the export does not answer "nothing" over files it
+        // never looked at.
         const { getLynoxDir } = await import('../core/config.js');
         const { exportMemoryDir, memoryDirOf } = await import('../core/memory.js');
         const all = await exportMemoryDir(memoryDirOf(getLynoxDir()));

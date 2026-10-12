@@ -128,29 +128,33 @@ export interface MemoryDirExport {
  * `<contextId>`, `user-<id>`), and `memory_store` and the extraction write into any of them,
  * so reading only the default scope answered for one directory of many.
  *
- * The set is what {@link Memory.eraseAll} removes, not what `parsePortableMemoryKey` accepts: the
- * migration bundle carries the namespace files it can restore, while an export has to show
- * every file the erasure deletes. That includes the engine's `manifest.json` (a map of the
- * working directory's file paths to their mtimes, written next to the namespace files) and
- * any file lying directly in the directory, listed under the key `.`.
+ * The set is the directory's regular files — what {@link Memory.eraseAll} removes when there is
+ * an instance — not what `parsePortableMemoryKey` accepts: the migration bundle carries the
+ * namespace files it can restore, while an export has to show every file held. That includes
+ * the engine's `manifest.json` (a map of the working directory's file paths to their mtimes,
+ * written next to the namespace files) and any file lying directly in the directory, listed
+ * under the key `.`.
  *
  * Listed from the directory rather than from the scopes this process knows: a scope written
  * by an earlier run, or from another context, is still held. The directory is read whatever
  * the flat-file setting is now, so files written while it was on are still shown. It takes a
  * path rather than a {@link Memory}: with `memory: false` the engine has no instance, while the
- * directory can still hold files from earlier runs and the manifest the engine writes on
- * shutdown either way. A symlink is not followed — its target can lie outside the directory,
- * and the erasure removes the link, not the target. Empty files and scopes are left out.
+ * directory can still hold files from earlier runs, and the engine's shutdown writes the
+ * manifest without asking the memory setting. A symlink is not followed — its target can lie
+ * outside the directory, and the erasure removes the link, not the target. Other entries that
+ * are neither a regular file nor a directory (a FIFO, a socket) are skipped as well; nothing
+ * in this store creates one. Empty files and scopes are left out.
  *
- * Only a missing path counts as empty. Any other failure to list or read sets
- * `mayBeIncomplete`, so the export cannot look complete when a file was unreadable.
+ * Only a missing path counts as empty. Any other failure to list a directory or read a file
+ * sets `mayBeIncomplete`, so the export cannot look complete when a file was unreadable.
+ * The maps have no prototype, so a scope directory named `__proto__` is a key like any other.
  */
 export async function exportMemoryDir(baseDir: string): Promise<MemoryDirExport> {
-  const scopes: Record<string, Record<string, string>> = {};
+  const scopes: Record<string, Record<string, string>> = Object.create(null) as Record<string, Record<string, string>>;
   let mayBeIncomplete = false;
   const isMissing = (err: unknown): boolean => (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
   const readFiles = async (dir: string, names: string[]): Promise<Record<string, string>> => {
-    const files: Record<string, string> = {};
+    const files: Record<string, string> = Object.create(null) as Record<string, string>;
     for (const name of names) {
       try {
         const content = await fs.readFile(path.join(dir, name), 'utf-8');

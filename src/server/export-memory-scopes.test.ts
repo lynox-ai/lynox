@@ -199,6 +199,15 @@ describe('Memory.exportAllScopes', () => {
     }
   });
 
+  it('carries a scope directory named __proto__ instead of dropping it into the prototype', async () => {
+    fresh();
+    mkdirSync(join(base(), '__proto__'));
+    writeFileSync(join(base(), '__proto__', 'knowledge.txt'), 'ZZMARKER-proto');
+    const { scopes } = await mem.exportAllScopes();
+    expect(Object.keys(scopes)).toContain('__proto__');
+    expect(JSON.stringify(scopes)).toContain('ZZMARKER-proto');
+  });
+
   it('reports a nested directory instead of claiming the scope is complete', async () => {
     fresh();
     mkdirSync(join(base(), 'global', 'nested'));
