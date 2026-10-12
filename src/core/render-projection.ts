@@ -36,6 +36,18 @@ export const TOOL_RESULT_CONTINUATION_HINT =
 export const TOOL_GUIDANCE_MARKER = '[tool-guidance]';
 
 /**
+ * User turn the agent injects when a response stops at `max_tokens` and it asks
+ * the model to continue. It is persisted with the thread (the model must see it
+ * on resume), but the user never wrote it — `projectMessages` suppresses it
+ * (stored threads held such rows, each rendered as an English user bubble
+ * after a reload). Matched by exact content, so rows stored
+ * before this constant existed are suppressed too: if the wording ever changes,
+ * keep today's string as a legacy match, or those rows come back.
+ */
+export const MAX_TOKENS_CONTINUATION_PROMPT =
+  'Your previous response was truncated due to length. Please continue from where you left off.';
+
+/**
  * UI-ready projection of stored thread messages.
  *
  * The storage layer keeps raw Anthropic `BetaMessageParam` shape (role + content
@@ -346,6 +358,9 @@ export function projectMessages(
         : Array.isArray(content)
           ? extractTextFromBlocks(content)
           : '';
+      // The agent's own "please continue" turn: the model reads it, the user
+      // never wrote it. The answer before and after it renders as one turn.
+      if (text === MAX_TOKENS_CONTINUATION_PROMPT) continue;
       out.push({
         seq: r.seq,
         role: 'user',
