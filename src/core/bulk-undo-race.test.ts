@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,7 +43,7 @@ async function haltedRunWithUndo(): Promise<{ runId: string; undoId: string }> {
     targets.push({ key: `k${String(i)}`, before: { absent: false, value: `v${String(i)}` }, after: `w${String(i)}` });
     state.set(`k${String(i)}`, `v${String(i)}`);
   }
-  const runId = ledger.recordDryRun({ createdBy: 't', targetSystem: 'workspace', scope: 'mem', targets }).id;
+  const runId = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets }).id;
   const approved = ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 2 });
   if (!approved.ok) throw new Error(approved.reason);
   const writer: TargetWriter = {

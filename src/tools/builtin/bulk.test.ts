@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,7 +30,7 @@ let ledger: BulkLedger;
 let store: DataStore;
 
 function agent(): IAgent {
-  return { toolContext: { bulkLedger: ledger, dataStore: store }, currentThreadId: 'thread-1' } as unknown as IAgent;
+  return { toolContext: { bulkLedger: ledger, dataStore: store }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
 }
 
 /** Every file under `root` with its bytes and mtime — the "byte-identical" witness. */
@@ -365,7 +366,7 @@ describe('bulk_plan over data-store rows', () => {
 describe('bulk_status on an instance without a vault key', () => {
   it('says the approval checksum does not bind — and says nothing when it does', async () => {
     const plan = (l: BulkLedger): string => l.recordDryRun({
-      createdBy: 't', targetSystem: 'workspace', scope: 's',
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 's',
       targets: [{ key: 'a.md', before: { absent: true }, after: 'x' }],
     }).id;
     const line = /Approval checksum: unkeyed/;

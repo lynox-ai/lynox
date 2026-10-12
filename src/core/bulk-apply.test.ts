@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -43,7 +44,7 @@ let ledger: BulkLedger;
 let store: DataStore;
 
 function agent(): IAgent {
-  return { toolContext: { bulkLedger: ledger, dataStore: store }, currentThreadId: 'thread-1' } as unknown as IAgent;
+  return { toolContext: { bulkLedger: ledger, dataStore: store }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
 }
 
 function runIdOf(result: string): string {
@@ -110,7 +111,7 @@ function recordMemoryRun(n: number, opts: { atomic?: boolean } = {}): { runId: s
     initial[key] = `v${String(i)}`;
     targets.push({ key, before: { absent: false, value: `v${String(i)}` }, after: `w${String(i)}` });
   }
-  const s = ledger.recordDryRun({ createdBy: 't', targetSystem: 'workspace', scope: 'mem', targets, atomic: opts.atomic });
+  const s = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem', targets, atomic: opts.atomic });
   return { runId: s.id, initial };
 }
 

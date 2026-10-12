@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash, createHmac, hkdfSync } from 'node:crypto';
@@ -220,7 +221,7 @@ describe('BulkLedger', () => {
   afterEach(() => { engineDb.close(); });
 
   const record = (targets: PlannedTarget[]): string =>
-    ledger.recordDryRun({ createdBy: 't', targetSystem: 'workspace', scope: 'workspace', targets }).id;
+    ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'workspace', targets }).id;
   const one = (key: string, after = 'x'): PlannedTarget[] => [{ key, before: { absent: true }, after }];
   const hashOf = (id: string): string =>
     (engineDb.getDb().prepare('SELECT rule_hash FROM bulk_runs WHERE id = ?').get(id) as { rule_hash: string }).rule_hash;
@@ -300,7 +301,7 @@ describe('BulkLedger', () => {
 
     const other = new EngineDb(join(dir, 'engine2.db'), 'key-two');
     try {
-      const c = new BulkLedger(other).recordDryRun({ createdBy: 't', targetSystem: 'workspace', scope: 'workspace', targets: one('alice@example.test') });
+      const c = new BulkLedger(other).recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'workspace', targets: one('alice@example.test') });
       const hc = (other.getDb().prepare('SELECT rule_hash FROM bulk_runs WHERE id = ?').get(c.id) as { rule_hash: string }).rule_hash;
       expect(hc).not.toBe(a);
     } finally {
