@@ -25,6 +25,8 @@ export interface DocumentMemorySink {
 			sourceChannel?: string | undefined;
 			sourceUntrusted?: boolean | undefined;
 			sourceToolName?: string | undefined;
+			/** Asked by the store after each of its own awaits (`KnowledgeLayer.store`). */
+			cancelled?: (() => boolean) | undefined;
 		},
 	): Promise<unknown>;
 }
@@ -86,7 +88,8 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
 
 /**
  * Store an uploaded document's text into the knowledge layer as recall-sized
- * memories. Returns the number of chunks stored. Each chunk is tagged
+ * memories. Returns the number of chunks handed to the store — the store may still
+ * drop one (a dedup hit, or `cancelled`), so it is an upper bound. Each chunk is tagged
  * `external_unverified` (untrusted uploaded content) so the recall path applies
  * its injection guard, and `document_upload` so the document's memories are
  * attributable. Best-effort: the caller fires this without awaiting.
@@ -95,6 +98,14 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
  * enumerates every caller: the answer decides whether this writes at all, and a
  * caller that forgot to pass it would silently keep the legacy write alive.
  * When it is true the archive is NOT written — see the guard below for why.
+ *
+ * `isPrivate` is REQUIRED for the same reason. It is asked before the first chunk and
+ * again before each one, because the caller fires this after the run is accepted and
+ * private mode can be switched on while the chunks are embedding. A chat in private mode
+ * stores nothing here: the switch's own purge removes what carries the thread id, and a
+ * chunk written after it would carry the id and stay. A check here cannot reach a chunk
+ * whose `store` call is already in flight when the switch is flipped, so the predicate is
+ * also handed to `store` as `cancelled`, which asks it again after each of its own awaits.
  */
 export async function ingestDocumentText(
 	sink: DocumentMemorySink,
@@ -104,6 +115,8 @@ export async function ingestDocumentText(
 		scope: MemoryScopeRef;
 		threadId: string;
 		durableKnowledgeActive: boolean;
+		/** Whether the chat is in private mode NOW — read again before every chunk. */
+		isPrivate: () => boolean;
 	},
 ): Promise<number> {
 	// Under the durable substrate this path is the LAST writer into the legacy
@@ -141,6 +154,7 @@ export async function ingestDocumentText(
 	const chunks = chunkDocumentText(params.text);
 	let stored = 0;
 	for (const chunk of chunks) {
+		if (params.isPrivate()) break;
 		await sink.store(`[Document: ${params.fileName}]\n${chunk}`, 'knowledge', params.scope, {
 			sourceThreadId: params.threadId,
 			// An uploaded document is untrusted external content → `upload` channel +
@@ -148,6 +162,9 @@ export async function ingestDocumentText(
 			sourceChannel: 'upload',
 			sourceUntrusted: true,
 			sourceToolName: 'document_upload',
+			// The same question, asked again inside the store after the embedding and the
+			// entity extraction: a chunk already in flight when the switch flips is dropped there.
+			cancelled: params.isPrivate,
 		});
 		stored++;
 	}
