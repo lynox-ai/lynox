@@ -3586,6 +3586,9 @@ export class LynoxHTTPApi {
                         scope: docScope,
                         threadId: session.sessionId,
                         durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
+                        // Read from the thread row on every chunk, not captured here: the switch
+                        // can be flipped while the chunks embed.
+                        isPrivate: () => this.engine?.getThreadStore()?.getThread(session.sessionId)?.skip_extraction === 1,
                       }).catch(() => { /* best-effort */ });
                     }
                   } catch (ingestErr) {

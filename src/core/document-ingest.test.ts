@@ -73,7 +73,7 @@ describe('ingestDocumentText', () => {
 	it('stores one knowledge memory per chunk with document provenance', async () => {
 		const { sink, calls } = fakeSink();
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false });
 
 		expect(n).toBe(calls.length);
 		expect(n).toBeGreaterThanOrEqual(1);
@@ -92,7 +92,7 @@ describe('ingestDocumentText', () => {
 
 	it('stores nothing for an empty document', async () => {
 		const { sink, calls } = fakeSink();
-		const n = await ingestDocumentText(sink, { text: '   ', fileName: 'x.pdf', scope, threadId: 't', durableKnowledgeActive: false });
+		const n = await ingestDocumentText(sink, { text: '   ', fileName: 'x.pdf', scope, threadId: 't', durableKnowledgeActive: false, isPrivate: () => false });
 		expect(n).toBe(0);
 		expect(calls.length).toBe(0);
 	});
@@ -102,7 +102,7 @@ describe('ingestDocumentText', () => {
 		// Same input that stores several chunks above — only the substrate differs, so a
 		// zero here can only come from the DK guard, not from an empty/short document.
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: true });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: true, isPrivate: () => false });
 		expect(n).toBe(0);
 		expect(calls).toHaveLength(0);
 	});
@@ -114,8 +114,33 @@ describe('ingestDocumentText', () => {
 		// self-hosted (flag-off) tenant.
 		const { sink, calls } = fakeSink();
 		const text = 'first paragraph\n\n' + 'y'.repeat(30);
-		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false });
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false });
 		expect(n).toBeGreaterThanOrEqual(1);
 		expect(calls).toHaveLength(n);
+	});
+
+	it('stores nothing from a chat that is already private', async () => {
+		const { sink, calls } = fakeSink();
+		const text = 'first paragraph\n\n' + 'y'.repeat(30);
+		const n = await ingestDocumentText(sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => true });
+		expect(n).toBe(0);
+		expect(calls).toHaveLength(0);
+	});
+
+	it('stops at the next chunk when private mode is switched on during the ingest', async () => {
+		const { sink, calls } = fakeSink();
+		// Three paragraphs over the 2000-char chunk size: three chunks.
+		const text = ['a', 'b', 'c'].map(c => c.repeat(1900)).join('\n\n');
+		let privateMode = false;
+		const flipping: typeof sink = {
+			store: async (...args) => { const r = await sink.store(...args); privateMode = true; return r; },
+		};
+		const n = await ingestDocumentText(flipping, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => privateMode });
+		expect(n).toBe(1);
+		expect(calls).toHaveLength(1);
+		// Positive control: the same text, never private, is more than one chunk.
+		const control = fakeSink();
+		const all = await ingestDocumentText(control.sink, { text, fileName: 'report.pdf', scope, threadId: 'th-9', durableKnowledgeActive: false, isPrivate: () => false });
+		expect(all).toBeGreaterThan(1);
 	});
 });

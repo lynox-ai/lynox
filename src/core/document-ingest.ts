@@ -95,6 +95,14 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
  * enumerates every caller: the answer decides whether this writes at all, and a
  * caller that forgot to pass it would silently keep the legacy write alive.
  * When it is true the archive is NOT written — see the guard below for why.
+ *
+ * `isPrivate` is REQUIRED for the same reason. It is asked before the first chunk and
+ * again before each one, because the caller fires this after the run is accepted and
+ * private mode can be switched on while the chunks are embedding. A chat in private mode
+ * stores nothing here: the switch's own purge removes what carries the thread id, and a
+ * chunk written after it would carry the id and stay. What one check cannot reach is a
+ * chunk whose `store` call is already in flight when the switch is flipped; that chunk
+ * still lands.
  */
 export async function ingestDocumentText(
 	sink: DocumentMemorySink,
@@ -104,6 +112,8 @@ export async function ingestDocumentText(
 		scope: MemoryScopeRef;
 		threadId: string;
 		durableKnowledgeActive: boolean;
+		/** Whether the chat is in private mode NOW — read again before every chunk. */
+		isPrivate: () => boolean;
 	},
 ): Promise<number> {
 	// Under the durable substrate this path is the LAST writer into the legacy
@@ -141,6 +151,7 @@ export async function ingestDocumentText(
 	const chunks = chunkDocumentText(params.text);
 	let stored = 0;
 	for (const chunk of chunks) {
+		if (params.isPrivate()) break;
 		await sink.store(`[Document: ${params.fileName}]\n${chunk}`, 'knowledge', params.scope, {
 			sourceThreadId: params.threadId,
 			// An uploaded document is untrusted external content → `upload` channel +

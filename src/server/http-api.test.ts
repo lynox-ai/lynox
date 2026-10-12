@@ -15,7 +15,7 @@ import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
-import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
+import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
@@ -2011,6 +2011,76 @@ describe('LynoxHTTPApi', () => {
         engineRef['getKnowledgeLayer'] = orig.kl;
         engineRef['getKnowledgeStore'] = orig.ks;
         engineRef['getActiveScopes'] = orig.scopes;
+      }
+    });
+
+    it('writes no document archive from a chat that is in private mode', async () => {
+      // The wiring half of the private check: `ingestDocumentText` asks `isPrivate`, and
+      // only the route can hand it the thread row's answer. Private first, then the same
+      // chat with private mode off — the ordering makes "nothing was written" a positive
+      // assertion, as in the DK case above.
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = {
+        kl: engineRef['getKnowledgeLayer'],
+        ks: engineRef['getKnowledgeStore'],
+        scopes: engineRef['getActiveScopes'],
+        ts: engineRef['getThreadStore'],
+      };
+      const stored: string[] = [];
+      let privateMode = 1;
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => {
+          stored.push(text);
+          // The switch flipped while this document's chunks are being stored.
+          if (text.startsWith('[Document: flip.docx]')) privateMode = 1;
+          return Promise.resolve({});
+        },
+      });
+      engineRef['getKnowledgeStore'] = (): unknown => null;
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+      // The mock engine has no thread store (null); the route reads the private flag from
+      // the thread row, so this one answers only that.
+      engineRef['getThreadStore'] = (): unknown => ({
+        getThread: (id: string) => ({ id, skip_extraction: privateMode }),
+      });
+
+      const pdf = buildPdf('Zahlungsziel 30 Tage').toString('base64');
+      const upload = (name: string): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'lies das', files: [{ name, type: 'application/pdf', data: pdf }] }),
+      });
+      try {
+        expect((await upload('private.pdf')).status).toBe(200);
+        privateMode = 0;
+        expect((await upload('public.pdf')).status).toBe(200);
+        await vi.waitFor(() => { expect(stored.length).toBeGreaterThan(0); });
+        expect(stored.every(t => t.startsWith('[Document: public.pdf]'))).toBe(true);
+        expect(stored.some(t => t.includes('private.pdf')), 'the private chat archived its upload').toBe(false);
+
+        // The flag is read from the thread row per chunk, not captured once by the route.
+        // A long document (several chunks), private mode switched on by the first store.
+        // A .docx, because the one-line PDF fixture clips its text at the page edge.
+        const longDocx = buildDocx('Zahlungsziel '.repeat(500)).toString('base64');
+        const uploadLong = (name: string): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'lies das', files: [{ name, type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', data: longDocx }] }),
+        });
+        const count = (name: string): number => stored.filter(t => t.startsWith(`[Document: ${name}]`)).length;
+        // Positive control first: the same document, never private, is more than one chunk.
+        privateMode = 0;
+        expect((await uploadLong('long.docx')).status).toBe(200);
+        await vi.waitFor(() => { expect(count('long.docx')).toBeGreaterThan(1); });
+        privateMode = 0;
+        expect((await uploadLong('flip.docx')).status).toBe(200);
+        await vi.waitFor(() => { expect(count('flip.docx')).toBeGreaterThan(0); });
+        // Settle: a capture-once route would keep storing every remaining chunk.
+        await new Promise(r => setTimeout(r, 50));
+        expect(count('flip.docx')).toBe(1);
+      } finally {
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getKnowledgeStore'] = orig.ks;
+        engineRef['getActiveScopes'] = orig.scopes;
+        engineRef['getThreadStore'] = orig.ts;
       }
     });
 
