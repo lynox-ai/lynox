@@ -1057,6 +1057,18 @@ const MIGRATIONS: string[] = [
      done INTEGER NOT NULL DEFAULT 0
    );
    INSERT OR IGNORE INTO profile_seed_backfill (id, done) VALUES (1, 0);`,
+
+  // v30: the subjects a conversation's writes created. Private mode removes such a subject once
+  // nothing holds it any more; a subject that existed before the conversation named it is not
+  // the conversation's to remove. Keyed by subject, not by entry: a write can create a subject
+  // and still fold into an entry about another one.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (30);
+   CREATE TABLE IF NOT EXISTS subject_mints (
+     subject_id TEXT PRIMARY KEY,
+     thread_id  TEXT NOT NULL,
+     minted_at  TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX IF NOT EXISTS idx_subject_mints_thread ON subject_mints(thread_id);`,
 ];
 
 /**
