@@ -11312,26 +11312,36 @@ describe('LynoxHTTPApi', () => {
       expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
     });
 
-    it('Google error param (e.g. ?error=access_denied) → 400 with error surfaced', async () => {
+    it('Google error param access_denied → back to the card with the contract code', async () => {
       const cbRes = await fetch(`${baseUrl}/api/google/callback?error=access_denied`);
-      expect(cbRes.status).toBe(400);
+      expect(cbRes.status).toBe(200);
 
       const body = await cbRes.text();
-      expect(body).toContain('access_denied');
-      expect(body).toContain('You can close this tab');
+      expect(body).toContain('/app/settings/channels/google?google_oauth_error=access_denied"');
       expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
     });
 
-    it('Google error param is HTML-escaped (XSS guard)', async () => {
-      // Google never sends this in practice, but the handler must escape
-      // anything that arrives in the error querystring.
+    it('any other Google error param → exchange_failed, and Google\'s own code is not shown', async () => {
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?error=admin_policy_enforced`);
+      expect(cbRes.status).toBe(200);
+
+      const body = await cbRes.text();
+      expect(body).toContain('/app/settings/channels/google?google_oauth_error=exchange_failed"');
+      expect(body).not.toContain('admin_policy_enforced');
+      expect(mockGoogleExchangeRedirectCode).not.toHaveBeenCalled();
+    });
+
+    it('a hostile error param never reaches the page (XSS guard)', async () => {
+      // Google never sends this in practice; the handler maps it to a contract
+      // code, so nothing from the querystring is rendered at all.
       const malicious = '<script>alert(1)</script>';
       const cbRes = await fetch(`${baseUrl}/api/google/callback?error=${encodeURIComponent(malicious)}`);
-      expect(cbRes.status).toBe(400);
+      expect(cbRes.status).toBe(200);
 
       const body = await cbRes.text();
       expect(body).not.toContain('<script>alert(1)</script>');
-      expect(body).toContain('&lt;script&gt;');
+      expect(body).not.toContain('&lt;script&gt;');
+      expect(body).toContain('google_oauth_error=exchange_failed');
     });
 
     it('callback without the state cookie → 400 (cookie now required for CSRF guard)', async () => {

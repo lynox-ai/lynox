@@ -474,3 +474,41 @@ export interface OAuthRevokeRequest {
 export interface OAuthRevokeResponse {
   revoked: true;
 }
+
+/**
+ * Why the control plane refused to START a Google consent flow, as sent on the
+ * wire: the signed start token was absent, past its TTL, already spent, forged,
+ * or names an instance that is not bound. `expired` has a second producer on the
+ * callback side (a grant that outlived its latency budget), which is why it is
+ * not repeated in {@link OAUTH_DECLINE_CODES}.
+ */
+export const BROKER_START_FAILURES = [
+  'missing_token',
+  'expired',
+  'replayed',
+  'bad_signature',
+  'instance_unbound',
+] as const;
+
+export type BrokerStartFailure = (typeof BROKER_START_FAILURES)[number];
+
+/**
+ * The CLOSED set of `google_oauth_error` values the control plane appends when it
+ * sends the browser back to the instance without a grant: every start failure,
+ * the user declining at Google (`access_denied`), and everything else collapsed
+ * into `exchange_failed`. Google's own error vocabulary is open-ended, so the
+ * control plane never forwards it; a value outside this set is not ours, and the
+ * reader treats it as a failed connect.
+ */
+export const OAUTH_DECLINE_CODES = [
+  ...BROKER_START_FAILURES,
+  'access_denied',
+  'exchange_failed',
+] as const;
+
+export type OAuthDeclineCode = (typeof OAUTH_DECLINE_CODES)[number];
+
+/** Runtime membership test for a `google_oauth_error` value read off a URL. */
+export function isOAuthDeclineCode(value: unknown): value is OAuthDeclineCode {
+  return typeof value === 'string' && (OAUTH_DECLINE_CODES as readonly string[]).includes(value);
+}

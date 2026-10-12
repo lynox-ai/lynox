@@ -82,6 +82,11 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'MAGIC_LINK_ERROR_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MAGIC_LINK_ERROR_CODES') },
   { name: 'MagicLinkErrorCode', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkErrorCode') },
   { name: 'isMagicLinkErrorCode', contractFile: 'http.ts', twinPattern: valueTwin('isMagicLinkErrorCode') },
+  { name: 'BROKER_START_FAILURES', contractFile: 'http.ts', twinPattern: valueTwin('BROKER_START_FAILURES') },
+  { name: 'BrokerStartFailure', contractFile: 'http.ts', twinPattern: typeTwin('BrokerStartFailure') },
+  { name: 'OAUTH_DECLINE_CODES', contractFile: 'http.ts', twinPattern: valueTwin('OAUTH_DECLINE_CODES') },
+  { name: 'OAuthDeclineCode', contractFile: 'http.ts', twinPattern: typeTwin('OAuthDeclineCode') },
+  { name: 'isOAuthDeclineCode', contractFile: 'http.ts', twinPattern: valueTwin('isOAuthDeclineCode') },
   { name: 'AuthErrorBody', contractFile: 'http.ts', twinPattern: typeTwin('AuthErrorBody') },
   // Born in the contract: the login principal the control plane hands the web-ui.
   { name: 'LOGIN_PRINCIPAL_VERSION', contractFile: 'http.ts', twinPattern: valueTwin('LOGIN_PRINCIPAL_VERSION') },
