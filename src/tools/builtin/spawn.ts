@@ -1813,8 +1813,18 @@ async function executeThinker(
     // Private mode reaches the child too. It is spawned from the chat but does not run as it, so
     // it has no `currentThreadId`: the memory tools check the chat it came from instead, and its
     // end-of-turn capture stays off whenever the parent's is.
+    //
+    // Read through to the parent on every access, not copied at spawn: the switch can be flipped
+    // while the child runs, and its capture asks this flag before and after its extraction call.
+    // The child's own value still counts, so a child that has capture off keeps it off.
     childAgent.originThreadId = parentAgent.currentThreadId ?? parentAgent.originThreadId;
-    if (parentAgent.skipMemoryExtraction === true) childAgent.skipMemoryExtraction = true;
+    let childSkipsCapture = childAgent.skipMemoryExtraction === true;
+    Object.defineProperty(childAgent, 'skipMemoryExtraction', {
+      configurable: true,
+      enumerable: true,
+      get: (): boolean => childSkipsCapture || parentAgent.skipMemoryExtraction === true,
+      set: (value: boolean): void => { childSkipsCapture = value; },
+    });
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone), { disposableDeadline: deadline?.signal });

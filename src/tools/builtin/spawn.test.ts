@@ -1687,6 +1687,31 @@ describe('spawn_agent tool', () => {
     expect(grandchild.skipMemoryExtraction).not.toBe(true);
   });
 
+  it('a switch flipped while the child runs reaches it: the child reads the parent\'s flag, not a copy', async () => {
+    const parent = makeAgent({ currentThreadId: 't-1', skipMemoryExtraction: false } as Partial<IAgent>);
+    const seen: boolean[] = [];
+    mockSend.mockImplementationOnce(async function (this: IAgent) {
+      // Read before and after the flip, inside the run: the before-read is the control that the
+      // child starts with capture on, so a `true` afterwards can only come from the switch.
+      seen.push(this.skipMemoryExtraction === true);
+      (parent as { skipMemoryExtraction?: boolean }).skipMemoryExtraction = true;
+      seen.push(this.skipMemoryExtraction === true);
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, parent);
+    expect(seen).toEqual([false, true]);
+  });
+
+  it('a child that turned its own capture off keeps it off while the parent\'s is on', async () => {
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const parent = makeAgent({ currentThreadId: 't-1', skipMemoryExtraction: false } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, parent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as { skipMemoryExtraction: boolean };
+    expect(child.skipMemoryExtraction).toBe(false);
+    child.skipMemoryExtraction = true;
+    expect(child.skipMemoryExtraction).toBe(true);
+  });
+
   it('F5/S8: an INHERITED taint seeds the sticky latch only — not the run marker', async () => {
     // The gate is identical either way, but the marker is also what gets REPORTED: the review
     // chip names the cause. `noteUntrustedData()` here would make a turn that read nothing
