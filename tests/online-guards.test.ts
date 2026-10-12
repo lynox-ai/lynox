@@ -14,6 +14,8 @@ import { CASES } from './online/lazy-tool-cases.js';
 import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, MODEL_ENV, PRESETS_UNDER_TEST } from './online/provider-presets.js';
 import { FIREWORKS_HOST, pinnedSlots } from './online/preset-slots.js';
 import { fitnessRosterIds } from './online/fitness-roster.js';
+import { WITHDRAWN_FIREWORKS_IDS, pickerModels } from './online/picker-models.js';
+import { modelCapability } from '../src/types/models.js';
 import { ALL_CANDIDATES } from '../scripts/model-fitness/models.js';
 import { CANDIDATES as REPLAY_CANDIDATES } from '../scripts/model-fitness/replay.js';
 import { JUDGE_MODEL } from '../scripts/model-fitness/judge.js';
@@ -56,6 +58,23 @@ describe('preset slots coverage', () => {
   // stopped pinning anything, which is itself worth failing on.
   it('the presets pin at least one Fireworks-hosted slot', () => {
     expect(pinnedSlots().filter(s => s.baseUrl.includes(FIREWORKS_HOST)).length).toBeGreaterThan(0);
+  });
+});
+
+describe('picker models coverage', () => {
+  // The online check skips on an empty list, so emptiness is checked here.
+  const fireworks = pickerModels().filter(m => m.baseUrl.includes(FIREWORKS_HOST)).map(m => m.modelId);
+  it('the picker offers at least one Fireworks-hosted model', () => {
+    expect(fireworks.length).toBeGreaterThan(0);
+  });
+  it('every picker model is Fireworks-hosted (the online check calls only that host)', () => {
+    expect(pickerModels().filter(m => !m.baseUrl.includes(FIREWORKS_HOST)).map(m => m.modelId)).toEqual([]);
+  });
+  it('offers none of the withdrawn ids', () => {
+    expect(fireworks.filter(id => WITHDRAWN_FIREWORKS_IDS.includes(id))).toEqual([]);
+  });
+  it('a withdrawn id keeps its capability row, so the engine still prices a config that names one', () => {
+    expect(WITHDRAWN_FIREWORKS_IDS.filter(id => modelCapability(id)?.pricing === undefined)).toEqual([]);
   });
 });
 
