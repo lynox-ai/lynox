@@ -1949,6 +1949,31 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    it('masks a credential typed into the message before the run gets it, and points the model to ask_secret', async () => {
+      // Built at run time: a key-shaped literal in a fixture trips the public-repo pattern scan.
+      const shopify = 'shp' + 'at_' + 'a1'.repeat(16);
+      mockSessionRun.mockClear();
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: `Token: ${shopify}, bitte Shopify einrichten` }),
+      });
+      await res.text();
+      const task = String((mockSessionRun.mock.calls[0] as unknown[] | undefined)?.[0]);
+      expect(task).not.toContain(shopify);
+      expect(task).toContain(`Token: ***${shopify.slice(-4)}, bitte Shopify einrichten`);
+      expect(task).toContain('collect it with ask_secret');
+    });
+
+    it('hands a message without a credential to the run as typed', async () => {
+      mockSessionRun.mockClear();
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'Commit a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 bitte prüfen' }),
+      });
+      await res.text();
+      expect(String((mockSessionRun.mock.calls[0] as unknown[] | undefined)?.[0])).toBe('Commit a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 bitte prüfen');
+    });
+
     it('carries fatal through to the wire on an ENGINE error, not just the catch', async () => {
       // The other test covers http-api's own catch. This covers the path every
       // engine event takes: session.onStream -> JSON.stringify -> res.write.

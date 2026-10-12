@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 import { LLM_CATALOG } from './llm/catalog.js';
 import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
@@ -736,5 +736,70 @@ describe('SECRET_SHAPES — the shared credential shape list', () => {
   ])('leaves a word that only contains a key prefix alone: %s', (text) => {
     expect(maskSecretPatterns(text)).toBe(text);
     expect(matchesSecretPattern(text)).toBeNull();
+  });
+});
+
+describe('maskCredentialInput', () => {
+  const pemHead = '-----BEGIN ' + 'PRIVATE KEY-----';
+  const pemTail = '-----END ' + 'PRIVATE KEY-----';
+
+  it('takes a private key out as a whole block, not only its header', () => {
+    const body = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC';
+    const { text, labels } = maskCredentialInput(`Key:\n${pemHead}\n${body}\n${pemTail}\nDanke`);
+    expect(text).toBe('Key:\n***\nDanke');
+    expect(labels).toEqual(['private key']);
+  });
+
+  it('takes a key block without its END line out to the end of the text', () => {
+    const { text } = maskCredentialInput(`${pemHead}\nMIIEvQIBADANBgkqhkiG9w0`);
+    expect(text).toBe('***');
+  });
+
+  it('names each kind of value it removed once', () => {
+    const stripe = 'sk_' + 'live_' + 'Ab1'.repeat(6);
+    const { text, labels } = maskCredentialInput(`${stripe} und ${stripe}`);
+    expect(text).not.toContain(stripe);
+    expect(labels).toEqual(['Stripe API key']);
+  });
+
+  it('takes several key blocks out one by one and keeps the text between them', () => {
+    const block = `${pemHead}\nMIIEvQIBADANBgkqhkiG9w0\n${pemTail}`;
+    expect(maskCredentialInput(`a ${block} b ${block} c`).text).toBe('a *** b *** c');
+  });
+
+  it('finds a key followed directly by a word character, as the web UI does', () => {
+    const shopify = 'shp' + 'at_' + 'a1'.repeat(16);
+    const stripe = 'sk_' + 'live_' + 'Ab1'.repeat(8);
+    const { text } = maskCredentialInput(`${shopify}zz ${stripe}_prod`);
+    expect(text).not.toContain(shopify);
+    expect(text).not.toContain(stripe);
+  });
+
+  it('leaves a hash, a UUID and a plain URL alone', () => {
+    const plain = 'a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 9b2e6c1a-4f3d-4e2a-9c1b-7d8e9f0a1b2c https://shop.example/admin';
+    expect(maskCredentialInput(plain)).toEqual({ text: plain, labels: [] });
+  });
+});
+
+describe('withoutTypedCredentials', () => {
+  it('masks the value and tells the model what was removed and to use ask_secret', () => {
+    const stripe = 'sk_' + 'live_' + 'Ab1'.repeat(6);
+    const out = withoutTypedCredentials(`Key ${stripe}`);
+    expect(out).toBe(`Key ***${stripe.slice(-4)}\n\n[lynox: removed from this message before it was saved or sent on: Stripe API key. ` +
+      'If the user meant to give you a credential, collect it with ask_secret; do not ask for it in chat again.]');
+  });
+
+  it('masks a JWT and names every kind it removed, in order', () => {
+    // Built at run time: a token-shaped literal in a fixture trips the public-repo pattern scan.
+    const jwt = ['ey' + 'JhbGciOiJIUzI1NiJ9', 'ey' + 'JzdWIiOiIxMjM0NTY3ODkwIn0', 'dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'].join('.');
+    const stripe = 'sk_' + 'live_' + 'Ab1'.repeat(6);
+    const out = withoutTypedCredentials(`${stripe} ${jwt}`);
+    expect(out).not.toContain(jwt);
+    expect(out).toContain('sent on: Stripe API key, JWT token. ');
+  });
+
+  it('returns a message without one exactly as typed', () => {
+    const plain = 'Wie ist der Umsatz im Q3?';
+    expect(withoutTypedCredentials(plain)).toBe(plain);
   });
 });

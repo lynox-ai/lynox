@@ -298,6 +298,55 @@ export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boole
 }
 
 /**
+ * The shapes that are a credential wherever they appear, read the way the web UI's chat input
+ * check reads them: without the trailing word boundary, so a key followed directly by a word
+ * character is still found.
+ */
+const INPUT_SHAPES: ReadonlyArray<{ readonly label: string; readonly pattern: RegExp }> = SECRET_SHAPES
+  .filter((s) => s.kind === 'vendor' || s.kind === 'jwt')
+  .map((s) => ({
+    label: s.label,
+    pattern: s.pattern instanceof LinearJwtRegExp
+      ? new LinearJwtRegExp({
+        ...s.pattern.spec,
+        regex: new RegExp(s.pattern.spec.regex.source.replace(/\\b$/, ''), s.pattern.spec.regex.flags),
+        s3: s.pattern.spec.s3 === null ? null : { ...s.pattern.spec.s3, wordEnd: false },
+      }, 'g')
+      : new RegExp(s.pattern.source.replace(/\\b$/, ''), 'g'),
+  }));
+/** A private key from its BEGIN line to its END line, or to the end of the text when the END line is missing. */
+const KEY_BLOCK = /-----BEGIN\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----[\s\S]*?(?:-----END\s+(?:(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)\s+)?PRIVATE\s+KEY-----|$)/g;
+
+/**
+ * Remove credential-shaped values from a message a person typed, before anything stores or
+ * sends it. Same masking as `maskSecretPatterns` (`***<last4>`); a private key goes as a whole
+ * block, not just its header. Returns the labels of what was removed, each once.
+ */
+export function maskCredentialInput(text: string): { text: string; labels: string[] } {
+  const labels: string[] = [];
+  const note = (label: string): void => { if (!labels.includes(label)) labels.push(label); };
+  let result = text.replace(KEY_BLOCK, () => { note('private key'); return '***'; });
+  for (const shape of INPUT_SHAPES) {
+    result = result.replace(shape.pattern, (match) => {
+      note(shape.label);
+      return match.length <= 4 ? '***' : `***${match.slice(-4)}`;
+    });
+  }
+  return { text: result, labels };
+}
+
+/**
+ * A typed chat message with its credentials masked (`maskCredentialInput`), and a note to the
+ * model appended when any were, so it collects them through `ask_secret` instead.
+ */
+export function withoutTypedCredentials(text: string): string {
+  const { text: masked, labels } = maskCredentialInput(text);
+  if (labels.length === 0) return text;
+  return `${masked}\n\n[lynox: removed from this message before it was saved or sent on: ${labels.join(', ')}. ` +
+    'If the user meant to give you a credential, collect it with ask_secret; do not ask for it in chat again.]';
+}
+
+/**
  * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
  *
  * Running the two maskers in sequence is unsafe in BOTH orders, and that is
