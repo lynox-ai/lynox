@@ -58,7 +58,17 @@ describe('the Run-now refusal reaches its owner', () => {
     expect(I18N).toContain("'triggers.run_already':");
     // The route must NOT stamp a code on the already-running refusal, or the view's
     // default branch becomes unreachable.
-    const alreadyBranch = /already_running'\) \{ errorResponse\(res, 409, '([^']+)'\)/.exec(ROUTE);
-    expect(alreadyBranch, 'the plain 409 is still an errorResponse without a code').not.toBeNull();
+    // The branch may answer in more than one form (with the time a start can go through, or
+    // without); every form must leave the code out — a fourth argument that is absent or
+    // `undefined`.
+    const start = ROUTE.indexOf("if (outcome.reason === 'already_running') {");
+    expect(start, 'the already-running branch is still there').toBeGreaterThan(-1);
+    const branch = ROUTE.slice(start, ROUTE.indexOf('return;', start));
+    const answers = [...branch.matchAll(/errorResponse\(res, 409, (?:'[^']*'|`[^`]*`)(?:, ([^,)]+))?/g)];
+    expect(answers.length, 'the branch still answers with a 409').toBeGreaterThan(0);
+    // Every answer in the branch has to be one the pattern read: a form it cannot match (a
+    // message in a variable, an apostrophe in a quoted one) would otherwise pass unchecked.
+    expect(answers.length, 'an errorResponse in the branch has a form this check cannot read').toBe(branch.split('errorResponse(').length - 1);
+    for (const m of answers) expect(m[1] === undefined || m[1].trim() === 'undefined', `a 409 in the already-running branch stamps a code: ${m[0]}`).toBe(true);
   });
 });

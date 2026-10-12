@@ -1421,6 +1421,12 @@ const MIGRATIONS: string[] = [
   // writes, which `ownedBy` reads as the owner's.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (58);
    ALTER TABLE tasks ADD COLUMN created_by TEXT;`,
+  // v59: why a question was closed without an answer, where the reason is not its own expiry.
+  // `process_restarted` on every question the boot or shutdown sweep closes (`expireUnparked`),
+  // so an answer that arrives afterwards hears that the run is gone instead of a bare
+  // "expired". NULL on every other row, older ones included.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (59);
+   ALTER TABLE pending_prompts ADD COLUMN closed_reason TEXT;`,
 ];
 
 export class RunHistory {
@@ -3211,6 +3217,11 @@ export class RunHistory {
   /** Trigger run lease (engine.db v16) — see {@link TriggerStore.claimLease}. */
   claimTriggerLease(id: string, holder: string, until: string, now: string): 'claimed' | 'interrupted' | 'held' | 'not_found' {
     return this._requireTriggerStore().claimLease(id, holder, until, now);
+  }
+
+  /** See {@link TriggerStore.leaseUntil}. */
+  triggerLeaseUntil(id: string): string | null {
+    return this._triggerStore?.leaseUntil(id) ?? null;
   }
 
   renewTriggerLease(id: string, holder: string, until: string): boolean {

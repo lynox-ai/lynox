@@ -387,6 +387,13 @@ export interface ActiveTask {
 }
 
 /** What a stop would actually reach in the phase it arrives in. */
+/** What `runTriggerNow` answers. `leaseUntil` on `already_running` is when the run lease runs
+ *  out, the earliest a new run can start; absent when the store could not say. */
+export type RunTriggerNowOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'already_running'; leaseUntil?: string }
+  | { ok: false; reason: 'not_found' | 'awaiting_answer' | 'awaits_owner_stamp' };
+
 export type StopHandle = 'wait' | 'session' | 'signal';
 
 /**
@@ -716,7 +723,7 @@ export class WorkerLoop {
   async runTriggerNow(
     triggerId: string,
     marker?: HandRunMarker,
-  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
+  ): Promise<RunTriggerNowOutcome> {
     // A marker that is not dispatched is dropped on the way out, whatever refused it: it
     // was minted for this one request and must not wait for a later one.
     let dispatched = false;
@@ -742,7 +749,7 @@ export class WorkerLoop {
   async #runTriggerNow(
     triggerId: string,
     marker: HandRunMarker | undefined,
-  ): Promise<{ ok: true } | { ok: false; reason: 'not_found' | 'already_running' | 'awaiting_answer' | 'awaits_owner_stamp' }> {
+  ): Promise<RunTriggerNowOutcome> {
     const taskManager = this.engine.getTaskManager();
     if (!taskManager) return { ok: false, reason: 'not_found' };
     const trigger = taskManager.getTrigger(triggerId);
@@ -756,7 +763,7 @@ export class WorkerLoop {
     if (mandateNeedsOwnerStamp(trigger) && !handRunCovers(this.#handRunDoor.peek(marker, trigger.id), trigger)) {
       return { ok: false, reason: 'awaits_owner_stamp' };
     }
-    if (this.activeTasks.has(trigger.id)) return { ok: false, reason: 'already_running' };
+    if (this.activeTasks.has(trigger.id)) return this.#alreadyRunning(trigger.id);
     // ⛔ A trigger with an OPEN QUESTION is running too, and after a restart
     // `activeTasks` cannot say so. In-process the guard above covers it; in the next
     // process the map is empty and the lease is free — on a graceful deploy immediately,
@@ -799,11 +806,23 @@ export class WorkerLoop {
     // a manual one: running it again is what the person asked for.
     const lease = this.takeLease(trigger.id);
     if (lease === 'not_found') return { ok: false, reason: 'not_found' };
-    if (lease === 'held') return { ok: false, reason: 'already_running' };
+    if (lease === 'held') return this.#alreadyRunning(trigger.id);
     // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
     // activeTasks guard + run history key on exactly the row we found.
     void this.executeTask(trigger, null, marker);
     return { ok: true };
+  }
+
+  /** `already_running`, with the time its lease runs out when the store can say: the earliest a
+   *  run can be started again. After a deploy the lease of the lost run holds until its TTL, and
+   *  without the time the owner can only retry blindly. A live holder renews the lease, so it is a
+   *  lower bound. A time already past is left out: a run of this process whose renewals failed
+   *  still refuses a second start, and "again at <a past time>" would contradict the refusal. */
+  #alreadyRunning(triggerId: string): RunTriggerNowOutcome {
+    let leaseUntil: string | null = null;
+    try { leaseUntil = this.engine.getTaskManager()?.leaseUntil(triggerId) ?? null; } catch { /* the refusal stands without the time */ }
+    const ahead = leaseUntil !== null && Date.parse(leaseUntil) > Date.now();
+    return ahead ? { ok: false, reason: 'already_running', leaseUntil: leaseUntil! } : { ok: false, reason: 'already_running' };
   }
 
   /**
