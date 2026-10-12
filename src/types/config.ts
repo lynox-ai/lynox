@@ -50,6 +50,8 @@ export interface AgentConfig {
   onStream?:        EmittingStreamHandler | undefined;
   workerPool?:      IWorkerPool | undefined;
   promptUser?:      PromptUserFn | undefined;
+  /** The question channel of `ask_user` alone (`Agent.askUserPrompt`): no consent gate reads it. */
+  askUserPrompt?:   PromptUserFn | undefined;
   promptTabs?:      PromptTabsFn | undefined;
   promptSecret?:    PromptSecretFn | undefined;
   promptMailConnect?: PromptMailConnectFn | undefined;
