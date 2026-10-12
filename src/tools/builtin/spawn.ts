@@ -2390,7 +2390,15 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           return parentStream({ ...event, subAgent: sub.name, subAgentId: sub.id });
         }
         if (event.type === 'error') {
-          return parentStream(event);
+          // Stamped like its neighbours, so a consumer can tell a child's incident
+          // from the parent's own. `fatal` is set to false rather than passed on:
+          // it answers "is THIS stream's turn over?", and a child's end is never
+          // the parent's — `Promise.allSettled` below settles every child and the
+          // parent turn goes on. Today no child can emit `fatal: true` (the only
+          // such emitter is the 500-iteration backstop, and a child always runs
+          // with `maxIterations` ≤ MAX_SPAWN_TURNS — see `absolute_cap` below), so
+          // this is a guard, not a fix for something observed.
+          return parentStream({ ...event, fatal: false, subAgent: sub.name, subAgentId: sub.id });
         }
         // Swallow the rest — keeps the stream manageable.
         return undefined;

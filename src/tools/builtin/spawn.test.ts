@@ -1363,6 +1363,61 @@ describe('spawn_agent tool', () => {
       expect(result).toMatchObject({ type: 'tool_result', name: 'read_file', subAgent: 'digger', subAgentId: sub.id });
     });
 
+    // Error events from a child, emitted through the wrapper that child was built
+    // with. Matched by the child's own name, not by construction order: two
+    // children of one batch run concurrently.
+    async function spawnWithChildError(
+      names: string[],
+      erring: string,
+      fatal: boolean,
+    ): Promise<{ errors: Record<string, unknown>[]; subs: Array<{ id: string; name: string }> }> {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const onStream = vi.fn();
+      let emitted = false;
+      mockSend.mockImplementation(async () => {
+        const cfg = vi.mocked(MockAgent).mock.calls
+          .map((c) => c[0] as { name?: string; onStream: StreamHandler })
+          .find((c) => c.name === erring);
+        if (cfg && !emitted) {
+          emitted = true;
+          await cfg.onStream({ type: 'error', message: `Failed to parse tool input for read_file`, fatal, agent: erring });
+        }
+        return 'done';
+      });
+      await spawnAgentTool.handler(
+        { agents: names.map((name) => ({ name, task: 'dig' })) },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      return {
+        errors: streamEvents(onStream).filter((e) => e['type'] === 'error'),
+        subs: spawn['subAgents'] as Array<{ id: string; name: string }>,
+      };
+    }
+
+    it('tags a child error with its origin', async () => {
+      // The reachable shape: stream.ts sends an unparsable tool input as `fatal: false`.
+      const { errors, subs } = await spawnWithChildError(['digger'], 'digger', false);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ subAgent: 'digger', subAgentId: subs[0]!.id, fatal: false });
+      expect(errors[0]!['message']).toBe('Failed to parse tool input for read_file');
+    });
+
+    it('tags a child error with the child that raised it, not a sibling', async () => {
+      const { errors, subs } = await spawnWithChildError(['first', 'second'], 'second', false);
+      const second = subs.find((s) => s.name === 'second')!;
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ subAgent: 'second', subAgentId: second.id });
+    });
+
+    it('never forwards a child error as the end of the parent turn', async () => {
+      // Guard: no child can emit `fatal: true` today (its maxIterations is capped
+      // far below the 500 backstop), but a child's end is never the parent's.
+      const { errors } = await spawnWithChildError(['digger'], 'digger', true);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!['fatal']).toBe(false);
+    });
+
     it('names the model the child is actually built with, not the requested tier', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const onStream = vi.fn();
