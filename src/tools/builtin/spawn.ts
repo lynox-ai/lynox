@@ -2025,7 +2025,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
               tools: { type: 'array', items: { type: 'string' }, description: 'Narrows the child to these of your tools; it cannot widen a grant.' },
               max_turns: { type: 'number', minimum: 1, maximum: MAX_SPAWN_TURNS },
               max_budget_usd: { type: 'number', minimum: 0, maximum: MAX_SPAWN_BUDGET_USD },
-              profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Configured in config.json.' },
+              profile: { type: 'string', description: 'Named model profile for non-Claude provider (e.g. "mistral-eu", "gemini-research"). Set up by the operator.' },
               secret_scope: { oneOf: [{ type: 'array', items: { type: 'string' } }, { type: 'string', enum: ['all'] }], description: 'Vault keys this sub-agent may resolve. Default: only keys this task names via secret:NAME — not your whole vault. "all" passes on the full vault.' },
             },
             required: ['name', 'task'],

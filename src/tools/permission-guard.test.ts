@@ -447,7 +447,20 @@ describe('isDangerous', () => {
     });
 
     it('returns null for bash touching non-secret .lynox files', () => {
-      expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json' }, 'autonomous')).toBeNull();
+      expect(isDangerous('bash', { command: 'cat ~/.lynox/apis/stripe.json' }, 'autonomous')).toBeNull();
+      // A top-level non-secret JSON file next to config.json stays readable.
+      expect(isDangerous('bash', { command: 'cat ~/.lynox/notes.json' }, 'autonomous')).toBeNull();
+    });
+
+    // `config.json` holds the operator's provider keys on a self-hosted install; it is a secret
+    // entry of the data-dir inventory and reaches the bash list through that flag.
+    it('BLOCKS cat of the lynox config.json in autonomous mode, and flags it interactively', () => {
+      const blocked = isDangerous('bash', { command: 'cat ~/.lynox/config.json' }, 'autonomous');
+      expect(blocked).toContain('[BLOCKED');
+      expect(blocked).toContain('lynox secret store');
+      expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json' })).toContain('lynox secret store');
+      // A copy with a dotted suffix matches as well.
+      expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json.bak' }, 'autonomous')).toContain('[BLOCKED');
     });
 
     it('returns null for the hyphen-free lookalike http_secret', () => {
@@ -703,7 +716,7 @@ describe('isDangerous', () => {
 
     it('does NOT block non-database files in the lynox dir', () => {
       expect(isDangerous('bash', { command: 'ls -la ~/.lynox/' }, 'autonomous')).toBeNull();
-      expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json' }, 'autonomous')).toBeNull();
+      expect(isDangerous('bash', { command: 'cat ~/.lynox/apis/stripe.json' }, 'autonomous')).toBeNull();
       expect(isDangerous('bash', { command: 'cat ~/.lynox/notes.db.md' }, 'autonomous')).toBeNull();
       // A copy with a further suffix is not a live store.
       expect(isDangerous('bash', { command: 'ls -la ~/.lynox/engine.db.bak' }, 'autonomous')).toBeNull();
@@ -1610,8 +1623,14 @@ describe('isDangerous', () => {
       expect(result).toContain('read sensitive path');
     });
 
-    it('returns null for read_file on lynox config.json (non-secret .lynox file)', () => {
-      expect(isDangerous('read_file', { path: '/home/op/.lynox/config.json' })).toBeNull();
+    it('flags read_file on the lynox config.json in interactive mode', () => {
+      const result = isDangerous('read_file', { path: '/home/op/.lynox/config.json' });
+      expect(result).toContain('read sensitive path');
+      expect(result).not.toContain('[BLOCKED');
+    });
+
+    it('returns null for read_file on a non-secret .lynox file', () => {
+      expect(isDangerous('read_file', { path: '/home/op/.lynox/apis/stripe.json' })).toBeNull();
     });
 
     it('BLOCKS write_file on the engine HTTP secret in autonomous mode', () => {
@@ -1983,9 +2002,15 @@ describe('isDangerous', () => {
   // LYNOX_WORKSPACE so workspace gating is off — denylist via SENSITIVE_PATHS is
   // the only line of defense. Tests pair every BLOCK case with a LEGIT case to
   // prevent the denylist from regressing legitimate "summarize my Desktop report"
-  // / "read /tmp/upload.txt" / "read my own ~/.lynox/config.json" flows.
+  // / "read /tmp/upload.txt" / "read my own ~/.lynox/sessions/…" flows.
   describe('H-003 SENSITIVE_PATHS expansion (lynox DBs + shell histories + Keychain + browsers)', () => {
     describe('A. security regressions — blocks LLM-driven exfiltration', () => {
+      it('BLOCKS read_file and write_file on ~/.lynox/config.json (operator credentials on self-host)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/.lynox/config.json' }, 'autonomous')).toContain('[BLOCKED');
+        expect(isDangerous('write_file', { path: '/Users/foo/.lynox/config.json', content: '{}' }, 'autonomous')).toContain('[BLOCKED');
+        expect(isDangerous('bash', { command: "sed -i 's/a/b/' ~/.lynox/config.json" }, 'autonomous')).toContain('[BLOCKED');
+      });
+
       it('BLOCKS read_file on ~/.lynox/vault.db (macOS path)', () => {
         const result = isDangerous('read_file', { path: '/Users/foo/.lynox/vault.db' }, 'autonomous');
         expect(result).not.toBeNull();
@@ -2095,8 +2120,8 @@ describe('isDangerous', () => {
         expect(isDangerous('read_file', { path: '/Users/foo/Desktop/notes.md' }, 'autonomous')).toBeNull();
       });
 
-      it('allows read_file on ~/.lynox/config.json (lynox MUST read its own non-secret config)', () => {
-        expect(isDangerous('read_file', { path: '/Users/foo/.lynox/config.json' }, 'autonomous')).toBeNull();
+      it('allows read_file on ~/.lynox/apis/stripe.json (non-secret lynox file)', () => {
+        expect(isDangerous('read_file', { path: '/Users/foo/.lynox/apis/stripe.json' }, 'autonomous')).toBeNull();
       });
 
       it('allows read_file on ~/.lynox/sessions/abc.json (lynox MUST read its own session files)', () => {
@@ -2682,12 +2707,12 @@ describe('isDangerous', () => {
       ['mkdir -p ~/.lynox/apis', 'write into the lynox data dir'],
       ['tar -xf a.tar -C ~/.lynox', 'write into the lynox data dir'],
       ['unzip a.zip -d ~/.lynox/apis', 'write into the lynox data dir'],
-      ["sed -i 's/a/b/' ~/.lynox/config.json", 'write into the lynox data dir'],
+      ["sed -i 's/a/b/' ~/.lynox/apis/crm.json", 'write into the lynox data dir'],
       ['git clone https://x.test/r ~/.lynox/apis', 'write into the lynox data dir'],
       ['rm ~/.lynox/apis/x', 'write into the lynox data dir'],
       ['rmdir ~/.lynox/apis', 'write into the lynox data dir'],
       ['unlink ~/.lynox/apis/x', 'write into the lynox data dir'],
-      ['patch ~/.lynox/config.json < p.diff', 'write into the lynox data dir'],
+      ['patch ~/.lynox/apis/crm.json < p.diff', 'write into the lynox data dir'],
       ['cd ~/.lynox && echo x > apis/y', 'write into the lynox data dir'],
       ['pushd "$HOME/.lynox/apis"', 'write into the lynox data dir'],
       ['install -m 600 p.json ~/.lynox/apis/crm.json', 'write into the lynox data dir'],

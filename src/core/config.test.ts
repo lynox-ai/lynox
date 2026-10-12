@@ -78,6 +78,21 @@ describe('Config', () => {
     expect(config).toEqual({});
   });
 
+  // The agent's path guard refuses `config.json` (a secret entry of the data-dir inventory); the
+  // engine reads it through the filesystem, which the guard does not see. Both halves, one file.
+  it('reads the user config.json the agent path guard refuses', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    const configPath = join(dir, 'config.json');
+    writeFileSync(configPath, JSON.stringify({ api_key: 'test-key-guarded', default_tier: 'fast' }));
+    const { loadConfig } = await import('./config.js');
+    const { isDangerous } = await import('../tools/permission-guard.js');
+    const config = loadConfig();
+    expect(config.api_key).toBe('test-key-guarded');
+    expect(config.default_tier).toBe('fast');
+    expect(isDangerous('read_file', { path: configPath }, 'autonomous')).toContain('[BLOCKED');
+  });
+
   it('loads user-level config', async () => {
     const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
