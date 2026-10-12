@@ -9,7 +9,7 @@ import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 import type { HookHost } from './metered-request.js';
 import type { LLMProvider, ProcessRecord, ProcessStep, ProcessParameter, SessionCounters } from '../types/index.js';
 import type { ToolCallRecord } from './run-history.js';
-import { settleForcedTool, reportForcedToolMiss } from './llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 
 /** Tools that are internal bookkeeping — excluded from process capture */
 const INTERNAL_TOOLS = new Set([
@@ -441,6 +441,7 @@ export async function captureProcess(
   }
 
   reportForcedToolMiss('process-capture', missed);
+  reportForcedToolCutOff('process-capture', modelId, response);
 
   // Extract annotations + parameters from the tool use response.
   const annotations: StepAnnotation[] = [];

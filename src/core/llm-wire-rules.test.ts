@@ -235,7 +235,7 @@ describe('every call site that forces a tool handles the lost call', () => {
     // route the reply through settleForcedTool (books once) and reportForcedToolMiss (says
     // so) — one of each per forcing site. A new forcing site fails here until it does.
     const root = join(__dirname, '..');
-    const perFile = new Map<string, { forces: number; settles: number; reports: number; unchecked: number }>();
+    const perFile = new Map<string, { forces: number; settles: number; reports: number; cutOffs: number; unchecked: number }>();
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
@@ -250,6 +250,9 @@ describe('every call site that forces a tool handles the lost call', () => {
           forces,
           settles: (src.match(/settleForcedTool\(/g) ?? []).length,
           reports: (src.match(/reportForcedToolMiss\(/g) ?? []).length,
+          // A reply cut off at `max_tokens` can carry the call with a partial input, which
+          // the miss check counts as a call. One cut-off report per forcing site says so.
+          cutOffs: (src.match(/reportForcedToolCutOff\(/g) ?? []).length,
           // The boundary checks the reply on `create` and on a stream's `finalMessage()` only.
           // These readers get the reply past that check, so a forcing file must not use them.
           unchecked: (src.match(/\.finalText\(|\.done\(\)|['"]finalMessage['"]|stream:\s*true/g) ?? []).length,
@@ -268,6 +271,7 @@ describe('every call site that forces a tool handles the lost call', () => {
     for (const [file, n] of perFile) {
       expect(n.settles, `${file}: settleForcedTool per forcing site`).toBe(n.forces);
       expect(n.reports, `${file}: reportForcedToolMiss per forcing site`).toBe(n.forces);
+      expect(n.cutOffs, `${file}: reportForcedToolCutOff per forcing site`).toBe(n.forces);
       expect(n.unchecked, `${file}: reads a forced reply past the check (finalText / done / 'finalMessage' event / stream:true)`).toBe(0);
     }
   });

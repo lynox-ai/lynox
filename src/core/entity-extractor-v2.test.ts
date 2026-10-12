@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import { extractEntitiesV2, parseToolInput } from './entity-extractor-v2.js';
-import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
 
 describe('entity-extractor-v2 parseToolInput', () => {
   it('keeps proper-noun entities at sufficient confidence', () => {
@@ -209,5 +209,35 @@ describe('entity-extractor-v2 — a reply that lost the forced call', () => {
     // A bare await lands in the catch, which returns no costUsd: the spend would be lost.
     expect(result.costUsd).toBeGreaterThan(0);
     expect(forcedToolMissCounts()['entity-extractor']).toBe(before + 1);
+  });
+});
+
+describe('entity-extractor-v2 — a reply cut off at max_tokens', () => {
+  // A reply cut off at its output budget carries the forced call with an incomplete
+  // input. The miss check counts that as a call, so the cut-off is counted by name.
+  const cutClient = (stopReason: string): Anthropic => ({
+    beta: { messages: { stream: () => ({
+      finalMessage: async () => ({
+        stop_reason: stopReason,
+        content: [{ type: 'tool_use', id: 'toolu_1', name: 'record_kg_extraction', input: {} }],
+        usage: { input_tokens: 400, output_tokens: 4096 },
+      }),
+    }) } },
+  } as unknown as Anthropic);
+
+  it('returns the reply\'s cost for the debit and counts the cut-off by name', async () => {
+    const before = forcedToolCutOffCounts()['entity-extractor'] ?? 0;
+    const result = await extractEntitiesV2('Acme AG signed the contract with Beta GmbH in Zurich.', cutClient('max_tokens'));
+    expect(result.entities).toEqual([]);
+    expect(result.costUsd).toBeGreaterThan(0);
+    expect(forcedToolCutOffCounts()['entity-extractor'] ?? 0).toBe(before + 1);
+  });
+
+  it('the same incomplete reply that stopped on its own is NOT counted as a cut-off', async () => {
+    const before = forcedToolCutOffCounts()['entity-extractor'] ?? 0;
+    const result = await extractEntitiesV2('Acme AG signed the contract with Beta GmbH in Zurich.', cutClient('tool_use'));
+    expect(result.entities).toEqual([]);
+    expect(result.costUsd).toBeGreaterThan(0);
+    expect(forcedToolCutOffCounts()['entity-extractor'] ?? 0).toBe(before);
   });
 });

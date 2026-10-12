@@ -24,7 +24,7 @@ import { calculateCost } from '../../core/pricing.js';
 import { resolveTierModel } from '../../core/tier-resolver.js';
 import type { LLMProvider } from '../../types/index.js';
 import type { ProviderConfigSnapshot } from '../../types/agent.js';
-import { settleForcedTool, reportForcedToolMiss } from '../../core/llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff, isCutOffReply } from '../../core/llm-wire-rules.js';
 
 export interface RerankOptions {
   /** Score threshold 0-10 for keeping a result. Default: 4. */
@@ -39,7 +39,7 @@ export interface RerankOutcome {
   results: SearchResult[];
   droppedCount: number;
   meanScore: number | null;
-  skipReason?: 'disabled' | 'too-few-results' | 'provider-unsupported' | 'timeout' | 'llm-error' | 'malformed';
+  skipReason?: 'disabled' | 'too-few-results' | 'provider-unsupported' | 'timeout' | 'llm-error' | 'malformed' | 'cut-off';
   durationMs: number;
   /** Actual USD cost of the pool-key rerank call (from response.usage), for the
    *  managed in-run debit. Undefined when no LLM call was made (skip/error). */
@@ -204,6 +204,7 @@ export async function rerankSearchResults(
         })
       : undefined;
     reportForcedToolMiss('search-reranker', missed);
+    reportForcedToolCutOff('search-reranker', rerankModel, response);
 
     let scores: number[] | null = null;
     for (const block of response.content) {
@@ -217,7 +218,8 @@ export async function rerankSearchResults(
     }
 
     if (!scores || scores.length !== results.length) {
-      return base({ skipReason: 'malformed', ...(costUsd !== undefined ? { costUsd } : {}) });
+      // A reply cut off at the budget is named as such: its scores are incomplete, not wrong.
+      return base({ skipReason: isCutOffReply(response) ? 'cut-off' : 'malformed', ...(costUsd !== undefined ? { costUsd } : {}) });
     }
 
     const kept = results.filter((_, i) => (scores![i] ?? 0) >= threshold);
