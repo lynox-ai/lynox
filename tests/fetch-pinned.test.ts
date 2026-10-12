@@ -1,11 +1,12 @@
 /**
  * Tests for scripts/fetch-pinned.sh — the Whisper model download in the image
- * build — against a local HTTP server, through the same `sh` the build stage
- * uses.
+ * build — against a local HTTP server, through `sh` (dash on the Debian build
+ * stage and on the Ubuntu CI runners; on macOS `sh` is bash).
  *
  * Two claims, each with both directions:
- *   - Fallback: a source that fails hands over to the next one; a source that
- *     answers is used and the next one is never asked.
+ *   - Fallback: a source that fails — an error status, or a connection that goes
+ *     quiet — hands over to the next one; a source that answers is used and the
+ *     next one is never asked. A 504 is retried on the same source, a 404 is not.
  *   - Pin: wrong bytes fail the run on EITHER path (first source, or the
  *     fallback), and leave nothing at the destination.
  *
@@ -42,6 +43,7 @@ beforeAll(async () => {
     if (req.url === '/good') { res.end(GOOD); return; }
     if (req.url === '/other') { res.end(OTHER); return; }
     if (req.url === '/504') { res.statusCode = 504; res.end('gateway timeout'); return; }
+    if (req.url === '/stall') return; // accepts the request, never answers
     res.statusCode = 404; res.end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -49,7 +51,10 @@ beforeAll(async () => {
   if (addr === null || typeof addr === 'string') throw new Error('no port');
   base = `http://127.0.0.1:${addr.port}`;
 });
-afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())); });
+afterAll(async () => {
+  server.closeAllConnections();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 let dir: string;
 let dest: string;
@@ -60,11 +65,22 @@ beforeEach(() => {
 });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
+/** The test env: no retries, a short stall cut-off, and no proxy between curl and the local server. */
+function testEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, FETCH_RETRIES: '0', FETCH_RETRY_DELAY: '0', FETCH_SPEED_TIME: '2', ...extra };
+  for (const k of ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']) delete env[k];
+  return env;
+}
+
 /** Run the script asynchronously — a sync spawn would block the server it calls. */
 function run(sha: string, ...paths: string[]): Promise<{ code: number; stderr: string }> {
+  return runWith({}, sha, ...paths);
+}
+
+function runWith(extra: Record<string, string>, sha: string, ...paths: string[]): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn('sh', [SCRIPT, dest, sha, ...paths.map((p) => base + p)], {
-      env: { ...process.env, FETCH_RETRIES: '0', FETCH_RETRY_DELAY: '0' },
+      env: testEnv(extra),
       stdio: ['ignore', 'ignore', 'pipe'],
     });
     let stderr = '';
@@ -88,6 +104,19 @@ describe('fetch-pinned.sh — fallback', () => {
     expect(readFileSync(dest, 'utf8')).toBe(GOOD);
     expect(hits).toEqual(['/good']);
   });
+
+  it('moves on from a source that connects and then goes quiet', async () => {
+    const r = await run(GOOD_SHA, '/stall', '/good');
+    expect(r.code).toBe(0);
+    expect(readFileSync(dest, 'utf8')).toBe(GOOD);
+    expect(hits).toEqual(['/stall', '/good']);
+  }, 15_000);
+
+  it('retries a 504 on the same source, but hands a 404 over at once', async () => {
+    const r = await runWith({ FETCH_RETRIES: '2', FETCH_RETRY_DELAY: '1' }, GOOD_SHA, '/504', '/missing', '/good');
+    expect(r.code).toBe(0);
+    expect(hits).toEqual(['/504', '/504', '/504', '/missing', '/good']);
+  }, 15_000);
 
   it('fails when every source fails, and leaves nothing behind', async () => {
     const r = await run(GOOD_SHA, '/504', '/missing');
@@ -130,9 +159,17 @@ describe('the image build runs this script', () => {
     dockerfile.indexOf('FROM', dockerfile.indexOf('AS whisper-build')),
   );
   const call = stage.slice(stage.indexOf('fetch-pinned.sh /usr/share/whisper/ggml-base.bin'));
+  /** The whole RUN instruction that calls the script: from its RUN line to the first line without a trailing `\`. */
+  const runStart = stage.search(/^RUN --mount=type=bind,source=scripts\/fetch-pinned\.sh,target=\/tmp\/fetch-pinned\.sh \\$/m);
+  const instruction = runStart < 0 ? '' : stage.slice(runStart).split('\n').reduce<{ lines: string[]; open: boolean }>(
+    (acc, line) => (acc.open ? { lines: [...acc.lines, line], open: line.endsWith('\\') } : acc),
+    { lines: [], open: true },
+  ).lines.join('\n');
 
   it('downloads the model through fetch-pinned.sh, with the pinned hash', () => {
-    expect(stage).toContain('--mount=type=bind,source=scripts/fetch-pinned.sh,target=/tmp/fetch-pinned.sh');
+    // The mount must be the RUN instruction itself, not a comment that mentions it.
+    expect(runStart).toBeGreaterThanOrEqual(0);
+    expect(instruction).toContain('sh /tmp/fetch-pinned.sh /usr/share/whisper/ggml-base.bin');
     expect(call).toMatch(/^fetch-pinned\.sh \/usr\/share\/whisper\/ggml-base\.bin \\\n\s+60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe \\/);
   });
 
@@ -142,6 +179,11 @@ describe('the image build runs this script', () => {
       'https://github.com/lynox-ai/lynox/releases/download/whisper-models/ggml-base.bin',
       'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin',
     ]);
+  });
+
+  it('lets a failed download fail the build — no `||`, no `;` after the call', () => {
+    expect(instruction).not.toMatch(/\|\||;/);
+    expect(instruction.trimEnd().endsWith('/ggml-base.bin')).toBe(true);
   });
 
   it('has no second, unguarded download of the model left in the stage', () => {
