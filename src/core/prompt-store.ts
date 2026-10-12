@@ -787,6 +787,12 @@ export class PromptStore {
     return outcome.status === 'answered' ? outcome.row : undefined;
   }
 
+  /** Whether the database behind this store is still open. False once the engine closed it at
+   *  shutdown, which is how a reader can tell a closing process from a failing query. */
+  isOpen(): boolean {
+    return this.db.open;
+  }
+
   /** Like waitForAnswer but distinguishes why the wait ended. */
   waitForSettled(promptId: string, signal?: AbortSignal): Promise<PromptOutcome> {
     return new Promise<PromptOutcome>((resolve) => {

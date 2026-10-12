@@ -10,6 +10,8 @@ import type { RequestPrincipal } from './request-principal.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
 import { decideRunGrant, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
+import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
+import type { WorkflowQuestionWait } from './workflow-questions.js';
 
 /** `decideRunGrant` bound to this engine's schedules and keyed hash. */
 function grantDecider(engine: Engine, origin: GrantRunOrigin): (planned: PlannedPipeline) => GrantDecision {
@@ -94,6 +96,10 @@ export async function runGuardedSavedWorkflow(
      *  See `RunManifestOptions.stopSignal`. */
     stopSignal?: AbortSignal | undefined;
     abortScope?: AbortScope | undefined;
+    /** The question channel of a scheduled run and the state the runner reads off it (PRD 3b-2
+     *  §4.1). See `runSavedWorkflow`. */
+    parentPrompt?: SubAgentPromptHandles | undefined;
+    questionWait?: WorkflowQuestionWait | undefined;
   } | undefined,
 ): Promise<RunSavedWorkflowResult> {
   // 1. Persistent daily/monthly cap — same gate Session.run() checks first.
@@ -182,6 +188,8 @@ export async function runGuardedSavedWorkflow(
     principal: opts?.principal,
     stopSignal: opts?.stopSignal,
     abortScope: opts?.abortScope,
+    parentPrompt: opts?.parentPrompt,
+    questionWait: opts?.questionWait,
   });
 
   // 4. onAfterRun cost report — debit the tenant's balance for the spend.

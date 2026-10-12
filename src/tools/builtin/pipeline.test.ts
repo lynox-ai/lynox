@@ -1275,6 +1275,46 @@ describe('runSavedWorkflow', () => {
     expect(result.error).toMatch(/interactive/);
   });
 
+  // PRD 3b-2 §4.1/§4.3: a scheduled run hands its question channel in. An interactive workflow
+  // then runs when `ask_user` is its only question tool, and its steps get the channel alone.
+  describe('the question channel of a scheduled run', () => {
+    const channel = { parentAskUserPrompt: async (): Promise<string> => 'B' };
+    const wait = { unanswered: false, pausedMs: (): number => 0 };
+
+    it('runs an interactive workflow that asks only through ask_user, and hands on the channel alone', async () => {
+      const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'pick', task: 'ask_user which list' }] });
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      // A caller that passed `parentPromptUser` too still hands on only the channel.
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, {
+        parentPrompt: { ...channel, parentPromptUser: async () => 'Allow' }, questionWait: wait,
+      });
+      expect(result.ok).toBe(true);
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toEqual({ parentAskUserPrompt: channel.parentAskUserPrompt });
+      expect(ctx['questionWait']).toBe(wait);
+    });
+
+    it.each([
+      ['ask_secret', 'ask_secret for the key'],
+      ['ask_user beside ask_secret', 'ask_user which list, then ask_secret for the key'],
+    ])('still refuses an interactive workflow that uses %s', async (_label, task) => {
+      const id = seedSavedWorkflow({ mode: 'interactive', steps: [{ id: 'k', task }] });
+      const result = await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { parentPrompt: channel, questionWait: wait });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/interactive/);
+      expect(mockRunManifest).not.toHaveBeenCalled();
+    });
+
+    it('an autonomous workflow gets no channel even when one is handed in', async () => {
+      const id = seedSavedWorkflow();
+      mockRunManifest.mockResolvedValueOnce(makeRunState());
+      await runSavedWorkflow(id, fakeRunHistory as never, mockConfig, undefined, { parentPrompt: channel, questionWait: wait });
+      const ctx = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+      expect(ctx['parentPrompt']).toBeUndefined();
+      expect(ctx['questionWait']).toBeUndefined();
+    });
+  });
+
   it('returns an error when run history is unavailable', async () => {
     const result = await runSavedWorkflow('any', null, mockConfig);
     expect(result.ok).toBe(false);
