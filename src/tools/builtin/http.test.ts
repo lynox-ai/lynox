@@ -6008,7 +6008,7 @@ describe('write approvals per method and host (270)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it.each(['X-Forwarded-Host', 'x-original-url', 'Forwarded'])('(F5) a write that sets %s is refused before anything is sent', async (name) => {
+  it.each(['X-Forwarded-Host', 'x-original-url', 'Forwarded', 'X-Original-Host', 'X-Forwarded-Server', 'X-Forwarded-Prefix'])('(F5) a write that sets %s is refused before anything is sent', async (name) => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
     const { agent, prompt } = agent270();
@@ -6016,6 +6016,16 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain('re-targets the request');
     expect(prompt).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['X-RapidAPI-Host', 'X-Forwarded-For'])('(F5) a write that sets %s is asked and sent as usual', async (name) => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { [name]: 'x' } }, agent);
+    expect(out).not.toContain('re-targets the request');
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('(F4) a call of another batch with the same question does not ride on an answer given for another epoch', async () => {

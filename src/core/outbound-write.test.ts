@@ -30,6 +30,15 @@ describe('retargetingHeader', () => {
     }
     expect(retargetingHeader({ 'x-hosting': 'x', 'content-type': 'y' })).toBeUndefined();
   });
+
+  it('finds a member of a routing family it does not name, and leaves the client and API selectors alone', () => {
+    for (const name of ['X-Original-Host', 'X-Forwarded-Server', 'X-Forwarded-Prefix', 'x-forwarded-proto', 'X-Original-URI', 'X-Rewrite-Host', ' X-Forwarded-Port ', 'X-Forwarded']) {
+      expect(retargetingHeader({ accept: 'x', [name]: 'y' }), name).toBe(name);
+    }
+    for (const name of ['X-Forwarded-For', 'X-RapidAPI-Host', 'X-Originating-IP', 'X-Originator', 'X-Rewritten', 'Foo-X-Forwarded-Host']) {
+      expect(retargetingHeader({ [name]: 'y' }), name).toBeUndefined();
+    }
+  });
 });
 
 describe('effectiveWriteMethod refuses an override that is not a method', () => {

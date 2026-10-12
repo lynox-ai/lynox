@@ -74,12 +74,28 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
   return effective;
 }
 
-/** Headers a server or a proxy in front of it may route on instead of the URL. */
-const RETARGETING_HEADERS = new Set(['host', 'x-host', 'x-forwarded-host', 'forwarded', 'x-original-url', 'x-rewrite-url']);
+/** Headers a server or a proxy in front of it may route on instead of the URL, by name. */
+const RETARGETING_HEADERS = new Set(['host', 'x-host', 'forwarded']);
+
+/**
+ * …and by family: a proxy fills the `X-Forwarded-*` set (host, server, prefix, proto, port)
+ * and a front end reads `X-Original-*` / `X-Rewrite-*` to route on, so a new member of a
+ * family is caught without being named here, the bare family word included. `X-Forwarded-For` names the client, not the
+ * target. Not a `*-host` suffix: that would catch `X-RapidAPI-Host`, which does route, but
+ * only among the APIs behind the one gateway host the write is approved for, and RapidAPI
+ * asks for it on its calls. Left out on purpose, as an accepted exception.
+ */
+const RETARGETING_FAMILIES = ['x-forwarded', 'x-original', 'x-rewrite'];
+
+function isRetargetingHeaderName(raw: string): boolean {
+  const name = raw.trim().toLowerCase();
+  if (RETARGETING_HEADERS.has(name)) return true;
+  return name !== 'x-forwarded-for' && RETARGETING_FAMILIES.some((family) => name.startsWith(family));
+}
 
 /** The first header the request sets that re-targets it away from its URL, by its name. */
 export function retargetingHeader(headers: Record<string, string>): string | undefined {
-  return Object.keys(headers).find((name) => RETARGETING_HEADERS.has(name.trim().toLowerCase()));
+  return Object.keys(headers).find(isRetargetingHeaderName);
 }
 
 /**
