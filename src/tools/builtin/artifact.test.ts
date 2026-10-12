@@ -79,10 +79,14 @@ describe('artifact_save refuses the eviction placeholder as content', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  // The placeholder exactly as a model sees it: a real save through the handler,
-  // then the real eviction transform over that turn. Built, not typed, so a
-  // reworded placeholder cannot leave this test checking a string nobody writes.
-  async function placeholderFor(document: string): Promise<{ id: string; placeholder: string }> {
+  // The reference in the two forms a model can copy: the note the engine now appends to an
+  // evicted save's result — taken from a real save through the handler and the real eviction
+  // transform, so a reworded note cannot leave this test checking a string nobody writes — and
+  // the in-field form it put into `content` until 2026-10-10, which threads persisted before
+  // then still carry (typed: nothing writes it any more).
+  const IN_FIELD = '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]';
+
+  async function placeholdersFor(document: string): Promise<{ id: string; forms: Array<[string, string]>; evictedInput: Record<string, unknown> }> {
     const result = await artifactSaveTool.handler({ title: 'Pitch', content: document }, makeAgent(store));
     const id = /id: ([0-9a-f]+)/.exec(result)![1]!;
     const turn = [
@@ -91,42 +95,52 @@ describe('artifact_save refuses the eviction placeholder as content', () => {
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: result }] },
     ] as BetaMessageParam[];
     const evicted = evictSavedArtifactBodies(turn);
-    const block = (evicted[1]!.content as Array<{ type: string; input?: { content?: string } }>).find(b => b.type === 'tool_use')!;
-    return { id, placeholder: block.input!.content! };
+    const call = (evicted[1]!.content as Array<{ type: string; input?: Record<string, unknown> }>).find(b => b.type === 'tool_use')!;
+    const evictedResult = (evicted[2]!.content as Array<{ content: string }>)[0]!.content;
+    const note = evictedResult.slice(result.length).trim();
+    return { id, forms: [['note', note], ['in-field form', IN_FIELD]], evictedInput: call.input! };
   }
 
   const DOCUMENT = '# Pitch\n\n' + 'Budget options and expected leads. '.repeat(Math.ceil(EVICTION_MIN_CHARS / 30));
 
-  it('the placeholder built here is the evicted form, not the document', async () => {
-    const { placeholder } = await placeholderFor(DOCUMENT);
-    expect(placeholder).not.toBe(DOCUMENT);
-    expect(placeholder.length).toBeLessThan(400);
+  it('the note built here is what eviction appends, and the evicted call keeps no content', async () => {
+    const { forms, evictedInput } = await placeholdersFor(DOCUMENT);
+    const note = forms[0]![1];
+    expect(note.length, 'eviction appended a note').toBeGreaterThan(20);
+    expect(note.length).toBeLessThan(400);
+    expect(evictedInput).not.toHaveProperty('content');
   });
 
-  it('an update carrying the placeholder throws and leaves the document as it was', async () => {
-    const { id, placeholder } = await placeholderFor(DOCUMENT);
-    await expect(artifactSaveTool.handler({ id, title: 'Pitch', content: placeholder }, makeAgent(store)))
-      .rejects.toThrow(/artifact_save refused[\s\S]*edit_file/);
+  it('an update carrying either form throws and leaves the document as it was', async () => {
+    const { id, forms } = await placeholdersFor(DOCUMENT);
+    for (const [form, placeholder] of forms) {
+      await expect(artifactSaveTool.handler({ id, title: 'Pitch', content: placeholder }, makeAgent(store)), form)
+        .rejects.toThrow(/artifact_save refused[\s\S]*edit_file/);
+    }
     expect(store.get(id)?.content).toBe(DOCUMENT);
     expect(store.get(id)?.version).toBe(1);
   });
 
-  it('a new artifact carrying the placeholder throws and creates nothing', async () => {
-    const { placeholder } = await placeholderFor(DOCUMENT);
+  it('a new artifact carrying either form throws and creates nothing', async () => {
+    const { forms } = await placeholdersFor(DOCUMENT);
     const before = store.list().length;
-    await expect(artifactSaveTool.handler({ title: 'Pitch v3', content: placeholder }, makeAgent(store)))
-      .rejects.toThrow(/artifact_save refused/);
+    for (const [form, placeholder] of forms) {
+      await expect(artifactSaveTool.handler({ title: 'Pitch v3', content: placeholder }, makeAgent(store)), form)
+        .rejects.toThrow(/artifact_save refused/);
+    }
     expect(store.list().length).toBe(before);
   });
 
-  it('the placeholder under a heading is refused too', async () => {
-    const { placeholder } = await placeholderFor(DOCUMENT);
-    await expect(artifactSaveTool.handler({ title: 'Pitch', content: `# Pitch\n\n${placeholder}\n` }, makeAgent(store)))
-      .rejects.toThrow(/artifact_save refused/);
+  it('either form under a heading is refused too', async () => {
+    const { forms } = await placeholdersFor(DOCUMENT);
+    for (const [form, placeholder] of forms) {
+      await expect(artifactSaveTool.handler({ title: 'Pitch', content: `# Pitch\n\n${placeholder}\n` }, makeAgent(store)), form)
+        .rejects.toThrow(/artifact_save refused/);
+    }
   });
 
   it('a real document still saves, as an update and as a new artifact', async () => {
-    const { id } = await placeholderFor(DOCUMENT);
+    const { id } = await placeholdersFor(DOCUMENT);
     const updated = await artifactSaveTool.handler({ id, title: 'Pitch', content: DOCUMENT + '\nThree options.' }, makeAgent(store));
     expect(updated).toMatch(/^Updated artifact "Pitch"/);
     expect(store.get(id)?.content).toBe(DOCUMENT + '\nThree options.');
