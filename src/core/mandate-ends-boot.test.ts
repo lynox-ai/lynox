@@ -97,4 +97,31 @@ describe('Engine boot — mandate ends', () => {
     const second = await boot(dir);
     expect(second.getPromptStore()!.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
   });
+
+  it('closes, on the 5-minute prompt sweep, a mandate\'s question whose grant ran out', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-mandatesweepboot-'));
+    dirs.push(dir);
+    // The engine's one 5-minute interval is the prompt sweep; it is caught, not waited for.
+    const real = globalThis.setInterval;
+    const sweeps: (() => void)[] = [];
+    const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === 5 * 60_000) sweeps.push(fn);
+      return real(fn, ms);
+    }) as typeof setInterval);
+    let engine: Engine;
+    try { engine = await boot(dir); } finally { spy.mockRestore(); }
+    expect(sweeps).toHaveLength(1);
+    const ends = engine.getMandateEnds()!;
+    const store = engine.getPromptStore()!;
+    const now = Math.floor(Date.now() / 1000);
+    ends.record({ kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-short', mandateExp: now + 2 }, now);
+    const id = store.insertAskUser('s-1', 'q?', undefined, undefined, undefined, undefined, undefined,
+      { principal: { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'M-short' } });
+    sweeps[0]!();
+    expect(store.getById(id)!.status).toBe('pending');
+    // The grant runs out; no revoke, only the clock.
+    const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
+    try { sweeps[0]!(); } finally { clock.mockRestore(); }
+    expect(store.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'mandate_ended' });
+  });
 });
