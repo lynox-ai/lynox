@@ -260,6 +260,8 @@ const PKG_VERSION: string = (() => {
 // route registration AND the path matcher), and the second was easy to
 // forget — turning a destructive route into a user-scope footgun.
 type AuthScope = 'admin' | 'user';
+/** What a verified session cookie carries beside its time: a mandate always names its grant. */
+type SessionMandate = Extract<RequestPrincipal, { kind: 'mandate' }> & { readonly mandateId: string };
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
@@ -1812,13 +1814,11 @@ export class LynoxHTTPApi {
   /**
    * Whether a mandate's request may go on: its mandate has a recorded end that has not passed
    * and has not been revoked. Every other case is refused, the closed direction: no store of
-   * ends, a cookie that names no mandate or no end, an end that could not be written on the
-   * first request, and a revoked mandate. The owner is never asked.
+   * ends, a cookie that names no end, an end that could not be written on the first request,
+   * and a revoked mandate. Only a mandate's cookie is asked: the owner's verifies to no principal.
    */
-  private _mandateLive(principal: RequestPrincipal): boolean {
-    if (principal.kind !== 'mandate') return true;
-    if (principal.mandateId === undefined) return false;
-    return this.engine?.getMandateEnds()?.isLive(principal.mandateId) ?? false;
+  private _mandateLive(mandateId: string): boolean {
+    return this.engine?.getMandateEnds()?.isLive(mandateId) ?? false;
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -1994,7 +1994,7 @@ export class LynoxHTTPApi {
    * mistaken for the owner where mandates exist. The Web UI reads the same rule
    * (`readSessionToken`).
    */
-  private _verifySessionCookie(req: IncomingMessage, secret: string): { iat: number; principal: RequestPrincipal | null } | null {
+  private _verifySessionCookie(req: IncomingMessage, secret: string): { iat: number; principal: SessionMandate | null } | null {
     const cookieHeader = req.headers['cookie'];
     if (!cookieHeader) return null;
 
@@ -2852,7 +2852,7 @@ export class LynoxHTTPApi {
             this._sessionPrincipal.set(req, session.principal);
             this._recordMandateEnd(session.principal, session.iat);
             // Recorded first: `record` never moves a revoked end, so a revoke stays a revoke.
-            if (!this._mandateLive(session.principal)) {
+            if (!this._mandateLive(session.principal.mandateId)) {
               errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
               return;
             }
