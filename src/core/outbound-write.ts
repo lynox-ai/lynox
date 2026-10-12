@@ -150,13 +150,75 @@ function lenientDecode(text: string): string {
     UTF8_REPLACING.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
 }
 
-/** Whether `text`, percent-decoded (also with `+` read as a space), holds a secret `mask` knows.
- *  Asked of text the mask already ran over: a secret left after decoding was written in a form
- *  the mask did not see. */
+/** The same runs read the way a server that does not assume UTF-8 reads them, in the two
+ *  single-byte forms in use: ISO-8859-1, one byte one character (`%E9` is `é`, `%80` is
+ *  U+0080), and windows-1252, which is what `TextDecoder('latin1')` really decodes and which
+ *  reads `%80` as `€`. They differ only in 0x80-0x9F. */
+function latin1Decode(text: string): string {
+  return text.replace(/%[0-9a-fA-F]{2}/g, (byte) => String.fromCharCode(parseInt(byte.slice(1), 16)));
+}
+const WINDOWS_1252 = new TextDecoder('windows-1252');
+function windows1252Decode(text: string): string {
+  return text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) =>
+    WINDOWS_1252.decode(Uint8Array.from(run.slice(1).split('%'), (hex) => parseInt(hex, 16))));
+}
+
+/**
+ * The steps a server may take on the way from the bytes it received to the value it uses:
+ * percent-decoding as UTF-8 or in a single-byte charset, and `+` as a space, each on its own
+ * or after one another. Taken up to three deep, counted from the bytes as sent, so a value
+ * encoded up to three times (`%2573…`), or with `+` read only partly, is read the way such a
+ * server reads it. A step that changes nothing yields the text itself, so the readings may
+ * hold it: callers pass text already masked.
+ */
+const READING_STEPS: ReadonlyArray<(text: string) => string> = [lenientDecode, latin1Decode, windows1252Decode, (t) => t.replace(/\+/g, ' ')];
+const READING_DEPTH = 3;
+function serverReadings(text: string): Set<string> {
+  const seen = new Set<string>();
+  let frontier = [text];
+  for (let depth = 0; depth < READING_DEPTH; depth++) {
+    const next: string[] = [];
+    for (const t of frontier) {
+      for (const step of READING_STEPS) {
+        const read = step(t);
+        seen.add(read);
+        next.push(read);
+      }
+    }
+    frontier = next;
+  }
+  return seen;
+}
+
+/** Whether a server reading of `text` holds a secret `mask` knows. Asked of text the mask
+ *  already ran over: a secret left after a reading was written in a form the mask did not see. */
 function hidesEncodedSecret(text: string, mask: (text: string) => string): boolean {
-  const decoded = lenientDecode(text);
-  const spaced = lenientDecode(text.replace(/\+/g, ' '));
-  return mask(decoded) !== decoded || mask(spaced) !== spaced;
+  for (const read of serverReadings(text)) {
+    if (mask(read) !== read) return true;
+  }
+  return false;
+}
+
+/**
+ * One piece of a question (a path segment, a query key, a field name). `raw` is the piece as
+ * sent, masked once; `read` is the reading the question shows, before its mask. Shown as `***`
+ * when another server reading of `raw` (a second decoding, a single-byte charset) holds a secret: the
+ * shown text would then hand that secret to whoever reads it, as `%73ecret` or as
+ * `caf�-secret`. A secret only the shown reading holds is masked in it.
+ */
+function shownPiece(raw: string, read: string, mask: (text: string) => string): string {
+  for (const other of serverReadings(raw)) {
+    if (other !== read && mask(other) !== other) return '***';
+  }
+  return mask(read);
+}
+
+/** The name of one `name=value` pair of a form body or a query the caller masked whole: as
+ *  sent (`raw`, masked raw as well as decoded, since `+` decodes to a space and a secret
+ *  holding a `+` is then no longer the value the mask knows), and as shown, decoded (`read`). */
+function formName(pair: string): { raw: string; read: string } {
+  const raw = pair.split('=')[0]!;
+  return { raw, read: lenientDecode(raw.replace(/\+/g, ' ')) };
 }
 
 const MAX_FIELDS = 12;
@@ -176,25 +238,24 @@ function clipName(name: string, max: number): string {
  */
 export function bodyFieldNames(body: string | undefined, mask: (text: string) => string = (t) => t): string {
   if (body === undefined || body === '') return 'no body';
-  let names: string[] | undefined;
+  // Each name as sent (`raw`) and as shown (`read`): a form name is shown decoded.
+  let names: Array<{ raw: string; read: string }> | undefined;
   try {
     const parsed: unknown = JSON.parse(body);
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) names = Object.keys(parsed);
-  } catch {
-    if (/^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(body)) {
-      // Masked raw as well as decoded: `+` decodes to a space, and a secret holding a `+` is
-      // then no longer the value the mask knows.
-      names = body.split('&').map((pair) => {
-        const name = mask(pair.split('=')[0]!);
-        return lenientDecode(name.replace(/\+/g, ' '));
-      });
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      names = Object.keys(parsed).map((n) => ({ raw: mask(n), read: n }));
     }
+  } catch {
+    // Masked whole before the shape is read and the text split at `&` and `=`, so a secret
+    // holding either (base64 padding) is still one value to the mask.
+    const masked = mask(body);
+    if (/^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(masked)) names = masked.split('&').map((pair) => formName(pair));
   }
   if (!names) return `body of ${new TextEncoder().encode(body).byteLength} bytes`;
   if (names.length === 0) return 'empty object';
   // Masked whole, before the clip: a name may hold a resolved `secret:NAME`, and a clipped
   // secret is no longer one the mask recognises.
-  const shown = names.slice(0, MAX_FIELDS).map((n) => `"${clipName(mask(n), MAX_FIELD_CHARS)}"`);
+  const shown = names.slice(0, MAX_FIELDS).map((n) => `"${clipName(shownPiece(n.raw, n.read, mask), MAX_FIELD_CHARS)}"`);
   const more = names.length > MAX_FIELDS ? ` and ${names.length - MAX_FIELDS} more` : '';
   return `fields ${shown.join(', ')}${more}`;
 }
@@ -208,9 +269,26 @@ export function pathForQuestion(url: string, mask: (text: string) => string): st
   let parsed: URL;
   try { parsed = new URL(url); } catch { return '(unparsable)'; }
   // Masked in both forms, encoded and decoded: a secret with a character the URL encodes is
-  // found only in the decoded one, and the decoded keys are what is shown.
-  const path = mask(lenientDecode(mask(parsed.pathname)));
-  const keys = [...new Set([...parsed.searchParams.keys()])].map((k) => mask(k));
+  // found only in the decoded one, and the decoded form is what is shown. Segment by segment,
+  // so another server reading of one (a second decoding, a single-byte charset) that turns it into a secret
+  // stars that segment.
+  // Masked whole first, so a secret holding a `/` is found before the split.
+  const pieces = mask(parsed.pathname).split('/').map((raw) => {
+    const read = lenientDecode(raw);
+    const shown = shownPiece(raw, read, mask);
+    return { left: shown === read ? raw : '', shown };
+  });
+  // A secret only a reading across segments holds (`%61/b` read twice) stars the whole path.
+  const path = hidesEncodedSecret(pieces.map((p) => p.left).join('/'), mask)
+    ? '/***'
+    : pieces.map((p) => p.shown).join('/');
+  // Keys from the query as sent, not `searchParams`: that decodes once as UTF-8 only. Masked
+  // whole before the split, like a form body, so a secret holding `&` or `=` is still found.
+  const rawKeys = mask(parsed.search).slice(1).split('&').filter((pair) => pair !== '');
+  const keys = [...new Set(rawKeys.map((pair) => {
+    const { raw, read } = formName(pair);
+    return shownPiece(raw, read, mask);
+  }))];
   const query = keys.length > 0 ? `?${keys.map((k) => `${k}=…`).join('&')}` : '';
   return clipName(`${path}${query}`, MAX_PATH_CHARS);
 }
@@ -333,10 +411,11 @@ export function bodyForQuestion(body: string, mask: (text: string) => string, co
   // A form body is shown pair by pair only when it is SENT as one (its Content-Type): the same
   // text sent as text/plain is not `x = a b` but `x=a+b`. Masked WHOLE before it is cut at `&`
   // and `=`, so a secret holding either (base64 padding) is still one value to the mask; then
-  // each part again once decoded. A line break inside a decoded part is shown as `\n`, so a
-  // value cannot add a `name = value` line of its own.
+  // each part again once decoded, and starred when another server reading of it holds a
+  // secret. A line break inside a decoded part is shown as `\n`, so a value cannot add a
+  // `name = value` line of its own.
   if (FORM_CONTENT_TYPE.test(contentType) && /^[^=&\s]+=[^&]*(?:&[^=&\s]+=[^&]*)*$/.test(shown)) {
-    const part = (raw: string) => mask(lenientDecode(raw.replace(/\+/g, ' '))).replace(/\r?\n/g, '\\n');
+    const part = (raw: string) => shownPiece(raw, lenientDecode(raw.replace(/\+/g, ' ')), mask).replace(/\r?\n/g, '\\n');
     return {
       text: visible(shown.split('&').map((pair) => {
         const at = pair.indexOf('=');
