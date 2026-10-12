@@ -53,9 +53,10 @@ function externalPlan(principal: RequestPrincipal): string {
 const row = (id: string): { phase: string; halt_reason: string | null; principal: string | null; mandate_id: string | null } =>
   engineDb.getDb().prepare('SELECT phase, halt_reason, principal, mandate_id FROM bulk_runs WHERE id = ?').get(id) as never;
 
-const ownership = (live: readonly string[] = [], threads: Record<string, string | null> = {}): BulkOwnership => ({
+const ownership = (live: readonly string[] = [], threads: Record<string, string | null> = {}, threadsKnown = true): BulkOwnership => ({
   isLive: (id) => live.includes(id),
   threadCreator: (id) => threads[id],
+  threadsKnown,
 });
 
 describe('who planned a bulk run (engine.db v31)', () => {
@@ -101,6 +102,10 @@ describe('whose run has ended', () => {
     expect(plannerHasEnded({ principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1', created_by: 't', created_at: NEW }, own)).toBe(false);
     expect(plannerHasEnded({ principal: 'mandate:other@example.invalid', mandate_id: 'grant-2', created_by: 't', created_at: NEW }, own)).toBe(true);
     expect(plannerHasEnded({ principal: 'mandate:helper@example.invalid', mandate_id: null, created_by: 't', created_at: NEW }, own)).toBe(true);
+  });
+
+  it('a planner tag that is neither the owner\'s nor a mandate\'s counts as ended', () => {
+    expect(plannerHasEnded({ principal: 'member:someone@example.invalid', mandate_id: null, created_by: 't', created_at: NEW }, ownership(['grant-1']))).toBe(true);
   });
 
   it('a run from before v31 in the owner\'s conversation, planned after H2c, stays', () => {
@@ -160,6 +165,21 @@ describe('ending the runs of an ended grant', () => {
     if (!ok.ok) throw new Error(ok.reason);
     expect(ledger.endIfPlannerEnded(id, ownership())).toBe(false);
     expect(row(id).phase).toBe('approved');
+  });
+
+  it('while the conversations cannot be read, refuses a run from before v31 and leaves it for a later sweep', () => {
+    const legacy = dryRun(OWNER_PRINCIPAL, 'owner-thread');
+    const mine = dryRun(GRANT);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET principal = NULL, created_at = '2026-10-13 08:00:00' WHERE id = ?`).run(legacy);
+    const blind = ownership([], {}, false);
+    expect(ledger.expireEndedPlanners(blind)).toBe(1);
+    expect(row(legacy).phase).toBe('previewed');
+    expect(row(mine).phase).toBe('aborted');
+    expect(ledger.endIfPlannerEnded(legacy, blind)).toBe(true);
+    expect(row(legacy).phase).toBe('previewed');
+    // Once they can be read again, the owner's conversation keeps it.
+    expect(ledger.expireEndedPlanners(ownership([], { 'owner-thread': 'owner' }))).toBe(0);
+    expect(ledger.endIfPlannerEnded(legacy, ownership([], { 'owner-thread': 'owner' }))).toBe(false);
   });
 
   it('leaves a live grant\'s run to be started', () => {

@@ -228,6 +228,9 @@ export interface BulkOwnership {
   /** Who started the conversation with this id: its `created_by` (history.db v57), or
    *  undefined when there is no such conversation or it records nobody. */
   threadCreator(threadId: string): string | null | undefined;
+  /** Whether the conversations can be read at all. When they cannot, a run from before v31
+   *  cannot be placed: it is refused, and left for a later sweep rather than ended. */
+  readonly threadsKnown: boolean;
 }
 
 /**
@@ -249,19 +252,21 @@ function planner(p: RequestPrincipal): [string, string | null] {
  * - a run from before v31, which names no planner: the owner's only when it was planned in a
  *   conversation the owner started, after {@link BULK_OWNER_THREADS_SINCE}; every other one,
  *   because who planned it cannot be shown.
- * The owner's own runs never end this way.
+ * The owner's own runs never end this way. A planner tag that is neither the owner's nor a
+ * mandate's counts as ended.
  */
 export function plannerHasEnded(
   row: Pick<RunRow, 'principal' | 'mandate_id' | 'created_by' | 'created_at'>,
   own: BulkOwnership,
 ): boolean {
+  const owner = principalTag(OWNER_PRINCIPAL);
   if (row.principal !== null) {
-    if (!isMandateTag(row.principal)) return false;
+    if (row.principal === owner) return false;
+    if (!isMandateTag(row.principal)) return true;
     return row.mandate_id === null || !own.isLive(row.mandate_id);
   }
   if (row.created_by === null || row.created_at <= BULK_OWNER_THREADS_SINCE) return true;
-  const creator = own.threadCreator(row.created_by);
-  return creator === null || creator === undefined || creator !== principalTag(OWNER_PRINCIPAL);
+  return own.threadCreator(row.created_by) !== owner;
 }
 
 /** An external run as its preview effect reads it. Not model-facing. */
@@ -623,14 +628,22 @@ export class BulkLedger {
       `SELECT id, principal, mandate_id, created_by, created_at FROM bulk_runs WHERE phase IN ('planned','previewed')`,
     ).all() as Pick<RunRow, 'id' | 'principal' | 'mandate_id' | 'created_by' | 'created_at'>[];
     let ended = 0;
-    for (const row of rows) if (plannerHasEnded(row, own) && this.endRun(row.id)) ended += 1;
+    for (const row of rows) {
+      if (row.principal === null && !own.threadsKnown) continue;
+      if (plannerHasEnded(row, own) && this.endRun(row.id)) ended += 1;
+    }
     return ended;
   }
 
-  /** Whether this run's planner has ended; if so the run is ended as {@link expireEndedPlanners} ends it. */
+  /**
+   * Whether this run is refused because its planner has ended. The run is then ended as
+   * {@link expireEndedPlanners} ends it; a run from before v31 while the conversations cannot be
+   * read is refused and left as it is.
+   */
   endIfPlannerEnded(runId: string, own: BulkOwnership): boolean {
     const row = this.runRow(runId);
     if (!row || !plannerHasEnded(row, own)) return false;
+    if (row.principal === null && !own.threadsKnown) return row.phase === 'planned' || row.phase === 'previewed';
     return this.endRun(runId);
   }
 

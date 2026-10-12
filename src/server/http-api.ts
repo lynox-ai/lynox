@@ -7804,11 +7804,11 @@ export class LynoxHTTPApi {
       return ledger;
     };
     // A run whose planner has ended is not the owner's to approve or start (§3.13 B7): the sweep
-    // ends it every 5 minutes and on a revoke, and this closes the time between. Called with no
-    // await between it and the ledger call it guards.
+    // ends it every 5 minutes and when a revoke is recorded, and this closes the time between.
+    // Called with no await between it and the ledger call it guards.
     const refuseEndedPlanner = (res: import('node:http').ServerResponse, ledger: import('../core/bulk-ledger.js').BulkLedger, runId: string): boolean => {
       if (!ledger.endIfPlannerEnded(runId, engine.getBulkOwnership())) return false;
-      errorResponse(res, 409, 'This run was planned under an access that has ended, so it was withdrawn.', 'mandate_ended');
+      errorResponse(res, 409, 'This run was planned under an access that has ended, so it cannot be approved or started.', 'mandate_ended');
       return true;
     };
     const checksumOf = (body: unknown): string | null => {

@@ -1625,7 +1625,7 @@ export class Engine {
       this._toolContext.bulkLedger = ledger;
       this.registry.register(bulkPlanTool).register(bulkStatusTool);
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
-      // every 5 minutes, and at once on a revoke. Fails on its own, like the prompt sweep.
+      // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       const own = this.getBulkOwnership();
       const sweep = (): void => {
         try {
@@ -2416,14 +2416,15 @@ export class Engine {
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
   /**
-   * What a bulk run's planner is read against (§3.13 B7). Read at each call, so a store set
-   * up later is seen. With no store of ends every mandate counts as ended, and with no thread
-   * store no conversation has a known creator.
+   * What a bulk run's planner is read against (§3.13 B7). With no store of ends every mandate
+   * counts as ended; with no thread store a run from before v31 is refused and not ended.
    */
   getBulkOwnership(): import('./bulk-ledger.js').BulkOwnership {
+    const threads = this._threadStore;
     return {
       isLive: (mandateId) => this._mandateEnds?.isLive(mandateId) ?? false,
-      threadCreator: (threadId) => this._threadStore?.getThread(threadId)?.created_by,
+      threadCreator: (threadId) => threads?.getThread(threadId)?.created_by,
+      threadsKnown: threads !== null,
     };
   }
 

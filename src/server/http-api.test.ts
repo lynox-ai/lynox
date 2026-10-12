@@ -209,7 +209,7 @@ const mockSessionStoreResetAll = vi.fn();
 /** The bulk-run routes read a REAL ledger (a temp engine.db) — null = flag off. */
 // `ownership` is what a run's planner is read against (§3.13 B7). The default reads every grant
 // as ended and no conversation as anyone's: the owner's runs, which carry 'owner', are untouched.
-const NO_OWNERSHIP: BulkOwnership = { isLive: () => false, threadCreator: () => undefined };
+const NO_OWNERSHIP: BulkOwnership = { isLive: () => false, threadCreator: () => undefined, threadsKnown: true };
 const bulkHolder: { ledger: BulkLedger | null; ownership: BulkOwnership } = { ledger: null, ownership: NO_OWNERSHIP };
 
 vi.mock('../core/engine.js', () => ({
@@ -8183,7 +8183,7 @@ describe('LynoxHTTPApi', () => {
 
     describe('a run whose planner has ended (§3.13 B7)', () => {
       const GRANT = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
-      const live = (...ids: string[]): BulkOwnership => ({ isLive: (id) => ids.includes(id), threadCreator: () => undefined });
+      const live = (...ids: string[]): BulkOwnership => ({ isLive: (id) => ids.includes(id), threadCreator: () => undefined, threadsKnown: true });
       const mandateRun = (): string => bulkLedger.recordDryRun({
         createdBy: 't', principal: GRANT, targetSystem: 'workspace', scope: 'mem',
         targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],

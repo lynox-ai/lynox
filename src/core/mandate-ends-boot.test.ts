@@ -231,5 +231,26 @@ describe('Engine boot — mandate ends', () => {
       try { for (const s of sweeps) s(); } finally { clock.mockRestore(); }
       expect(phaseOf(engine, id)).toBe('aborted');
     });
+
+    it('stops its 5-minute sweep at shutdown', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-bulksweepstop-'));
+      dirs.push(dir);
+      const real = globalThis.setInterval;
+      const handles: ReturnType<typeof setInterval>[] = [];
+      const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+        const h = real(fn, ms);
+        if (ms === 5 * 60_000) handles.push(h);
+        return h;
+      }) as typeof setInterval);
+      let engine: Engine;
+      try { engine = await boot(dir, withBulk); } finally { spy.mockRestore(); }
+      expect(handles).toHaveLength(2);
+      const clear = vi.spyOn(globalThis, 'clearInterval');
+      try {
+        await engine.shutdown();
+        engines.length = 0;
+        for (const h of handles) expect(clear).toHaveBeenCalledWith(h);
+      } finally { clear.mockRestore(); }
+    });
   });
 });
