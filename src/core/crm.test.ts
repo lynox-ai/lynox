@@ -81,6 +81,14 @@ describe('CRM', () => {
       crm.ensureSchema();
       expect(crm.initialized).toBe(true);
     });
+
+    it('listForExport as the first read answers empty instead of throwing', () => {
+      // The constructor creates nothing; an export that is the CRM's first read
+      // must create the collections like every other read does.
+      expect(ds.listCollections().map(c => c.name), 'fixture guard').not.toContain('contacts');
+      expect(crm.listForExport('contacts', { limit: 10 })).toEqual([]);
+      expect(crm.listForExport('deals', { limit: 10 })).toEqual([]);
+    });
   });
 
   describe('contacts', () => {

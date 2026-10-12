@@ -532,8 +532,9 @@ export class CRM {
    * One page of an exhaustive read of contacts or deals, for the data export. Not
    * {@link listContacts} / {@link getAllDeals}: those serve the overview and are
    * capped at 500 by the store. Goes through the CRM rather than straight to the
-   * DataStore so the schema is ensured first — after an erasure the two collections
-   * are gone until the next CRM read recreates them.
+   * DataStore so the schema is ensured first, like every other CRM read: the
+   * constructor creates nothing, so on a CRM whose first read this is, the two
+   * collections do not exist yet.
    */
   listForExport(collection: 'contacts' | 'deals', opts: { afterId?: number | undefined; limit: number }): Array<Record<string, unknown>> {
     this.ensureSchema();

@@ -69,7 +69,7 @@ import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../c
 import { promptOriginOf, parseOriginJson, originWireFields, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
-import { MAX_RECORDS, RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
+import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -10860,27 +10860,37 @@ export class LynoxHTTPApi {
       //
       // Both blocks used to read once through the store's listing, which caps at 500
       // rows, so a tenant with 501 contacts got an Art. 15 copy with 500 and no sign
-      // of the rest. The walk stops at `MAX_RECORDS`, the most a collection can hold
-      // through the DataStore's own writes, so the dump is complete for anything this
-      // codebase can produce; only a foreign or restored database can exceed it, and
-      // that is what `*_may_be_incomplete` reports. Like the thread cap, this bounds
-      // rows per collection, not the size of the dump.
-      const walkRecords = (page: (afterId: number | undefined) => Array<Record<string, unknown>>): { rows: Array<Record<string, unknown>>; truncated: boolean } => {
+      // of the rest.
+      //
+      // One row budget for both blocks together, and a real one, for the reason the
+      // thread cap gives: the dump is materialised and serialised into one string, so
+      // an unbounded walk trades a short answer for no answer at all. Per collection
+      // would not do — a hundred collections of `MAX_RECORDS` rows each is ten million.
+      // The budget is about five times the most the old caps let through (51 000 rows:
+      // 100 collections and the two CRM lists at 500 each), and when it
+      // runs out the block says so in `*_may_be_incomplete`. Exact at the boundary: a
+      // collection that ends where the budget does is probed with one more one-row
+      // read and is not reported short.
+      const RECORD_BUDGET = 250_000;
+      let budget = RECORD_BUDGET;
+      const walkRecords = (page: (afterId: number | undefined, limit: number) => Array<Record<string, unknown>>): { rows: Array<Record<string, unknown>>; truncated: boolean } => {
         const rows: Array<Record<string, unknown>> = [];
         let afterId: number | undefined;
         for (;;) {
-          const batch = page(afterId);
+          const limit = Math.max(1, Math.min(RECORD_EXPORT_PAGE_MAX, budget));
+          const batch = page(afterId, limit);
+          if (budget <= 0) return { rows, truncated: batch.length > 0 };
           rows.push(...batch);
-          if (batch.length < RECORD_EXPORT_PAGE_MAX) return { rows, truncated: false };
-          if (rows.length >= MAX_RECORDS) return { rows, truncated: true };
+          budget -= batch.length;
+          if (batch.length < limit) return { rows, truncated: false };
           afterId = batch[batch.length - 1]!['_id'] as number;
         }
       };
 
       const crm = engine.getCRM();
       if (crm) {
-        const contacts = walkRecords(afterId => crm.listForExport('contacts', { afterId, limit: RECORD_EXPORT_PAGE_MAX }));
-        const deals = walkRecords(afterId => crm.listForExport('deals', { afterId, limit: RECORD_EXPORT_PAGE_MAX }));
+        const contacts = walkRecords((afterId, limit) => crm.listForExport('contacts', { afterId, limit }));
+        const deals = walkRecords((afterId, limit) => crm.listForExport('deals', { afterId, limit }));
         exportData['contacts'] = contacts.rows;
         exportData['contacts_may_be_incomplete'] = contacts.truncated;
         exportData['deals'] = deals.rows;
@@ -10902,7 +10912,7 @@ export class LynoxHTTPApi {
         const incomplete: string[] = [];
         for (const col of collections) {
           try {
-            const walked = walkRecords(afterId => ds.listRecordsForExport({ collection: col.name, afterId, limit: RECORD_EXPORT_PAGE_MAX }));
+            const walked = walkRecords((afterId, limit) => ds.listRecordsForExport({ collection: col.name, afterId, limit }));
             datastoreExport[col.name] = walked.rows;
             if (walked.truncated) incomplete.push(col.name);
           } catch {

@@ -925,16 +925,20 @@ describe('DataStore', () => {
       expect(new Set(seen).size).toBe(ROWS);
     });
 
-    it('neither repeats nor skips a row when rows are updated mid-walk', () => {
-      // An update moves a row to the front of `_updated_at DESC`; a walk keyed on an
-      // offset over that order repeats one row and loses another. Rows from both
-      // sides of the cursor are updated, after each page.
+    it('neither repeats nor skips a row when rows are updated or deleted mid-walk', () => {
+      // Rows the walk has already passed are DELETED after each page. A walk keyed on
+      // an offset, in any order, then steps over as many unseen rows as were deleted
+      // behind it; a walk keyed on the last `_id` does not move. Rows on both sides
+      // of the cursor are also updated (an upsert keeps `_id`), which must not move
+      // or repeat them either.
       let round = 0;
       const seen = walk(() => {
         round++;
-        ds.insertRecords({ collection: 'walked', records: [{ k: 10 * round, v: 'b' }, { k: ROWS - 10 * round, v: 'b' }] });
+        ds.deleteRecords({ collection: 'walked', filter: { k: { $in: [3 * round, 3 * round + 1] } } });
+        ds.insertRecords({ collection: 'walked', records: [{ k: 400 + round, v: 'b' }, { k: ROWS - 10 * round, v: 'b' }] });
       });
       expect(round, 'precondition: the walk was written between pages').toBeGreaterThan(0);
+      expect(ds.queryRecords({ collection: 'walked' }).total, 'precondition: the deletes landed').toBe(ROWS - 2 * round);
       expect(seen).toHaveLength(ROWS);
       expect(new Set(seen).size).toBe(ROWS);
     });

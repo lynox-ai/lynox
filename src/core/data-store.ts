@@ -35,8 +35,7 @@ export const CRM_OVERLAP_NAMES: ReadonlySet<string> = new Set([
 ]);
 const MAX_COLLECTIONS = 100;
 const MAX_COLUMNS = 50;
-/** Exported so the export can walk a collection to the end: past this, a collection cannot be filled through {@link DataStore}. */
-export const MAX_RECORDS = 100_000;
+const MAX_RECORDS = 100_000;
 /**
  * The largest page {@link DataStore.listRecordsForExport} returns. Exported for the
  * same reason as the thread store's `EXPORT_PAGE_MAX`: a walk stops on a SHORT page,
