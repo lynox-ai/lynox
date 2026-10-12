@@ -179,6 +179,61 @@ function wireStepTaint(runTaint: RunTaint | undefined): {
 }
 
 /**
+ * The chat a run was started from, for private mode. Set by `run_workflow` from the calling
+ * agent; absent for a run no chat started (scheduled, headless, the Run button).
+ *
+ * `skipsCapture` is a function, not a value, and that is the point: private mode can be
+ * switched on while a step runs, and a value copied at spawn would keep the step capturing
+ * for the rest of its turn. It is the same defect `spawn_agent` had before its child read
+ * the parent's flag live.
+ *
+ * Not carried by {@link RunTaint}: taint is about untrusted content and folds back into the
+ * run; this is about whose chat it is and never changes direction.
+ */
+export interface ChatOrigin {
+  /** The chat's thread, which `privateThreadRefusal` looks up as the step's `originThreadId`. */
+  readonly threadId: string | undefined;
+  /** Whether the chat has private mode on right now. */
+  readonly skipsCapture: () => boolean;
+}
+
+/**
+ * The {@link ChatOrigin} of a calling agent, read live — from the agent's flag AND from the
+ * thread row. The row is what the private-mode switch writes, and it outlives the agent: the
+ * session rebuilds its agent on a model or thinking change, and the switch then flips the NEW
+ * agent while this origin still holds the old one. The flag also carries the global
+ * `memory_extraction: false`, which stands a step's capture down as it does the chat's.
+ */
+export function chatOriginOf(
+  agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'skipMemoryExtraction'> & Partial<Pick<IAgent, 'toolContext'>>,
+): ChatOrigin {
+  const threadId = agent.currentThreadId ?? agent.originThreadId;
+  return {
+    threadId,
+    skipsCapture: () => agent.skipMemoryExtraction === true
+      || (threadId !== undefined && agent.toolContext?.threadStore?.getThread(threadId)?.skip_extraction === 1),
+  };
+}
+
+/**
+ * Give a step agent its chat's private mode: the thread its memory tools check, and an
+ * end-of-turn capture that stops as soon as the chat goes private. The step's own switch
+ * still counts for the step, and setting it never reaches the chat. Applied after the
+ * Agent is built, as `spawn_agent` does for its child.
+ */
+export function applyChatOrigin(agent: Agent, origin: ChatOrigin | undefined): void {
+  if (!origin) return;
+  agent.originThreadId = origin.threadId;
+  let stepSkipsCapture = agent.skipMemoryExtraction === true;
+  Object.defineProperty(agent, 'skipMemoryExtraction', {
+    configurable: true,
+    enumerable: true,
+    get: (): boolean => stepSkipsCapture || origin.skipsCapture(),
+    set: (value: boolean): void => { stepSkipsCapture = value; },
+  });
+}
+
+/**
  * F1 (PRD-COST-CONTROLS-V2, D1): a pipeline step that declares no tier runs
  * `fast`. A step is a scoped, described unit of work — if neither the step nor
  * its role justifies a premium tier, the default must not supply one silently.
@@ -749,6 +804,11 @@ export async function spawnViaAgent(
   /** The engine's ToolContext, handed to the step agent as `spawnInline` does. Last because
    *  it was added last; absent = the Agent builds an empty one. */
   parentToolContext?: ToolContext | undefined,
+  /** The chat the run was started from, for private mode — see {@link ChatOrigin}. Last for
+   *  the reason given above; absent = no chat. It changes nothing observable today: this agent
+   *  has no `memory`, so its capture stands down as `no_memory`, and an `AgentTool` is handed
+   *  its input only, never the agent. Applied anyway so the two step paths cannot diverge. */
+  chatOrigin?: ChatOrigin | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -935,6 +995,7 @@ export async function spawnViaAgent(
   // arms this agent mid-run (the spawn-time seed below covers only taint that
   // existed BEFORE this step spawned).
   taintWiring.register(agent);
+  applyChatOrigin(agent, chatOrigin);
   // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
   // run's accumulator is armed — by the caller's own taint or by an earlier
   // step reading external content — this step starts with its STICKY latch
@@ -1048,6 +1109,9 @@ export async function spawnInline(
   /** Who started the run; the step agent is built for it (PRD customer-granted-operator-access
    *  D1, §3.13 E5). After `abortScope` for the reason given there. Absent = the owner. */
   principal?: RequestPrincipal | undefined,
+  /** The chat the run was started from, for private mode — see {@link ChatOrigin}. Last
+   *  because it was added last; absent = no chat. */
+  chatOrigin?: ChatOrigin | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1260,6 +1324,7 @@ export async function spawnInline(
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run — see spawnViaAgent.
   taintWiring.register(agent);
+  applyChatOrigin(agent, chatOrigin);
   // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
   // run's accumulator is armed — by the caller's own taint or by an earlier
   // step reading external content — this step starts with its STICKY latch
@@ -1372,6 +1437,9 @@ export async function spawnPipeline(
    *  given above. Without it the nested inline steps build an empty context, and the tools
    *  they inherit from the caller read no egress policy from it. */
   parentToolContext?: ToolContext | undefined,
+  /** The chat the run was started from, handed to the nested run so its steps keep the
+   *  chat's private mode. Last, for the reason given above; absent = no chat. */
+  chatOrigin?: ChatOrigin | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -1448,6 +1516,8 @@ export async function spawnPipeline(
     principal,
     // …and with the same ToolContext, so they run under the engine's egress policy.
     parentToolContext,
+    // …and in the same chat, so a nested step keeps that chat's private mode.
+    chatOrigin,
     // Share the SAME accumulator with the nested run (not a copy): a nested
     // workflow's external read must arm the OUTER run's later steps too, and
     // the outer accumulator is what flows back to the caller at the end.
