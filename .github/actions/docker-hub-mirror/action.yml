@@ -3,21 +3,26 @@ description: >
   Point the runner's Docker daemon at mirror.gcr.io for docker.io pulls, then
   restart it and check that it took the setting.
 
-# For every pull the runner's own daemon makes: `docker run`, `docker compose
-# up --build`, `docker/build-push-action` without a setup-buildx step, and the
-# `moby/buildkit` image that setup-buildx pulls when it boots a builder. Pulls
-# made INSIDE that builder go through .github/buildkitd.toml instead — the
-# reason for both is written there.
+# For the docker.io pulls the runner's own daemon makes: `docker run`, `docker
+# compose up --build`, `docker/build-push-action` without a setup-buildx step,
+# and the `moby/buildkit` image that setup-buildx pulls when it boots a
+# builder. Pulls made INSIDE that builder go through .github/buildkitd.toml
+# instead — the reason for both is written there. Other registries (ghcr.io)
+# are not affected.
 #
 # The daemon tries the mirror first and falls back to Docker Hub on its own, so
 # an outage at the mirror costs a retry, not the job.
 #
-# Not every image this covers is pinned by digest (the CI test containers use
-# tags), so for those the mirror's copy of the tag is what runs.
+# What the mirror serves is checked only where a digest is pinned: the
+# Dockerfile's base image, and the `moby/buildkit` builder image, which every
+# setup-buildx step pins with `driver-opts: image=…@sha256:` because it builds
+# and pushes the release image. The CI test containers (greenmail, searxng) use
+# tags, so for those the mirror's copy of the tag is what runs.
 #
 # Merged, not overwritten: hosted runners ship a daemon.json of their own, and
 # replacing it would drop whatever the image put there. A file that is not valid
-# JSON stops the step before anything is replaced.
+# JSON, or that exists but cannot be read, stops the step before anything is
+# replaced.
 
 runs:
   using: composite
@@ -27,7 +32,10 @@ runs:
       run: |
         set -euo pipefail
         cfg=/etc/docker/daemon.json
-        current=$(sudo cat "$cfg" 2>/dev/null || true)
+        current=''
+        # Read only a file that is there, and let a failed read fail the step:
+        # replacing an unreadable file with `{}` would drop its settings.
+        if sudo test -e "$cfg"; then current=$(sudo cat "$cfg"); fi
         # Absent, empty or whitespace-only: start from an empty object. jq on
         # empty input prints nothing, which would empty the file.
         if [ -z "${current//[[:space:]]/}" ]; then current='{}'; fi

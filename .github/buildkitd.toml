@@ -20,7 +20,10 @@
 # This file only reaches pulls made inside the builder. The `moby/buildkit`
 # image the builder itself runs on is pulled by the runner's daemon, as are
 # all pulls in the ci.yml jobs; those go through
-# .github/actions/docker-hub-mirror, which runs before every setup-buildx.
+# .github/actions/docker-hub-mirror. A new setup-buildx step needs that action
+# before it, and the same `driver-opts: image=…@sha256:` pin as the five that
+# exist (release.yml ×2, staging.yml ×2, canary-build.yml) — nothing checks
+# this. To move the builder to a newer BuildKit, change the digest in all five.
 
 [registry."docker.io"]
   mirrors = ["mirror.gcr.io"]
