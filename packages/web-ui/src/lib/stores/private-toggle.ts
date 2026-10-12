@@ -19,3 +19,30 @@ export function privateToggleFailure(
 	if (stored === true) return { skip: true, messageKey: 'threads.private_purge_incomplete' };
 	return { skip: typeof stored === 'boolean' ? stored : previous, messageKey: 'threads.error_extraction' };
 }
+
+/**
+ * Whether a private-mode toggle ended without saying what the server holds: no answer at all
+ * (`status` null), or a server error whose body names no stored state. A gateway's 502/504 can
+ * come after the engine stored the flag, so such an error is not evidence that nothing changed.
+ * A 4xx is: the request was refused before anything was stored, and `privateToggleFailure` holds.
+ */
+export function privateToggleOutcomeUnknown(status: number | null, body: unknown): boolean {
+	if (status === null) return true;
+	const stored =
+		typeof body === 'object' && body !== null
+			? (body as { skip_extraction?: unknown }).skip_extraction
+			: undefined;
+	return status >= 500 && typeof stored !== 'boolean';
+}
+
+/**
+ * What the page shows after a private-mode toggle whose outcome is unknown (see
+ * `privateToggleOutcomeUnknown`): the request may have been stored or not, in either direction.
+ *
+ * OFF, whichever way the user switched. Of the two wrong pictures, showing private mode on while
+ * the server holds it off is the one that lets a chat be remembered while the user thinks it is
+ * not. Showing it off while the server holds it on only under-promises; the next click asks again.
+ */
+export function privateToggleNoAnswer(): { skip: false; messageKey: 'threads.error_extraction' } {
+	return { skip: false, messageKey: 'threads.error_extraction' };
+}
