@@ -1208,3 +1208,41 @@ describe('Memory', () => {
     });
   });
 });
+
+describe('Memory.maybeUpdate — private mode switched on while the extraction is out', () => {
+  let dir: string;
+  const LONG_ANSWER = 'A'.repeat(100);
+  const FACT = '{"knowledge": "User prefers dark mode."}';
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'lynox-mem-private-'));
+    mockCreate.mockReset().mockResolvedValue({ content: [{ type: 'text', text: FACT }] });
+    mockPublish.mockReset();
+  });
+  afterEach(async () => {
+    mockCreate.mockReset().mockResolvedValue({ content: [{ type: 'text', text: '{}' }] });
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('writes and publishes nothing when the switch flipped during the call', async () => {
+    const mem = new Memory(dir, undefined, undefined, 'proj1');
+    let privateMode = false;
+    // The flip happens INSIDE the extraction call: a check made before it would still
+    // read `false`, so only a re-read after the call can stop the write.
+    mockCreate.mockImplementation(async () => {
+      privateMode = true;
+      return { content: [{ type: 'text', text: FACT }] };
+    });
+    await mem.maybeUpdate(LONG_ANSWER, undefined, 'thread-1', undefined, () => privateMode);
+    expect(await mem.load('knowledge')).toBeNull();
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it('writes and publishes as before when the chat stays public', async () => {
+    // Positive control on the same machinery: the fact above is one the extraction stores.
+    const mem = new Memory(dir, undefined, undefined, 'proj1');
+    await mem.maybeUpdate(LONG_ANSWER, undefined, 'thread-1', undefined, () => false);
+    expect(await mem.load('knowledge')).toContain('User prefers dark mode.');
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+});

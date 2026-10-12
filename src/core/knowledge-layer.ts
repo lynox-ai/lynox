@@ -316,6 +316,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
+      /**
+       * Asked after each await, before anything is written: `true` drops the write. The
+       * private-mode switch purges what carries a thread's id, synchronously; a write whose
+       * embedding (or contradiction check) was still out when it ran would land after the
+       * purge and keep the id. Everything from the last check to the insert is synchronous,
+       * so a purge cannot fall between them.
+       */
+      cancelled?: (() => boolean) | undefined;
     },
   ): Promise<KnowledgeStoreResult> {
     const trimmedText = text.trim();
@@ -344,6 +352,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
+    if (options?.cancelled?.()) {
+      return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+    }
 
     // 2. Dedup check — but bypass dedup when contradiction signals are present.
     // Filter by `scopeIds:[scope.id]` so a `context:acme` memory cannot dedup
@@ -423,6 +434,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         (emb, topK, thr, f) => this._dedupRecall(emb, topK, thr, f),
         this.embeddingProvider, embedding,
       );
+      if (options?.cancelled?.()) {
+        return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
+      }
     }
 
     // 3b. Memory Foundation Wave 2 (P1a — trust-aware conflict, DECIDED AT SOURCE).

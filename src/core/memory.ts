@@ -489,7 +489,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined, cancelled?: (() => boolean) | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -601,6 +601,11 @@ export class Memory implements IMemory {
         return;
       }
       this._emptyExtractionStreak = 0;
+
+      // Re-read after the extraction call, as the durable capture does: the caller's gate ran
+      // before it, and private mode can be switched on while the call is out. The switch purges
+      // what the thread already stored; a line written now would outlive that purge.
+      if (cancelled?.()) return;
 
       const useAutoScope = this._autoScope && this._activeScopes.length > 1;
 

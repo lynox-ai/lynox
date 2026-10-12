@@ -2049,7 +2049,11 @@ export class Agent implements IAgent {
     // find afterwards, so without the line above this abstention leaves no trace at all.
     if (turnUntrusted) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-    this._scheduleMemoryExtraction(gate.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
+    this._scheduleMemoryExtraction(gate.memory.maybeUpdate(
+      safeText, this._loopToolCount, this.currentThreadId, this.currentRunId,
+      // Read when the extraction returns, not now: see the same re-read on the durable path.
+      () => this.skipMemoryExtraction,
+    ));
   }
 
   private _scheduleMemoryExtraction(promise: Promise<void>): void {
