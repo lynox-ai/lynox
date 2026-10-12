@@ -234,6 +234,7 @@ vi.mock('../core/engine.js', () => ({
       append: mockMemoryAppend,
       update: mockMemoryUpdate,
       delete: mockMemoryDelete,
+      exportAllScopes: vi.fn().mockResolvedValue({ scopes: {}, mayBeIncomplete: false }),
     });
     // MemoryFacade (the /api/memory mutation choke point) reads this to mirror to the
     // knowledge layer; null = doc-only, which is all the route tests assert on.
@@ -12628,6 +12629,28 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         expect(body.threads_may_be_incomplete).toBe(false);
         expect(listThreadsForExport).toHaveBeenCalledTimes(1);
       });
+    });
+
+    it('GET /api/export passes the memory store\'s scopes and its incompleteness through, in both directions', async () => {
+      // What `exportAllScopes` reads is asserted on disk in `export-memory-scopes.test.ts`;
+      // this is only the hand-over, so a route that dropped the flag cannot pass for one
+      // whose store read everything.
+      for (const mayBeIncomplete of [true, false]) {
+        const scopes = { global: { 'knowledge.txt': `ZZMARKER-route-${String(mayBeIncomplete)}` } };
+        await swapEngine({
+          getMemory: () => ({ load: async () => null, exportAllScopes: async () => ({ scopes, mayBeIncomplete }) }),
+          getThreadStore: () => null,
+          getKnowledgeLayer: () => null,
+          getCRM: () => null,
+          getDataStore: () => null,
+        }, async () => {
+          const res = await jsonFetch('/api/export');
+          expect(res.status).toBe(200);
+          const body = await res.json() as { memory_scopes: unknown; memory_scopes_may_be_incomplete: boolean };
+          expect(body.memory_scopes).toEqual(scopes);
+          expect(body.memory_scopes_may_be_incomplete).toBe(mayBeIncomplete);
+        });
+      }
     });
 
     it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {

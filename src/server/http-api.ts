@@ -10696,8 +10696,24 @@ export class LynoxHTTPApi {
           memoryData[ns] = await memory.load(ns);
         }
         exportData['memory'] = memoryData;
+        // Every scope, not only the current one: `memory` above is the current scope and stays
+        // for compatibility, but `memory_store` and the extraction also write into user and
+        // context scopes, and an Art. 15 answer that shows one directory of several looks
+        // complete while it is not.
+        const all = await memory.exportAllScopes();
+        exportData['memory_scopes'] = all.scopes;
+        exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       } else {
         exportData['memory'] = {};
+        // No instance with `memory: false`, but the directory can still hold files from runs
+        // with it on, and the engine's shutdown writes its manifest there without asking the
+        // memory setting. Read by path, so the export does not answer "nothing" over files it
+        // never looked at.
+        const { getLynoxDir } = await import('../core/config.js');
+        const { exportMemoryDir, memoryDirOf } = await import('../core/memory.js');
+        const all = await exportMemoryDir(memoryDirOf(getLynoxDir()));
+        exportData['memory_scopes'] = all.scopes;
+        exportData['memory_scopes_may_be_incomplete'] = all.mayBeIncomplete;
       }
 
       // Knowledge graph (entities + relations)
