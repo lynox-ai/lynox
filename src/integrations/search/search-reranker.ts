@@ -25,6 +25,8 @@ import { resolveTierModel } from '../../core/tier-resolver.js';
 import type { LLMProvider } from '../../types/index.js';
 import type { ProviderConfigSnapshot } from '../../types/agent.js';
 import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff, isCutOffReply } from '../../core/llm-wire-rules.js';
+import { abortedCallCost, partialMessageOf, reportAbortedCall } from '../../core/aborted-call.js';
+import type { AbortedCallCost } from '../../core/aborted-call.js';
 
 export interface RerankOptions {
   /** Score threshold 0-10 for keeping a result. Default: 4. */
@@ -44,10 +46,14 @@ export interface RerankOutcome {
   /** Actual USD cost of the pool-key rerank call (from response.usage), for the
    *  managed in-run debit. Undefined when no LLM call was made (skip/error). */
   costUsd?: number | undefined;
+  /** Bounds for a rerank call aborted at the timeout, whose reply never arrived. The upper
+   *  bound is for the session cap only — an aborted call is never debited to the tenant. */
+  abortedCost?: AbortedCallCost | undefined;
 }
 
 const DEFAULT_THRESHOLD = 4;
 const DEFAULT_TIMEOUT_MS = 5000;
+const RERANK_MAX_TOKENS = 512;
 
 const SCORE_TOOL = {
   name: 'score_results',
@@ -153,6 +159,11 @@ export async function rerankSearchResults(
     .map((r, i) => `${i + 1}. "${r.title}" (${r.url}) — ${r.snippet.slice(0, 300)}`)
     .join('\n');
 
+  // Declared out here so the timeout path can bound what the aborted call cost.
+  let rerankModel: string | undefined;
+  let stream: unknown;
+  let request: { system: string; messages: Array<{ role: 'user'; content: string }>; tools: Array<typeof SCORE_TOOL> } | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     // Provider-aware client: on 'openai' (Mistral) createLLMClient has NO
     // global fallback for key/baseURL/model, so we MUST pass the resolved
@@ -176,20 +187,31 @@ export async function rerankSearchResults(
     const pinned = pinnedModelOf(providerConfig);
     const fast = resolveTierModel('fast', provider);
     const fastClient = pinned ? client : clientForTierSnapshot(fast, client, provider);
-    const rerankModel = pinned ?? fast.modelId;
-    const callPromise = settleForcedTool(fastClient.beta.messages.stream({
-      model: rerankModel,
-      max_tokens: 512,
-      ...(fast.betas ? { betas: fast.betas } : {}),
+    rerankModel = pinned ?? fast.modelId;
+    request = {
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: `Query: "${query}"\n\nResults:\n${resultList}` }],
       tools: [SCORE_TOOL],
+    };
+    // The timeout ABORTS the call. A race alone left it running at the provider: paid for in
+    // full, and booked nowhere.
+    const controller = new AbortController();
+    const s = fastClient.beta.messages.stream({
+      model: rerankModel,
+      max_tokens: RERANK_MAX_TOKENS,
+      ...(fast.betas ? { betas: fast.betas } : {}),
+      ...request,
       tool_choice: { type: 'tool', name: 'score_results' },
-    }).finalMessage());
+    }, { signal: controller.signal });
+    stream = s;
+    const callPromise = settleForcedTool(s.finalMessage());
 
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('rerank-timeout')), timeoutMs),
-    );
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('rerank-timeout'));
+      }, timeoutMs);
+    });
     const { message: response, missed } = await Promise.race([callPromise, timeoutPromise]);
 
     // Actual pool-key spend of this rerank call, for the managed in-run debit at
@@ -242,9 +264,16 @@ export async function rerankSearchResults(
       ...(costUsd !== undefined ? { costUsd } : {}),
     };
   } catch (err) {
-    const reason = err instanceof Error && err.message === 'rerank-timeout'
-      ? 'timeout' as const
-      : 'llm-error' as const;
-    return base({ skipReason: reason });
+    if (err instanceof Error && err.message === 'rerank-timeout') {
+      if (rerankModel !== undefined) {
+        const cost = abortedCallCost({ model: rerankModel, maxTokens: RERANK_MAX_TOKENS, request, partial: partialMessageOf(stream) });
+        reportAbortedCall('search-reranker', rerankModel, cost);
+        return base({ skipReason: 'timeout', abortedCost: cost });
+      }
+      return base({ skipReason: 'timeout' });
+    }
+    return base({ skipReason: 'llm-error' });
+  } finally {
+    clearTimeout(timer);
   }
 }

@@ -370,3 +370,36 @@ describe('CostGuard', () => {
     });
   });
 });
+
+describe('CostGuard — aborted-call bounds count against the ceiling only', () => {
+  // An aborted helper call's upper bound must stop a run that would cross its ceiling, but it
+  // is not spend: the snapshot is what a spawned child is debited to the tenant with.
+  it('counts toward the ceiling and the remaining budget', () => {
+    const g = new CostGuard({ maxBudgetUSD: 1 }, 'claude-haiku-4-5-20251001');
+    expect(g.recordCapOnlyCost(0.6)).toBe(false);
+    expect(g.remainingBudgetUSD()).toBeCloseTo(0.4, 10);
+    expect(g.recordCapOnlyCost(0.5)).toBe(true);
+    expect(g.isExceeded()).toBe(true);
+  });
+
+  it('stays out of the snapshot, and out of it after spend is recorded too', () => {
+    const g = new CostGuard({ maxBudgetUSD: 10 }, 'claude-haiku-4-5-20251001');
+    g.recordCapOnlyCost(0.7);
+    expect(g.snapshot().estimatedCostUSD).toBe(0);
+    g.recordExternalCost(0.2);
+    expect(g.snapshot().estimatedCostUSD).toBeCloseTo(0.2, 10);
+  });
+
+  it('counts toward the warning threshold', () => {
+    const g = new CostGuard({ maxBudgetUSD: 1 }, 'claude-haiku-4-5-20251001');
+    g.recordCapOnlyCost(0.85);
+    expect(g.shouldWarn()).toBe(true);
+  });
+
+  it('is cleared by reset', () => {
+    const g = new CostGuard({ maxBudgetUSD: 1 }, 'claude-haiku-4-5-20251001');
+    g.recordCapOnlyCost(0.9);
+    g.reset();
+    expect(g.remainingBudgetUSD()).toBeCloseTo(1, 10);
+  });
+});

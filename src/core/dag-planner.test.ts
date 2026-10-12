@@ -1,14 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the SDK using class syntax (same pattern as pre-approve-planner.test.ts)
 const mockCreate = vi.fn();
+// The partial message the Anthropic SDK's stream holds after its first event; undefined
+// unless a test sets it (the aborted-call bound reads the provider's prompt count from it).
+let mockCurrentMessage: unknown;
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class MockAnthropic {
     beta = {
       messages: {
         create: (...args: unknown[]) => mockCreate(...args),
-        stream: (...args: unknown[]) => ({ finalMessage: () => mockCreate(...args) }),
+        stream: (...args: unknown[]) => ({
+          finalMessage: () => mockCreate(...args),
+          ...(mockCurrentMessage !== undefined ? { currentMessage: mockCurrentMessage } : {}),
+        }),
       },
     };
     constructor(..._args: unknown[]) { /* accept any args */ }
@@ -18,6 +24,8 @@ vi.mock('@anthropic-ai/sdk', () => ({
 import { planDAG, estimatePipelineCost } from './dag-planner.js';
 import type { InlinePipelineStep } from '../types/index.js';
 import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
+import { calculateCost } from './pricing.js';
+import { abortedCallCounts } from './aborted-call.js';
 
 function makeToolUseResponse(input: unknown) {
   return {
@@ -448,6 +456,64 @@ describe('planDAG', () => {
     expect(result).not.toBeNull();
     // input_from with mixed types should be rejected (every() check fails)
     expect(result!.steps[1]!.input_from).toBeUndefined();
+  });
+});
+
+describe('planDAG — a planning call aborted at its timeout', () => {
+  // The 15 s timeout aborts the call through the signal handed to `stream()`. The reply never
+  // arrives, so nothing reaches `onSpend`; the caller gets bounds through `onAbortedSpend`
+  // instead (upper bound for the caps, never for the tenant debit). Both tests use the same
+  // fake stream with the same partial message and differ only in whether the timeout fired.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCurrentMessage = { usage: { input_tokens: 900 } };
+  });
+  afterEach(() => {
+    mockCurrentMessage = undefined;
+    vi.useRealTimers();
+  });
+
+  /** A reply that only ever ends by rejecting when its signal aborts. */
+  const rejectOnAbort = (_params: unknown, opt?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+    opt?.signal?.addEventListener('abort', () => reject(new Error('Request was aborted.')));
+  });
+
+  it('hands the caller the upper bound, books no spend, and counts the call by name', async () => {
+    vi.useFakeTimers();
+    mockCreate.mockImplementationOnce(rejectOnAbort);
+    const onSpend = vi.fn();
+    const onAbortedSpend = vi.fn();
+    const before = abortedCallCounts().notBilled['dag-planner'] ?? 0;
+
+    const pending = planDAG('build the app', { onSpend, onAbortedSpend });
+    await vi.advanceTimersByTimeAsync(15_000);
+    const result = await pending;
+
+    expect(result).toBeNull();
+    const [params, opt] = mockCreate.mock.calls[0]! as [{ model: string }, { signal: AbortSignal }];
+    expect(opt.signal.aborted, 'the timeout aborted the request').toBe(true);
+    expect(onAbortedSpend).toHaveBeenCalledOnce();
+    const cost = onAbortedSpend.mock.calls[0]![0] as { upperBoundUsd: number; estimateUsd: number };
+    // EXACT: the prompt count from the partial message, the whole output budget.
+    expect(cost.upperBoundUsd).toBe(calculateCost(params.model, { input_tokens: 900, output_tokens: 4096 }));
+    expect(cost.estimateUsd).toBeLessThan(cost.upperBoundUsd);
+    expect(onSpend, 'no reply, nothing for the tenant debit').not.toHaveBeenCalled();
+    expect(abortedCallCounts().notBilled['dag-planner']).toBe(before + 1);
+  });
+
+  it('a rejection that was NOT the timeout hands over nothing', async () => {
+    mockCreate.mockRejectedValueOnce(new Error('Internal Server Error'));
+    const onSpend = vi.fn();
+    const onAbortedSpend = vi.fn();
+    const before = abortedCallCounts().notBilled['dag-planner'] ?? 0;
+
+    const result = await planDAG('build the app', { onSpend, onAbortedSpend });
+
+    expect(result).toBeNull();
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(onAbortedSpend).not.toHaveBeenCalled();
+    expect(onSpend).not.toHaveBeenCalled();
+    expect(abortedCallCounts().notBilled['dag-planner'] ?? 0).toBe(before);
   });
 });
 
