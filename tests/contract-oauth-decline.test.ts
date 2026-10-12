@@ -12,6 +12,7 @@ import {
   OAUTH_DECLINE_CODES,
   isOAuthDeclineCode,
 } from '../src/contract/http.js';
+import { MIGRATED } from '../src/contract/migrated.js';
 
 describe('the start-failure vocabulary', () => {
   it('is exactly the five codes the start route refuses with', () => {
@@ -37,6 +38,18 @@ describe('the decline vocabulary', () => {
     for (const code of OAUTH_DECLINE_CODES) expect(isOAuthDeclineCode(code)).toBe(true);
     for (const other of ['admin_policy_enforced', 'ACCESS_DENIED', '', ' expired', undefined, null, 1]) {
       expect(isOAuthDeclineCode(other)).toBe(false);
+    }
+  });
+});
+
+describe('the vocabulary is registered as migrated', () => {
+  // The orphan-twin sweep (`contract-drift.test.ts`) hunts only what `MIGRATED`
+  // names. Without these rows a private copy of the list could reappear in
+  // `src/` or the web-ui and nothing would object.
+  it('names all five symbols, owned by http.ts', () => {
+    const rows = MIGRATED.filter((m) => m.contractFile === 'http.ts').map((m) => m.name);
+    for (const name of ['BROKER_START_FAILURES', 'BrokerStartFailure', 'OAUTH_DECLINE_CODES', 'OAuthDeclineCode', 'isOAuthDeclineCode']) {
+      expect(rows, name).toContain(name);
     }
   });
 });
