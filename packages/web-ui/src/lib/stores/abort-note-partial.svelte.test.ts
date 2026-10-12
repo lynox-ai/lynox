@@ -49,21 +49,38 @@ interface Server {
 	registry?: 'no-run' | 'unreachable';
 	/** What `/threads/t1/messages` returns. */
 	transcript: unknown[];
+	/** Holds the FIRST transcript read (the one the branch makes) until it settles. */
+	holdFirstTranscript?: Promise<void>;
 }
 
 /** Starts a turn; returns the open `/run` stream and the turn's promise. */
 async function startTurn(server: Server): Promise<{ run: ReturnType<typeof sseStream>; turn: Promise<void>; transcriptReads: () => number }> {
 	const run = sseStream();
 	let transcriptReads = 0;
+	let runPosts = 0;
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
 		const url = String(input);
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
-		if (url.endsWith('/sessions/t1/run')) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		if (url.endsWith('/sessions/t1/run')) {
+			// The first POST is the turn under test; a later one is a queued turn
+			// draining after it, which simply completes.
+			if (runPosts++ === 0) return new Response(run.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+			const later = sseStream();
+			later.send('text', { text: 'later answer', agent: 'lynox' });
+			later.send('done', { agent: 'lynox' });
+			later.close();
+			return new Response(later.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+		}
+		if (url.endsWith('/threads/t1')) return json({ thread: null });
 		if (url.endsWith('/runs/active')) {
 			if (server.registry === 'unreachable') return json({}, 503);
 			return json({ runs: [] });
 		}
-		if (url.endsWith('/threads/t1/messages')) { transcriptReads++; return json({ messages: server.transcript }); }
+		if (url.endsWith('/threads/t1/messages')) {
+			transcriptReads++;
+			if (transcriptReads === 1 && server.holdFirstTranscript) await server.holdFirstTranscript;
+			return json({ messages: server.transcript });
+		}
 		return json({}, 404);
 	}));
 	const turn = store.sendMessage('write the essay');
@@ -156,6 +173,71 @@ describe('nothing is added where the note is not this turn\'s, or not yet known'
 		await turn; await settle();
 
 		expect(afterUser().some((m) => m.note)).toBe(false);
+	});
+});
+
+describe('the note is this turn\'s, counted against the user rows both sides hold', () => {
+	it('another tab sent into the thread since: its row makes the counts differ, nothing is added', async () => {
+		// The trailing note may be the other turn's (its own provider error, say).
+		const { run, turn } = await startTurn({ transcript: [USER, { role: 'user', content: 'from the other tab' }, INTERRUPTED] });
+		run.send('text', { text: 'partial', agent: 'lynox' });
+		await settle();
+		run.close();
+		await turn; await settle();
+
+		expect(afterUser().some((m) => m.note)).toBe(false);
+	});
+
+	it('a blank user row (an ask_user answer) is not counted, as the client does not show it either', async () => {
+		const { run, turn } = await startTurn({ transcript: [USER, { role: 'user', content: '  ' }, INTERRUPTED] });
+		run.send('text', { text: 'partial', agent: 'lynox' });
+		await settle();
+		run.close();
+		await turn; await settle();
+
+		expect(afterUser()[1]?.note?.code).toBe('run_interrupted');
+	});
+
+	it('a follow-up queued during the run is not counted, so the note still shows', async () => {
+		const { run, turn } = await startTurn({ transcript: [USER, INTERRUPTED] });
+		run.send('text', { text: 'partial', agent: 'lynox' });
+		await settle();
+		void store.sendMessage('and one more thing');
+		await settle();
+		run.close();
+		await turn; await settle();
+
+		expect(afterUser()[1]?.note?.code).toBe('run_interrupted');
+	});
+
+	it('an error event already reported the failure: no second report', async () => {
+		const { run, turn } = await startTurn({ transcript: [USER, { role: 'assistant', content: '', note: { code: 'provider_error' } }] });
+		run.send('text', { text: 'partial', agent: 'lynox' });
+		run.send('error', { message: 'upstream 529', fatal: true, agent: 'lynox' });
+		await settle();
+		run.close();
+		await turn; await settle();
+
+		expect(afterUser().some((m) => m.note)).toBe(false);
+	});
+
+	it('the thread opened again while the transcript was being read: the note is neither doubled nor misplaced', async () => {
+		let release!: () => void;
+		const hold = new Promise<void>((r) => { release = r; });
+		const { run, turn } = await startTurn({ transcript: [USER, INTERRUPTED], holdFirstTranscript: hold });
+		run.send('text', { text: 'partial', agent: 'lynox' });
+		await settle();
+		run.close();
+		await settle();
+		// The user taps the same thread: the list is replaced by the server's.
+		await store.resumeThread('t1');
+		await settle();
+		release();
+		await turn; await settle();
+
+		const notes = afterUser().filter((m) => m.note);
+		expect(notes).toHaveLength(1);
+		expect(afterUser().at(-1)?.note?.code).toBe('run_interrupted');
 	});
 });
 

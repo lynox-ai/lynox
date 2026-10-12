@@ -195,15 +195,19 @@ export interface TurnNote {
  * `/threads/:id/messages` body — or null when the thread does not end on one.
  *
  * Asked after a stream ended without a terminal event while the turn had already
- * rendered something (thinking, text, tool calls). The server writes the note
- * when the run stops, but the `/run` stream of an aborted run ends without `done`,
- * so the note never reaches the live client; only a reload showed it.
+ * rendered something (thinking, text, tool calls). The server writes a note when
+ * a run stops early (interrupted, a loop break, a cap), but the `/run` stream of an
+ * aborted run ends without `done`, so the note never reaches the live client; only
+ * a reload showed it. Whatever the note is, a reload would show the same row.
  *
- * `localUserTurns` is how many user messages the client shows. The note must
- * belong to THIS turn, and the transcript proves that only by holding this turn's
- * user message: a transcript with fewer user rows than the client ends on an
- * EARLIER turn, whose note would be a false report about this one. Fewer is
- * refused, never guessed — the cost of refusing is today's behaviour (no note).
+ * `localUserTurns` counts the user messages this client shows that the server
+ * holds too (the caller leaves out queued and unsent ones). The note must belong
+ * to THIS turn, and the only proof the transcript offers is that its user rows are
+ * the client's user rows: fewer means it ends on an EARLIER turn, more means
+ * someone else (another tab, another device) sent into the thread since, and the
+ * note may be theirs. Both are refused, never guessed — the cost of refusing is
+ * today's behaviour (no note until a reload). Blank user rows are left out of the
+ * server's count, because the client drops them too (they are ask_user answers).
  */
 export function trailingTurnNote(body: unknown, localUserTurns: number): TurnNote | null {
 	if (typeof body !== 'object' || body === null) return null;
@@ -215,8 +219,12 @@ export function trailingTurnNote(body: unknown, localUserTurns: number): TurnNot
 	if (role !== 'assistant' || typeof note !== 'object' || note === null) return null;
 	const { code, detail } = note as { code?: unknown; detail?: unknown };
 	if (typeof code !== 'string' || code.length === 0) return null;
-	const userRows = rows.filter((r) => typeof r === 'object' && r !== null && (r as { role?: unknown }).role === 'user').length;
-	if (userRows < localUserTurns) return null;
+	const userRows = rows.filter((r) => {
+		if (typeof r !== 'object' || r === null) return false;
+		const { role: rr, content } = r as { role?: unknown; content?: unknown };
+		return rr === 'user' && typeof content === 'string' && content.trim().length > 0;
+	}).length;
+	if (userRows !== localUserTurns) return null;
 	return typeof detail === 'string' ? { code, detail } : { code };
 }
 
@@ -226,10 +234,10 @@ export function trailingTurnNote(body: unknown, localUserTurns: number): TurnNot
  * does not persist an answer the abort cut off, so replacing the bubble with the
  * transcript would delete text the user has already read.
  *
- * Idempotent because the branch that calls it can run again for the same turn
- * (a second stream end). A later reconcile or reload replaces the rows from the
- * server, which holds the note once, so neither can double it either.
- * Returns whether a row was added.
+ * Idempotent so that no path can stack the same note twice under one bubble.
+ * Today the caller runs once per turn; the check is the guard for the day a
+ * second pass appears. A later reconcile or reload replaces the rows from the
+ * server, which holds the note once. Returns whether a row was added.
  */
 export function appendNoteOnce<M extends { role: string; content: string; note?: TurnNote | undefined }>(
 	rows: M[],
