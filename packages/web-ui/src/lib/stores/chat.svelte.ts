@@ -24,7 +24,7 @@ import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody,
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
-import { privateToggleFailure } from './private-toggle.js';
+import { privateToggleFailure, privateToggleNoAnswer } from './private-toggle.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
@@ -3051,15 +3051,17 @@ export async function toggleSkipExtraction(): Promise<void> {
 	if (!sid) return;
 	const newValue = !skipExtraction;
 	skipExtraction = newValue;
-	// A request that got no answer at all is a failure too: the switch must not stay on when the
-	// server may never have heard of it. No answer carries no stored state, so it falls back.
+	// A request that got no answer at all is a failure too, and nothing says what the server
+	// holds; `privateToggleNoAnswer` says why the switch then shows off.
 	const res = await fetch(`${getApiBase()}/threads/${sid}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ skip_extraction: newValue }),
 	}).catch(() => null);
 	if (!res?.ok) {
-		const failure = privateToggleFailure(!newValue, res ? await res.json().catch(() => null) : null);
+		const failure = res
+			? privateToggleFailure(!newValue, await res.json().catch(() => null))
+			: privateToggleNoAnswer();
 		skipExtraction = failure.skip;
 		addToast(t(failure.messageKey), 'error');
 	}

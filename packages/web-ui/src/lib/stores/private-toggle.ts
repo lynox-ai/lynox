@@ -19,3 +19,15 @@ export function privateToggleFailure(
 	if (stored === true) return { skip: true, messageKey: 'threads.private_purge_incomplete' };
 	return { skip: typeof stored === 'boolean' ? stored : previous, messageKey: 'threads.error_extraction' };
 }
+
+/**
+ * What the page shows after a private-mode toggle that got no answer at all: the request may
+ * have been stored or not, in either direction.
+ *
+ * OFF, whichever way the user switched. Of the two wrong pictures, showing private mode on while
+ * the server holds it off is the one that lets a chat be remembered while the user thinks it is
+ * not. Showing it off while the server holds it on only under-promises; the next click asks again.
+ */
+export function privateToggleNoAnswer(): { skip: false; messageKey: 'threads.error_extraction' } {
+	return { skip: false, messageKey: 'threads.error_extraction' };
+}

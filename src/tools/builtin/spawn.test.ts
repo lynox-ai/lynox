@@ -1702,13 +1702,19 @@ describe('spawn_agent tool', () => {
     expect(seen).toEqual([false, true]);
   });
 
-  it('a child that turned its own capture off keeps it off while the parent\'s is on', async () => {
+  it('the child\'s own switch counts for the child only, and cannot undo the parent\'s', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const parent = makeAgent({ currentThreadId: 't-1', skipMemoryExtraction: false } as Partial<IAgent>);
     await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, parent);
     const child = vi.mocked(MockAgent).mock.instances[0] as unknown as { skipMemoryExtraction: boolean };
     expect(child.skipMemoryExtraction).toBe(false);
+    // Child off, parent on: the child stops capturing, and the parent is left as it was.
     child.skipMemoryExtraction = true;
+    expect(child.skipMemoryExtraction).toBe(true);
+    expect(parent.skipMemoryExtraction).toBe(false);
+    // Parent on, child set back on: the parent's private mode still holds for the child.
+    child.skipMemoryExtraction = false;
+    (parent as { skipMemoryExtraction?: boolean }).skipMemoryExtraction = true;
     expect(child.skipMemoryExtraction).toBe(true);
   });
 
