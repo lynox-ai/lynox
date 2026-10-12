@@ -298,7 +298,7 @@ export const actions: Actions = {
 		});
 		if (outcome.type === 'fail') {
 			if (outcome.failedLogin) recordFailedLogin(ip);
-			return fail(outcome.status, { error: outcome.error });
+			return fail(outcome.status, { error: outcome.error, ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}) });
 		}
 		setSessionCookie(cookies, outcome.session, isHttpsRequest(url, request));
 		clearRateLimit(ip);

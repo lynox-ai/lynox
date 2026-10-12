@@ -45,6 +45,10 @@
 			localError = null;
 			otpStep = 'code';
 			startOtpCountdown();
+		} else if (form && 'errorCode' in form && form.errorCode === 'code_rejected') {
+			localError = isDE
+				? 'Der Code hat nicht funktioniert. Ein Code gilt 10 Minuten lang und für drei Versuche, danach brauchst du einen neuen.'
+				: "That code didn't work. A code is valid for 10 minutes and three tries, then you need a new one.";
 		} else if (form && 'error' in form && typeof form.error === 'string') {
 			localError = form.error;
 		}

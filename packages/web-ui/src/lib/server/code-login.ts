@@ -23,8 +23,11 @@ export interface CodeLoginDeps {
 
 export type CodeLoginOutcome =
 	| { type: 'session'; session: { token: string; maxAge: number } }
-	/** `failedLogin` counts toward the IP's rate limit. */
-	| { type: 'fail'; status: number; error: string; failedLogin: boolean };
+	/**
+	 * `failedLogin` counts toward the IP's rate limit. `errorCode` names a refusal the
+	 * page words itself, in the visitor's language; without it the page shows `error`.
+	 */
+	| { type: 'fail'; status: number; error: string; failedLogin: boolean; errorCode?: 'code_rejected' };
 
 const UNREACHABLE = 'Could not reach the control plane. Please try again.';
 
@@ -52,6 +55,10 @@ export async function verifyCodeLogin(deps: CodeLoginDeps): Promise<CodeLoginOut
 
 	if (!res.ok) {
 		const body = await res.json().catch(() => ({ error: 'Verification failed' })) as { error?: string };
+		// The CP answers every failed code (wrong, expired, used up) with 401 and one text.
+		if (res.status === 401) {
+			return { type: 'fail', status: 401, error: body.error ?? 'Invalid code.', failedLogin: true, errorCode: 'code_rejected' };
+		}
 		return { type: 'fail', status: res.status, error: body.error ?? 'Invalid code.', failedLogin: true };
 	}
 
