@@ -149,6 +149,17 @@ describe('ending the runs of an ended grant', () => {
     expect(ledger.approve(ended, { checksum: 'x' })).toEqual({ ok: false, reason: 'wrong_phase' });
   });
 
+  it('asks about the grants of unapproved runs only', () => {
+    const THIRD: RequestPrincipal = { kind: 'mandate', email: 'third@example.invalid', mandateId: 'grant-3' };
+    const approved = dryRun(THIRD);
+    const ok = ledger.approve(approved, { checksum: ledger.computeChecksum(approved)!, maxTargets: 1 });
+    if (!ok.ok) throw new Error(ok.reason);
+    dryRun(GRANT);
+    const asked: string[] = [];
+    ledger.expireEndedPlanners({ isLive: (id) => { asked.push(id); return true; }, threadCreator: () => undefined, threadsKnown: true });
+    expect(asked).toEqual(['grant-1']);
+  });
+
   it('withdraws a planned external run and removes its preview trigger', () => {
     const id = externalPlan(GRANT);
     expect(ledger.resumePreview(id).ok).toBe(true);
