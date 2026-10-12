@@ -130,7 +130,7 @@ function hasSpeakableContent(s: string): boolean {
 
 /**
  * ⭐ THE ONE DECISION POINT for "which voice", and it is deliberately one function so
- * that the open question below changes exactly one place.
+ * that a change to the rule below changes exactly one place.
  *
  * Resolution order, and each step is a decision already made elsewhere:
  *   1. an explicit `voice` wins — the caller has chosen;
@@ -141,17 +141,16 @@ function hasSpeakableContent(s: string): boolean {
  *      because the OPTIONAL step in front of it did.
  *   5. otherwise the deterministic pick.
  *
- * ⚠⚠ OPEN, AND NOT DECIDED HERE: what should happen when the catalogue has no voice
- * for the requested language. Today that is not a corner case — it is the GERMAN
- * case, every time, because the provider has no German voice at all. The behaviour
- * of this branch therefore IS the answer to "browser `SpeechSynthesis` or a second
- * provider", and that is a product decision, not this function's.
+ * A chosen voice (step 1: the caller's `voice`, which the HTTP route fills from the
+ * request, else from the saved voice setting) is used as it is, for every language,
+ * and the catalogue is not consulted. That is the rule, not a stopgap.
  *
- * Until it is made, this falls back to the provider's default voice AND says so. That
- * is strictly today's behaviour plus a diagnostic — the surface reads German text with
- * an English speaker voice — so it adds no
- * promise. Throwing instead would take a working feature away from German users,
- * which is the wrong direction for an unanswered question.
+ * Only when no voice was chosen does the language pick run. If the catalogue then has
+ * no voice for the language, this returns no voice, the provider's default reads the
+ * text, and a warning says the speaker does not match the text. It does not throw:
+ * that would take a working feature away from German users. The current provider's
+ * catalogue has no German voice (see `mistral-voxtral-tts.ts`), so German text is read
+ * by a voice whose accent is not German.
  */
 async function resolveVoice(
   provider: SpeakProvider,
