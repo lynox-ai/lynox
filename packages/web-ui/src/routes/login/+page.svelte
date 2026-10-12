@@ -10,7 +10,7 @@
 	let otpStep = $state<'email' | 'code'>('email');
 	let localError = $state<string | null>(null);
 	let _emailOverride = $state<string | null>(null);
-	let submittedEmail = $derived(_emailOverride ?? data.customerEmail ?? '');
+	let submittedEmail = $derived(_emailOverride ?? '');
 
 	// OTP countdown timer (10 min = 600s)
 	let otpCountdown = $state(0);
@@ -45,6 +45,10 @@
 			localError = null;
 			otpStep = 'code';
 			startOtpCountdown();
+		} else if (form && 'errorCode' in form && form.errorCode === 'code_rejected') {
+			localError = isDE
+				? 'Der Code hat nicht funktioniert. Ein Code gilt 10 Minuten lang und für drei Versuche, danach brauchst du einen neuen.'
+				: "That code didn't work. A code is valid for 10 minutes and three tries, then you need a new one.";
 		} else if (form && 'error' in form && typeof form.error === 'string') {
 			localError = form.error;
 		}
@@ -224,10 +228,8 @@
 								autocomplete="email"
 								required
 								value={submittedEmail}
-								readonly={!!data.customerEmail}
 								class="w-full rounded-[var(--radius-md)] border border-border bg-bg-subtle px-3 py-2.5 text-text
-									placeholder:text-text-subtle focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent
-									{data.customerEmail ? 'opacity-60' : ''}"
+									placeholder:text-text-subtle focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
 							/>
 						</div>
 
@@ -275,8 +277,8 @@
 
 						<p class="text-sm text-text-muted">
 							{isDE
-								? `Wir haben dir an ${submittedEmail} einen Link geschickt — klick ihn an, oder gib den Code ein.`
-								: `We sent a link to ${submittedEmail} — tap it, or enter the code below.`}
+								? `Falls ${submittedEmail} sich hier anmelden darf, ist ein Link unterwegs. Klick ihn an oder gib den Code unten ein.`
+								: `If ${submittedEmail} can sign in here, a link is on its way. Tap it, or enter the code below.`}
 						</p>
 
 						{#if otpCountdown > 0}
@@ -309,6 +311,17 @@
 									font-mono text-lg tracking-[0.3em] text-text placeholder:text-text-subtle
 									focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
 							/>
+							<p class="mt-1.5 text-xs text-text-subtle">
+								{#if data.hasPasskeys}
+									{isDE
+										? 'Keine Mail nach ein paar Minuten? Prüf die Adresse und den Spam-Ordner oder melde dich mit Passkey an.'
+										: 'No email after a few minutes? Check the address and your spam folder, or sign in with a passkey.'}
+								{:else}
+									{isDE
+										? 'Keine Mail nach ein paar Minuten? Prüf die Adresse und den Spam-Ordner.'
+										: 'No email after a few minutes? Check the address and your spam folder.'}
+								{/if}
+							</p>
 						</div>
 
 						<button

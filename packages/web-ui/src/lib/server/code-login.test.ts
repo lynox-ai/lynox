@@ -61,13 +61,19 @@ describe('verifyCodeLogin', () => {
 		expect(await verifyCodeLogin(deps(ok(body)))).toMatchObject({ type: 'fail', status: 403 });
 	});
 
-	it('passes the CP refusal through and counts it as a failed login', async () => {
-		const out = await verifyCodeLogin(deps(new Response(JSON.stringify({ error: 'Invalid code. Please try again.' }), { status: 401 })));
-		expect(out).toEqual({ type: 'fail', status: 401, error: 'Invalid code. Please try again.', failedLogin: true });
+	it('names a refused code so the page can word it, and counts it as a failed login', async () => {
+		const out = await verifyCodeLogin(deps(new Response(JSON.stringify({ error: 'TEST-CP-TEXT' }), { status: 401 })));
+		expect(out).toEqual({ type: 'fail', status: 401, error: 'TEST-CP-TEXT', failedLogin: true, errorCode: 'code_rejected' });
+	});
+
+	it.each([400, 403])('passes any other CP refusal (%i) through with its own text and no code', async (status) => {
+		const out = await verifyCodeLogin(deps(new Response(JSON.stringify({ error: 'TEST-CP-TEXT' }), { status })));
+		expect(out).toEqual({ type: 'fail', status, error: 'TEST-CP-TEXT', failedLogin: true });
 	});
 
 	it('reports an unreachable CP without counting it against the IP', async () => {
 		const out = await verifyCodeLogin(deps(() => { throw new TypeError('fetch failed'); }));
 		expect(out).toMatchObject({ type: 'fail', status: 502, failedLogin: false });
+		expect(out).not.toHaveProperty('errorCode');
 	});
 });

@@ -10,7 +10,7 @@ vi.mock('$lib/server/auth.js', async () => await import('../../lib/server/auth.j
 vi.mock('$lib/contract/http.js', async () => await import('../../lib/contract/http.js'));
 vi.mock('$lib/server/code-login.js', async () => await import('../../lib/server/code-login.js'));
 
-const { load } = await import('./+page.server.js');
+const { load, actions } = await import('./+page.server.js');
 const { createSessionToken, createLinkCode, consumeLinkCode, readSessionToken, MANDATE_SESSION_MAX_S } = await import('../../lib/server/auth.js');
 
 const SECRET = 'a'.repeat(64);
@@ -79,5 +79,60 @@ describe('login page — a mandate session is sent on before any owner login run
 		const r = await visit(`?token=${ONBOARDING}`, mandateCookie());
 		expect(r).toEqual({ set: null, redirectedTo: '/app' });
 		expect(existsSync(join(dataDir, '.onboarding-consumed'))).toBe(false);
+	});
+});
+
+describe('login page — the address field', () => {
+	it('a managed login page carries no address: the visitor types their own', async () => {
+		const OWNER = 'owner-address@example.test';
+		env['LYNOX_MANAGED_INSTANCE_ID'] = 'TEST-INSTANCE';
+		env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.test';
+		env['LYNOX_MANAGED_CUSTOMER_EMAIL'] = OWNER;
+		try {
+			const url = new URL('https://inst.example.test/login');
+			const data = await load({
+				cookies: { get: () => undefined, set: () => {} } as unknown as Cookies,
+				url, request: new Request(url), getClientAddress: () => '203.0.113.7', setHeaders: () => {},
+			} as unknown as Parameters<typeof load>[0]);
+			// Twin: this is the managed branch, not the self-hosted one.
+			expect(data).toMatchObject({ isManaged: true });
+			expect(JSON.stringify(data)).not.toContain(OWNER);
+		} finally {
+			delete env['LYNOX_MANAGED_INSTANCE_ID'];
+			delete env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+			delete env['LYNOX_MANAGED_CUSTOMER_EMAIL'];
+		}
+	});
+});
+
+describe('login page — a refused code', () => {
+	async function verifyWith(status: number): Promise<unknown> {
+		env['LYNOX_MANAGED_INSTANCE_ID'] = 'TEST-INSTANCE';
+		env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.example.test';
+		vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'TEST-CP-TEXT' }), { status })));
+		try {
+			const url = new URL('https://inst.example.test/login?/verifyOtp');
+			const body = new FormData();
+			body.set('email', 'someone@example.test');
+			body.set('code', '123456');
+			return await actions.verifyOtp({
+				cookies: { get: () => undefined, set: () => {} } as unknown as Cookies,
+				url, request: new Request(url, { method: 'POST', body }), getClientAddress: () => `203.0.113.${status % 250}`,
+			} as unknown as Parameters<typeof actions.verifyOtp>[0]);
+		} finally {
+			vi.unstubAllGlobals();
+			delete env['LYNOX_MANAGED_INSTANCE_ID'];
+			delete env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+		}
+	}
+
+	it('hands the page the code it words in the visitor\'s language', async () => {
+		expect(await verifyWith(401)).toMatchObject({ status: 401, data: { error: 'TEST-CP-TEXT', errorCode: 'code_rejected' } });
+	});
+
+	it.each([400, 403])('hands the page the control plane\'s own text for a %i', async (status) => {
+		const out = await verifyWith(status) as { status: number; data: Record<string, unknown> };
+		expect(out).toMatchObject({ status, data: { error: 'TEST-CP-TEXT' } });
+		expect(out.data).not.toHaveProperty('errorCode');
 	});
 });

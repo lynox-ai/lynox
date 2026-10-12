@@ -148,9 +148,9 @@ export const load: PageServerLoad = async ({ cookies, url, request, getClientAdd
 			} catch { /* control plane unreachable — fallback to OTP */ }
 		}
 
+		// The address field starts empty: the owner's address is not part of the page.
 		return {
 			isManaged: true,
-			customerEmail: managed.customerEmail ?? undefined,
 			hasPasskeys,
 		};
 	}
@@ -298,7 +298,7 @@ export const actions: Actions = {
 		});
 		if (outcome.type === 'fail') {
 			if (outcome.failedLogin) recordFailedLogin(ip);
-			return fail(outcome.status, { error: outcome.error });
+			return fail(outcome.status, { error: outcome.error, ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}) });
 		}
 		setSessionCookie(cookies, outcome.session, isHttpsRequest(url, request));
 		clearRateLimit(ip);
