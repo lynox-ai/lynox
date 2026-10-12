@@ -128,8 +128,10 @@ export interface MemoryDirExport {
  * `<contextId>`, `user-<id>`), and `memory_store` and the extraction write into any of them,
  * so reading only the default scope answered for one directory of many.
  *
- * The set is the directory's regular files — what {@link Memory.eraseAll} removes when there is
- * an instance — not what `parsePortableMemoryKey` accepts: the migration bundle carries the
+ * The set is the regular files in the directory and its scope directories. {@link Memory.eraseAll},
+ * when there is an instance, removes the whole tree, so it removes more than this reads: the
+ * entries skipped or flagged below go too. The set is not what `parsePortableMemoryKey`
+ * accepts either: the migration bundle carries the
  * namespace files it can restore, while an export has to show every file held. That includes
  * the engine's `manifest.json` (a map of the working directory's file paths to their mtimes,
  * written next to the namespace files) and any file lying directly in the directory, listed

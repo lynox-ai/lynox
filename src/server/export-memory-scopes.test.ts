@@ -203,9 +203,13 @@ describe('Memory.exportAllScopes', () => {
     fresh();
     mkdirSync(join(base(), '__proto__'));
     writeFileSync(join(base(), '__proto__', 'knowledge.txt'), 'ZZMARKER-proto');
+    // And a FILE of that name, for the inner map.
+    writeFileSync(join(base(), 'global', '__proto__'), 'ZZMARKER-proto-file');
     const { scopes } = await mem.exportAllScopes();
     expect(Object.keys(scopes)).toContain('__proto__');
     expect(JSON.stringify(scopes)).toContain('ZZMARKER-proto');
+    expect(Object.keys(scopes['global'] ?? {})).toContain('__proto__');
+    expect(JSON.stringify(scopes)).toContain('ZZMARKER-proto-file');
   });
 
   it('reports a nested directory instead of claiming the scope is complete', async () => {
