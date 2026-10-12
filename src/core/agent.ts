@@ -73,7 +73,7 @@ import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
-import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
+import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
@@ -2599,7 +2599,7 @@ export class Agent implements IAgent {
           if (this.onStream) {
             await this.onStream({ type: 'continuation', iteration: this.continuationCount, max: this.maxContinuations, agent: this.name });
           }
-          this.messages.push({ role: 'user', content: 'Your previous response was truncated due to length. Please continue from where you left off.' });
+          this.messages.push({ role: 'user', content: MAX_TOKENS_CONTINUATION_PROMPT });
           return this._loop();
         }
         // Continuation cap exhausted — surface a clear notice rather than an

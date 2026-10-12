@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
+import { projectMessages, stripSafetyMarkers, buildDisplayNoteContent, sanitizeNoteDetail, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
 import type { ThreadMessageRecord } from './thread-store.js';
 
 function rec(seq: number, role: string, content: unknown): ThreadMessageRecord {
@@ -586,5 +586,71 @@ describe('tool-result carrier with continuation hint', () => {
     ]);
     expect(out.some((m) => m.content.includes('your own tool calls'))).toBe(false);
     expect(out.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['go']);
+  });
+});
+
+describe('max_tokens continuation prompt', () => {
+  // The wording the agent has persisted since before the constant existed.
+  // Spelled out, not taken from the constant: stored rows carry THIS text, so
+  // changing the constant without a legacy match has to fail here.
+  const STORED = 'Your previous response was truncated due to length. Please continue from where you left off.';
+
+  it('a stored continuation row does not render, and the answer around it stays one turn', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'write the report'),
+      rec(2, 'assistant', [{ type: 'text', text: 'First half.' }]),
+      rec(3, 'user', STORED),
+      rec(4, 'assistant', [{ type: 'text', text: 'Second half.' }]),
+    ]);
+    expect(out.filter((m) => m.role === 'user').map((m) => m.content)).toEqual(['write the report']);
+    expect(out.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    expect(out.some((m) => m.content.includes('truncated due to length'))).toBe(false);
+  });
+
+  it('the same text as a single text block does not render either', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'go'),
+      rec(2, 'user', [{ type: 'text', text: STORED }]),
+    ]);
+    expect(out.map((m) => m.content)).toEqual(['go']);
+  });
+
+  it('after a tool round: the call keeps its result and the text on both sides stays in the turn', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'check the logs'),
+      rec(2, 'assistant', [{ type: 'tool_use', id: 'tu_c', name: 'bash', input: { command: 'tail' } }]),
+      rec(3, 'user', [{ type: 'tool_result', tool_use_id: 'tu_c', content: 'log lines' }]),
+      rec(4, 'assistant', [{ type: 'text', text: 'First half.' }]),
+      rec(5, 'user', STORED),
+      rec(6, 'assistant', [{ type: 'text', text: 'Second half.' }]),
+    ]);
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(out[1]!.toolCalls?.[0]?.result).toBe('log lines');
+    expect(out[1]!.content).toContain('First half.');
+    expect(out[1]!.content).toContain('Second half.');
+  });
+
+  it('is dropped without merging turns too (the debug export reads it that way)', () => {
+    const out = projectMessages([
+      rec(1, 'user', 'go'),
+      rec(2, 'assistant', [{ type: 'text', text: 'First half.' }]),
+      rec(3, 'user', STORED),
+      rec(4, 'assistant', [{ type: 'text', text: 'Second half.' }]),
+    ], { mergeTurns: false });
+    expect(out.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant']);
+  });
+
+  it('the agent injects exactly the stored wording', () => {
+    expect(MAX_TOKENS_CONTINUATION_PROMPT).toBe(STORED);
+  });
+
+  it('a real user message with similar text still renders', () => {
+    const similar = [
+      `${STORED} And add a summary table.`,
+      'Your previous response was truncated. Please continue from where you left off.',
+      'your previous response was truncated due to length. please continue from where you left off.',
+    ];
+    const out = projectMessages(similar.map((t, i) => rec(i + 1, 'user', t)));
+    expect(out.map((m) => m.content)).toEqual(similar);
   });
 });

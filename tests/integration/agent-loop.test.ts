@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ToolEntry, StreamEvent } from '../../src/types/index.js';
+import { MAX_TOKENS_CONTINUATION_PROMPT } from '../../src/core/render-projection.js';
 
 // === Mocks ===
 
@@ -246,6 +247,9 @@ describe('Agent Loop Integration', () => {
 
     expect(result).toBe('complete');
     expect(mockProcess).toHaveBeenCalledTimes(2);
+    // The injected turn is the shared constant the transcript projection
+    // hides; any other wording would render as a user bubble after a reload.
+    expect(agent.getMessages()).toContainEqual({ role: 'user', content: MAX_TOKENS_CONTINUATION_PROMPT });
   });
 
   // -- 4. Stream event collection --
