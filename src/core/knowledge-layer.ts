@@ -322,8 +322,10 @@ export class KnowledgeLayer implements IKnowledgeLayer {
        * step that stores the flag, so a `true` here means that purge has already run. A write
        * whose embedding, contradiction check, gate or entity extraction was still out would
        * otherwise land after it — and a stub written after the legacy row was purged is one
-       * no later purge reaches, because purges find stubs through the legacy ids. Between
-       * each check and the writes it guards there is no await.
+       * no later purge reaches, because purges find stubs through the legacy ids. Each check
+       * sits directly after the await it answers; the only await between a check and its writes
+       * is `store`'s own on the extraction helper, which has already made its check and
+       * returned.
        */
       cancelled?: (() => boolean) | undefined;
     },

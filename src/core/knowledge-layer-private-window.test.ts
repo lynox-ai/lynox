@@ -25,7 +25,7 @@ vi.mock('./entity-extractor.js', async (importOriginal) => {
     ...actual,
     extractEntities: vi.fn(async (): Promise<ExtractionResult> => {
       hook.during();
-      return { entities: [{ name: 'Kestrel Weaving', type: 'organization' }], relations: [] } as unknown as ExtractionResult;
+      return { entities: [{ name: 'Kestrel Weaving', type: 'organization' }], relations: [], costUsd: 0.01 } as unknown as ExtractionResult;
     }),
   };
 });
@@ -37,7 +37,7 @@ vi.mock('./entity-extractor-v2.js', async (importOriginal) => {
     ...actual,
     extractEntitiesV2: vi.fn(async (): Promise<ExtractionResultV2> => {
       hook.during();
-      return { entities: [], relations: [] } as unknown as ExtractionResultV2;
+      return { entities: [], relations: [], costUsd: 0.01 } as unknown as ExtractionResultV2;
     }),
   };
 });
@@ -84,12 +84,37 @@ describe.each([
     if (v2) layer.setAnthropicClient({} as never);
     let privateMode = false;
     hook.during = () => { privateMode = true; layer.purgeThread('t-1'); };
+    const stderr = vi.spyOn(process.stderr, 'write');
+    try {
+      const r = await layer.store(TEXT, 'knowledge', scope, {
+        sourceThreadId: 't-1', skipContradictionCheck: true, cancelled: () => privateMode,
+      });
+      expect(r.stored).toBe(false);
+      expect(stubsWithMarker(engine)).toBe(0);
+      expect(layer.purgeThread('t-1')).toBe(0);
+      // A dropped write is not a lost mirror: the parity alarm must stay quiet.
+      expect(stderr.mock.calls.some(([chunk]) => String(chunk).includes('mirror-parity'))).toBe(false);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('still bills the extraction it made, once, when the write is dropped after it', async () => {
+    const { layer } = newLayer(memReads);
+    let privateMode = false;
+    hook.during = () => { privateMode = true; layer.purgeThread('t-1'); };
+    const billed: number[] = [];
+    // A metered tenant: the gate passes, the extraction runs (V2, the client selects it).
+    layer.setAnthropicClient({} as never);
+    layer.setMeteredHost({
+      getContext: () => null,
+      getHooks: () => [{ onAfterRun: (_runId: string, cost: number) => { billed.push(cost); } }],
+    } as never);
     const r = await layer.store(TEXT, 'knowledge', scope, {
       sourceThreadId: 't-1', skipContradictionCheck: true, cancelled: () => privateMode,
     });
     expect(r.stored).toBe(false);
-    expect(stubsWithMarker(engine)).toBe(0);
-    expect(layer.purgeThread('t-1')).toBe(0);
+    expect(billed).toEqual([0.01]);
   });
 
   it('leaves no stub behind when the switch flipped during the metered gate', async () => {
