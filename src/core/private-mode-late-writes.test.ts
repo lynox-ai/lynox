@@ -97,7 +97,11 @@ describe('memory:store subscriber — private threads', () => {
       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(current!.layer) : v;
     },
   });
-  setupMemoryStoreSubscription(proxy, null, null, 'proj-1', (id) => privateThreads.has(id));
+  setupMemoryStoreSubscription(proxy, null, null, 'proj-1', (id) => {
+    // A thread store that fails, as during shutdown.
+    if (id === 't-throws') throw new Error('database is closed');
+    return privateThreads.has(id);
+  });
 
   const publish = (threadId: string, content: string): void => {
     channels.memoryStore.publish({
@@ -121,6 +125,17 @@ describe('memory:store subscriber — private threads', () => {
     // An already-private thread is dropped before its embedding is paid for: one embed, the
     // public one. (The check inside `store` would also drop it, but only after embedding.)
     expect(embeds).toBe(1);
+  });
+
+  it('drops a publish when the thread store cannot answer, instead of writing it', async () => {
+    current = newLayer();
+    privateThreads.clear();
+    publish('t-throws', 'The client prefers invoices in CHF.');
+    publish('t-public', 'The client pays within thirty days.');
+    await settle();
+    expect(current.layer.purgeThread('t-throws')).toBe(0);
+    // Positive control: the subscriber is live and stores a public write.
+    expect(current.layer.purgeThread('t-public')).toBe(1);
   });
 
   it('drops a publish whose thread turned private while its embedding was out', async () => {

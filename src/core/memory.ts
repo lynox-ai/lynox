@@ -603,8 +603,10 @@ export class Memory implements IMemory {
       this._emptyExtractionStreak = 0;
 
       // Re-read after the extraction call, as the durable capture does: the caller's gate ran
-      // before it, and private mode can be switched on while the call is out. The switch purges
-      // what the thread already stored; a line written now would outlive that purge.
+      // before it, and private mode can be switched on while the call is out. A chat in private
+      // mode writes nothing new — neither these flat-file lines (which the switch's purge does
+      // not reach at all) nor the `memory:store` publish below, whose subscriber would write a
+      // thread-tagged row after the purge has run.
       if (cancelled?.()) return;
 
       const useAutoScope = this._autoScope && this._activeScopes.length > 1;

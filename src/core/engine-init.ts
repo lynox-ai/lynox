@@ -845,7 +845,11 @@ export function setupMemoryStoreSubscription(
       }
 
       const threadId = data.sourceThreadId;
-      const cancelled = threadId ? (): boolean => isThreadPrivate(threadId) : undefined;
+      // A thread store that throws (closed during shutdown, busy) answers "private": the write
+      // is dropped rather than risked, and nothing escapes this un-awaited function.
+      const cancelled = threadId
+        ? (): boolean => { try { return isThreadPrivate(threadId); } catch { return true; } }
+        : undefined;
       if (cancelled?.()) return;
 
       const embedTask = (async () => {
