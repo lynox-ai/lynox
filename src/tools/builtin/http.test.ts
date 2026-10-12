@@ -5890,6 +5890,52 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain('needs its own approval');
   });
 
+  // A bodyless write keeps its method across origins (only a body forces the hop down to a
+  // GET), so the host name alone would let it reach another service on the same machine.
+  it.each([
+    ['another port', 'https://h.example:8443/items/1'],
+    ['plain http', 'http://h.example/items/1'],
+    ['plain http on another port', 'http://h.example:8080/items/1'],
+  ])('a DELETE redirected to %s on its own host is not followed', async (_case, location) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'https://h.example/items/1', method: 'DELETE' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('needs its own approval');
+  });
+
+  it('a DELETE upgraded from http to https on its own host is followed', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/1' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url: 'http://h.example/items/1', method: 'DELETE' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe('https://h.example/items/1');
+    expect(out).toContain('HTTP 200');
+  });
+
+  it.each([
+    ['upgraded to https on another port', 'http://h.example/items/1', 'https://h.example:8443/items/1'],
+    ['upgraded to https from another port', 'http://h.example:8080/items/1', 'https://h.example/items/1'],
+    // Not followed in any case (no other scheme is fetched), but refused here, so the answer
+    // still says the DELETE may have landed.
+    ['sent on to a scheme that is not https', 'http://h.example/items/1', 'ws://h.example/items/1'],
+  ])('a DELETE from plain http %s is not followed', async (_case, url, location) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent } = agent270();
+    const out = await visible({ url, method: 'DELETE' }, agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('needs its own approval');
+  });
+
   it("(13f'') a remembered write redirected to the same path with a trailing slash is followed", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/' } }))
