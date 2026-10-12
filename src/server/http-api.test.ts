@@ -850,6 +850,16 @@ describe('LynoxHTTPApi', () => {
   // day 30 saw a healthy engine + 401 on every /api/* call.
   describe('session-cookie auth (Web UI shared)', () => {
     const DAY = 24 * 60 * 60;
+    // A mandate's request goes on only while its mandate is live (`_mandateLive`). The tests
+    // here are about other properties of the cookie, so the engine answers every mandate as
+    // live; the block on the mandate's end below swaps in a real store.
+    let origEnds: unknown;
+    const engineFor = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    beforeEach(() => {
+      origEnds = engineFor()['getMandateEnds'];
+      engineFor()['getMandateEnds'] = () => ({ record: (): void => {}, isLive: (): boolean => true });
+    });
+    afterEach(() => { engineFor()['getMandateEnds'] = origEnds; });
     // Boundary margins use a few seconds of slack so a second-boundary
     // tick between mint and verify cannot flip 30-day-cap assertions.
     const SLACK_S = 5;
@@ -1151,6 +1161,13 @@ describe('LynoxHTTPApi', () => {
       const approve = (token: string): Promise<Response> => fetch(`${baseUrl}/api/bulk/runs/TEST-RUN/approve`, {
         method: 'POST', headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' }, body: '{}',
       });
+      // This file shares ONE per-IP rate window; the requests below are paid back so a test
+      // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+      const rateCounts = (): Map<string, { count: number }> =>
+        (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      let windowBefore = new Map<string, number>();
+      beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+      afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
       beforeEach(() => {
         dir = mkdtempSync(join(tmpdir(), 'lynox-mandate-end-'));
         edb = new EngineDb(join(dir, 'engine.db'));
@@ -1170,10 +1187,11 @@ describe('LynoxHTTPApi', () => {
         expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBe(MANDATE_END_S);
       });
 
-      it('keeps nothing from a cookie minted before the end was signed, and still lets it in', async () => {
+      it('keeps nothing from a cookie minted before the end was signed, and refuses it: there is no end to check', async () => {
         const nowS = Math.floor(Date.now() / 1000);
         const res = await approve(mintPrincipalToken(TEST_SECRET, nowS, mandatePrincipal(nowS + 600)));
         expect(res.status).toBe(403);
+        expect(((await res.json()) as { code?: string }).code).toBe('mandate_revoked');
         expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBeUndefined();
       });
 
@@ -1194,11 +1212,71 @@ describe('LynoxHTTPApi', () => {
         expect(ends.endOf(MANDATE_LOGIN.mandate_id)).toBeUndefined();
       });
 
-      it('does not refuse the request when the end cannot be written', async () => {
-        engineRef()['getMandateEnds'] = () => ({ record: (): void => { throw new Error('disk full'); } });
+      it('refuses the first request when its end cannot be written: nothing says the mandate is live', async () => {
+        engineRef()['getMandateEnds'] = () => ({ record: (): void => { throw new Error('disk full'); }, isLive: (id: string) => ends.isLive(id) });
         const res = await approve(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
         expect(res.status).toBe(403);
+        expect(((await res.json()) as { code?: string }).code).toBe('mandate_revoked');
+      });
+
+      it('lets a later request in when its write fails but the end of an earlier one stands', async () => {
+        const token = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+        expect((await approve(token)).status).toBe(403); // records the end
+        engineRef()['getMandateEnds'] = () => ({ record: (): void => { throw new Error('disk full'); }, isLive: (id: string) => ends.isLive(id) });
+        const res = await approve(token);
+        expect(res.status).toBe(403);
         expect(((await res.json()) as { error: string }).error).toContain('Only the owner');
+      });
+
+      // ── D-1: a revoked mandate is refused at the request (PRD §3.5, §4 row D) ──
+
+      const secrets = (token: string): Promise<Response> => fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${token}` } });
+      const OTHER_LOGIN = { ...MANDATE_LOGIN, email: 'other@example.invalid', mandate_id: 'TEST-MANDATE-2' };
+
+      it('lets a live mandate through to the route', async () => {
+        expect((await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).status).toBe(200);
+      });
+
+      it('refuses a revoked mandate with 403 and the code the browser logs out on', async () => {
+        const token = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+        expect((await secrets(token)).status).toBe(200);
+        ends.revoke(MANDATE_LOGIN.mandate_id);
+        const res = await secrets(token);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toEqual({ error: 'This access has ended.', code: 'mandate_revoked' });
+      });
+
+      it('refuses a mandate revoked before its first request, and its login does not revive it', async () => {
+        ends.revoke(MANDATE_LOGIN.mandate_id);
+        const res = await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token);
+        expect(res.status).toBe(403);
+        expect(ends.isLive(MANDATE_LOGIN.mandate_id)).toBe(false);
+      });
+
+      it('leaves the owner and another mandate alone when one mandate is revoked', async () => {
+        const other = webUiLoginSession(TEST_SECRET, OTHER_LOGIN)!.token;
+        expect((await secrets(other)).status).toBe(200);
+        ends.revoke(MANDATE_LOGIN.mandate_id);
+        expect((await secrets(other)).status).toBe(200);
+        expect((await secrets(webUiLoginSession(TEST_SECRET, null)!.token)).status).toBe(200);
+      });
+
+      it('keeps the revoke across a restart: a new store over the same database still refuses', async () => {
+        const token = webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token;
+        expect((await secrets(token)).status).toBe(200);
+        ends.revoke(MANDATE_LOGIN.mandate_id);
+        const edb2 = new EngineDb(join(dir, 'engine.db'));
+        try {
+          const reopened = new MandateEnds(edb2.getDb());
+          engineRef()['getMandateEnds'] = () => reopened;
+          expect((await secrets(token)).status).toBe(403);
+        } finally { edb2.close(); }
+      });
+
+      it('refuses every mandate when the engine has no store of ends, and still serves the owner', async () => {
+        engineRef()['getMandateEnds'] = () => null;
+        expect((await secrets(webUiLoginSession(TEST_SECRET, MANDATE_LOGIN)!.token)).status).toBe(403);
+        expect((await secrets(webUiLoginSession(TEST_SECRET, null)!.token)).status).toBe(200);
       });
     });
 

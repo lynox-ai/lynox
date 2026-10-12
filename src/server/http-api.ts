@@ -1798,8 +1798,8 @@ export class LynoxHTTPApi {
 
   /**
    * Keep the end a mandate's request carried (mandate-ends.ts), for readers that run later
-   * without a request. A failed write does not refuse the request: the stored end then stays
-   * where it was, and a reader treats a missing or past end as ended, the closed direction.
+   * without a request. A failed write is logged here and decided by `_mandateLive` below:
+   * the stored end stays where it was, and a missing or past end reads as ended.
    */
   private _recordMandateEnd(principal: RequestPrincipal, issuedAtS: number): void {
     try {
@@ -1807,6 +1807,18 @@ export class LynoxHTTPApi {
     } catch (err: unknown) {
       process.stderr.write(`[lynox] mandate end not recorded: ${err instanceof Error ? err.message : String(err)}\n`);
     }
+  }
+
+  /**
+   * Whether a mandate's request may go on: its mandate has a recorded end that has not passed
+   * and has not been revoked. Every other case is refused, the closed direction: no store of
+   * ends, a cookie that names no mandate or no end, an end that could not be written on the
+   * first request, and a revoked mandate. The owner is never asked.
+   */
+  private _mandateLive(principal: RequestPrincipal): boolean {
+    if (principal.kind !== 'mandate') return true;
+    if (principal.mandateId === undefined) return false;
+    return this.engine?.getMandateEnds()?.isLive(principal.mandateId) ?? false;
   }
 
   private _principalOf(req: IncomingMessage): RequestPrincipal {
@@ -2839,6 +2851,11 @@ export class LynoxHTTPApi {
           if (session.principal !== null) {
             this._sessionPrincipal.set(req, session.principal);
             this._recordMandateEnd(session.principal, session.iat);
+            // Recorded first: `record` never moves a revoked end, so a revoke stays a revoke.
+            if (!this._mandateLive(session.principal)) {
+              errorResponse(res, 403, 'This access has ended.', 'mandate_revoked');
+              return;
+            }
           }
           const cookie = /(?:^|;\s*)lynox_session=([^;]+)/.exec(req.headers['cookie'] ?? '')?.[1] ?? '';
           this._authOrigin.set(req, `cookie:${createHash('sha256').update(cookie).digest('hex').slice(0, 16)}`);

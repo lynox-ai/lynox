@@ -1,4 +1,4 @@
-// === window.fetch interceptor — flips sessionExpired on /api/* 401 ===
+// === window.fetch interceptor — flips sessionExpired on /api/* 401, and on the 403 of an ended access ===
 //
 // Installed once from AppShell on mount. Wraps `window.fetch` and looks
 // at every response. A 401 from a `/api/*` URL that ISN'T part of the
@@ -29,18 +29,33 @@ export function installApiFetchInterceptor(): void {
 	const original = window.fetch;
 	window.fetch = async function lynoxFetchInterceptor(...args: Parameters<typeof fetch>) {
 		const response = await original(...args);
-		// Only treat /api/* 401s as session-expired — third-party fetches
+		// Only treat /api/* refusals as session-expired — third-party fetches
 		// (analytics, integrations) shouldn't trigger the auth banner.
-		if (response.status === 401) {
+		if (response.status === 401 || response.status === 403) {
 			const url = typeof args[0] === 'string'
 				? args[0]
 				: args[0] instanceof URL
 					? args[0].href
 					: (args[0] as Request).url;
 			if (url.includes('/api/') && !AUTH_HANDSHAKE_PATHS.some(p => url.includes(p))) {
-				markSessionExpired();
+				if (response.status === 401 || await endsTheSession(response)) markSessionExpired();
 			}
 		}
 		return response;
 	};
+}
+
+/**
+ * Whether a 403 ends the session: the engine refuses a request of a delegated access that has
+ * ended with `code: 'mandate_revoked'`. Every other 403 is a state of the view that got it
+ * (a managed instance, an owner-only action) and stays the view's to show. Reads a clone,
+ * so the caller still gets the whole body.
+ */
+async function endsTheSession(response: Response): Promise<boolean> {
+	try {
+		const body: unknown = await response.clone().json();
+		return typeof body === 'object' && body !== null && (body as { code?: unknown }).code === 'mandate_revoked';
+	} catch {
+		return false;
+	}
 }
