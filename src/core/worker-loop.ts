@@ -1607,7 +1607,7 @@ export class WorkerLoop {
         ledger,
         signal,
         costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
-        clientFor: (r) => clientFor(r.contractJson),
+        clientFor: (r, listQuery) => clientFor(r.contractJson, listQuery),
       });
     } catch (err: unknown) {
       // A preview that threw would leave its run `planned` and unhalted with no trigger
@@ -1659,16 +1659,27 @@ export class WorkerLoop {
    * Null when the contract is unreadable or the stores are missing — the run then halts
    * as unavailable rather than sending anything.
    */
-  private async bulkClientFactory(): Promise<(contractJson: string | null) => import('./bulk-external.js').ExternalClient | null> {
+  private async bulkClientFactory(): Promise<(contractJson: string | null, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
+    const { withListQuery } = await import('../tools/permission-guard.js');
     const { attachStoredCredential, detectSecretInContent } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
     const toolContext = this.engine.getToolContext();
-    return (contractJson) => {
-      const contract = parseBulkContract(contractJson);
-      if (!contract || !apiStore || !secretStore) return null;
+    return (contractJson, listQuery) => {
+      const stored = parseBulkContract(contractJson);
+      if (!stored || !apiStore || !secretStore) return null;
+      // A list page's query is granted only on a copy made here, in memory, from the stored
+      // read contract: the stored contract itself never carries it (`withListQuery`).
+      let contract = stored;
+      if (listQuery !== undefined) {
+        try {
+          contract = withListQuery(stored, listQuery);
+        } catch {
+          return null;
+        }
+      }
       return externalClient({
         contract,
         hostPolicy: toolContext,

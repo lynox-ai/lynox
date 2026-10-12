@@ -21,6 +21,7 @@ import { externalTargetKey, isPlainObject, isScalar, BULK_WRITE_METHODS, type Bu
 import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { urlScanForms } from './url-scan-forms.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
+import type { CapabilityContract } from '../types/capability-contract.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
 export interface BulkListFormSpec {
@@ -163,6 +164,18 @@ export function listPageUrl(host: string, source: BulkListSource, page: number):
   pairs.push(...spec.order.map(([n, v]): [string, string] => [n, v]));
   pairs.push([spec.perPageParam, String(spec.perPage)], [spec.pageParam, String(page)]);
   return `https://${host}${source.path}?${pairs.map(([n, v]) => `${n}=${v}`).join('&')}`;
+}
+
+/**
+ * The contract a list is read under, stored with the run and shown to the owner before the
+ * read starts: GET on the list's path on its host, nothing else. The query its pages carry is
+ * granted only on an in-memory copy (`withListQuery` with {@link listQueryParams}).
+ */
+export function listReadContract(host: string, source: BulkListSource): CapabilityContract {
+  return {
+    version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET'],
+    hostPatterns: [host], pathPatterns: [source.path], paramConstraints: {},
+  };
 }
 
 /** The query names a page address may carry, each with the values it may take. */

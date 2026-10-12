@@ -38,7 +38,8 @@ export type ExternalPlanned =
 
 /** One GET against a request, answered in a fixed vocabulary — no response text leaves. */
 export type ExternalRead =
-  | { kind: 'ok'; value: unknown }
+  /** `bytes`: the body's size, on a GET. */
+  | { kind: 'ok'; value: unknown; bytes?: number }
   /** The target does not exist. A PATCH cannot create it, so it is not a `create`. */
   | { kind: 'not_found' }
   | { kind: 'redirect' }
@@ -279,14 +280,18 @@ export interface ExternalClientDeps {
    * The secret-pattern scan `http_request` runs on what it sends (`detectSecretInContent`):
    * non-null when `text` looks like it carries a secret. Required, so no caller can build a
    * client that sends unscanned. `http_request`'s separate GET check is not run here: a bulk
-   * target has no query or fragment (`externalTargetKey`) and its host is the contract's.
+   * target has no query or fragment (`externalTargetKey`) and its host is the contract's. The
+   * one GET with a query is a list page (`bulk-list.ts`), whose query the engine builds from
+   * names of the list's form and values of a narrow alphabet the plan checked — and which this
+   * scan still reads, address included, before it is sent.
    */
   scan: (text: string) => string | null;
   now?: () => number;
 }
 
 export interface ExternalClient {
-  get(url: string, signal?: AbortSignal): Promise<ExternalRead>;
+  /** GET `url`; a body past `maxBytes` (default {@link BULK_MAX_TARGET_BYTES}) is `too_large`. */
+  get(url: string, signal?: AbortSignal, maxBytes?: number): Promise<ExternalRead>;
   /** PATCH `body` as JSON. `ok` carries no value: success is the status alone. */
   /** Write `body` as JSON with the run's verb. `ok` carries no value: success is the status alone. */
   write(url: string, method: BulkWriteMethod, body: unknown, signal?: AbortSignal, onSend?: () => void): Promise<ExternalRead>;
@@ -303,7 +308,7 @@ export interface ExternalClient {
 export function externalClient(deps: ExternalClientDeps): ExternalClient {
   const now = deps.now ?? Date.now;
   let sent = 0;
-  const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined, onSend?: () => void): Promise<ExternalRead> => {
+  const send = async (method: 'GET' | BulkWriteMethod, url: string, body: unknown, signal: AbortSignal | undefined, onSend?: () => void, maxBytes: number = BULK_MAX_TARGET_BYTES): Promise<ExternalRead> => {
     // Whatever the plan or the approval decided: nothing is sent to a mail API, and a write
     // halts the run (`blocked`). Reads too — a run that may not write one has no use for them.
     // Before the contract: `contractGrants` refuses a mail target as well, and checked second
@@ -347,19 +352,19 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // The body streams after the headers: a reset or a timeout there is a failed read
     // like one before them, never an exception out of the effect.
     try {
-      return await readResponse(res, now(), method === 'GET');
+      return await readResponse(res, now(), method === 'GET', maxBytes);
     } catch {
       return { kind: 'failed' };
     }
   };
   return {
     get sent() { return sent; },
-    get: (url, signal) => send('GET', url, undefined, signal),
+    get: (url, signal, maxBytes) => send('GET', url, undefined, signal, undefined, maxBytes),
     write: (url, method, body, signal, onSend) => send(method, url, body, signal, onSend),
   };
 }
 
-async function readResponse(res: Response, now: number, parse: boolean): Promise<ExternalRead> {
+async function readResponse(res: Response, now: number, parse: boolean, maxBytes: number): Promise<ExternalRead> {
   const status = res.status;
   const answer = ((): ExternalRead | null => {
     if (status >= 300 && status < 400) return { kind: 'redirect' };
@@ -374,10 +379,10 @@ async function readResponse(res: Response, now: number, parse: boolean): Promise
     await res.body?.cancel().catch(() => {});
     return answer ?? { kind: 'ok', value: undefined };
   }
-  const body = await readCapped(res, BULK_MAX_TARGET_BYTES);
+  const body = await readCapped(res, maxBytes);
   if (body === null) return { kind: 'too_large' };
   try {
-    return { kind: 'ok', value: JSON.parse(body) as unknown };
+    return { kind: 'ok', value: JSON.parse(body) as unknown, bytes: Buffer.byteLength(body, 'utf8') };
   } catch {
     return { kind: 'not_json' };
   }
