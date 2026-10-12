@@ -112,6 +112,84 @@ function coerceExtractionValue(value: unknown, depth = 0): string | null {
   return null;
 }
 
+/** The flat-file memory directory under a data directory — the one place both {@link Memory} and the export derive it. */
+export function memoryDirOf(dataDir: string): string {
+  return path.join(dataDir, DEFAULT_DIR);
+}
+
+export interface MemoryDirExport {
+  scopes: Record<string, Record<string, string>>;
+  mayBeIncomplete: boolean;
+}
+
+/**
+ * Everything a flat-file memory directory holds, keyed by scope directory and then by file name as
+ * it lies on disk — what an Art. 15 export owes. Scopes are separate directories (`global`,
+ * `<contextId>`, `user-<id>`), and `memory_store` and the extraction write into any of them,
+ * so reading only the default scope answered for one directory of many.
+ *
+ * The set is what {@link Memory.eraseAll} removes, not what `parsePortableMemoryKey` accepts: the
+ * migration bundle carries the namespace files it can restore, while an export has to show
+ * every file the erasure deletes. That includes the engine's `manifest.json` (a map of the
+ * working directory's file paths to their mtimes, written next to the namespace files) and
+ * any file lying directly in the directory, listed under the key `.`.
+ *
+ * Listed from the directory rather than from the scopes this process knows: a scope written
+ * by an earlier run, or from another context, is still held. The directory is read whatever
+ * the flat-file setting is now, so files written while it was on are still shown. It takes a
+ * path rather than a {@link Memory}: with `memory: false` the engine has no instance, while the
+ * directory can still hold files from earlier runs and the manifest the engine writes on
+ * shutdown either way. A symlink is not followed — its target can lie outside the directory,
+ * and the erasure removes the link, not the target. Empty files and scopes are left out.
+ *
+ * Only a missing path counts as empty. Any other failure to list or read sets
+ * `mayBeIncomplete`, so the export cannot look complete when a file was unreadable.
+ */
+export async function exportMemoryDir(baseDir: string): Promise<MemoryDirExport> {
+  const scopes: Record<string, Record<string, string>> = {};
+  let mayBeIncomplete = false;
+  const isMissing = (err: unknown): boolean => (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+  const readFiles = async (dir: string, names: string[]): Promise<Record<string, string>> => {
+    const files: Record<string, string> = {};
+    for (const name of names) {
+      try {
+        const content = await fs.readFile(path.join(dir, name), 'utf-8');
+        if (content !== '') files[name] = content;
+      } catch (err) {
+        if (!isMissing(err)) mayBeIncomplete = true;
+      }
+    }
+    return files;
+  };
+  const listDir = async (dir: string): Promise<{ dirs: string[]; files: string[] } | null> => {
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      return {
+        dirs: entries.filter(e => e.isDirectory()).map(e => e.name).sort(),
+        files: entries.filter(e => e.isFile()).map(e => e.name).sort(),
+      };
+    } catch (err) {
+      if (!isMissing(err)) mayBeIncomplete = true;
+      return null;
+    }
+  };
+
+  const top = await listDir(baseDir);
+  if (top === null) return { scopes, mayBeIncomplete };
+  const loose = await readFiles(baseDir, top.files);
+  if (Object.keys(loose).length > 0) scopes['.'] = loose;
+  for (const dir of top.dirs) {
+    const listed = await listDir(path.join(baseDir, dir));
+    if (listed === null) continue;
+    // A directory nested inside a scope is not something this store writes; it is reported
+    // rather than walked, so the answer never claims a completeness it did not check.
+    if (listed.dirs.length > 0) mayBeIncomplete = true;
+    const files = await readFiles(path.join(baseDir, dir), listed.files);
+    if (Object.keys(files).length > 0) scopes[dir] = files;
+  }
+  return { scopes, mayBeIncomplete };
+}
+
 export class Memory implements IMemory {
   private client: Anthropic;
   private readonly cache = new Map<string, string>();
@@ -147,7 +225,7 @@ export class Memory implements IMemory {
     this.client = createLLMClient({ apiKey, apiBaseURL, provider, openaiModelId });
     this.apiKey = apiKey;
     this.apiBaseURL = apiBaseURL;
-    this.baseDir = path.join(workingDir ?? getLynoxDir(), DEFAULT_DIR);
+    this.baseDir = memoryDirOf(workingDir ?? getLynoxDir());
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
     this._flatFileEnabled = flatFileEnabled ?? true;
@@ -387,70 +465,9 @@ export class Memory implements IMemory {
     this.cache.clear();
   }
 
-  /**
-   * Everything this store's directory holds, keyed by scope directory and then by file name as
-   * it lies on disk — what an Art. 15 export owes. Scopes are separate directories (`global`,
-   * `<contextId>`, `user-<id>`), and `memory_store` and the extraction write into any of them,
-   * so reading only the default scope answered for one directory of many.
-   *
-   * The set is what {@link eraseAll} removes, not what `parsePortableMemoryKey` accepts: the
-   * migration bundle carries the namespace files it can restore, while an export has to show
-   * every file the erasure deletes. That includes the engine's `manifest.json` (a map of the
-   * working directory's file paths to their mtimes, written next to the namespace files) and
-   * any file lying directly in the store's directory, listed under the key `.`.
-   *
-   * Listed from the directory rather than from the scopes this process knows: a scope written
-   * by an earlier run, or from another context, is still held. The directory is read whatever
-   * the flat-file setting is now, so files written while it was on are still shown. A symlink
-   * is not followed — its target can lie outside the store, and the erasure removes the link,
-   * not the target. Empty files and scopes are left out.
-   *
-   * Only a missing path counts as empty. Any other failure to list or read sets
-   * `mayBeIncomplete`, so the export cannot look complete when a file was unreadable.
-   */
-  async exportAllScopes(): Promise<{ scopes: Record<string, Record<string, string>>; mayBeIncomplete: boolean }> {
-    const scopes: Record<string, Record<string, string>> = {};
-    let mayBeIncomplete = false;
-    const isMissing = (err: unknown): boolean => (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
-    const readFiles = async (dir: string, names: string[]): Promise<Record<string, string>> => {
-      const files: Record<string, string> = {};
-      for (const name of names) {
-        try {
-          const content = await fs.readFile(path.join(dir, name), 'utf-8');
-          if (content !== '') files[name] = content;
-        } catch (err) {
-          if (!isMissing(err)) mayBeIncomplete = true;
-        }
-      }
-      return files;
-    };
-    const listDir = async (dir: string): Promise<{ dirs: string[]; files: string[] } | null> => {
-      try {
-        const entries = await fs.readdir(dir, { withFileTypes: true });
-        return {
-          dirs: entries.filter(e => e.isDirectory()).map(e => e.name).sort(),
-          files: entries.filter(e => e.isFile()).map(e => e.name).sort(),
-        };
-      } catch (err) {
-        if (!isMissing(err)) mayBeIncomplete = true;
-        return null;
-      }
-    };
-
-    const top = await listDir(this.baseDir);
-    if (top === null) return { scopes, mayBeIncomplete };
-    const loose = await readFiles(this.baseDir, top.files);
-    if (Object.keys(loose).length > 0) scopes['.'] = loose;
-    for (const dir of top.dirs) {
-      const listed = await listDir(path.join(this.baseDir, dir));
-      if (listed === null) continue;
-      // A directory nested inside a scope is not something this store writes; it is reported
-      // rather than walked, so the answer never claims a completeness it did not check.
-      if (listed.dirs.length > 0) mayBeIncomplete = true;
-      const files = await readFiles(path.join(this.baseDir, dir), listed.files);
-      if (Object.keys(files).length > 0) scopes[dir] = files;
-    }
-    return { scopes, mayBeIncomplete };
+  /** What {@link exportMemoryDir} reads for this store's directory — the Art. 15 view of every scope. */
+  async exportAllScopes(): Promise<MemoryDirExport> {
+    return exportMemoryDir(this.baseDir);
   }
 
   // === Scope-aware methods ===

@@ -113,6 +113,30 @@ describe('Art. 15 export and Art. 17 erasure see every flat-file memory scope (r
     expect(after.body['memory_scopes_may_be_incomplete']).toBe(false);
     expect(await memoryOf().loadScoped('knowledge', { type: 'user', id: USER_ID })).toBeNull();
   }, 60_000);
+
+  it('still exports the files on disk when the engine runs without a memory instance', async () => {
+    // `memory: false` leaves `getMemory()` null, while the directory keeps what runs with it on
+    // wrote. Seeded through the real store first, then the instance is taken away.
+    const mem = memoryOf();
+    const agent: IAgent = {
+      name: 'test', model: 'test-model', memory: mem, tools: [], onStream: null,
+      toolContext: createToolContext({}),
+    };
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: USER_FACT, scope: `user:${USER_ID}` }, agent);
+    const engineRef = (api as unknown as { engine: { getMemory: () => Memory | null } }).engine;
+    const orig = engineRef.getMemory;
+    engineRef.getMemory = () => null;
+    try {
+      const res = await call('GET', '/api/export');
+      expect(res.status).toBe(200);
+      expect(res.body['memory']).toEqual({});
+      expect((res.body['memory_scopes'] as Scopes)[`user-${USER_ID}`]?.['knowledge.txt']).toContain(USER_FACT);
+      expect(res.body['memory_scopes_may_be_incomplete']).toBe(false);
+    } finally {
+      engineRef.getMemory = orig;
+      mem.eraseAll();
+    }
+  }, 60_000);
 });
 
 /**
