@@ -795,7 +795,9 @@ export async function spawnViaAgent(
    *  it was added last; absent = the Agent builds an empty one. */
   parentToolContext?: ToolContext | undefined,
   /** The chat the run was started from, for private mode — see {@link ChatOrigin}. Last for
-   *  the reason given above; absent = no chat. */
+   *  the reason given above; absent = no chat. It changes nothing observable today: this agent
+   *  has no `memory`, so its capture stands down as `no_memory`, and an `AgentTool` is handed
+   *  its input only, never the agent. Applied anyway so the two step paths cannot diverge. */
   chatOrigin?: ChatOrigin | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
