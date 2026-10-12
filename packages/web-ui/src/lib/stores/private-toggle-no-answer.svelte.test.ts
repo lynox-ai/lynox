@@ -59,11 +59,25 @@ describe('the private switch in the chat header, when its request gets no answer
 		const store = await openChat(1, offline);
 		await store.toggleSkipExtraction();
 		expect(store.getSkipExtraction()).toBe(false);
-		expect(toasts).toEqual([expect.objectContaining({ type: 'error' })]);
+		const { t } = await import('../i18n.svelte.js');
+		expect(toasts).toEqual([{ message: t('threads.error_extraction'), type: 'error' }]);
+	});
+
+	it('switching off: a gateway error without a stored state counts as no answer', async () => {
+		// The engine stores the flag before it answers, so a proxy's 504 can follow a stored OFF.
+		const store = await openChat(1, () => Promise.resolve(new Response('<html>504</html>', { status: 504 })));
+		await store.toggleSkipExtraction();
+		expect(store.getSkipExtraction()).toBe(false);
 	});
 });
 
 describe('controls on the same path', () => {
+	it('a refusal (4xx) changed nothing: switching off that is refused stays on', async () => {
+		const store = await openChat(1, () => Promise.resolve(json({ error: 'Thread not found' }, 404)));
+		await store.toggleSkipExtraction();
+		expect(store.getSkipExtraction()).toBe(true);
+	});
+
 	it('turns on when the server stores it', async () => {
 		const store = await openChat(0, () => Promise.resolve(json({ ok: true })));
 		await store.toggleSkipExtraction();

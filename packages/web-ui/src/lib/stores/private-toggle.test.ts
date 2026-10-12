@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { privateToggleFailure } from './private-toggle.js';
+import { privateToggleFailure, privateToggleOutcomeUnknown } from './private-toggle.js';
 
 describe('privateToggleFailure — the page shows the state the server holds', () => {
 	it('purge failed after the flag was stored: private mode stays ON, and the message says so', () => {
@@ -34,5 +34,20 @@ describe('privateToggleFailure — the page shows the state the server holds', (
 		for (const key of ['threads.private_purge_incomplete', 'threads.error_extraction']) {
 			expect(i18n).toMatch(new RegExp(`'${key.replace('.', '\\.')}': \\{ de: '[^']+', en: '[^']+' \\}`));
 		}
+	});
+});
+
+describe('privateToggleOutcomeUnknown — when the page cannot know what the server holds', () => {
+	it('no answer, or a server error naming no stored state: unknown', () => {
+		expect(privateToggleOutcomeUnknown(null, null)).toBe(true);
+		expect(privateToggleOutcomeUnknown(502, null)).toBe(true);
+		expect(privateToggleOutcomeUnknown(500, { error: 'x' })).toBe(true);
+	});
+
+	it('a server error that names the stored state, or a refusal: known', () => {
+		expect(privateToggleOutcomeUnknown(500, { error: 'x', skip_extraction: true })).toBe(false);
+		expect(privateToggleOutcomeUnknown(500, { skip_extraction: false })).toBe(false);
+		expect(privateToggleOutcomeUnknown(404, { error: 'Thread not found' })).toBe(false);
+		expect(privateToggleOutcomeUnknown(499, null)).toBe(false);
 	});
 });
