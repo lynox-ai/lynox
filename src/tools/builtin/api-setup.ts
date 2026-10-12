@@ -26,7 +26,7 @@ import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PR
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
-import { callForStructuredJson, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
+import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
@@ -1126,6 +1126,10 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // understated `balanced` by exactly the helper calls it could not see.
     debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
+    // A refused extraction still paid for its reply: book it here, once, as the success
+    // path above does. Undefined when the call never reached the model.
+    const spent = extractionSpendOf(err);
+    if (spent) debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, spent.costUsd, spent.tier);
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
     }

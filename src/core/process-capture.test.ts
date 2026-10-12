@@ -89,10 +89,27 @@ function call(tool_name: string, input_json: string, order: number): ToolCallRec
   return { id: `tc-${order}`, run_id: 'r', tool_name, input_json, output_json: 'ok', duration_ms: 1, sequence_order: order };
 }
 
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
+
 describe('captureProcess', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreate.mockResolvedValue(makeMockResponse());
+  });
+
+  it('a reply that lost the forced call is booked once and counted by name', async () => {
+    // The boundary relaxes the forced `extract_process` choice on models that reject it; a
+    // reply without the call arrives as ForcedToolNotCalledError. Its tokens were spent.
+    mockCreate.mockRejectedValueOnce(new ForcedToolNotCalledError(
+      'claude-opus-5-5', { type: 'tool', name: 'extract_process' },
+      { content: [{ type: 'text', text: 'Step 1 reads the report…' }], usage: { input_tokens: 5_000, output_tokens: 1_000 } },
+    ));
+    const counters: import('../types/index.js').SessionCounters = { httpRequests: 0, writeBytes: 0, costUSD: 0 };
+    const before = forcedToolMissCounts()['process-capture'] ?? 0;
+    await captureProcess('run1', 'Ad Report', makeToolCalls(), { apiKey: 'test-key', modelId: 'ministral-14b-2512', sessionCounters: counters });
+    // Exactly once: not lost with the exception, not booked twice.
+    expect(counters.costUSD).toBeCloseTo(calculateCost('ministral-14b-2512', { input_tokens: 5_000, output_tokens: 1_000 }), 10);
+    expect(forcedToolMissCounts()['process-capture']).toBe(before + 1);
   });
 
   it('sends a pinned model instead of the fast tier, and prices it', async () => {

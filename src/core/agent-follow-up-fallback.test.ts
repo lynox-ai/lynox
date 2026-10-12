@@ -49,8 +49,13 @@ vi.mock('./metered-request.js', async () => {
 
 import { Agent } from './agent.js';
 import { suggestFollowUpsTool } from '../tools/builtin/suggest-follow-ups.js';
-import { FOLLOW_UP_EXCERPT_CHARS, FOLLOW_UP_MAX_TASK_CHARS } from './follow-up-fallback.js';
+import {
+  FOLLOW_UP_EXCERPT_CHARS, FOLLOW_UP_MAX_TASK_CHARS, FOLLOW_UP_MAX_LABEL_CHARS, FOLLOW_UP_MAX_SUGGESTIONS,
+  FOLLOW_UP_FALLBACK_MAX_TOKENS,
+} from './follow-up-fallback.js';
 import type { StreamEvent } from '../types/index.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
+import { REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
 
 interface Internals {
   _recoverFollowUps(text: string): Promise<void>;
@@ -397,6 +402,111 @@ describe('follow-up recovery — failure never damages the turn', () => {
     const before = inner.messages.length;
     await inner._recoverFollowUps(ANSWER);
     expect(inner.messages.length).toBe(before);
+    expect(events.find((e) => e.type === 'tool_call')).toBeUndefined();
+  });
+});
+
+describe('follow-up recovery — a model that lost the forced call', () => {
+  // On a model that rejects a forced `tool_choice`, the client boundary sends `auto` and
+  // turns a reply without the call into ForcedToolNotCalledError (llm-wire-rules.ts). The
+  // tokens of that reply were spent: they must be booked exactly once, and the miss must
+  // be counted by name — not swallowed by the catch as if the provider had failed.
+  it('books the reply once, says what happened, and shows no chips', async () => {
+    const missReply = { content: [{ type: 'text', text: 'Vorschläge: …' }], usage: USAGE };
+    const reply = vi.fn().mockRejectedValue(
+      new ForcedToolNotCalledError('claude-opus-5-5', { type: 'tool', name: 'suggest_follow_ups' }, missReply));
+    const { inner, events } = makeAgent({ reply });
+    const recordExternalCost = vi.fn().mockReturnValue(false);
+    inner.costGuard = { recordTurn: vi.fn().mockReturnValue(false), recordExternalCost };
+    mockDebit.mockClear();
+    const before = forcedToolMissCounts()['agent.follow_up'] ?? 0;
+
+    await inner._recoverFollowUps(ANSWER);
+
+    expect(mockDebit, 'booked once: not lost with the exception, not twice').toHaveBeenCalledTimes(1);
+    expect(mockDebit.mock.calls[0]![2]).toBeGreaterThan(0);
+    expect(recordExternalCost).toHaveBeenCalledTimes(1);
+    expect(forcedToolMissCounts()['agent.follow_up'], 'the miss is counted by name').toBe(before + 1);
+    expect(events.filter(e => (e as { type?: string }).type === 'follow_ups')).toHaveLength(0);
+  });
+});
+
+describe('follow-up recovery — the output budget', () => {
+  // Measured 2026-10-11: on Sonnet 5.5 and Opus 5.5 the flat 512 cut 3 of 20 replies off,
+  // each carrying the call with an EMPTY input — zero chips, and no miss, because the call
+  // was there.
+  it('fits the longest reply the normalizer still accepts in full, at 2 characters per token', () => {
+    const longest = JSON.stringify({
+      suggestions: Array.from({ length: FOLLOW_UP_MAX_SUGGESTIONS }, () => ({
+        label: 'Ä'.repeat(FOLLOW_UP_MAX_LABEL_CHARS),
+        task: 'ü'.repeat(FOLLOW_UP_MAX_TASK_CHARS),
+      })),
+    });
+    expect(longest.length).toBeLessThanOrEqual(FOLLOW_UP_FALLBACK_MAX_TOKENS * 2);
+  });
+
+  it('stays within the bound under which the OpenAI-compatible adapter suppresses reasoning', () => {
+    expect(FOLLOW_UP_FALLBACK_MAX_TOKENS).toBeLessThanOrEqual(REASONING_SUPPRESSION_MAX_TOKENS);
+  });
+
+  it('asks for that budget', async () => {
+    const { inner, reply } = makeAgent();
+    await inner._recoverFollowUps(ANSWER);
+    expect((reply.mock.calls[0]![0] as { max_tokens: number }).max_tokens).toBe(FOLLOW_UP_FALLBACK_MAX_TOKENS);
+  });
+
+  it('says so when the reply stopped at the budget with an empty call, and shows no chips', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: {} }],
+      stop_reason: 'max_tokens',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up'], 'the cut-off is counted by name').toBe(before + 1);
+    expect(events.find((e) => e.type === 'tool_call')).toBeUndefined();
+  });
+
+  it('counts nothing when the reply ended on the call', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
+      stop_reason: 'tool_use',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up'] ?? 0).toBe(before);
+    expect(events.find((e) => e.type === 'tool_call'), 'same machinery, chips shown').toBeDefined();
+  });
+
+  // The two cases above differ in both the stop reason and the input. These two hold one
+  // fixed and vary the other, so a report keyed on "no suggestions" instead of the stop
+  // reason fails one of them.
+  it('counts a cut-off reply even when the items it finished are usable, and still shows them', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
+      stop_reason: 'max_tokens',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up']).toBe(before + 1);
+    expect(events.find((e) => e.type === 'tool_call')).toBeDefined();
+  });
+
+  it('counts nothing for an empty call that ended normally — that is the model declining', async () => {
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c', name: 'suggest_follow_ups', input: {} }],
+      stop_reason: 'tool_use',
+      usage: USAGE,
+    });
+    const { inner, events } = makeAgent({ reply });
+    const before = forcedToolCutOffCounts()['agent.follow_up'] ?? 0;
+    await inner._recoverFollowUps(ANSWER);
+    expect(forcedToolCutOffCounts()['agent.follow_up'] ?? 0).toBe(before);
     expect(events.find((e) => e.type === 'tool_call')).toBeUndefined();
   });
 });

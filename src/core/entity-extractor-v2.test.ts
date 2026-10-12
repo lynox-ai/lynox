@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
 import { extractEntitiesV2, parseToolInput } from './entity-extractor-v2.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
 
 describe('entity-extractor-v2 parseToolInput', () => {
   it('keeps proper-noun entities at sufficient confidence', () => {
@@ -190,5 +191,23 @@ describe('entity-extractor-v2 request', () => {
     expect(sent).not.toHaveProperty('temperature');
     expect(sent).not.toHaveProperty('top_p');
     expect(sent).not.toHaveProperty('top_k');
+  });
+});
+
+describe('entity-extractor-v2 — a reply that lost the forced call', () => {
+  it('returns the reply\'s cost for the debit and counts the miss by name', async () => {
+    const client = {
+      beta: { messages: { stream: () => ({
+        finalMessage: async () => { throw new ForcedToolNotCalledError(
+          'claude-opus-5-5', { type: 'tool', name: 'extract_entities' },
+          { content: [{ type: 'text', text: 'Acme AG, Beta GmbH' }], usage: { input_tokens: 400, output_tokens: 60 } }); },
+      }) } },
+    } as unknown as Anthropic;
+    const before = forcedToolMissCounts()['entity-extractor'] ?? 0;
+    const result = await extractEntitiesV2('Acme AG signed the contract with Beta GmbH in Zurich.', client);
+    expect(result.entities).toEqual([]);
+    // A bare await lands in the catch, which returns no costUsd: the spend would be lost.
+    expect(result.costUsd).toBeGreaterThan(0);
+    expect(forcedToolMissCounts()['entity-extractor']).toBe(before + 1);
   });
 });

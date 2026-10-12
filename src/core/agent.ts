@@ -45,6 +45,7 @@ import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
 import { calculateCost } from './pricing.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
 import { debitInRunHelperCost } from './metered-request.js';
 import {
   FOLLOW_UP_TOOL_NAME,
@@ -1568,7 +1569,10 @@ export class Agent implements IAgent {
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
         ),
       });
-      const response = await stream.finalMessage();
+      // A model that rejects a forced tool gets `auto` at the client boundary, and a reply
+      // without the call comes back as `missed` instead of a throw, so the booking below
+      // still runs on it (llm-wire-rules.ts › settleForcedTool).
+      const { message: response, missed } = await settleForcedTool(stream.finalMessage());
 
       // Account the spend BEFORE the early returns below: the tokens were spent
       // whether or not the suggestions turn out usable.
@@ -1589,6 +1593,10 @@ export class Agent implements IAgent {
         this._helperCostUsd += usd;
       }
 
+      reportForcedToolMiss('agent.follow_up', missed);
+      // A reply cut off at the budget can carry the call with an empty input, which the
+      // normalizer below reads as "no suggestions" — say so instead of showing nothing.
+      reportForcedToolCutOff('agent.follow_up', helper.modelId, response);
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
       );
@@ -1758,7 +1766,7 @@ export class Agent implements IAgent {
           [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
         ),
       });
-      const response = await stream.finalMessage();
+      const { message: response, missed } = await settleForcedTool(stream.finalMessage());
 
       // Booked BEFORE the early returns: the tokens were spent whether or not the
       // extraction turns out usable. Priced on the fast model and charged as a
@@ -1776,6 +1784,7 @@ export class Agent implements IAgent {
         this._helperCostUsd += usd;
       }
 
+      reportForcedToolMiss('agent.capture', missed);
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
       );

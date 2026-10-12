@@ -1832,6 +1832,51 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('debits a refused extraction once, from the spend its error carries', async () => {
+      // The model answered but the extraction failed (no tool call, or a value the schema
+      // refused). The reply was paid for, so it is booked like an accepted one.
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      const refused = new llmHelper.ExtractShapeError('Model did not call the extract tool. Got content types: [text]');
+      llmHelper.attachExtractionSpend(refused, { costUsd: 0.0033, tier: 'balanced' });
+      mockedExtract.mockRejectedValue(refused);
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', docs_url: 'https://docs.example.com/v1' },
+          agent,
+        );
+        expect(result).toContain('docs extraction failed');
+        expect((agent.sessionCounters as { costUSD: number }).costUSD).toBeCloseTo(0.0033, 6);
+        expect(onAfterRun).toHaveBeenCalledOnce();
+        expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0033, 6);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('books nothing when the extraction failed before reaching the model', async () => {
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      mockedExtract.mockRejectedValue(new Error('connect ECONNREFUSED'));
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent);
+        expect(onAfterRun).not.toHaveBeenCalled();
+        expect((agent.sessionCounters as { costUSD: number }).costUSD).toBe(0);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('debits under the tier the extraction ACTUALLY ran on, not a literal', async () => {
       // This call site passed `'fast'` while `callForStructuredJson` defaults to
       // `MODEL_MAP.balanced`, so a real customer's $0.3848 Sonnet extraction was

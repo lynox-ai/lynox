@@ -66,11 +66,23 @@ describe('pricing-vs-TTL contract (cache-write must match the TTL the agent send
   );
 
   it.each(cachedAnthropic)(
-    'cacheRead for %s equals input × the (TTL-independent) read multiplier',
+    'cacheRead for %s equals input × its (TTL-independent) read multiplier',
     (_id, m) => {
-      expect(m.pricing.cacheRead).toBeCloseTo(m.pricing.input * CACHE_READ_MULTIPLIER, 6);
+      expect(m.pricing.cacheRead).toBeCloseTo(m.pricing.input * (m.cacheReadMultiplier ?? CACHE_READ_MULTIPLIER), 6);
     },
   );
+
+  it.each([
+    ['claude-opus-5-5', 0.20],
+    ['claude-sonnet-5-5', 0.10],
+  ] as const)('holds %s to its documented 0.05× read rate, not the 0.1× default', (id, cacheRead) => {
+    // A per-model multiplier that nothing pins could be dropped together with the price,
+    // and the contract above would then accept the 0.1× figure — a wrong price passing as
+    // the right one.
+    const m = MODEL_CAPABILITIES[id]!;
+    expect(m.cacheReadMultiplier).toBe(0.05);
+    expect(m.pricing.cacheRead).toBe(cacheRead);
+  });
 });
 
 describe('normalizeTier', () => {

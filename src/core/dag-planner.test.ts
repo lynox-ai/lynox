@@ -17,6 +17,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 import { planDAG, estimatePipelineCost } from './dag-planner.js';
 import type { InlinePipelineStep } from '../types/index.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from './llm-wire-rules.js';
 
 function makeToolUseResponse(input: unknown) {
   return {
@@ -39,8 +40,26 @@ describe('planDAG', () => {
   it('returns null when API call fails', async () => {
     mockCreate.mockRejectedValueOnce(new Error('Internal Server Error'));
 
-    const result = await planDAG('build the app');
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
     expect(result).toBeNull();
+    // Nothing came back, nothing was spent.
+    expect(onSpend).not.toHaveBeenCalled();
+  });
+
+  it('a reply that lost the forced call returns null and is counted by name, not swallowed', async () => {
+    mockCreate.mockRejectedValueOnce(new ForcedToolNotCalledError(
+      'claude-opus-5-5', { type: 'tool', name: 'propose_dag' },
+      { content: [{ type: 'text', text: 'Step 1: …' }], usage: { input_tokens: 300, output_tokens: 80 } },
+    ));
+    const before = forcedToolMissCounts()['dag-planner'] ?? 0;
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
+    expect(result).toBeNull();
+    // The reply that planned nothing is still handed over for booking, once.
+    expect(onSpend).toHaveBeenCalledOnce();
+    expect(onSpend.mock.calls[0]![0] as number).toBeGreaterThan(0);
+    expect(forcedToolMissCounts()['dag-planner']).toBe(before + 1);
   });
 
   it('returns null when tool_use block missing', async () => {
@@ -116,8 +135,12 @@ describe('planDAG', () => {
       }),
       usage: { input_tokens: 1000, output_tokens: 200 },
     });
-    const result = await planDAG('build the app');
+    const onSpend = vi.fn();
+    const result = await planDAG('build the app', { onSpend });
     expect(result).not.toBeNull();
+    // A reply that does plan is handed over for booking too — once, at the plan's own cost.
+    expect(onSpend).toHaveBeenCalledOnce();
+    expect(onSpend.mock.calls[0]![0]).toBe(result!.actualCostUsd);
     // Priced on the resolved fast model — a positive, finite, sub-cent-ish cost
     // (a 1.2k-token call), NOT the model-emitted `estimated_cost_usd` (0.01).
     expect(Number.isFinite(result!.actualCostUsd)).toBe(true);

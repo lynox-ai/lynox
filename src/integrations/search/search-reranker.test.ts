@@ -4,6 +4,7 @@ import { rerankSearchResults, getRerankerCapability } from './search-reranker.js
 import { initLLMProvider } from '../../core/llm-client.js';
 import { setOpenAIModelResolver, getActiveOpenAIModelMap, MISTRAL_MODEL_MAP } from '../../types/models.js';
 import type { SearchResult } from './search-provider.js';
+import { ForcedToolNotCalledError, forcedToolMissCounts } from '../../core/llm-wire-rules.js';
 
 // `mockCreate` resolves the reranker's stream().finalMessage() call (it now
 // uses streaming uniformly so the OpenAIAdapter, which has no `.create`, works
@@ -137,6 +138,20 @@ describe('rerankSearchResults', () => {
     // a ~920-token call. The call site debits this to the tenant balance.
     expect(out.costUsd).toBeGreaterThan(0);
     expect(out.costUsd!).toBeLessThan(0.1);
+  });
+
+  it('a reply that lost the forced call still surfaces its cost, and is counted by name', async () => {
+    // On a model that rejects a forced choice the boundary sends `auto`; a reply without
+    // `score_results` arrives as ForcedToolNotCalledError. Its tokens were spent — the cost
+    // must reach the call site's debit, not vanish in the catch.
+    mockCreate.mockRejectedValueOnce(new ForcedToolNotCalledError(
+      'claude-opus-5-5', { type: 'tool', name: 'score_results' },
+      { content: [{ type: 'text', text: 'Ranking: 3, 1, 4, 2' }], usage: { input_tokens: 800, output_tokens: 120 } },
+    ));
+    const before = forcedToolMissCounts()['search-reranker'] ?? 0;
+    const out = await rerankSearchResults('pytrends github', makeResults(), { enabled: true });
+    expect(out.costUsd).toBeGreaterThan(0);
+    expect(forcedToolMissCounts()['search-reranker']).toBe(before + 1);
   });
 
   it('leaves costUsd undefined when reranking is skipped (no LLM call)', async () => {

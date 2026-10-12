@@ -24,9 +24,6 @@ import { wrapUntrustedData } from './data-boundary.js';
 /** The terminal Web-UI tool the chips come from. */
 export const FOLLOW_UP_TOOL_NAME = 'suggest_follow_ups';
 
-/** Chips are short by construction — this only has to fit one forced call. */
-export const FOLLOW_UP_FALLBACK_MAX_TOKENS = 512;
-
 /** Per-excerpt cap for the question and the answer. Enough for contextual
  *  chips, small enough that a recovered turn stays cheap. */
 export const FOLLOW_UP_EXCERPT_CHARS = 2000;
@@ -48,6 +45,29 @@ export const FOLLOW_UP_MAX_SUGGESTIONS = 4;
  * `Agent._recoverFollowUps`), it bounds it.
  */
 export const FOLLOW_UP_MAX_TASK_CHARS = 400;
+
+/**
+ * The output budget of the recovery call, derived from the limits above rather than set
+ * by hand: the longest reply the normalizer still accepts in full has to fit.
+ *
+ * It was a flat 512, and that is shorter than a valid reply: four suggestions at the label
+ * and task caps are 1760 characters before any JSON. Measured 2026-10-11 on 10 synthetic
+ * turns each for Sonnet 5.5 and Opus 5.5: 3 of the 20 replies stopped at `max_tokens` with
+ * an EMPTY tool input, which reads as "no chips". On two of those turns Haiku 4.5 wrote
+ * 305 and 311 tokens.
+ *
+ * The bound assumes at least 2 characters per token, which leaves ample room for German and
+ * English text. It is an assumption, not a guarantee: text in other scripts, or a task full
+ * of quotes and line breaks, can still run past it, and so can a model that writes items the
+ * normalizer drops. Such a reply is reported as cut off (`reportForcedToolCutOff`), not
+ * silently shown as no chips. The model is billed for what it writes, not for the budget.
+ */
+const FOLLOW_UP_JSON_CHARS_PER_ITEM = 32;
+const FOLLOW_UP_MIN_CHARS_PER_TOKEN = 2;
+export const FOLLOW_UP_FALLBACK_MAX_TOKENS = Math.ceil(
+  (FOLLOW_UP_MAX_SUGGESTIONS * (FOLLOW_UP_MAX_LABEL_CHARS + FOLLOW_UP_MAX_TASK_CHARS + FOLLOW_UP_JSON_CHARS_PER_ITEM) + FOLLOW_UP_JSON_CHARS_PER_ITEM)
+  / FOLLOW_UP_MIN_CHARS_PER_TOKEN,
+);
 
 /**
  * The recovery call's entire system prompt. It deliberately does NOT reuse the

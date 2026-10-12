@@ -15,6 +15,7 @@ import type { LLMProvider, ProviderKey } from '../types/index.js';
 import { getProviderDescriptor } from '../types/index.js';
 import { OpenAIAdapter, type ApiKeyProvider } from './openai-adapter.js';
 import { createVertexOAuthProvider } from './vertex-oauth.js';
+import { withWireRules } from './llm-wire-rules.js';
 
 // Cached dynamic module reference — loaded once via initLLMProvider()
 type VertexCtor = new (opts: { projectId?: string | undefined; region?: string | undefined; accessToken?: string | undefined }) => Anthropic;
@@ -97,20 +98,23 @@ export function createLLMClient(opts: LLMClientOptions = {}): Anthropic {
     if (!_vertexCtor) {
       throw new Error('Vertex provider not initialized. Call initLLMProvider("vertex") first.');
     }
-    return new _vertexCtor({
+    return withWireRules(new _vertexCtor({
       projectId: opts.gcpProjectId,
       region: opts.gcpRegion,
-    });
+    }));
   }
 
-  // Standard Anthropic API
+  // Standard Anthropic API. Every Claude-wire client goes through `withWireRules`, which
+  // drops or rewrites the request fields a model rejects (llm-wire-rules.ts). The
+  // OpenAI adapter does not: it translates every request itself, for models without
+  // Anthropic wire rules.
   if (opts.apiKey) {
-    return new Anthropic({ apiKey: opts.apiKey, baseURL: opts.apiBaseURL });
+    return withWireRules(new Anthropic({ apiKey: opts.apiKey, baseURL: opts.apiBaseURL }));
   }
   if (opts.apiBaseURL) {
-    return new Anthropic({ baseURL: opts.apiBaseURL });
+    return withWireRules(new Anthropic({ baseURL: opts.apiBaseURL }));
   }
-  return new Anthropic();
+  return withWireRules(new Anthropic());
 }
 
 /** Get the currently active provider (set by initLLMProvider). */

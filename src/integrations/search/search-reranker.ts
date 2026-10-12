@@ -24,6 +24,7 @@ import { calculateCost } from '../../core/pricing.js';
 import { resolveTierModel } from '../../core/tier-resolver.js';
 import type { LLMProvider } from '../../types/index.js';
 import type { ProviderConfigSnapshot } from '../../types/agent.js';
+import { settleForcedTool, reportForcedToolMiss } from '../../core/llm-wire-rules.js';
 
 export interface RerankOptions {
   /** Score threshold 0-10 for keeping a result. Default: 4. */
@@ -176,7 +177,7 @@ export async function rerankSearchResults(
     const fast = resolveTierModel('fast', provider);
     const fastClient = pinned ? client : clientForTierSnapshot(fast, client, provider);
     const rerankModel = pinned ?? fast.modelId;
-    const callPromise = fastClient.beta.messages.stream({
+    const callPromise = settleForcedTool(fastClient.beta.messages.stream({
       model: rerankModel,
       max_tokens: 512,
       ...(fast.betas ? { betas: fast.betas } : {}),
@@ -184,12 +185,12 @@ export async function rerankSearchResults(
       messages: [{ role: 'user', content: `Query: "${query}"\n\nResults:\n${resultList}` }],
       tools: [SCORE_TOOL],
       tool_choice: { type: 'tool', name: 'score_results' },
-    }).finalMessage();
+    }).finalMessage());
 
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('rerank-timeout')), timeoutMs),
     );
-    const response = await Promise.race([callPromise, timeoutPromise]);
+    const { message: response, missed } = await Promise.race([callPromise, timeoutPromise]);
 
     // Actual pool-key spend of this rerank call, for the managed in-run debit at
     // the call site (web-search-tool). Normalize the SDK's null cache fields.
@@ -202,6 +203,7 @@ export async function rerankSearchResults(
           cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
         })
       : undefined;
+    reportForcedToolMiss('search-reranker', missed);
 
     let scores: number[] | null = null;
     for (const block of response.content) {
