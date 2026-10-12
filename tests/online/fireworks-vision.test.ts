@@ -58,11 +58,11 @@ function redBluePngBase64(): string {
   return png.toString('base64');
 }
 
-// The three candidates whose Fireworks pages list image input (2026-08-14).
+// The candidates whose Fireworks pages list image input (2026-08-14), minus
+// qwen3p7-plus, which the provider withdrew (404 measured 2026-10-12).
 // Full ids so modelCapability resolves the real entry the flag lives on.
 const VISION_CANDIDATES = [
   'accounts/fireworks/models/kimi-k3',
-  'accounts/fireworks/models/qwen3p7-plus',
   'accounts/fireworks/models/minimax-m3',
 ] as const;
 

@@ -272,33 +272,29 @@ describe('LLM_CATALOG', () => {
 });
 
 describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)', () => {
-  it('fireworks pins exactly the served preset-slot/candidate models — no tier tag', () => {
+  // This pins MEMBERSHIP only. Whether each id is still served is a property of the
+  // provider, not of this file: tests/online/picker-models-served.test.ts asks
+  // Fireworks. The old name of this test said "served" and measured membership,
+  // which is how six withdrawn ids sat in the dropdown behind a green test.
+  it('fireworks pins exactly this picker list — no tier tag', () => {
     const entry = getCatalogEntryByKey('fireworks')!;
     expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
       'accounts/fireworks/models/deepseek-v4p1-flash',
       'accounts/fireworks/models/glm-5p3',
-      'accounts/fireworks/models/glm-5p2',
-      'accounts/fireworks/models/deepseek-v4-pro',
-      // Candidates (2026-08-09, rafael canary) — replay measurement owed before
-      // any preset pins them; presence here only makes them picker-selectable.
       'accounts/fireworks/models/kimi-k3',
-      'accounts/fireworks/models/deepseek-v4-flash-0731',
-      'accounts/fireworks/models/qwen3p7-plus',
       'accounts/fireworks/models/gpt-oss-120b',
-      'accounts/fireworks/models/kimi-k2p6',
-      'accounts/fireworks/models/kimi-k2p7-code',
       'accounts/fireworks/models/minimax-m3',
     ]);
     for (const m of entry.tier_models ?? []) {
       // All are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
       // measured tier map) — a `tier` tag here would fake a band mapping.
       expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
-      // Vision (2026-08-14): the three candidates whose wire was validated
-      // live (fireworks-vision online test) carry 'vision'; the genuinely
+      // Vision (2026-08-14): the candidates whose wire was validated live
+      // (fireworks-vision online test) carry 'vision' — two since qwen3p7-plus
+      // was withdrawn and left the list (2026-10-12); the genuinely
       // text-only siblings stay ['tool_use'].
       const visionIds = new Set([
         'accounts/fireworks/models/kimi-k3',
-        'accounts/fireworks/models/qwen3p7-plus',
         'accounts/fireworks/models/minimax-m3',
       ]);
       expect(m.capabilities, m.id).toEqual(visionIds.has(m.id) ? ['vision', 'tool_use'] : ['tool_use']);
@@ -554,13 +550,29 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
       fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
       deep: {
         provider: 'openai',
+        model_id: 'accounts/fireworks/models/glm-5p3',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      },
+    };
+    const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
+    expect(out?.deep).toBe('GLM 5.3 · 1M');
+    expect(out?.fast).toBe('Haiku 4.5 · 200k');
+  });
+
+  it('a slot that still names a WITHDRAWN Fireworks id shows its raw path', () => {
+    // glm-5p2 left the picker when the provider withdrew it. A config that still
+    // names it keeps its price (MODEL_CAPABILITIES row) but loses the label, so
+    // the band shows the raw id: honest, since the slot is not a picker choice.
+    const tierSet: TierSet = {
+      fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+      deep: {
+        provider: 'openai',
         model_id: 'accounts/fireworks/models/glm-5p2',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       },
     };
     const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
-    expect(out?.deep).toBe('GLM 5.2 · 1M');
-    expect(out?.fast).toBe('Haiku 4.5 · 200k');
+    expect(out?.deep).toBe('accounts/fireworks/models/glm-5p2 · 1M');
   });
 
   it('formatContextWindow: the shorthand behind every picker label', () => {

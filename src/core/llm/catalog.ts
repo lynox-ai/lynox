@@ -504,6 +504,15 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     // replay measurement owed via the #1112 harness before any preset pins it).
     // The TILE stays free-text (`models: []` above is untouched). No `tier`
     // field — all are `tier: null` in MODEL_CAPABILITIES (no measured tier map).
+    // Only SERVED ids belong here: this list IS the dropdown, so a withdrawn id is a
+    // choice that fails on its first call. Six left on 2026-10-12 (glm-5p2,
+    // deepseek-v4-pro, deepseek-v4-flash-0731, qwen3p7-plus, kimi-k2p6,
+    // kimi-k2p7-code: 404 on a one-token completion). Their MODEL_CAPABILITIES rows
+    // stay, so the engine still prices a config that names one. The settings editor
+    // does not keep such a slot: it shows the tile's first model instead, and the
+    // next save of that page writes it. The online guard
+    // `tests/online/picker-models-served.test.ts` checks this list against the
+    // provider and uses those six as its positive control.
     tier_models: [
       {
         // FIRST in tier_models on purpose, and it is a behaviour change worth naming:
@@ -530,24 +539,6 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         notes: '1M context; the MAIN slot of the balanced preset since 2026-09-30, replacing glm-5p2 after the provider withdrew it (404 measured live). THINKING-ONLY by provider statement — it refuses reasoning_effort:none with HTTP 400 and returns an empty answer below the small-budget bound on hard prompts (difficulty-dependent, not a token threshold), so it is only safe in a main slot; the adapter refuses a smaller call rather than passing the silence on. Text-only (no vision). Priced $1.40/$4.40 per 1M (cached 0.26), verified 2026-09-30 on the provider\'s public MODEL PAGE — the pricing OVERVIEW page lists GLM 5.3 under Serverless TRAINING only, which is not this number.',
       },
       {
-        id: 'accounts/fireworks/models/glm-5p2',
-        label: 'GLM 5.2',
-        context_window: 1_000_000,
-        pricing: { input: 1.40, output: 4.40 },
-        capabilities: ['tool_use'],
-        residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; the MAIN slot of the balanced preset since 2026-08-10 (it previously served efficient\'s deep slot). Text-only (no vision).',
-      },
-      {
-        id: 'accounts/fireworks/models/deepseek-v4-pro',
-        label: 'DeepSeek v4 Pro',
-        context_window: 1_000_000,
-        pricing: { input: 1.74, output: 3.48 },
-        capabilities: ['tool_use'],
-        residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; alternative deep/big-context model. Text-only (no vision).',
-      },
-      {
         id: 'accounts/fireworks/models/kimi-k3',
         label: 'Kimi K3',
         context_window: 1_000_000,
@@ -555,24 +546,6 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         capabilities: ['vision', 'tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
         notes: '1M context; deep slot of the efficient + balanced presets — operator decision on the chat sweep, no deep bench exists. Vision validated on the openai wire 2026-08-14 (fireworks-vision online test).',
-      },
-      {
-        id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
-        label: 'DeepSeek v4 Flash',
-        context_window: 1_000_000,
-        pricing: { input: 0.14, output: 0.28 },
-        capabilities: ['tool_use'],
-        residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; FAST slot only — benched there (89.1% recall, best judge of the field), never as a main. Text-only (no vision). Dated id: Fireworks retired the unsuffixed alias on 2026-08-14.',
-      },
-      {
-        id: 'accounts/fireworks/models/qwen3p7-plus',
-        label: 'Qwen3.7 Plus',
-        context_window: 262_144,
-        pricing: { input: 0.40, output: 1.60 },
-        capabilities: ['vision', 'tool_use'],
-        residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '262k context; fast-slot bench HOLD (87.9% recall / judge 6.96) and the quickest of the sweep. Pinned by no preset — lost the efficient main to minimax-m3 on quality. Vision validated on the openai wire 2026-08-14 (fireworks-vision online test).',
       },
       {
         id: 'accounts/fireworks/models/gpt-oss-120b',
@@ -589,24 +562,6 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         // openai-wire models cleanly. Its compaction recall also came in at 66% against
         // a 90% reference. Fine for a scripted tool round-trip, poor as a chat model.
         notes: '131k context; tool_use wire proven by the reachability suite. Text-only. NOT recommended as a chat model: measured empty-text turns and tool-JSON leaking into the visible answer (model behaviour), plus weak recall when summarizing.',
-      },
-      {
-        id: 'accounts/fireworks/models/kimi-k2p6',
-        label: 'Kimi K2.6',
-        context_window: 262_144,
-        pricing: { input: 0.95, output: 4.00 },
-        capabilities: ['tool_use'],
-        residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '262k context; generalist main-chat candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
-      },
-      {
-        id: 'accounts/fireworks/models/kimi-k2p7-code',
-        label: 'Kimi K2.7 Code',
-        context_window: 262_144,
-        pricing: { input: 0.95, output: 4.00 },
-        capabilities: ['tool_use'],
-        residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '262k context; agentic/coding candidate (unmeasured); reasons on every turn (no non-thinking mode). Text-only for now.',
       },
       {
         id: 'accounts/fireworks/models/minimax-m3',
