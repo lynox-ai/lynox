@@ -14408,26 +14408,28 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   });
 });
 
-// PRD customer-granted-operator-access §3.13: every `user` route that writes declares, at its
-// registration, what a mandate may do there. Read off the route table the server really
+// PRD customer-granted-operator-access §3.13: every `user` route declares, at its registration,
+// what a mandate may do there, whatever its method. Read off the route table the server really
 // builds, so a route added tomorrow is in the set without anyone listing it.
 //
-// ⚠ What this checks and what it does not: that each such route DECLARES a stance, and for
-// `owner-only` that the stance is APPLIED (the dispatcher refuses before the handler). For
-// `mark`, `own` and `free` it checks neither that the handler does what the stance says nor
-// that the stance is the right one; those are the handlers' own tests and a reviewer's call.
-describe('mandate stance of every route that writes', () => {
+// ⚠ What this checks and what it does not: that each route DECLARES a stance, that `reads`
+// sits only on a GET, and for `owner-only` that the stance is APPLIED (the dispatcher refuses
+// before the handler, for HEAD too). For the other kinds it checks neither that the handler
+// does what the stance says nor that the stance is the right one; in particular it cannot see
+// whether a GET marked `reads` writes. Those are the handlers' own tests and a reviewer's call.
+describe('mandate stance of every user route', () => {
   const WRITE = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
   const table = (): ReturnType<typeof api.routeStancesForTesting> => api.routeStancesForTesting();
-  const writes = (): ReturnType<typeof api.routeStancesForTesting> => table().filter(r => r.scope === 'user' && WRITE.has(r.method));
+  const users = (): ReturnType<typeof api.routeStancesForTesting> => table().filter(r => r.scope === 'user');
   /** A request path for a route: a dynamic pattern's groups filled with a placeholder. */
   const concrete = (path: string): string => path.replace(/:[^/]+/g, 'stance-probe');
   const name = (r: { method: string; path: string }): string => `${r.method} ${concrete(r.path)}`;
 
-  it('finds a stance on every user route that writes, and a reason on every free one', () => {
-    const all = writes();
-    // The set is the real one, not an empty filter.
-    expect(all.length).toBeGreaterThan(70);
+  it('finds a stance on every user route, whatever its method, and a reason on every free one', () => {
+    const all = users();
+    // The set is the real one, not an empty filter, and it holds the GET routes as well.
+    expect(all.filter(r => WRITE.has(r.method)).length).toBeGreaterThan(70);
+    expect(all.filter(r => r.method === 'GET').length).toBeGreaterThan(80);
     expect(all.filter(r => r.stance === undefined).map(name), 'declare a MandateStance at the registration').toEqual([]);
     for (const r of all) {
       if (r.stance?.kind === 'free') expect(r.stance.why.trim().length, name(r)).toBeGreaterThan(10);
@@ -14435,13 +14437,25 @@ describe('mandate stance of every route that writes', () => {
     }
   });
 
+  it('allows `reads` only on a GET', () => {
+    expect(users().filter(r => r.stance?.kind === 'reads' && r.method !== 'GET').map(name)).toEqual([]);
+  });
+
   it('opens to a mandate exactly the routes named here — opening another is a change to this list', () => {
-    const open = writes().filter(r => r.stance !== undefined && r.stance.kind !== 'owner-only').map(r => `${name(r)} ${r.stance!.kind}`).sort();
+    const open = users().filter(r => r.stance !== undefined && r.stance.kind !== 'owner-only' && r.stance.kind !== 'reads').map(r => `${name(r)} ${r.stance!.kind}`).sort();
     expect(open).toEqual([
       'DELETE /api/runs/stance-probe own',
       'DELETE /api/sessions/stance-probe own',
       'DELETE /api/tasks/stance-probe mark',
       'DELETE /api/threads/stance-probe own',
+      'GET /api/artifacts free',
+      'GET /api/artifacts/stance-probe free',
+      'GET /api/files free',
+      'GET /api/google/callback free',
+      'GET /api/kg/entities free',
+      'GET /api/migration/preview free',
+      'GET /api/oauth/callback free',
+      'GET /api/oauth/connect/stance-probe own',
       'PATCH /api/sessions/stance-probe/model own',
       'PATCH /api/tasks/stance-probe mark',
       'PATCH /api/threads/stance-probe own',
@@ -14485,18 +14499,30 @@ describe('mandate stance of every route that writes', () => {
     });
 
     it('refuses a mandate at every owner-only route with that route\'s sentence, before its handler', async () => {
-      const closed = writes().filter(r => r.stance?.kind === 'owner-only');
+      const closed = users().filter(r => r.stance?.kind === 'owner-only');
       expect(closed.length).toBeGreaterThan(40);
+      expect(closed.filter(r => r.method === 'GET').length).toBeGreaterThan(0);
       api.setPrincipalResolverForTesting(() => MANDATE);
       const wrong: string[] = [];
       for (const r of closed) {
-        const res = await jsonFetch(concrete(r.path), { method: r.method, body: '{}' });
+        const res = await jsonFetch(concrete(r.path), r.method === 'GET' ? { method: 'GET' } : { method: r.method, body: '{}' });
         const error = res.status === 403 ? ((await res.json()) as { error?: string }).error : `status ${String(res.status)}`;
         const want = `Only the owner of this instance can ${(r.stance as { what: string }).what}.`;
         if (error !== want) wrong.push(`${name(r)}: ${String(error)}`);
         for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
       }
-      expect(wrong).toEqual([]);
+      expect(wrong, wrong.join("\n")).toEqual([]);
+    });
+
+    it('refuses a mandate at an owner-only GET when it comes as HEAD, which runs the GET handler', async () => {
+      const closed = users().filter(r => r.method === 'GET' && r.stance?.kind === 'owner-only');
+      expect(closed.map(name).sort()).toEqual(['GET /api/google/oauth-url']);
+      api.setPrincipalResolverForTesting(() => MANDATE);
+      for (const r of closed) {
+        const res = await jsonFetch(concrete(r.path), { method: 'HEAD' });
+        expect(res.status, `HEAD ${concrete(r.path)}`).toBe(403);
+        for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0;
+      }
     });
 
     it('lets the owner past the same check (the handler answers, whatever it says)', async () => {
