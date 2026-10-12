@@ -3051,13 +3051,15 @@ export async function toggleSkipExtraction(): Promise<void> {
 	if (!sid) return;
 	const newValue = !skipExtraction;
 	skipExtraction = newValue;
+	// A request that got no answer at all is a failure too: the switch must not stay on when the
+	// server may never have heard of it. No answer carries no stored state, so it falls back.
 	const res = await fetch(`${getApiBase()}/threads/${sid}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ skip_extraction: newValue }),
-	});
-	if (!res.ok) {
-		const failure = privateToggleFailure(!newValue, await res.json().catch(() => null));
+	}).catch(() => null);
+	if (!res?.ok) {
+		const failure = privateToggleFailure(!newValue, res ? await res.json().catch(() => null) : null);
 		skipExtraction = failure.skip;
 		addToast(t(failure.messageKey), 'error');
 	}

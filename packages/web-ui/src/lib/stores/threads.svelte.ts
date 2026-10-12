@@ -178,14 +178,16 @@ export async function toggleExtraction(id: string): Promise<void> {
 	const newValue = oldValue ? false : true;
 	// Optimistic update
 	thread.skip_extraction = newValue ? 1 : 0;
+	// No answer at all (the request never arrived, or its answer was lost) falls back like an
+	// answer without a stored state: the list must not show private mode the server may not hold.
 	const res = await fetch(`${getApiBase()}/threads/${id}`, {
 		method: 'PATCH',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ skip_extraction: newValue }),
-	});
-	if (!res.ok) {
+	}).catch(() => null);
+	if (!res?.ok) {
 		// Back to the state the server holds, which is not always the previous one.
-		const failure = privateToggleFailure(oldValue === 1, await res.json().catch(() => null));
+		const failure = privateToggleFailure(oldValue === 1, res ? await res.json().catch(() => null) : null);
 		thread.skip_extraction = failure.skip ? 1 : 0;
 		addToast(t(failure.messageKey), 'error');
 	}
