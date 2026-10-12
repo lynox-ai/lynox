@@ -40,6 +40,7 @@
 		getContextBudget,
 		getCompactionOffer,
 		getPendingChangeset,
+		sendBlockedByReview,
 		getChangesetLoading,
 		submitChangesetReview,
 		getSessionId,
@@ -1080,7 +1081,9 @@
 						removePlaceholder(placeholderIdx);
 						const trimmed = finalText.trim();
 						if (trimmed) {
-							if (isVoiceAutoSendEnabled()) {
+							// An open changeset review holds the send: the transcript then lands in
+							// the input like a reviewed one, instead of being lost.
+							if (isVoiceAutoSendEnabled() && !sendBlockedByReview()) {
 								// Transcription is done — release the composer before the
 								// agent run starts. The run has its own presence (the
 								// streaming activity bar); keeping `transcribing` true
@@ -1797,6 +1800,8 @@
 		}
 
 		if (!ready) return;
+		// An open changeset review holds the send. Ask before clearing, so the text stays.
+		if (sendBlockedByReview()) return;
 		const files = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
 		inputText = '';
 		pendingFiles = [];

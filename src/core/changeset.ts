@@ -6,6 +6,9 @@ import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
 
 export class ChangesetManager {
   private entries: Map<string, ChangesetEntry> = new Map();
+  /** The pre-run bytes of each `modified` entry. Held here, not read back from the backup
+   *  copy: that copy can be a symlink to the live file, or shared with another manager. */
+  private originalBytes: Map<string, Buffer> = new Map();
   private readonly backupDir: string;
 
   constructor(private readonly cwd: string, _runId: string) {
@@ -26,13 +29,15 @@ export class ChangesetManager {
 
     if (existsSync(abs)) {
       try {
-        originalContent = readFileSync(abs, 'utf-8');
+        const bytes = readFileSync(abs);
+        originalContent = bytes.toString('utf-8');
         status = 'modified';
         // Copy original to backup dir preserving relative structure
         const rel = relative(this.cwd, abs);
         const backupPath = join(this.backupDir, rel);
         mkdirSync(dirname(backupPath), { recursive: true });
         cpSync(abs, backupPath);
+        this.originalBytes.set(abs, bytes);
       } catch {
         // Best-effort — if we can't read, treat as new file
         originalContent = null;
@@ -44,20 +49,41 @@ export class ChangesetManager {
   }
 
   /**
+   * The tracked files that differ from their pre-run state, with their current content.
+   * The backup is taken before the write tool runs, so a write that failed or wrote the
+   * same text leaves an entry behind. Such a file is unchanged and not reported: an
+   * empty entry would open a review with nothing in it, and the review holds the next
+   * message until it is answered. `getChanges`, `hasChanges` and `size` all read this.
+   *
+   * "Same" is decided on the bytes read before the run, never on decoded text: a file with
+   * bytes that are not valid UTF-8 decodes to the same string after a write that changed
+   * them, and that write must still be reviewed.
+   */
+  private _changed(): Array<[string, ChangesetEntry, string]> {
+    const changed: Array<[string, ChangesetEntry, string]> = [];
+    for (const [abs, entry] of this.entries) {
+      let currentBytes: Buffer;
+      try {
+        currentBytes = readFileSync(abs);
+      } catch {
+        // Deleted during the run, or unreadable — not reported
+        continue;
+      }
+      if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
+      const currentContent = currentBytes.toString('utf-8');
+      changed.push([abs, entry, currentContent]);
+    }
+    return changed;
+  }
+
+  /**
    * Produce unified diffs for all changed files.
    */
   getChanges(): ChangesetDiff[] {
     const diffs: ChangesetDiff[] = [];
 
-    for (const [abs, entry] of this.entries) {
+    for (const [abs, entry, currentContent] of this._changed()) {
       const rel = relative(this.cwd, abs);
-      let currentContent: string;
-      try {
-        currentContent = readFileSync(abs, 'utf-8');
-      } catch {
-        // File was deleted during run — skip
-        continue;
-      }
 
       let diffText: string;
       if (entry.status === 'added') {
@@ -137,10 +163,10 @@ export class ChangesetManager {
   }
 
   /**
-   * Whether any file writes were tracked.
+   * Whether any tracked file differs from its pre-run state.
    */
   hasChanges(): boolean {
-    return this.entries.size > 0;
+    return this._changed().length > 0;
   }
 
   /**
@@ -151,10 +177,10 @@ export class ChangesetManager {
   }
 
   /**
-   * Number of tracked files.
+   * Number of tracked files that differ from their pre-run state.
    */
   get size(): number {
-    return this.entries.size;
+    return this._changed().length;
   }
 
   private _rollbackOne(abs: string, entry: ChangesetEntry): void {
@@ -176,10 +202,10 @@ export class ChangesetManager {
         // File already gone
       }
     } else {
-      // Modified file — restore original content
+      // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8
       if (entry.originalContent !== null) {
         try {
-          writeFileSync(abs, entry.originalContent, 'utf-8');
+          writeFileSync(abs, this.originalBytes.get(abs) ?? entry.originalContent);
         } catch {
           // Best-effort
         }

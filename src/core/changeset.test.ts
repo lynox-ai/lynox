@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
@@ -32,11 +32,11 @@ describe('ChangesetManager', () => {
 
     mgr.backupBeforeWrite(filePath);
 
-    expect(mgr.hasChanges()).toBe(true);
-    expect(mgr.size).toBe(1);
-
     // Write new content (simulating what write_file tool does)
     writeFileSync(filePath, 'modified content', 'utf-8');
+
+    expect(mgr.hasChanges()).toBe(true);
+    expect(mgr.size).toBe(1);
 
     const changes = mgr.getChanges();
     expect(changes).toHaveLength(1);
@@ -215,6 +215,7 @@ describe('ChangesetManager', () => {
     const filePath = join(cwd, 'clean.txt');
     writeFileSync(filePath, 'content', 'utf-8');
     mgr.backupBeforeWrite(filePath);
+    writeFileSync(filePath, 'content, edited', 'utf-8');
 
     // Access backup dir via getChanges (it reads from backup dir internally)
     const changes = mgr.getChanges();
@@ -223,5 +224,121 @@ describe('ChangesetManager', () => {
     mgr.cleanup();
     // After cleanup, getChanges still works (reads from entries map + current files)
     // but backup dir is gone
+  });
+
+  // The backup is taken before the write tool runs. A write that failed — or wrote the same
+  // text — leaves an entry behind; it must not open a review, because an open review holds
+  // the next message until it is answered.
+  describe('a tracked file that did not change is not a change', () => {
+    it('backup without a write: nothing to review', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'failed-edit.txt');
+      writeFileSync(filePath, 'as it was', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      expect(mgr.getChanges()).toEqual([]);
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+      mgr.cleanup();
+    });
+
+    it('a write of the same text: nothing to review', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'same.txt');
+      writeFileSync(filePath, 'same text', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      writeFileSync(filePath, 'same text', 'utf-8');
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+      mgr.cleanup();
+    });
+
+    it('a new file that was never created: nothing to review', () => {
+      const cwd = makeTempDir();
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'never-written.txt'));
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+      mgr.cleanup();
+    });
+
+    it('next to an unchanged one, a changed file is still reported, and counted alone', () => {
+      const cwd = makeTempDir();
+      const untouched = join(cwd, 'untouched.txt');
+      const edited = join(cwd, 'edited.txt');
+      writeFileSync(untouched, 'a', 'utf-8');
+      writeFileSync(edited, 'b', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(untouched);
+      mgr.backupBeforeWrite(edited);
+      writeFileSync(edited, 'b, edited', 'utf-8');
+      expect(mgr.getChanges().map(c => c.file)).toEqual(['edited.txt']);
+      expect(mgr.hasChanges()).toBe(true);
+      expect(mgr.size).toBe(1);
+      mgr.cleanup();
+    });
+
+    it('a write that changed only bytes the text decoding hides is still a change', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'not-utf8.bin');
+      writeFileSync(filePath, Buffer.from([0x61, 0xff, 0x62]));
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      // Writing back the decoded text turns 0xff into U+FFFD: same string, other bytes.
+      const decoded = readFileSync(filePath, 'utf-8');
+      writeFileSync(filePath, decoded, 'utf-8');
+      expect(readFileSync(filePath, 'utf-8'), 'positive control: the decoded text is unchanged').toBe(decoded);
+      expect(readFileSync(filePath).equals(Buffer.from([0x61, 0xff, 0x62])), 'positive control: the bytes changed').toBe(false);
+      expect(mgr.hasChanges()).toBe(true);
+      expect(mgr.size).toBe(1);
+      mgr.cleanup();
+    });
+
+    // The comparison is against bytes held in memory, never against the backup copy: that
+    // copy is a symlink when the tracked path is one, and gone after cleanup().
+    it('a write through a symlink is a change', () => {
+      const cwd = makeTempDir();
+      const target = join(cwd, 'target.txt');
+      const link = join(cwd, 'link.txt');
+      writeFileSync(target, 'before', 'utf-8');
+      symlinkSync('target.txt', link);
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(link);
+      writeFileSync(link, 'through the link', 'utf-8');
+      expect(readFileSync(target, 'utf-8'), 'positive control: the write reached the target').toBe('through the link');
+      expect(mgr.hasChanges()).toBe(true);
+      expect(mgr.size).toBe(1);
+      mgr.cleanup();
+    });
+
+    it('rollback restores bytes that are not UTF-8 exactly, and the review is settled', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'not-utf8.bin');
+      const before = Buffer.from([0xff, 0x41]);
+      writeFileSync(filePath, before);
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      writeFileSync(filePath, 'replaced', 'utf-8');
+      expect(mgr.hasChanges(), 'positive control').toBe(true);
+      mgr.rollbackAll();
+      expect(readFileSync(filePath).equals(before)).toBe(true);
+      expect(mgr.hasChanges()).toBe(false);
+      mgr.cleanup();
+    });
+
+    it('after cleanup, a file restored by rollback is not a change', () => {
+      const cwd = makeTempDir();
+      const filePath = join(cwd, 'restored.txt');
+      writeFileSync(filePath, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(filePath);
+      writeFileSync(filePath, 'after', 'utf-8');
+      expect(mgr.hasChanges(), 'positive control').toBe(true);
+      mgr.rollbackAll();
+      mgr.cleanup();
+      expect(mgr.hasChanges()).toBe(false);
+      expect(mgr.size).toBe(0);
+    });
   });
 });
