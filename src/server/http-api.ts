@@ -7808,7 +7808,7 @@ export class LynoxHTTPApi {
     // Called with no await between it and the ledger call it guards.
     const refuseEndedPlanner = (res: import('node:http').ServerResponse, ledger: import('../core/bulk-ledger.js').BulkLedger, runId: string): boolean => {
       if (!ledger.endIfPlannerEnded(runId, engine.getBulkOwnership())) return false;
-      errorResponse(res, 409, 'This run was planned under an access that has ended, so it cannot be approved or started.', 'mandate_ended');
+      errorResponse(res, 409, 'This run was planned under an access that has ended, or one that cannot be confirmed, so it cannot be approved or started.', 'mandate_ended');
       return true;
     };
     const checksumOf = (body: unknown): string | null => {

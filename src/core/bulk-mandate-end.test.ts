@@ -177,6 +177,13 @@ describe('ending the runs of an ended grant', () => {
     expect(row(mine).phase).toBe('aborted');
     expect(ledger.endIfPlannerEnded(legacy, blind)).toBe(true);
     expect(row(legacy).phase).toBe('previewed');
+    // An approved run from before v31 is the owner's act: not refused, whatever can be read.
+    const approved = dryRun(OWNER_PRINCIPAL, 'owner-thread');
+    const ok = ledger.approve(approved, { checksum: ledger.computeChecksum(approved)!, maxTargets: 1 });
+    if (!ok.ok) throw new Error(ok.reason);
+    engineDb.getDb().prepare(`UPDATE bulk_runs SET principal = NULL WHERE id = ?`).run(approved);
+    expect(ledger.endIfPlannerEnded(approved, blind)).toBe(false);
+    expect(row(approved).phase).toBe('approved');
     // Once they can be read again, the owner's conversation keeps it.
     expect(ledger.expireEndedPlanners(ownership([], { 'owner-thread': 'owner' }))).toBe(0);
     expect(ledger.endIfPlannerEnded(legacy, ownership([], { 'owner-thread': 'owner' }))).toBe(false);
