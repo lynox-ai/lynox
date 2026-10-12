@@ -82,6 +82,7 @@ import type {
   UsageSummaryResponse,
   OAuthClaimRequest,
   OAuthClaimResponse,
+  OAuthDeclineCode,
 } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
@@ -8964,13 +8965,6 @@ export class LynoxHTTPApi {
       const state = url.searchParams.get('state');
       const error = url.searchParams.get('error');
 
-      if (error) {
-        const safe = error.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
-        res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end(`<html><body><h1>Error</h1><p>${safe}</p><p>You can close this tab.</p></body></html>`);
-        return;
-      }
-
       // Render the post-callback redirect page. Uses meta-refresh (not inline JS,
       // which the engine API CSP `default-src 'none'` blocks; not a 302 directly
       // out of the callback handler because we want a same-origin navigation
@@ -8983,6 +8977,21 @@ export class LynoxHTTPApi {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Connected</title></head><body><p>Google connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
       };
+
+      // Google sent the user back without a code. Its error vocabulary is
+      // open-ended, so the card is told one of two contract codes, the same ones the
+      // control plane sends on the managed path, and says the sentence for it.
+      if (error) {
+        const decline: OAuthDeclineCode = error === 'access_denied' ? 'access_denied' : 'exchange_failed';
+        const target = `${process.env['ORIGIN'] ?? ''}/app/settings/channels/google?google_oauth_error=${decline}`;
+        const escaped = target.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+        // The state cookie is left alone: this branch checks no state, so clearing it
+        // would let any page that navigates this browser here break a consent in
+        // progress. The next POST /api/google/auth overwrites it anyway.
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${escaped}"><title>Not connected</title></head><body><p>Google was not connected. Returning to settings…</p><p><a href="${escaped}">Click here if not redirected.</a></p></body></html>`);
+        return;
+      }
 
       const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
       const cookieState = httpSecret ? this._verifyOAuthStateCookie(req, httpSecret) : null;

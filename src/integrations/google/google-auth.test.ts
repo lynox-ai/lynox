@@ -243,7 +243,11 @@ describe('GoogleAuth', () => {
           { status: 400, headers: { 'Content-Type': 'application/json' } },
         ),
       );
-      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_grant/);
+      const err = await vaultAuth.getAccessToken().then(() => null, (e: unknown) => e as Error);
+      expect(err?.message).toMatch(/invalid_grant/);
+      // A Workspace admin who blocks the app revokes the grant the same way, and
+      // then re-connecting fails again; the remedy has to say so.
+      expect(err?.message).toMatch(/its admin may have blocked lynox\.$/);
       expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
       // The vault and the in-memory copy must go together — a wipe that
       // leaves `tokenData` set would keep the instance falsely authenticated

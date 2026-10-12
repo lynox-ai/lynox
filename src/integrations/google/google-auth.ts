@@ -516,7 +516,10 @@ function deleteTokenData(vault?: SecretVault | undefined): void {
  * ternaries, so adding a kind is a compile error until it has a remedy.
  */
 const REFRESH_FAILURE_REMEDY: Record<RefreshFailureKind, string> = {
-  'grant-revoked': ' Re-connect your Google account in Settings → Channels → Google.',
+  // The second sentence is for a Google Workspace account: an admin who blocks the
+  // app revokes its tokens, and re-connecting then fails the same way.
+  'grant-revoked': ' Re-connect your Google account in Settings → Channels → Google.'
+    + ' If it belongs to a company Google Workspace and connecting fails again, its admin may have blocked lynox.',
   // Deliberately operator-facing and free of credential NAMES: this string is
   // returned inside tool results (`google-drive.ts`, `google-sheets.ts`), so
   // the model reads it. `GOOGLE_CLIENT_*` are infra-walled (`secret-store.ts`)

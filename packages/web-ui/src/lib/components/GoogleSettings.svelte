@@ -6,10 +6,11 @@
 	// (shipped in P3-PR-A1); this component just renders the card and owns
 	// the OAuth-claim side-effect (only fires on this route now).
 
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { isManaged, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { googleOAuthErrorNotice } from '../stores/integrations/google-oauth-error.js';
 	import {
 		getGoogleStatus,
 		isGoogleLoading,
@@ -130,6 +131,17 @@
 				url.searchParams.delete('google_oauth');
 				window.history.replaceState({}, '', url.toString());
 				pendingClaimNonce = claimNonce;
+			}
+			// A connect that came back WITHOUT a grant says why in `google_oauth_error`.
+			// Read once, removed from the URL so a reload does not repeat it.
+			const notice = googleOAuthErrorNotice(params.get('google_oauth_error'));
+			if (notice) {
+				const url = new URL(window.location.href);
+				url.searchParams.delete('google_oauth_error');
+				window.history.replaceState({}, '', url.toString());
+				// untrack: `addToast` reads the toast list, which would make this effect
+				// re-run and load both statuses twice.
+				untrack(() => addToast(t(notice.key), notice.type, 12000));
 			}
 		}
 	});
