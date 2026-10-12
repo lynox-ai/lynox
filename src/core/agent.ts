@@ -364,11 +364,12 @@ export class Agent implements IAgent {
   // own and not a flag on `promptUser`: every consent gate and guard reads `promptUser`, and a
   // run that may ask a question must not thereby gain a way to approve anything. No reader of
   // `promptUser` knows this field, and neither getter ever returns the other's callback. It goes
-  // through the same wrapper as `promptUser`, so the run's signal still withdraws the question.
+  // through the same wrapper as `promptUser`, so the run's signal and the asking call's signal
+  // withdraw the question, and its answer is tracked for the call like any other.
   private _askUserPrompt: PromptUserFn | undefined;
   get askUserPrompt(): PromptUserFn | undefined {
     const raw = this._askUserPrompt;
-    return raw ? (question, options, meta) => this._notingAskedNobody(raw(question, options, { ...meta, signal: meta?.signal ?? this.runSignal })) : undefined;
+    return raw ? (question, options, meta) => this._notingAskedNobody(trackCallAnswer(raw(question, options, { ...meta, signal: this._promptSignal(meta) }))) : undefined;
   }
   set askUserPrompt(fn: PromptUserFn | undefined) { this._askUserPrompt = fn; }
   get promptTabs(): PromptTabsFn | undefined {

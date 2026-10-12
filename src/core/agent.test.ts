@@ -1391,6 +1391,52 @@ describe('Agent', () => {
       }
     });
 
+    // The question channel of a workflow step goes through the same wrapper: the asking call's
+    // signal withdraws it, and the timeout knows the call was waiting on an answer.
+    it('a call that times out while it waits on askUserPrompt withdraws the question', async () => {
+      vi.useFakeTimers();
+      try {
+        const { promptUser: askUserPrompt, signals } = oneOpenQuestion([null]);
+        const tool = makeTool('waits_on_question', async (_i, a) => (a as Agent).askUserPrompt!('Which month?', ['Sep', 'Oct']));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_aup', name: 'waits_on_question', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], askUserPrompt });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(15 * 60_000 + 1_000);
+        await expect(p).resolves.toBe('done');
+        expect(signals[0]?.aborted).toBe(true);
+        expect(toolResultFor(agent, 'tu_aup').content).toMatch(/^Tool "waits_on_question" timed out after 900s while it was waiting for the user's answer\. /);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('an exempt tool\'s question survives the tool timeout through askUserPrompt too', async () => {
+      vi.useFakeTimers();
+      try {
+        let answer: (a: string) => void = () => {};
+        let signal: AbortSignal | undefined;
+        const askUserPrompt = vi.fn((_q: unknown, _o: unknown, meta?: { signal?: AbortSignal }) => {
+          signal = meta?.signal;
+          return new Promise<string>((r) => { answer = r; });
+        });
+        const tool = makeTool('ask_user', async (_i, a) => (a as Agent).askUserPrompt!('Which month?', ['Sep', 'Oct']));
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_aup2', name: 'ask_user', input: {} }]))
+          .mockResolvedValueOnce(endTurnResponse('done'));
+        const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], askUserPrompt });
+        const p = agent.send('go');
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        expect(signal?.aborted).toBe(false);
+        answer('Oct');
+        await p;
+        expect(toolResultFor(agent, 'tu_aup2')).toMatchObject({ content: 'Oct' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     // The counterpart on the same machinery: an ordinary thrown error takes the
     // same outer catch and must NOT carry the timeout advice. Without it, the
     // test above would pass just as well if every tool error were given the
@@ -6232,7 +6278,9 @@ describe('the question channel of ask_user', () => {
     expect(askUserPrompt).not.toHaveBeenCalled();
   });
 
-  it('a question over it carries the run signal, and a caller\'s own wins', async () => {
+  // Inside a tool call the signal joins the run's and the call's (`_promptSignal`), so it is a
+  // signal of its own, not the run's; that the run's abort reaches it is the next test.
+  it('a question over it carries the run and call signal, and a caller\'s own wins', async () => {
     const seen: Array<AbortSignal | undefined> = [];
     const own = new AbortController();
     const agent = new Agent({
@@ -6251,7 +6299,9 @@ describe('the question channel of ask_user', () => {
       .mockResolvedValueOnce(endTurnResponse('end'));
     await agent.send('go');
     expect(runSignal).toBeInstanceOf(AbortSignal);
-    expect(seen).toEqual([runSignal, own.signal]);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[0]).not.toBe(runSignal);
+    expect(seen[1]).toBe(own.signal);
   });
 
   it('an aborted run withdraws a question asked over it', async () => {
