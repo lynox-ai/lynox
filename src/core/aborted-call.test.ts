@@ -67,6 +67,7 @@ describe('abortedCallCost — no count from the provider (aborted before the fir
     ['a negative cache-write count', { cache_creation_input_tokens: -1_000_000 }],
     ['a non-numeric cache-read count', { cache_read_input_tokens: 'many' }],
     ['a negative cache-read count', { cache_read_input_tokens: -1_000_000 }],
+    ['an infinite cache-write count', { cache_creation_input_tokens: Infinity }],
     ['an infinite prompt count', { input_tokens: Infinity }],
   ])('treats a snapshot with %s like no snapshot, so the bound stays a finite amount above zero', (_label, bad) => {
     const usage = { input_tokens: 1200, ...bad } as unknown as { input_tokens: number };

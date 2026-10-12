@@ -27,13 +27,13 @@ import { calculateCost } from './pricing.js';
  */
 export const TOOL_USE_OVERHEAD_TOKENS = 1024;
 
-/** Bytes per token for the display estimate of a prompt or a partial reply. */
+/** Bytes per token for the estimate of a prompt or a partial reply. */
 const ESTIMATE_BYTES_PER_TOKEN = 4;
 
 export interface AbortedCallCost {
-  /** A cost the call cannot have exceeded. For the budget caps. */
+  /** A cost the call cannot have exceeded. For the run ceiling and the session cap. */
   upperBoundUsd: number;
-  /** A best guess. For display only. */
+  /** A best guess. For the run's own cost line (see the module comment for who reads it). */
   estimateUsd: number;
   /** Whether the prompt size came from the provider's own count rather than from the request. */
   fromSnapshot: boolean;
