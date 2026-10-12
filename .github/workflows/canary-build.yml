@@ -42,6 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: PROBE control - daemon debug on, no mirror, pull from Docker Hub
+        run: |
+          cfg=/etc/docker/daemon.json
+          cur=$(sudo cat "$cfg" 2>/dev/null || true); [ -n "${cur//[[:space:]]/}" ] || cur='{}'
+          printf '%s' "$cur" | jq '.debug = true' | sudo tee "$cfg" > /dev/null
+          sudo systemctl restart docker
+          docker info --format 'mirrors before: {{json .RegistryConfig.Mirrors}}'
+          docker pull -q busybox:1.37.0
+
       # The daemon pulls the BuildKit image itself when setup-buildx boots the
       # builder, so it needs the mirror too.
       - uses: ./.github/actions/docker-hub-mirror
@@ -50,6 +59,11 @@ jobs:
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           buildkitd-config: .github/buildkitd.toml
+
+      - name: PROBE which registry served each daemon pull
+        if: always()
+        run: |
+          sudo journalctl -u docker --no-pager | grep -oE 'https?://(mirror\.gcr\.io|registry-1\.docker\.io)/v2/[a-z0-9._/-]+/(manifests|blobs)' | sed -E 's#/(manifests|blobs)$##' | sort | uniq -c || echo "PROBE: no registry lines"
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
