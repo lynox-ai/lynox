@@ -1,0 +1,39 @@
+name: Docker Hub mirror for the runner's daemon
+description: >
+  Point the runner's Docker daemon at mirror.gcr.io for docker.io pulls, then
+  restart it and check that it took the setting.
+
+# For the jobs that pull or build through the daemon itself: `docker run`,
+# `docker compose up --build`, and `docker/build-push-action` without a
+# setup-buildx step. Builders made by setup-buildx run their own BuildKit and
+# read .github/buildkitd.toml instead — the reason for both is written there.
+#
+# The daemon tries the mirror first and falls back to Docker Hub on its own, so
+# an outage at the mirror costs a retry, not the job.
+#
+# Merged, not overwritten: hosted runners ship a daemon.json of their own, and
+# replacing it would drop whatever the image put there.
+
+runs:
+  using: composite
+  steps:
+    - name: Add mirror.gcr.io to the daemon's registry mirrors
+      shell: bash
+      run: |
+        set -euo pipefail
+        cfg=/etc/docker/daemon.json
+        current='{}'
+        if [ -s "$cfg" ]; then current=$(sudo cat "$cfg"); fi
+        printf '%s' "$current" \
+          | jq '.["registry-mirrors"] = ((.["registry-mirrors"] // []) + ["https://mirror.gcr.io"] | unique)' \
+          | sudo tee "$cfg.new" > /dev/null
+        sudo mv "$cfg.new" "$cfg"
+        sudo systemctl restart docker
+        # A daemon that came back without the setting would pull anonymously
+        # again and say nothing, so ask it rather than trusting the file.
+        mirrors=$(docker info --format '{{json .RegistryConfig.Mirrors}}')
+        echo "registry mirrors: $mirrors"
+        case "$mirrors" in
+          *'https://mirror.gcr.io'*) ;;
+          *) echo "::error::Docker daemon did not take the mirror setting: $mirrors"; exit 1 ;;
+        esac
