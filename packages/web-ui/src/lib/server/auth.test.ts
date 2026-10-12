@@ -456,6 +456,7 @@ describe('a session without a principal on a managed instance', () => {
 	const cleanTier = (): void => {
 		vi.stubEnv('LYNOX_BILLING_TIER', '');
 		vi.stubEnv('LYNOX_MANAGED_MODE', '');
+		vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
 	};
 
 	it('is the owner\'s on a self-hosted instance, as before', () => {
@@ -469,6 +470,7 @@ describe('a session without a principal on a managed instance', () => {
 		['LYNOX_BILLING_TIER', 'hosted'],
 		['LYNOX_BILLING_TIER', 'starter'],
 		['LYNOX_MANAGED_MODE', 'managed'],
+		['LYNOX_MANAGED_INSTANCE_ID', 'inst_test'],
 	])('is refused when %s=%s, and the owner\'s principal is not', (name, value) => {
 		cleanTier();
 		vi.stubEnv(name, value);

@@ -20,11 +20,13 @@ export const SESSION_FUTURE_SKEW_S = 60;
  * Whether this instance was provisioned by the control plane. Read the way the engine
  * reads it (`readEnvAlias('LYNOX_BILLING_TIER')`, legacy `LYNOX_MANAGED_MODE`); on a
  * managed instance the Web UI runs in the engine's process, so both see the same env.
+ * An instance id alone also counts: mandate login needs it, so a missing or unknown tier
+ * must not leave a cookie without a principal standing where a mandate can log in.
  */
 function hostedInstance(): boolean {
 	const env = process.env;
 	const tier = env['LYNOX_BILLING_TIER'] || env['LYNOX_MANAGED_MODE'] || undefined;
-	return isHostedInstance(tier);
+	return isHostedInstance(tier) || Boolean(env['LYNOX_MANAGED_INSTANCE_ID']);
 }
 
 /** The owner's principal: every owner login mints it (PRD D2). */

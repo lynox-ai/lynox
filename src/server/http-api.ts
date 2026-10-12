@@ -1958,7 +1958,7 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) ? null : { iat: timestamp, principal: null };
+    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
@@ -1971,6 +1971,15 @@ export class LynoxHTTPApi {
         ...(session.mandateExp !== undefined ? { mandateExp: session.mandateExp } : {}),
       },
     };
+  }
+
+  /**
+   * Whether an owner cookie must carry the owner's principal: on an instance the control plane
+   * provisioned. An instance id alone also counts — mandate login needs it, so a missing or
+   * unknown tier must not leave a cookie without a principal standing where a mandate can log in.
+   */
+  private static _ownerNeedsPrincipal(): boolean {
+    return isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) || Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
   }
 
   /** The signed principal part of a session cookie; null for anything this engine does not know. */

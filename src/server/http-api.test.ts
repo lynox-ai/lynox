@@ -972,7 +972,7 @@ describe('LynoxHTTPApi', () => {
       vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
       try {
         const echo = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${refreshed}` } });
-        expect(echo.status).not.toBe(401);
+        expect(echo.status).toBe(200);
       } finally {
         // Not unstubAllEnvs: that would also drop the file's beforeAll stubs. Empty reads as unset.
         vi.stubEnv('LYNOX_BILLING_TIER', '');
@@ -980,7 +980,7 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it.each([['LYNOX_BILLING_TIER', 'managed'], ['LYNOX_BILLING_TIER', 'hosted'], ['LYNOX_MANAGED_MODE', 'managed']])(
+    it.each([['LYNOX_BILLING_TIER', 'managed'], ['LYNOX_BILLING_TIER', 'hosted'], ['LYNOX_MANAGED_MODE', 'managed'], ['LYNOX_MANAGED_INSTANCE_ID', 'inst-42']])(
       'refuses a cookie without a principal when %s=%s, and takes the owner\'s principal (D2)',
       async (name, value) => {
         const nowS = Math.floor(Date.now() / 1000);
@@ -993,7 +993,7 @@ describe('LynoxHTTPApi', () => {
           }
           const owner = mintPrincipalToken(TEST_SECRET, nowS, { v: 1, kind: 'owner' });
           const ok = await fetch(`${baseUrl}/api/secrets`, { headers: { cookie: `lynox_session=${owner}` } });
-          expect(ok.status).not.toBe(401);
+          expect(ok.status).toBe(200);
         } finally {
           vi.stubEnv(name, '');
           giveWindowBack();
