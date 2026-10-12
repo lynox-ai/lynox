@@ -2392,9 +2392,9 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         if (event.type === 'error') {
           // Stamped like its neighbours, so a consumer can tell a child's incident
           // from the parent's own. `fatal` is set to false rather than passed on:
-          // it answers "is THIS stream's turn over?", and a child's end is never
-          // the parent's — `Promise.allSettled` below settles every child and the
-          // parent turn goes on. Today no child can emit `fatal: true` (the only
+          // it answers "is THIS stream's turn over?", and a child's error event is
+          // not the end of the parent's turn — `Promise.allSettled` below settles
+          // every child and the parent turn goes on. Today no child can emit `fatal: true` (the only
           // such emitter is the 500-iteration backstop, and a child always runs
           // with `maxIterations` ≤ MAX_SPAWN_TURNS — see `absolute_cap` below), so
           // this is a guard, not a fix for something observed.

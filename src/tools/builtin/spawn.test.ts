@@ -1412,7 +1412,8 @@ describe('spawn_agent tool', () => {
 
     it('never forwards a child error as the end of the parent turn', async () => {
       // Guard: no child can emit `fatal: true` today (its maxIterations is capped
-      // far below the 500 backstop), but a child's end is never the parent's.
+      // far below the 500 backstop), but a child's error event is not the end
+      // of the parent's turn.
       const { errors } = await spawnWithChildError(['digger'], 'digger', true);
       expect(errors).toHaveLength(1);
       expect(errors[0]!['fatal']).toBe(false);
