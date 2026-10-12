@@ -120,17 +120,21 @@ RUN git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp
     && cp build/ggml/src/libggml*.so.0* /usr/local/lib/ \
     && ldconfig
 
-# Whisper STT model: pulled from OUR GitHub release mirror, not HuggingFace.
-# HF intermittently served HTTP errors and the model download flaked the build
-# repeatedly (~5× on 2026-06-03/04, blocking CI/staging/canary). The model is
-# mirrored once to the `whisper-models` release (pinned by the sha256 below).
+# Whisper STT model: first from OUR GitHub release mirror, then from Hugging
+# Face at a pinned commit. HF intermittently served HTTP errors and flaked the
+# build repeatedly (~5× on 2026-06-03/04), which is why the mirror comes first;
+# the mirror in turn answered 504 for longer than one source's retry window, so
+# HF stays as the second source. Both serve the same bytes, and the sha256 below
+# is checked once, whichever source delivered (scripts/fetch-pinned.sh).
 # Only the `base` model is shipped — it transcribes all clip lengths; the prior
 # `tiny` model was just a short-clip speed optimisation that whisper-cpp.ts
-# already treats as optional (falls back to base). -f --retry guards the mirror.
-RUN mkdir -p /usr/share/whisper \
-    && curl -fL --retry 5 --retry-delay 3 --retry-all-errors -o /usr/share/whisper/ggml-base.bin \
+# already treats as optional (falls back to base).
+RUN --mount=type=bind,source=scripts/fetch-pinned.sh,target=/tmp/fetch-pinned.sh \
+    mkdir -p /usr/share/whisper \
+    && sh /tmp/fetch-pinned.sh /usr/share/whisper/ggml-base.bin \
+       60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe \
        https://github.com/lynox-ai/lynox/releases/download/whisper-models/ggml-base.bin \
-    && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe /usr/share/whisper/ggml-base.bin" | sha256sum -c -
+       https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin
 
 # --- Stage 5: Production image ---
 FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS production

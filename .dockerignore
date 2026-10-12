@@ -19,6 +19,8 @@ secrets.json
 coverage/
 docs/
 scripts/
+# The whisper-build stage runs this one (bind-mounted, not copied into the image).
+!scripts/fetch-pinned.sh
 *.png
 *.pem
 *.key
