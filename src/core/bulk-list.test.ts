@@ -191,6 +191,14 @@ describe('listItemKey', () => {
   it('passes on the reason an element has no usable id', () => {
     expect(listItemKey(HOST, s, { id: '../orders' })).toEqual({ invalid: 'list_item_bad_id' });
   });
+
+  // Two rules stand between an element and a key outside the list: the id alphabet, and the
+  // check that the built key lies one segment below the list. This asserts what both together
+  // guarantee, so it fails only once both are gone — the second is defence in depth.
+  it.each([['1/2'], ['a/../../orders']])('never builds a key outside the list for the id %j', (id) => {
+    const got = listItemKey(HOST, s, { id });
+    expect('invalid' in got).toBe(true);
+  });
 });
 
 describe('isUnderList', () => {

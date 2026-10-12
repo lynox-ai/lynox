@@ -43,9 +43,18 @@ describe('withListQuery', () => {
     expect(grants(`${LIST}?page=1`)).toBe(true);
   });
 
-  it('is only made from a reviewed GET-only contract', () => {
+  it('is only made from a reviewed contract', () => {
     expect(() => withListQuery({ ...base, origin: 'authorship' }, constraints)).toThrow(/reviewed/);
-    expect(() => withListQuery({ ...base, httpMethods: ['GET', 'PATCH'] }, constraints)).toThrow(/GET/);
+  });
+
+  it('grants the query on a GET only, whatever else the contract grants', () => {
+    const plain: CapabilityContract = { ...base, httpMethods: ['GET', 'POST'] };
+    const readAndPost = withListQuery(plain, constraints);
+    expect(contractGrants('http_request', { method: 'POST', url: PAGE }, readAndPost)).toBe(false);
+    expect(contractGrants('http_request', { method: 'GET', url: PAGE }, readAndPost)).toBe(true);
+    // The copy grants list reads and nothing else; the contract it was made from keeps its own grant.
+    expect(contractGrants('http_request', { method: 'POST', url: LIST }, readAndPost)).toBe(false);
+    expect(contractGrants('http_request', { method: 'POST', url: LIST }, plain)).toBe(true);
   });
 
   it('refuses a list read without a query, and one with a body', () => {

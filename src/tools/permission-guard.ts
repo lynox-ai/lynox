@@ -713,13 +713,14 @@ export interface ListQueryConstraints {
 const LIST_QUERIES = new WeakMap<CapabilityContract, ListQueryConstraints>();
 
 /**
- * A reviewed GET-only contract that also admits the query `constraints` describe — the read
+ * A reviewed contract that also admits the query `constraints` describe, on a GET — the read
  * of one paginated list by a bulk run, whose address the engine built (`bulk-list.ts`).
- * The returned contract is a frozen copy; only it carries the constraints.
+ * The returned contract is a frozen copy; only it carries the constraints. That a query only
+ * ever rides on a GET is decided per request ({@link grantsListRead}), not here, so it holds
+ * whatever contract the constraints were attached to.
  */
 export function withListQuery(contract: CapabilityContract, constraints: ListQueryConstraints): CapabilityContract {
   if (contract.origin !== 'reviewed') throw new Error('a list read is only granted by a reviewed contract');
-  if (contract.httpMethods.length !== 1 || contract.httpMethods[0] !== 'GET') throw new Error('a list read is only granted with GET');
   const copy = Object.freeze({ ...contract });
   LIST_QUERIES.set(copy, Object.freeze({ ...constraints }));
   return copy;
