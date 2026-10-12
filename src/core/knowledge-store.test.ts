@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS, MAX_HINT_LOOKUPS_PER_BATCH, knowledgeEvidence } from './knowledge-store.js';
@@ -1080,10 +1081,18 @@ describe('the always-loaded profile block and who may reach into it', () => {
 
   const LINE = 'Operator prefers terse replies';
 
-  /** Put LINE into the profile block, and return an entry whose text matches it verbatim. */
-  function seed(ks: KnowledgeStore, channel: 'agent' | 'user'): string {
+  /** Put LINE into the profile block as seeded from an entry, the way the onboarding promotion
+   *  does, and return that entry. */
+  function seed(ks: KnowledgeStore, channel: 'agent' | 'user', threadId?: string): string {
     ks.setBlockContent('profile', LINE);
-    return ks.write({ text: LINE, sourceChannel: channel }).id;
+    const id = ks.write({ text: LINE, sourceChannel: channel, ...(threadId ? { sourceThreadId: threadId } : {}) }).id;
+    ks.recordProfileSeed(id);
+    return id;
+  }
+
+  /** The store's own connection, for planting rows the public API does not write directly. */
+  function rawDb(ks: KnowledgeStore): Database.Database {
+    return (ks as unknown as { db: Database.Database }).db;
   }
 
   it('an AGENT retire does not delete an operator line from the block', () => {
@@ -1113,25 +1122,136 @@ describe('the always-loaded profile block and who may reach into it', () => {
     // deleted the row and left the text loading into every future turn — the one place it
     // was guaranteed to keep being read.
     const { ks } = make();
-    const id = seed(ks, 'agent');
+    // A line the operator wrote by hand, never seeded: erasure takes it anyway.
+    ks.setBlockContent('profile', `${LINE}\n${LINE}`);
+    const id = ks.write({ text: LINE, sourceChannel: 'agent' }).id;
     expect(ks.deleteEntry(id)).toBe(true);
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
   });
 
   it('a private-mode purge removes the line too — the block is where a surviving copy keeps being read', () => {
     const { ks } = make();
+    seed(ks, 'user', 'private-chat');
+    expect(ks.deleteByThread('private-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('a private-mode purge leaves an identical line the operator wrote by hand', () => {
+    // No seed: the line is the operator's, and the chat going private is not a mandate to
+    // rewrite their block. Before, any line equal to the entry's text went.
+    const { ks } = make();
     ks.setBlockContent('profile', LINE);
     ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'private-chat' });
     expect(ks.deleteByThread('private-chat')).toBe(1);
-    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('a seeded line next to an identical hand-written one: the purge takes one, the other stays', () => {
+    const { ks } = make();
+    seed(ks, 'user', 'private-chat');
+    ks.setBlockContent('profile', `${LINE}\n${LINE}`);
+    expect(ks.deleteByThread('private-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('a line seeded from another chat\'s entry stays when this chat goes private', () => {
+    const { ks } = make();
+    seed(ks, 'user', 'other-chat');
+    // The same text from the private chat, never seeded: a pending twin, so dedup does not fold it.
+    ks.write({ text: LINE, sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'private-chat' });
+    expect(ks.deleteByThread('private-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('a chat that only restated a seeded fact going private leaves the seeded line', () => {
+    const { ks } = make();
+    // Same subject on both writes: that is what lets the restatement fold into the first entry.
+    ks.setBlockContent('profile', LINE);
+    const first = ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'first-chat' });
+    ks.recordProfileSeed(first.id);
+    const again = ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'restating-chat' });
+    expect(again.deduped).toBe(true);
+    expect(ks.deleteByThread('restating-chat')).toBe(0);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('once its seeded line is gone, an entry that stays does not claim the identical hand-written one', () => {
+    // The entry outlives the private chat (another chat said it too), and the operator had
+    // written the same line by hand. The seeded copy goes; the seed must go with it, or the
+    // entry's later removal would take the operator's line as if it were the seeded one.
+    const { ks } = make();
+    ks.setBlockContent('profile', `${LINE}\n${LINE}`);
+    const first = ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'first-chat' });
+    ks.recordProfileSeed(first.id);
+    expect(ks.write({ text: LINE, subjectName: 'Walkfalke AG', sourceChannel: 'user', sourceThreadId: 'second-chat' }).deduped).toBe(true);
+
+    expect(ks.deleteByThread('first-chat')).toBe(0);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+
+    expect(ks.deleteByThread('second-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('a seeded line the operator removed, then wrote again by hand, is theirs', () => {
+    // The seed is forgotten when its line leaves the block, so a later identical line is not
+    // mistaken for the seeded one.
+    const { ks } = make();
+    seed(ks, 'user', 'private-chat');
+    ks.setBlockContent('profile', '');
+    ks.setBlockContent('profile', LINE);
+    expect(ks.deleteByThread('private-chat')).toBe(1);
+    expect(ks.getBlock('profile')?.content).toBe(LINE);
+  });
+
+  it('a boot that cannot read the encrypted store leaves the backfill for a boot that can', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-block-key-'));
+    tmpDirs.push(dir);
+    const path = join(dir, 'engine.db');
+    const key = `k-${'0'.repeat(8)}-${Date.now().toString(36)}`;
+    const withKey = new EngineDb(path, key);
+    const ks = new KnowledgeStore(withKey, new SubjectStore(withKey));
+    ks.setBlockContent('profile', LINE);
+    ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'onboarding' });
+    const raw = rawDb(ks);
+    raw.prepare('DELETE FROM profile_seeds').run();
+    raw.prepare('UPDATE profile_seed_backfill SET done = 0').run();
+    withKey.close();
+
+    const noKey = new EngineDb(path, '');
+    new KnowledgeStore(noKey, new SubjectStore(noKey));
+    expect(noKey.getDb().prepare('SELECT done FROM profile_seed_backfill').get()).toEqual({ done: 0 });
+    noKey.close();
+
+    const again = new EngineDb(path, key);
+    const reopened = new KnowledgeStore(again, new SubjectStore(again));
+    expect(again.getDb().prepare('SELECT done FROM profile_seed_backfill').get()).toEqual({ done: 1 });
+    expect(reopened.deleteByThread('onboarding')).toBe(1);
+    expect(reopened.getBlock('profile')?.content ?? '').toBe('');
+    again.close();
+  });
+
+  it('a block written before seeds were recorded is backfilled once from user-asserted entries', () => {
+    const { ks } = make();
+    ks.setBlockContent('profile', `${LINE}\nOperator works from Bern`);
+    ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'onboarding' });
+    ks.write({ text: 'Operator works from Bern', sourceChannel: 'agent', sourceThreadId: 'onboarding' });
+    const db = rawDb(ks);
+    db.prepare('DELETE FROM profile_seeds').run();
+    db.prepare('UPDATE profile_seed_backfill SET done = 0').run();
+
+    const reopened = new KnowledgeStore((ks as unknown as { engine: EngineDb }).engine, new SubjectStore((ks as unknown as { engine: EngineDb }).engine));
+
+    expect(db.prepare('SELECT done FROM profile_seed_backfill').get()).toEqual({ done: 1 });
+    expect(reopened.deleteByThread('onboarding')).toBe(2);
+    // The user-asserted line was seeded and goes; the agent one was never a seed and stays.
+    expect(reopened.getBlock('profile')?.content).toBe('Operator works from Bern');
   });
 
   it('a private-mode purge THROWS when the block cannot be changed, keeps the rows, and a retry finishes', () => {
     // The caller reports the failure. The rows stay so the retry can find the line again —
     // deleted first, the retry would have no text to match.
     const { ks } = make();
-    ks.setBlockContent('profile', LINE);
-    const id = ks.write({ text: LINE, sourceChannel: 'user', sourceThreadId: 'private-chat' }).id;
+    const id = seed(ks, 'user', 'private-chat');
     const spy = vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
 
     expect(() => ks.deleteByThread('private-chat')).toThrow('disk full');
@@ -1148,6 +1268,150 @@ describe('the always-loaded profile block and who may reach into it', () => {
     const id = seed(ks, 'agent');
     vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
     expect(ks.deleteEntry(id)).toBe(true);
+  });
+});
+
+describe('a fact said in two chats: private mode takes only what the private chat said', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore; db: Database.Database } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-sources-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const ks = new KnowledgeStore(engine, new SubjectStore(engine));
+    return { ks, db: (ks as unknown as { db: Database.Database }).db };
+  }
+
+  const FULL = 'Jana Reber lives in Bern and earns 9000 a month';
+  const RESTATED = 'Jana Reber lives in Bern';
+
+  /** Chat A says the full fact; chat B restates part of it, which folds into A's entry. */
+  function sayInTwoChats(ks: KnowledgeStore): string {
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    const b = ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b' });
+    // Positive control: B's write really folded into A's entry.
+    expect(b.deduped).toBe(true);
+    expect(b.id).toBe(a.id);
+    return a.id;
+  }
+
+  it('the first chat going private keeps the fact for the other chat, in the other chat\'s words', () => {
+    const { ks } = make();
+    const id = sayInTwoChats(ks);
+
+    expect(ks.deleteByThread('chat-a')).toBe(0);
+
+    const entry = ks.getEntry(id);
+    expect(entry?.text).toBe(RESTATED);
+    // The detail only chat A said is gone with it.
+    expect(entry?.text).not.toContain('9000');
+    expect(entry?.sourceThreadId).toBe('chat-b');
+  });
+
+  it('a later chat going private leaves the entry as it was, and the last one deletes it', () => {
+    const { ks } = make();
+    const id = sayInTwoChats(ks);
+
+    expect(ks.deleteByThread('chat-b')).toBe(0);
+    expect(ks.getEntry(id)?.text).toBe(FULL);
+    expect(ks.getEntry(id)?.sourceThreadId).toBe('chat-a');
+
+    expect(ks.deleteByThread('chat-a')).toBe(1);
+    expect(ks.getEntry(id)).toBeNull();
+  });
+
+  it('an entry with no chat behind it stays when a chat that restated it goes private', () => {
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b' });
+
+    expect(ks.deleteByThread('chat-b')).toBe(0);
+    expect(ks.getEntry(a.id)?.text).toBe(FULL);
+  });
+
+  it('the wording each chat used is kept per source, and the private chat\'s goes', () => {
+    const { ks, db } = make();
+    const id = sayInTwoChats(ks);
+    const raw = db.prepare('SELECT thread_id, text FROM entry_sources WHERE entry_id = ? ORDER BY id').all(id) as Array<{ thread_id: string; text: string }>;
+    expect(raw.map(r => r.thread_id)).toEqual(['chat-a', 'chat-b']);
+
+    ks.deleteByThread('chat-a');
+
+    expect((db.prepare('SELECT thread_id FROM entry_sources WHERE entry_id = ?').all(id) as Array<{ thread_id: string }>).map(r => r.thread_id)).toEqual(['chat-b']);
+  });
+
+  it('an entry that takes another chat\'s wording takes that chat\'s trust, and loses the pin', () => {
+    // A was typed by the user and pinned; B is the agent's own restatement. Keeping A's tier and
+    // pin on B's words would make agent text read as user-asserted, everywhere the tier decides.
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a', pin: true });
+    expect(ks.getEntry(a.id)?.pinned).toBe(true);
+    expect(ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'agent', sourceThreadId: 'chat-b' }).deduped).toBe(true);
+
+    ks.deleteByThread('chat-a');
+
+    const entry = ks.getEntry(a.id);
+    expect(entry?.text).toBe(RESTATED);
+    expect(entry?.sourceType).toBe('agent_inferred');
+    expect(entry?.sourceChannel).toBe('agent');
+    expect(entry?.pinned).toBe(false);
+  });
+
+  it('a pin the remaining chat set stays with it', () => {
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    expect(ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b', pin: true }).pinned).toBe(true);
+
+    ks.deleteByThread('chat-a');
+
+    expect(ks.getEntry(a.id)?.text).toBe(RESTATED);
+    expect(ks.getEntry(a.id)?.pinned).toBe(true);
+  });
+
+  it('a pin the remaining chat set later, as a source already, stays with it', () => {
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b', pin: true });
+
+    ks.deleteByThread('chat-a');
+
+    expect(ks.getEntry(a.id)?.pinned).toBe(true);
+  });
+
+  it('a retired entry the remaining chat had pinned is handed over unpinned, not refused', () => {
+    // The pin CHECK allows a pin only on an active entry. Retirement unpins the entry; the
+    // source still says it pinned. The purge must not fail on that, or the chat stays stuck.
+    const { ks } = make();
+    const a = ks.write({ text: FULL, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-a' });
+    ks.write({ text: RESTATED, subjectName: 'Jana Reber', subjectKind: 'person', sourceChannel: 'user', sourceThreadId: 'chat-b', pin: true });
+    ks.retireEntry(a.id, 'user_asserted');
+
+    expect(() => ks.deleteByThread('chat-a')).not.toThrow();
+
+    expect(ks.getEntry(a.id)?.text).toBe(RESTATED);
+    expect(ks.getEntry(a.id)?.status).toBe('superseded');
+    expect(ks.getEntry(a.id)?.pinned).toBe(false);
+  });
+
+  it('an edited approval replaces the queued wording in the source too', () => {
+    const { ks } = make();
+    const queued = ks.write({ text: 'Jana Reber moved from Gasse 4 and lives in Bern', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'chat-q' });
+    ks.reviewEntry(queued.id, 'edit_approve', 'Jana Reber lives in Bern');
+    expect(ks.listSourcesMasked().filter(s => s.entryId === queued.id).map(s => s.text)).toEqual(['Jana Reber lives in Bern']);
+  });
+
+  it('deleting a chat marks its source, not only the entry\'s first chat', () => {
+    const { ks, db } = make();
+    const id = sayInTwoChats(ks);
+
+    ks.markThreadDeleted('chat-b');
+
+    const rows = db.prepare('SELECT thread_id, thread_deleted_at AS at FROM entry_sources WHERE entry_id = ? ORDER BY id').all(id) as Array<{ thread_id: string; at: string | null }>;
+    expect(rows[0]).toEqual({ thread_id: 'chat-a', at: null });
+    expect(rows[1]?.at).toMatch(/^\d{4}-/);
+    expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBeNull();
   });
 });
 

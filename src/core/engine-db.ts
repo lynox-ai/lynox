@@ -1010,6 +1010,53 @@ const MIGRATIONS: string[] = [
   // Mirrors agent-memory.db v7.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (28);
    ALTER TABLE knowledge_entries ADD COLUMN source_thread_deleted_at TEXT;`,
+
+  // v29: where each durable entry came from, per source, and which entry seeded a `profile` line.
+  //
+  // `entry_sources`: one row per conversation that said a fact. The write path folds a
+  // restatement into the entry it restates, so an entry can carry several conversations, and
+  // `knowledge_entries.source_thread_id` names only the first. Each row keeps the wording that
+  // source used (enc()'d like the entry), because the entry's own text is the first source's
+  // and can hold detail a later source never said. Private mode removes a conversation's
+  // source rows; an entry with sources left takes the earliest remaining source's wording.
+  // A source also keeps its own evidence (channel, untrusted flag) and whether it pinned the
+  // entry: an entry that takes a remaining source's wording takes that source's trust and pin
+  // with it, never the removed one's.
+  // Fed by the provenance primitive once it exists (thread_id/run_id then come from its
+  // context). Backfilled with one row per existing entry, `thread_id` NULL included, so an
+  // entry that never had a conversation is not removed when a restatement's goes.
+  //
+  // `profile_seeds`: the entry a `profile` line was seeded from. Removing an entry removes its
+  // line only when this row exists, never by text equality alone. `profile_seed_backfill` is
+  // the one-time marker for seeding it from existing blocks, which needs the decrypted text.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (29);
+   CREATE TABLE IF NOT EXISTS entry_sources (
+     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+     entry_id          TEXT NOT NULL REFERENCES knowledge_entries(id) ON DELETE CASCADE,
+     thread_id         TEXT,
+     run_id            TEXT,
+     text              TEXT NOT NULL,
+     source_channel    TEXT,
+     source_untrusted  INTEGER NOT NULL DEFAULT 0,
+     pinned            INTEGER NOT NULL DEFAULT 0,
+     added_at          TEXT NOT NULL DEFAULT (datetime('now')),
+     thread_deleted_at TEXT
+   );
+   CREATE UNIQUE INDEX IF NOT EXISTS idx_entry_sources_entry_thread ON entry_sources(entry_id, thread_id);
+   CREATE INDEX IF NOT EXISTS idx_entry_sources_thread ON entry_sources(thread_id);
+   INSERT INTO entry_sources (entry_id, thread_id, run_id, text, source_channel, source_untrusted, pinned, added_at, thread_deleted_at)
+     SELECT k.id, k.source_thread_id, k.source_run_id, k.text, k.source_channel, k.source_untrusted, k.pinned, k.created_at, k.source_thread_deleted_at
+     FROM knowledge_entries k
+     WHERE NOT EXISTS (SELECT 1 FROM entry_sources s WHERE s.entry_id = k.id);
+   CREATE TABLE IF NOT EXISTS profile_seeds (
+     entry_id  TEXT PRIMARY KEY REFERENCES knowledge_entries(id) ON DELETE CASCADE,
+     seeded_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE TABLE IF NOT EXISTS profile_seed_backfill (
+     id   INTEGER PRIMARY KEY CHECK (id = 1),
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO profile_seed_backfill (id, done) VALUES (1, 0);`,
 ];
 
 /**
