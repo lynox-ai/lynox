@@ -186,6 +186,11 @@ export class CostGuard {
    * `isExceeded` reads as "over budget" and would end EVERY later turn of the
    * run. Dropping one unpriceable helper call understates the ceiling by cents;
    * the alternative kills the run.
+   *
+   * Contract: this spend counts in `snapshot().estimatedCostUSD`, and a spawned child is
+   * debited from its snapshot. Spend that already debited itself (an in-run helper call)
+   * may be recorded here only on an agent that is NOT debited from its snapshot. Spawned
+   * children keep both helper fallbacks off for that reason (pinned in `spawn.test.ts`).
    */
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;

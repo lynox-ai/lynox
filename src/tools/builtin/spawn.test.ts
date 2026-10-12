@@ -1710,6 +1710,25 @@ describe('spawn_agent tool', () => {
 
   // === F5/S8: spawn seeds the child's sticky taint from a tainted parent ===
 
+  it('a spawned child runs neither helper fallback — it is debited from its own cost snapshot', async () => {
+    // Both fallbacks debit their helper call to the tenant directly AND record it in the
+    // agent's cost guard. A child's tenant debit is its whole snapshot, so a child running
+    // either one would bill that helper call twice. Off by default (agent.ts), and spawn
+    // must not turn them on — not even by inheriting them from a parent that runs both, as
+    // the session's own agent does.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const parent = Object.assign(makeAgent(), { followUpFallback: true, captureFallback: true });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, parent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as { followUpFallback?: boolean; captureFallback?: boolean };
+    expect(child.followUpFallback ?? false).toBe(false);
+    expect(child.captureFallback ?? false).toBe(false);
+    // The other road in: the child's config. The mock copies only the keys it knows onto the
+    // instance, so a flag passed through the config would not show up above.
+    const config = vi.mocked(MockAgent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(config['followUpFallback'] ?? false).toBe(false);
+    expect(config['captureFallback'] ?? false).toBe(false);
+  });
+
   it('F5/S8: a tainted parent seeds the spawned child\'s untrusted taint', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     // Parent read untrusted content earlier (sticky conversation latch set) — an injected

@@ -303,6 +303,11 @@ export interface IAgent {
    * would be silent. A TypeScript implementer gets a compile error and adds it; the
    * call site still guards the METHOD, because a partial test double is not a type
    * error — and because this one is called from a `finally`.
+   *
+   * Contract: what is charged here counts in this agent's cost snapshot, and an agent
+   * that is debited from its snapshot (a spawned child) is billed for it. So charge only
+   * spend that no one has debited yet. Spend that debited itself, such as an in-run helper
+   * call, must not reach the snapshot of an agent that is debited from it.
    */
   chargeExternalCost(usd: number): void;
   /**
