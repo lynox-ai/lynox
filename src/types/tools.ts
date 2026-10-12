@@ -221,7 +221,9 @@ export type StreamEvent =
   // break every external constructor of an error event for a flag they have no
   // stake in. The compiler force belongs where the emitters are, not where the
   // consumers are.
-  | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string }
+  // `subAgent`/`subAgentId` are set when the error was raised inside a spawned
+  // child and forwarded by `spawn` — same stamp as `tool_call`/`tool_result`.
+  | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
@@ -282,7 +284,7 @@ export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
  */
 export type EmittedStreamEvent =
   | Exclude<StreamEvent, { type: 'error' }>
-  | { type: 'error'; message: string; fatal: boolean; agent: string };
+  | { type: 'error'; message: string; fatal: boolean; agent: string; subAgent?: string | undefined; subAgentId?: string | undefined };
 
 /** A {@link StreamHandler} as core's own producers must call it. */
 export type EmittingStreamHandler = (event: EmittedStreamEvent) => void | Promise<void>;
