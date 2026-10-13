@@ -653,7 +653,7 @@ export class WorkerLoop {
   }
 
   /**
-   * Right before a turn reaches the provider: a run whose starter's grant has ended by now is
+   * Right before a turn reaches the provider, or a workflow's first step: a run whose starter's grant has ended by now is
    * stopped here, recorded as `stopped` (PRD customer-granted-operator-access §3.13 B8). The
    * grant was live when the run was let in; a sweep finds a run only once it is registered,
    * and one that lands before the run's session exists has nothing to abort.
