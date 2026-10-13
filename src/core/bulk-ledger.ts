@@ -1057,8 +1057,9 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
-    // An undo takes back only targets its source wrote, and an unmeasured source wrote more
-    // than one only after its own probe on an unmeasured target. An undo cannot be a probe.
+    // An undo writes only to targets its source wrote, with the form the source already used
+    // past its own probe on an unmeasured target. A probe for the undo would only block it
+    // without measuring anything, and an undo cannot be a probe itself.
     if (run.kind === 'undo' && this.writeFormOfRun(run) === 'unmeasured') return true;
     const paths = parseContractPaths(run.contract_json);
     const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
