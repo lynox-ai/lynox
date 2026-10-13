@@ -95,6 +95,16 @@ pre-push:
         - merge
         - rebase
   commands:
+    lint-changed:
+      # eslint over the .ts/.svelte source this branch changes since origin/main, as committed at
+      # HEAD. Until this hook, eslint ran only in CI, so a rule the typecheck does not know (eqeqeq)
+      # reached the merge queue red. Exit 2 when it could not check — a lint that read nothing is
+      # not a pass. A command, not a script: its CI twin (the `lint` step in ci.yml) covers the
+      # pushes lefthook skips. See the header of scripts/lint-changed.mjs.
+      run: node scripts/lint-changed.mjs
+      skip:
+        - merge
+        - rebase
     security-scan:
       run: sh scripts/security-scan.sh
     default-on-inventory:
