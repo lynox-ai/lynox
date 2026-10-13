@@ -12,7 +12,10 @@ import { EngineDb } from './engine-db.js';
 import { BulkLedger, BULK_HALT_REASONS, type BulkRunForPreview } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { BulkHostBudget, externalClient, parseBulkContract, type ExternalClient } from './bulk-external.js';
-import { listReadContract, parseListSource, type BulkListSource } from './bulk-list.js';
+import { listPageUrl, listQueryParams, listReadContract, maxListPages, parseListSource, type BulkListSource } from './bulk-list.js';
+import { ApiStore } from './api-store.js';
+import { SecretStore } from './secret-store.js';
+import { WorkerLoop } from './worker-loop.js';
 import { runBulkPreview, type BulkPreviewDeps } from './bulk-preview.js';
 import { BULK_MAX_SOURCE_BYTES } from './bulk-plan.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
@@ -37,10 +40,12 @@ interface Shop {
   listAnswer?: (page: number) => Response | null;
   /** Answer every item GET with this id instead of its own. */
   itemIdOverride?: Map<number, unknown>;
+  /** The bytes of every list page body served from `items`. */
+  listBytes: number;
 }
 
 function shop(n: number): Shop {
-  const s: Shop = { items: new Map(), requests: [] };
+  const s: Shop = { items: new Map(), requests: [], listBytes: 0 };
   for (let i = 1; i <= n; i++) s.items.set(i, { id: i, name: `${PROVIDER_TEXT} ${String(i)}`, status: 'publish' });
   return s;
 }
@@ -56,7 +61,9 @@ function serve(s: Shop): () => void {
       if (special) return special;
       const per = Number(u.searchParams.get('per_page'));
       const all = [...s.items.values()].sort((a, b) => (a['id'] as number) - (b['id'] as number));
-      return new Response(JSON.stringify(all.slice((page - 1) * per, page * per)), { status: 200 });
+      const body = JSON.stringify(all.slice((page - 1) * per, page * per));
+      s.listBytes += Buffer.byteLength(body, 'utf8');
+      return new Response(body, { status: 200 });
     }
     const id = Number(u.pathname.slice(PATH.length + 1));
     const item = s.items.get(id);
@@ -256,16 +263,117 @@ describe('what stops a list read — each with a fixed reason, nothing of the pr
     await stopsWith(shop(5100), BULK_HALT_REASONS.listTooLarge);
   });
 
-  it('a page larger than what is left of the source budget', async () => {
-    await stopsWith(shop(50), BULK_HALT_REASONS.listTooLarge, (id) => {
-      engineDb.getDb().prepare('UPDATE bulk_runs SET list_bytes = ? WHERE id = ?').run(BULK_MAX_SOURCE_BYTES - 100, id);
+  it('a page larger than what is left of the source budget — and none of it is recorded', async () => {
+    const s = shop(50);
+    let id = '';
+    await stopsWith(s, BULK_HALT_REASONS.listTooLarge, (runId) => {
+      id = runId;
+      engineDb.getDb().prepare('UPDATE bulk_runs SET list_bytes = ? WHERE id = ?').run(BULK_MAX_SOURCE_BYTES - 100, runId);
     });
+    // The page is cut off at what is left, not read whole and refused on the next one.
+    expect(s.requests).toHaveLength(1);
+    expect(ledger.getStatus(id)!.total).toBe(0);
+  });
+
+  it('a source budget already spent — then nothing is sent', async () => {
+    const s = shop(50);
+    await stopsWith(s, BULK_HALT_REASONS.listTooLarge, (runId) => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET list_bytes = ? WHERE id = ?').run(BULK_MAX_SOURCE_BYTES, runId);
+    });
+    expect(s.requests).toEqual([]);
+  });
+
+  it('a list that adds one element per page past the page cap — a halt, not a page it may not ask for', async () => {
+    const s = shop(0);
+    // Each full page repeats one element and adds one: progress, but never a short page.
+    s.listAnswer = (page) => new Response(JSON.stringify([{ id: page }, ...Array.from({ length: 49 }, () => ({ id: 1 }))]), { status: 200 });
+    await stopsWith(s, BULK_HALT_REASONS.listTooLarge);
+    expect(s.requests).toHaveLength(maxListPages('woocommerce'));
   });
 
   it('a credential the host does not accept', async () => {
     const s = shop(3);
     s.listAnswer = () => new Response(PROVIDER_TEXT, { status: 401 });
     await stopsWith(s, BULK_HALT_REASONS.unauthorized);
+  });
+});
+
+describe('what a list read keeps count of', () => {
+  it('counts every page\'s bytes against the source budget', async () => {
+    const s = shop(120);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      await runBulkPreview(id, deps());
+      expect(s.listBytes).toBeGreaterThan(0);
+      expect(ledger.getListRun(id)!.bytes).toBe(s.listBytes);
+    } finally {
+      restore();
+    }
+  });
+
+  it('counts failures in a row, not in all: a host failing once on every page is read to the end', async () => {
+    const s = shop(120);
+    const failed = new Set<number>();
+    s.listAnswer = (page) => {
+      if (failed.has(page)) return null;
+      failed.add(page);
+      return new Response(PROVIDER_TEXT, { status: 503 });
+    };
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      const out = await runBulkPreview(id, deps());
+      expect(out.status).toBe('done');
+      expect(ledger.getStatus(id)).toMatchObject({ total: 120, haltReason: BULK_HALT_REASONS.listed });
+    } finally {
+      restore();
+    }
+  });
+
+  it('stops for a run halted between two pages, even once the tick\'s time is up', async () => {
+    const s = shop(120);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      let t = 0;
+      const record = ledger.recordListPage.bind(ledger);
+      vi.spyOn(ledger, 'recordListPage').mockImplementation((runId, page) => {
+        const out = record(runId, page);
+        // The owner halts the run while the page is recorded, and the tick runs out.
+        ledger.halt(runId, BULK_HALT_REASONS.contract);
+        t += 1e12;
+        return out;
+      });
+      const out = await runBulkPreview(id, deps({ now: () => t }));
+      expect(out.status).toBe('halted');
+      expect(s.requests).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('the worker\'s client for a list read', () => {
+  it('grants the page query on its in-memory copy of the stored read contract', async () => {
+    const s = shop(3);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      const engine = { getApiStore: () => new ApiStore(), getSecretStore: () => new SecretStore(), getToolContext: () => createToolContext({}) };
+      const factory = await (WorkerLoop.prototype as unknown as {
+        bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null, listQuery?: ListQueryConstraints) => ExternalClient | null>;
+      }).bulkClientFactory.call({ engine });
+      const run = ledger.getListRun(id)!;
+      const url = listPageUrl(HOST, run.source, 1);
+      // Past the contract: what stops it is the missing stored credential, nothing is sent.
+      expect(await factory(run.contractJson, listQueryParams(run.source))!.get(url)).toEqual({ kind: 'no_credential' });
+      // The stored contract alone grants no query.
+      expect(await factory(run.contractJson)!.get(url)).toEqual({ kind: 'not_granted' });
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
   });
 });
 
