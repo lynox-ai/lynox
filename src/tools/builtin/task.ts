@@ -523,6 +523,23 @@ export const taskUpdateTool: ToolEntry<TaskUpdateInput> = {
       : undefined;
 
     try {
+      // The create path refuses a firing trigger whose title or description reads like an
+      // instruction (`task_create`, `willFire`); an edit of an existing trigger writes the same
+      // fields into the same run prompt, so it gets the same scan. The scan reads the title and
+      // description as they will stand after the edit, together, because the run prompt joins them:
+      // a pattern split across two calls (half in the title now, half in the description later)
+      // passes a scan of the written text alone. A TODO fires nothing and stays unscanned, as on
+      // create.
+      // Runs before the mandate mark below, so a refused edit changes nothing.
+      if (input.title !== undefined || input.description !== undefined) {
+        const target = managerRef.getTrigger(input.task_id, scopeFilter);
+        if (target) {
+          const scan = detectInjectionAttempt(`${input.title ?? target.title}\n${input.description ?? target.description ?? ''}`);
+          if (scan.detected) {
+            return `Error: refused to update this trigger — its title and description as they would stand after this edit matched prompt-injection patterns (${scan.patterns.join(', ')}); a stored field this call did not change counts too, because the run prompt joins them. A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, edit it on the Triggers page (a human-confirmed schedule) or rephrase the text that matched without embedded instructions/addresses.`;
+          }
+        }
+      }
       // A mandate's change of a schedule — any field, the schedule, completion — takes the
       // owner's stamp off it, the rule the HTTP routes apply (`_markMandateEdit`), so a stamped
       // schedule stops until the owner stamps it again (PRD §3.12 point 3, H2). Resolved under
