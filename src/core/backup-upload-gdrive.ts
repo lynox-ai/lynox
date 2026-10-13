@@ -7,7 +7,7 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { BackupManifest } from './backup.js';
 import { isProvisionedInstance } from './wire-capture.js';
 import { googleFetch } from './connector-egress.js';
@@ -279,41 +279,50 @@ export class GDriveBackupUploader {
     }
   }
 
-  /** Download a remote backup to a local directory. */
+  /**
+   * Download a remote backup to a local directory that is empty or does not exist yet.
+   *
+   * Only a backup folder directly under this uploader's own root is downloaded (see
+   * `isOwnBackupFolder`); any other id is refused before anything is written. The whole tree is
+   * listed and checked first (see `planDownload`), and nothing is written when any entry fails:
+   * every file and folder must be one this app wrote for this account, and every Drive name must
+   * map to its own path inside `destDir` (see `localPathFor`). The uploader names files by their
+   * path relative to the backup (`dir/file`). `destDir` must be empty because the check is on
+   * paths, not on what is already there: an existing symlink inside it would lead a checked path
+   * elsewhere. A failure while writing (a file that cannot be fetched, or whose path exists by
+   * then) leaves the files written so far, and a retry needs an empty target again.
+   *
+   * What this does not establish is that the content is the backup's: someone who can write into
+   * the root can change, rename or move the user's own files there without changing who owns
+   * them. Checking content against the manifest is the restore's job.
+   */
   async download(remoteFolderId: string, destDir: string): Promise<DownloadResult> {
     if (!this.auth.hasScope(DRIVE_FILE_SCOPE)) {
       return { success: false, localPath: destDir, filesDownloaded: 0, error: 'Missing drive.file scope.' };
     }
 
     try {
-      mkdirSync(destDir, { recursive: true, mode: 0o700 });
-
-      // List all files in the remote folder (including subfolders)
-      const files = await this.listFolderContents(remoteFolderId);
-      let downloaded = 0;
-
-      for (const file of files) {
-        if (file.mimeType === 'application/vnd.google-apps.folder') {
-          // Recurse into subfolder
-          const subDir = join(destDir, file.name);
-          const subResult = await this.download(file.id, subDir);
-          downloaded += subResult.filesDownloaded;
-        } else {
-          const destPath = join(destDir, file.name);
-          await this.downloadFile(file.id, destPath);
-          downloaded++;
-        }
+      if (!await this.isOwnBackupFolder(remoteFolderId)) {
+        return { success: false, localPath: destDir, filesDownloaded: 0, error: `Not a backup in the ${BACKUP_FOLDER_NAME} folder.` };
       }
-
-      return { success: true, localPath: destDir, filesDownloaded: downloaded };
+      if (!isEmptyOrAbsent(destDir)) {
+        return { success: false, localPath: destDir, filesDownloaded: 0, error: `Download target ${destDir} is not empty.` };
+      }
+      const plan = await this.planDownload(remoteFolderId, destDir);
+      mkdirSync(destDir, { recursive: true, mode: 0o700 });
+      for (const dir of plan.dirs) mkdirSync(dir, { recursive: true, mode: 0o700 });
+      for (const { id, path } of plan.files) await this.downloadFile(id, path);
+      return { success: true, localPath: destDir, filesDownloaded: plan.files.length };
     } catch (err: unknown) {
       return { success: false, localPath: destDir, filesDownloaded: 0, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
-  /** Delete a remote backup folder. */
+  /** Delete a remote backup folder. Only a backup folder directly under the own root is deleted. */
   async delete(remoteFolderId: string): Promise<boolean> {
     try {
+      if (!await this.isOwnBackupFolder(remoteFolderId)) return false;
+      // The id was checked to be a plain Drive id, so this is the same URL the check read.
       const response = await driveFetch(this.auth, `${DRIVE_BASE}/files/${remoteFolderId}`, {
         method: 'DELETE',
       });
@@ -511,6 +520,61 @@ export class GDriveBackupUploader {
     return result.id;
   }
 
+  /**
+   * Is `id` a backup folder of this account directly under the own root, not in the bin? The
+   * id must be a plain Drive id before anything is asked, since it goes into URLs and queries.
+   * The root is the one `findRootFolder` accepts, so a folder elsewhere in the account, one
+   * another account shared in, and the root itself (not its own parent) are not. The folder must
+   * also be the user's and this app's, as the uploader creates it: someone who can write into
+   * the root, such as the previous owner of a transferred one, can add folders, but they are
+   * theirs. (They can still change the user's own folders and files; see `download`.)
+   * No root means no backup folder. Throws when Drive cannot say.
+   */
+  private async isOwnBackupFolder(id: string): Promise<boolean> {
+    if (!DRIVE_ID.test(id)) return false;
+    const rootId = await this.findRootFolder();
+    if (rootId === null) return false;
+    const params = new URLSearchParams({ fields: 'id,mimeType,trashed,parents,ownedByMe,isAppAuthorized' });
+    const response = await driveFetch(this.auth, `${DRIVE_BASE}/files/${id}?${params.toString()}`);
+    if (response.status === 404) return false;
+    if (!response.ok) throw new Error(`Could not read backup folder ${id}: ${String(response.status)}`);
+    const f = await response.json() as {
+      mimeType?: string | undefined; trashed?: boolean | undefined; parents?: string[] | undefined;
+      ownedByMe?: boolean | undefined; isAppAuthorized?: boolean | undefined;
+    };
+    return f.mimeType === FOLDER_MIME && f.trashed !== true && f.ownedByMe === true && f.isAppAuthorized === true
+      && (f.parents ?? []).includes(rootId);
+  }
+
+  /**
+   * Every folder and file below `folderId` with its local path, or a thrown error naming the
+   * first entry that fails: one not owned by the user or not written by this app (someone who
+   * can write into the folder can add entries, but they are theirs), a name that does not map
+   * to its own path inside `destDir`, or two entries that map to the same path.
+   */
+  private async planDownload(folderId: string, destDir: string): Promise<{ dirs: string[]; files: Array<{ id: string; path: string }> }> {
+    const plan = { dirs: [] as string[], files: [] as Array<{ id: string; path: string }> };
+    const taken = new Set<string>();
+    const walk = async (id: string, dir: string): Promise<void> => {
+      for (const entry of await this.listFolderContents(id)) {
+        if (entry.ownedByMe !== true || entry.isAppAuthorized !== true) {
+          throw new Error(`Refusing Drive file ${JSON.stringify(entry.name)}: not one this app wrote for this account`);
+        }
+        const path = localPathFor(dir, entry.name);
+        if (taken.has(path)) throw new Error(`Refusing Drive file ${JSON.stringify(entry.name)}: a second entry for ${path}`);
+        taken.add(path);
+        if (entry.mimeType === FOLDER_MIME) {
+          plan.dirs.push(path);
+          await walk(entry.id, path);
+        } else {
+          plan.files.push({ id: entry.id, path });
+        }
+      }
+    };
+    await walk(folderId, destDir);
+    return plan;
+  }
+
   /** Download a file from Google Drive to local path. */
   private async downloadFile(fileId: string, destPath: string): Promise<void> {
     const response = await driveFetch(this.auth, `${DRIVE_BASE}/files/${fileId}?alt=media`);
@@ -521,7 +585,11 @@ export class GDriveBackupUploader {
     const buffer = Buffer.from(await response.arrayBuffer());
     const destDir = join(destPath, '..');
     mkdirSync(destDir, { recursive: true, mode: 0o700 });
-    writeFileSync(destPath, buffer, { mode: 0o600 });
+    // `wx`: the file's own entry existing by now, a symlink included, was not there when the
+    // target was checked empty, so it is refused rather than written through. This covers the
+    // last component only: a directory symlink planted on the way, or a target that is itself a
+    // symlink, is still followed.
+    writeFileSync(destPath, buffer, { mode: 0o600, flag: 'wx' });
   }
 
   /** Download and parse manifest.json from a remote backup folder. */
@@ -545,19 +613,28 @@ export class GDriveBackupUploader {
     return await dlResponse.json() as BackupManifest;
   }
 
-  /** List all files in a Drive folder. */
-  private async listFolderContents(folderId: string): Promise<DriveFile[]> {
-    const params = new URLSearchParams({
-      q: `'${folderId}' in parents and trashed = false`,
-      fields: 'files(id,name,mimeType,size)',
-      pageSize: '200',
-    });
-
-    const response = await driveFetch(this.auth, `${DRIVE_BASE}/files?${params.toString()}`);
-    if (!response.ok) return [];
-
-    const data = await response.json() as DriveFileList;
-    return data.files ?? [];
+  /**
+   * Everything in a Drive folder, over all pages. A listing that fails or does not end is an
+   * error, not an empty folder: a download would otherwise report success with files missing.
+   */
+  private async listFolderContents(folderId: string): Promise<DriveListingFile[]> {
+    const out: DriveListingFile[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_LISTING_PAGES; page++) {
+      const params = new URLSearchParams({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: 'nextPageToken,files(id,name,mimeType,ownedByMe,isAppAuthorized)',
+        pageSize: '200',
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const response = await driveFetch(this.auth, `${DRIVE_BASE}/files?${params.toString()}`);
+      if (!response.ok) throw new Error(`Could not list Drive folder ${folderId}: ${String(response.status)}`);
+      const data = await response.json() as { nextPageToken?: string | undefined; files?: DriveListingFile[] | undefined };
+      out.push(...(data.files ?? []));
+      pageToken = data.nextPageToken;
+      if (!pageToken) return out;
+    }
+    throw new Error(`Listing Drive folder ${folderId} did not end after ${String(MAX_LISTING_PAGES)} pages`);
   }
 
   /** Collect all files in a local backup directory (flat list with relative paths). */
@@ -599,6 +676,36 @@ const BACKUP_DIR_NAME = /^\d{4}-\d{2}-\d{2}T\d{8}Z(?:-\d+)?$/;
 /** Is this the name `BackupManager.createBackup` gives a backup directory? Exported for the test that derives one. */
 export function isBackupDirName(name: string): boolean {
   return BACKUP_DIR_NAME.test(name);
+}
+
+/**
+ * The local path a Drive file name maps to below `destDir`, or a thrown error. A name may be a
+ * relative path: the uploader names each file by its path inside the backup (`dir/file`), so a
+ * separator is not an attack. Taken is exactly that form: the name must be the path from
+ * `destDir` to where it lands, spelled with `/`, and must not leave `destDir` or be `destDir`
+ * itself. That refuses a parent step, an absolute name, the empty one, and any other spelling
+ * (`a/../b`, `./a`, `a//b`) — two of which could otherwise name the same file. Exported for its
+ * tests.
+ */
+export function localPathFor(destDir: string, name: string): string {
+  const base = resolve(destDir);
+  const path = resolve(base, name);
+  const rel = relative(base, path);
+  const inside = rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  if (!inside || rel.split(sep).join('/') !== name) {
+    throw new Error(`Refusing Drive file name ${JSON.stringify(name)}: not a path inside ${destDir}`);
+  }
+  return path;
+}
+
+/** Is `dir` absent or an empty directory? Anything else that cannot be read is thrown. */
+function isEmptyOrAbsent(dir: string): boolean {
+  try {
+    return readdirSync(dir).length === 0;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw err;
+  }
 }
 
 interface DriveListingFile {
