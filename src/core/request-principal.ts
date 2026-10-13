@@ -9,9 +9,16 @@
  * run, and a schedule a mandate created or changed runs only after the owner
  * stamped it.
  *
- * A principal is stored on rows as a TAG: `owner`, or `mandate:<address>`. The
+ * A principal is stored on rows as a TAG: `owner`, `cp-admin`, or `mandate:<address>`. The
  * address is the mandate's identity across its renewals — not its id — so a person
  * who sets up and later accompanies the same account stays the same author.
+ *
+ * `cp-admin` is the control plane's admin bearer on an instance it provisioned (PRD
+ * cp-admin-line §3.1). It is neither the owner nor a mandate: it reaches only the routes
+ * registered for it, and every rule below names what it gets. A rule that asks "is this the
+ * owner?" refuses it; a rule that reads a mandate's fields must not see it. The rules in this file
+ * that tell the kinds apart switch on `kind` with a `never` check, so a new kind does not compile
+ * until each of them is decided.
  */
 export type RequestPrincipal =
   | { readonly kind: 'owner' }
@@ -28,12 +35,23 @@ export type RequestPrincipal =
        *  (not the session's own end, which comes much sooner). Absent in a cookie minted
        *  before the web UI signed it. */
       readonly mandateExp?: number | undefined;
-    };
+    }
+  | { readonly kind: 'cp-admin' };
 
 /** The prefix every mandate tag carries; the due query matches on it in SQL. */
 export const MANDATE_TAG_PREFIX = 'mandate:';
 
+/** The tag of the control plane's admin bearer. Never a mandate tag, never the owner's. */
+export const CP_ADMIN_TAG = 'cp-admin';
+
 export const OWNER_PRINCIPAL: RequestPrincipal = Object.freeze({ kind: 'owner' as const });
+
+export const CP_ADMIN_PRINCIPAL: RequestPrincipal = Object.freeze({ kind: 'cp-admin' as const });
+
+/** Fails the compile where a switch over `RequestPrincipal['kind']` leaves a kind out. */
+export function unhandledPrincipal(p: never): never {
+  throw new Error(`Unhandled principal kind: ${String((p as { kind?: unknown }).kind)}`);
+}
 
 export function isOwnerPrincipal(p: RequestPrincipal): boolean {
   return p.kind === 'owner';
@@ -41,7 +59,12 @@ export function isOwnerPrincipal(p: RequestPrincipal): boolean {
 
 /** The tag a row records for who created, changed or stamped it. */
 export function principalTag(p: RequestPrincipal): string {
-  return p.kind === 'owner' ? 'owner' : `${MANDATE_TAG_PREFIX}${p.email}`;
+  switch (p.kind) {
+    case 'owner': return 'owner';
+    case 'mandate': return `${MANDATE_TAG_PREFIX}${p.email}`;
+    case 'cp-admin': return CP_ADMIN_TAG;
+    default: return unhandledPrincipal(p);
+  }
 }
 
 /**
@@ -70,26 +93,40 @@ export function isMandateTag(tag: string | null | undefined): boolean {
  * refused, so asking about something missing never reads as "its own".
  */
 export function ownedBy(row: { readonly created_by?: string | null | undefined } | undefined, p: RequestPrincipal): boolean {
-  if (isOwnerPrincipal(p)) return true;
-  return row !== undefined && row.created_by === principalTag(p);
+  switch (p.kind) {
+    case 'owner': return true;
+    case 'mandate': return row !== undefined && row.created_by === principalTag(p);
+    // The control plane owns no row: it creates none on the routes it reaches.
+    case 'cp-admin': return false;
+    default: return unhandledPrincipal(p);
+  }
 }
 
 /**
  * Whether the grant a principal acts under has ended (PRD customer-granted-operator-access
  * §3.13 B8): never for the owner; for a mandate, when it names no grant or its grant is not
  * live. A mandate without a grant cannot be told apart from an ended one, so it counts as
- * ended. `isLive` is `MandateEnds.isLive`.
+ * ended, and so does the control plane's admin bearer, which acts under no grant. `isLive` is
+ * `MandateEnds.isLive`.
  */
 export function principalHasEnded(p: RequestPrincipal, isLive: (mandateId: string) => boolean): boolean {
-  if (p.kind === 'owner') return false;
-  return p.mandateId === undefined || !isLive(p.mandateId);
+  switch (p.kind) {
+    case 'owner': return false;
+    case 'mandate': return p.mandateId === undefined || !isLive(p.mandateId);
+    // It acts under no grant, so it counts as ended, like a mandate that names none: nothing that
+    // asks for a live grant passes for it.
+    case 'cp-admin': return true;
+    default: return unhandledPrincipal(p);
+  }
 }
 
 /**
  * The principal a recorded tag names, for a run that resumes after its request is gone. Only
- * ever narrows: a mandate tag gives the mandate (whose runs carry the tool lock), anything else
- * the owner. Never a proof of a hand: nothing that grants a hand run may read it.
+ * ever narrows: a mandate tag gives the mandate (whose runs carry the tool lock), the control
+ * plane's tag the control plane, anything else the owner. Never a proof of a hand: nothing that
+ * grants a hand run may read it.
  */
 export function principalFromTag(tag: string | null | undefined): RequestPrincipal {
+  if (tag === CP_ADMIN_TAG) return CP_ADMIN_PRINCIPAL;
   return isMandateTag(tag) ? { kind: 'mandate', email: tag!.slice(MANDATE_TAG_PREFIX.length) } : OWNER_PRINCIPAL;
 }

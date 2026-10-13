@@ -251,7 +251,7 @@ describe('person erasure routes (real engine)', () => {
     const asAdminBearer = { Authorization: `Bearer ${ADMIN}` };
     const pr = await preview(p.subjectId, asAdminBearer);
     expect(pr.status).toBe(403);
-    expect(String(pr.body['error'])).toContain('control plane reaches admin routes only');
+    expect(String(pr.body['error'])).toContain('control plane reaches only the routes registered for it');
     expect((await erase({ subjectId: p.subjectId, plan: pv['plan'] }, asAdminBearer)).status).toBe(403);
     const asInstanceBearer = { Authorization: `Bearer ${SECRET}` };
     const ib = await preview(p.subjectId, asInstanceBearer);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { OWNER_PRINCIPAL, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
+import { CP_ADMIN_PRINCIPAL, CP_ADMIN_TAG, OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
 
 const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
 const OTHER: RequestPrincipal = { kind: 'mandate', email: 'other@example.org' };
@@ -49,5 +49,27 @@ describe('principalHasEnded — whose grant has ended (§3.13 B8)', () => {
   });
   it('for a mandate that names no grant: ended', () => {
     expect(principalHasEnded(MANDATE, () => true)).toBe(true);
+  });
+});
+
+// PRD cp-admin-line §3.1 (A11): the control plane's admin bearer is a principal of its own. The
+// rules in request-principal.ts name what it gets.
+describe('the control plane\'s admin bearer (cp-admin)', () => {
+  it('has its own tag: neither the owner\'s nor a mandate\'s', () => {
+    expect(principalTag(CP_ADMIN_PRINCIPAL)).toBe(CP_ADMIN_TAG);
+    expect(isMandateTag(principalTag(CP_ADMIN_PRINCIPAL))).toBe(false);
+    expect(principalTag(CP_ADMIN_PRINCIPAL)).not.toBe(principalTag(OWNER_PRINCIPAL));
+  });
+  it('reads back from its tag as itself, never as the owner', () => {
+    expect(principalFromTag(CP_ADMIN_TAG)).toBe(CP_ADMIN_PRINCIPAL);
+    expect(isOwnerPrincipal(principalFromTag(CP_ADMIN_TAG))).toBe(false);
+  });
+  it('owns no row, not even one it is named on', () => {
+    expect(ownedBy({ created_by: CP_ADMIN_TAG }, CP_ADMIN_PRINCIPAL)).toBe(false);
+    expect(ownedBy({ created_by: 'owner' }, CP_ADMIN_PRINCIPAL)).toBe(false);
+    expect(ownedBy(undefined, CP_ADMIN_PRINCIPAL)).toBe(false);
+  });
+  it('acts under no grant, so it counts as ended, whatever the grants', () => {
+    expect(principalHasEnded(CP_ADMIN_PRINCIPAL, () => true)).toBe(true);
   });
 });
