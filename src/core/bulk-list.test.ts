@@ -113,13 +113,16 @@ describe('listPageUrl', () => {
 });
 
 describe('listQueryParams', () => {
-  it('pins every filter, the order and the page size to one value, and the page to a number', () => {
+  it('pins every filter, the order and the page size to one value, and the page to the pages the engine may ask for', () => {
     const s = parse({ ...base, filters: { category: '12' } });
     const q = listQueryParams(s);
+    const pages = Array.from({ length: maxListPages('woocommerce') }, (_, i) => String(i + 1));
     expect(q).toEqual({
       category: { enum: ['12'] }, orderby: { enum: ['id'] }, order: { enum: ['asc'] },
-      per_page: { enum: ['50'] }, page: { regex: '[1-9][0-9]{0,2}' },
+      per_page: { enum: ['50'] }, page: { enum: pages },
     });
+    expect(pages.at(-1)).toBe('101');
+    expect(q['page']!.enum).not.toContain('102');
     // Every name the page address carries is one the grant names.
     const names = new URL(listPageUrl(HOST, s, 1)).searchParams;
     for (const n of names.keys()) expect(Object.hasOwn(q, n)).toBe(true);

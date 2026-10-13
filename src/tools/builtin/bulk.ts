@@ -93,6 +93,9 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
  *  is read here — the list is read once the user starts the run. */
 function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger): string {
   if (input.target_system !== 'http') throw new BulkSourceError('source_list needs target_system "http".');
+  // Said, not dropped: a planner who gave one expects it to narrow or shape the run.
+  const unused = (['source_filter', 'source_format', 'target_collection'] as const).filter((k) => input[k] !== undefined);
+  if (unused.length > 0) throw new BulkSourceError(`source_list does not take ${unused.join(', ')}: filter the list with source_list.filters.`);
   const host = input.target_host === undefined ? null : canonicalHost(input.target_host);
   if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');

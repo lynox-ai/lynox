@@ -191,7 +191,8 @@ export function listQueryParams(source: BulkListSource): Record<string, { enum?:
   for (const [n, v] of Object.entries(source.filters)) out[n] = { enum: [v] };
   for (const [n, v] of spec.order) out[n] = { enum: [v] };
   out[spec.perPageParam] = { enum: [String(spec.perPage)] };
-  out[spec.pageParam] = { regex: `[1-9][0-9]{0,${String(String(maxListPages(source.form)).length - 1)}}` };
+  // Exactly the pages the engine may ask for: a pattern over the digits would grant more.
+  out[spec.pageParam] = { enum: Array.from({ length: maxListPages(source.form) }, (_, i) => String(i + 1)) };
   return out;
 }
 

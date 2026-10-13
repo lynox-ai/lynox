@@ -73,13 +73,16 @@ function serve(s: Shop): () => void {
   });
 }
 
+/** The profile's own rate limit, as `apiStore.checkRateLimit` answers: null when a request may go. */
+let profileLimit: string | null = null;
+
 function client(contract: NonNullable<ReturnType<typeof parseBulkContract>>): ExternalClient {
   return externalClient({
     contract,
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
     attach: async (_u, headers) => { headers['authorization'] = 'Basic fixture'; return true; },
-    rateLimit: () => null,
+    rateLimit: () => profileLimit,
     scan: detectSecretInContent,
   });
 }
@@ -107,6 +110,7 @@ beforeEach(() => {
   ledger = new BulkLedger(engineDb);
 });
 afterEach(() => {
+  profileLimit = null;
   engineDb.close();
   rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
@@ -354,6 +358,25 @@ describe('what a list read keeps count of', () => {
   });
 });
 
+describe('a profile rate limit during a list read', () => {
+  it('waits without spending the run\'s requests: nothing was sent', async () => {
+    const s = shop(3);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      profileLimit = 'limit reached';
+      for (let i = 0; i < 3; i++) expect((await runBulkPreview(id, deps())).status).toBe('pending');
+      expect(s.requests).toEqual([]);
+      expect(ledger.getListRun(id)!.calls).toBe(0);
+      profileLimit = null;
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.getListRun(id)!.calls).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe('the worker\'s client for a list read', () => {
   it('grants the page query on its in-memory copy of the stored read contract', async () => {
     const s = shop(3);
@@ -370,6 +393,10 @@ describe('the worker\'s client for a list read', () => {
       expect(await factory(run.contractJson, listQueryParams(run.source))!.get(url)).toEqual({ kind: 'no_credential' });
       // The stored contract alone grants no query.
       expect(await factory(run.contractJson)!.get(url)).toEqual({ kind: 'not_granted' });
+      // The copy grants the pages the engine may ask for, not one more.
+      const last = url.replace(/page=1$/, `page=${String(maxListPages('woocommerce'))}`);
+      expect(await factory(run.contractJson, listQueryParams(run.source))!.get(last)).toEqual({ kind: 'no_credential' });
+      expect(await factory(run.contractJson, listQueryParams(run.source))!.get(url.replace(/page=1$/, 'page=102'))).toEqual({ kind: 'not_granted' });
       expect(s.requests).toEqual([]);
     } finally {
       restore();

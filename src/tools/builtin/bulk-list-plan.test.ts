@@ -74,6 +74,12 @@ describe('bulk_plan with source_list', () => {
     expect(ledger.listRuns()).toEqual([]);
   });
 
+  it('refuses what a list source would not use, rather than dropping it', async () => {
+    expect(await plan({ source_filter: { status: 'publish' } })).toBe('Error: source_list does not take source_filter: filter the list with source_list.filters.');
+    expect(await plan({ source_format: 'csv', target_collection: 'x' })).toBe('Error: source_list does not take source_format, target_collection: filter the list with source_list.filters.');
+    expect(ledger.listRuns()).toEqual([]);
+  });
+
   it('passes the list check\'s refusal on, and records nothing', async () => {
     expect(await plan({ source_list: { path: PATH, filters: { orderby: 'price' }, after: { status: 'draft' } } }))
       .toBe('Error: source_list.filters may only use: category, tag, status, sku, type, stock_status.');

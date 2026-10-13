@@ -741,6 +741,12 @@ export class BulkLedger {
     ).run(runId, max).changes === 1;
   }
 
+  /** Give back a request {@link takeListCall} counted that was never sent: the profile's own
+   *  rate limit answered before it left. Without this, a slow profile limit spends the cap. */
+  returnListCall(runId: string): void {
+    this.engineDb.getDb().prepare(`UPDATE bulk_runs SET list_calls = list_calls - 1 WHERE id = ?`).run(runId);
+  }
+
   /**
    * Record one page of a run's list, in one transaction, only as the page after the last one
    * recorded and only while the run is reading its list — so two loops, or a loop after a

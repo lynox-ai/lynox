@@ -239,7 +239,11 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
             : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
         }
         const answer = await listClient.get(listPageUrl(host!, source, next), deps.signal, cap);
-        if (answer.kind === 'rate_limited') return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
+        if (answer.kind === 'rate_limited') {
+          // Nothing was sent: the call is not one of the run's.
+          ledger.returnListCall(runId);
+          return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
+        }
         if (answer.kind === 'retry_after') {
           if (tooMany >= MAX_429_PER_TARGET || answer.ms > SLEEP_MAX_MS) return pending(now() + answer.ms, 'Bulk list read waiting: the host asked to slow down.');
           tooMany++;
