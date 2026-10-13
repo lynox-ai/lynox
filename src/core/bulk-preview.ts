@@ -8,15 +8,24 @@
  * It writes only the ledger. What bounds it is the engine's host budget, consumed
  * before every request; the profile's own rate limit and a host's 429 are waited out,
  * never pushed through.
+ *
+ * A run whose targets come from a list (PRD bulk-loop §3.2) is read in two parts, each
+ * started by the owner: first the list, page by page from where the last tick stopped, until
+ * a short page ends it — then the run halts so the owner sees how many targets it holds;
+ * then, once started again, each target as above, checked to be the element that was listed.
  */
 import { setTimeout as delay } from 'node:timers/promises';
 import {
-  BULK_HOST_BUDGET, beforeOverFields,
+  BULK_HOST_BUDGET, beforeOverFields, mintBulkContract,
   type BulkHostBudget, type ExternalClient, type ExternalRead,
 } from './bulk-external.js';
 import {
+  BULK_LIST_FORMS, isSameListItem, listItemKey, listPageCap, listPageElements, listPageUrl, listQueryParams, maxListPages,
+} from './bulk-list.js';
+import type { ListQueryConstraints } from '../tools/permission-guard.js';
+import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, externalHostOf,
-  type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkRunForPreview,
+  type BulkHaltReason, type BulkInvalidReason, type BulkLedger, type BulkListRun, type BulkRunForPreview,
 } from './bulk-ledger.js';
 
 export interface BulkPreviewOutcome {
@@ -30,8 +39,10 @@ export interface BulkPreviewOutcome {
 
 export interface BulkPreviewDeps {
   ledger: BulkLedger;
-  /** The client for the run's host, or null when the run cannot reach it. */
-  clientFor: (run: BulkRunForPreview) => ExternalClient | null;
+  /** The client for the run's host, or null when the run cannot reach it. `listQuery` is
+   *  given while the run's list is read: the query its pages may carry under the read
+   *  contract (`withListQuery`). */
+  clientFor: (run: BulkRunForPreview, listQuery?: ListQueryConstraints) => ExternalClient | null;
   budget?: BulkHostBudget | undefined;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal | undefined) => Promise<void>;
@@ -109,8 +120,10 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   if (run.phase !== 'planned' || run.haltReason !== null) {
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing read.`) };
   }
-  const client = deps.clientFor(run);
+  const list = ledger.getListRun(runId);
+  const client = deps.clientFor(run, list?.state === 'pending' ? listQueryParams(list.source) : undefined);
   if (!client) return halt(BULK_HALT_REASONS.unavailable);
+  if (list?.state === 'pending') return await readList(list, client);
 
   const unread = ledger.listUnread(runId);
   const deadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, unread.length * BULK_TARGET_BUDGET_MS);
@@ -152,6 +165,14 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     const stop = haltFor(read);
     if (stop !== null) return halt(stop);
     if (read.kind === 'ok') {
+      // A listed target must still be the element that was listed: the same id in the same
+      // field. Read under its address, anything else is not what the owner reviewed.
+      const listedId = list === null ? null : target.key.slice(target.key.lastIndexOf('/') + 1);
+      if (list !== null && !isSameListItem(read.value, list.source.idField, listedId!)) {
+        ledger.recordRead(runId, seq, { invalid: 'list_item_mismatch' });
+        consecutive = 0;
+        continue;
+      }
       ledger.recordRead(runId, seq, beforeOverFields(read.value, target.after));
       consecutive = 0;
       continue;
@@ -175,6 +196,99 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     return { status: 'halted', summary: summarize(ledger, runId, 'Bulk preview stopped: the run was dropped, halted or moved on.') };
   }
   return { status: 'done', summary: costed(summarize(ledger, runId, 'Bulk preview done — the run is ready for review.')) };
+
+  /**
+   * Read the run's list, page by page from the one after the last recorded, until a short
+   * page ends it. Every outcome of a page maps to a fixed reason — nothing the provider sent
+   * reaches the summary, which the model can read through `task_list`.
+   */
+  async function readList(listRun: BulkListRun, listClient: ExternalClient): Promise<BulkPreviewOutcome> {
+    const { source } = listRun;
+    const perPage = BULK_LIST_FORMS[source.form].perPage;
+    const maxPages = maxListPages(source.form);
+    // Each page may be tried a few times (a 5xx, a 429), never without bound.
+    const maxCalls = maxPages * 3;
+    const listDeadline = now() + Math.max(MIN_PREVIEW_BUDGET_MS, (maxPages - listRun.page) * BULK_TARGET_BUDGET_MS);
+    let failures = 0;
+    for (;;) {
+      if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+      const current = ledger.getListRun(runId);
+      if (!current || current.state !== 'pending' || current.phase !== 'planned' || current.haltReason !== null) {
+        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+      }
+      // The progress is kept page by page, so a tick that runs out of time goes on from here.
+      if (now() > listDeadline) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read has pages left to read.');
+      const next = current.page + 1;
+      if (next > maxPages) return halt(BULK_HALT_REASONS.listTooLarge);
+      const cap = listPageCap(current.bytes);
+      if (cap === 0) return halt(BULK_HALT_REASONS.listTooLarge);
+
+      let got: ExternalRead | null = null;
+      for (let tooMany = 0; got === null;) {
+        const wait = budget.take(host!, now());
+        if (wait > 0) {
+          if (wait > SLEEP_MAX_MS) return pending(now() + wait, 'Bulk list read waiting for the host budget.');
+          await sleep(wait, deps.signal);
+          if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+          continue;
+        }
+        if (!ledger.takeListCall(runId, maxCalls)) {
+          const still = ledger.getListRun(runId);
+          return still?.state === 'pending' && still.phase === 'planned' && still.haltReason === null
+            ? halt(BULK_HALT_REASONS.listTooLarge)
+            : { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+        }
+        const answer = await listClient.get(listPageUrl(host!, source, next), deps.signal, cap);
+        if (answer.kind === 'rate_limited') {
+          // Nothing was sent: the call is not one of the run's.
+          ledger.returnListCall(runId);
+          return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read waiting for the API rate limit.');
+        }
+        if (answer.kind === 'retry_after') {
+          if (tooMany >= MAX_429_PER_TARGET || answer.ms > SLEEP_MAX_MS) return pending(now() + answer.ms, 'Bulk list read waiting: the host asked to slow down.');
+          tooMany++;
+          await sleep(answer.ms, deps.signal);
+          if (deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+          continue;
+        }
+        got = answer;
+      }
+      if (got.kind === 'failed' && deps.signal?.aborted) return pending(now() + DEFAULT_RETRY_MS, 'Bulk list read paused.');
+      const stop = haltFor(got);
+      if (stop !== null) return halt(stop);
+      if (got.kind === 'failed') {
+        // The same page again: a host failing three times in a row is down.
+        if (++failures >= HALT_CONSECUTIVE) return halt(BULK_HALT_REASONS.consecutiveFailures);
+        continue;
+      }
+      if (got.kind === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
+      if (got.kind !== 'ok') return halt(BULK_HALT_REASONS.listUnreadable);
+      failures = 0;
+      const elements = listPageElements(got.value);
+      if (elements === null) return halt(BULK_HALT_REASONS.listNotAList);
+      const recorded = ledger.recordListPage(runId, {
+        page: next, items: elements.map((e) => listItemKey(host!, source, e)), bytes: got.bytes ?? 0,
+      });
+      if (!recorded.ok) {
+        if (recorded.reason === 'too_large') return halt(BULK_HALT_REASONS.listTooLarge);
+        return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+      }
+      // A short page is the last one. A full page that adds nothing is a list that pages in
+      // circles, or ignores the page asked for: it is not read to the page cap.
+      if (elements.length < perPage) break;
+      if (recorded.added === 0) return halt(BULK_HALT_REASONS.listNoProgress);
+    }
+    const closed = ledger.finishList(runId, (keys) => mintBulkContract(host!, keys, source.method));
+    if (closed === 'moved') {
+      return { status: 'halted', summary: summarize(ledger, runId, 'Bulk list read stopped: the run was dropped, halted or moved on.') };
+    }
+    return {
+      status: 'done',
+      summary: costed(summarize(ledger, runId, closed === 'empty'
+        ? 'Bulk list read done — the list holds no target that could be planned.'
+        : 'Bulk list read done — waiting for the owner to review the targets and start reading them.')),
+    };
+  }
 
   function halt(reason: BulkHaltReason): BulkPreviewOutcome {
     ledger.halt(runId, reason);

@@ -725,6 +725,8 @@ function makeClassHarness(opts: {
         // `undefined` keeps `runBulkPreview` out (it refuses an unknown run); the ready
         // variant is what carries a test INTO it, which is where the stop is decided.
         getRunForPreview: () => (opts.previewReady === true ? previewRun : undefined),
+        // A run whose targets were given, not listed.
+        getListRun: () => null,
         listUnread: () => [1],
         getStatus: () => undefined,
         haltPreview: (_id: string, reason: string) => { halts.push(reason); },

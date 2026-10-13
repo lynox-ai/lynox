@@ -627,7 +627,12 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // No contract grants a mail API, whoever wrote it: the published promise is that mail
   // leaves the instance only once it is confirmed in the chat.
   if (isMailProviderTarget(obj.url)) return false;
-  if (contract.origin === 'reviewed' && !isReviewableUrl(parsed, obj.url)) return false;
+  const listQuery = LIST_QUERIES.get(contract);
+  if (listQuery === undefined) {
+    if (contract.origin === 'reviewed' && !isReviewableUrl(parsed, obj.url)) return false;
+  } else if (!grantsListRead(input, obj.url, method, listQuery)) {
+    return false;
+  }
   if (contract.origin === 'reviewed' && carriesUnreviewedHeader((input as { headers?: unknown }).headers)) return false;
   const host = parsed.hostname.replace(/^\[|\]$/g, '');
   if (!_matchesAnyGlob(host, contract.hostPatterns)) return false;
@@ -689,6 +694,104 @@ export function isReviewableUrl(parsed: URL, raw: string): boolean {
   if (raw.includes('?')) return false;
   if (raw.includes('#')) return false;
   return true;
+}
+
+/**
+ * The query a reviewed list read may carry (PRD bulk-loop §3.2): name → the values it may
+ * take — an exact list, or a regex the whole value must match.
+ */
+export interface ListQueryConstraints {
+  readonly [name: string]: { readonly enum?: readonly string[] | undefined; readonly regex?: string | undefined };
+}
+
+/**
+ * The query constraints of the list-read contracts the engine built in this process. Held
+ * here, never on the contract: a contract that was stored, parsed or imported is a new
+ * object, so it has none and takes the query-free path above, word for word. A database row
+ * or an imported workflow can therefore never carry a grant for a query.
+ */
+const LIST_QUERIES = new WeakMap<CapabilityContract, ListQueryConstraints>();
+
+/**
+ * A reviewed contract that also admits the query `constraints` describe, on a GET — the read
+ * of one paginated list by a bulk run, whose address the engine built (`bulk-list.ts`).
+ * The returned contract is a frozen copy; only it carries the constraints. That a query only
+ * ever rides on a GET is decided per request ({@link grantsListRead}), not here, so it holds
+ * whatever contract the constraints were attached to.
+ */
+export function withListQuery(contract: CapabilityContract, constraints: ListQueryConstraints): CapabilityContract {
+  if (contract.origin !== 'reviewed') throw new Error('a list read is only granted by a reviewed contract');
+  const copy = Object.freeze({ ...contract });
+  LIST_QUERIES.set(copy, Object.freeze({ ...constraints }));
+  return copy;
+}
+
+/** The longest query a list read sends. A list whose longest page address would pass it is refused when it is planned (`parseListSource`). */
+export const LIST_QUERY_MAX = 512;
+const LIST_QUERY_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+const LIST_QUERY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
+/** Names outside that alphabet a list read may still carry — each one a list form sets itself,
+ *  never a planner (it is admitted only where the constraints name it, as any other). WordPress's
+ *  `_fields` narrows each element to the field named, where the server honours it. */
+const LIST_QUERY_FIXED_NAMES: ReadonlySet<string> = new Set(['_fields']);
+
+/**
+ * Whether `raw` — the text after `?` — is a query a list read may send. Checked on the raw
+ * text, not on a parse of it: every server splits and decodes on its own, so the text admitted
+ * is one no splitting can read differently. Names and values of a narrow alphabet (no `%`,
+ * `+`, `;`, `[`, `.`, `=` or `&` inside), each name once and among `constraints`, each value
+ * one they allow. ⛔ No name that could select a method is ever admitted, whatever the
+ * constraints say: which names a framework reads as a method override is not a closed set
+ * (`_method`, the override headers written as parameters, a getter of the app's choosing).
+ */
+export function reviewableQuery(raw: string, constraints: ListQueryConstraints): boolean {
+  if (raw.length > LIST_QUERY_MAX) return false;
+  const seen = new Set<string>();
+  for (const segment of raw.split('&')) {
+    const eq = segment.indexOf('=');
+    // An empty segment, a name without a value, a value without a name. A second `=` fails
+    // the value alphabet below.
+    if (eq <= 0) return false;
+    const name = segment.slice(0, eq);
+    const value = segment.slice(eq + 1);
+    if (!(LIST_QUERY_NAME.test(name) || LIST_QUERY_FIXED_NAMES.has(name)) || !LIST_QUERY_VALUE.test(value)) return false;
+    if (seen.has(name)) return false;
+    seen.add(name);
+    // The alphabet above already leaves out every spelling a server folds into another name
+    // (PHP turns `.`, ` ` and `[` into `_`; header names are written with `-`; `_method`
+    // starts with `_`; the fixed names are spelled out whole), so the name a server reads is this one.
+    if (name.includes('method')) return false;
+    if (!Object.hasOwn(constraints, name)) return false;
+    const c = constraints[name]!;
+    if (c.enum !== undefined && !c.enum.includes(value)) return false;
+    if (c.regex !== undefined && !new RegExp(`^(?:${c.regex})$`).test(value)) return false;
+    if (c.enum === undefined && c.regex === undefined) return false;
+  }
+  return true;
+}
+
+/**
+ * The URL rules of a list read: the address without its query is a reviewable one, the
+ * query is one {@link reviewableQuery} admits, the request is a GET in effect — no override
+ * raises it — and it carries no body.
+ */
+function grantsListRead(input: object, url: string, method: string, constraints: ListQueryConstraints): boolean {
+  if ((input as { body?: unknown }).body !== undefined) return false;
+  const rawHeaders = (input as { headers?: unknown }).headers;
+  const headers = rawHeaders !== null && typeof rawHeaders === 'object'
+    ? Object.fromEntries(Object.entries(rawHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+    : {};
+  if (effectiveWriteMethod(method, headers, url) !== 'GET') return false;
+  const q = url.indexOf('?');
+  if (q === -1) return false;
+  const base = url.slice(0, q);
+  let parsedBase: URL;
+  try {
+    parsedBase = new URL(base);
+  } catch {
+    return false;
+  }
+  return isReviewableUrl(parsedBase, base) && reviewableQuery(url.slice(q + 1), constraints);
 }
 
 /**

@@ -1076,6 +1076,19 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (31);
    ALTER TABLE bulk_runs ADD COLUMN principal TEXT;
    ALTER TABLE bulk_runs ADD COLUMN mandate_id TEXT;`,
+
+  // v32: an external run whose targets come from a paginated GET list (PRD bulk-loop §3.2).
+  // `list_source` is what the planner asked for — path, filters, id field, verb, after-state —
+  // encrypted like a target key; NULL on every other run. `list_state` is plain so a guard can
+  // read it: 'pending' while the list is read, 'done' once its targets and write contract
+  // stand. `list_page`, `list_calls` and `list_bytes` are the read's progress — the last page
+  // taken, the requests sent, the bytes read — kept so a tick that ends goes on from there.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (32);
+   ALTER TABLE bulk_runs ADD COLUMN list_source TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN list_state TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN list_page INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE bulk_runs ADD COLUMN list_calls INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE bulk_runs ADD COLUMN list_bytes INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 /**

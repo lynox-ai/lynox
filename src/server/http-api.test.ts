@@ -26,6 +26,7 @@ import type { SecretStoreLike } from '../types/index.js';
 import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
+import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -8275,6 +8276,30 @@ describe('LynoxHTTPApi', () => {
       expect(due.map((d) => [d.id, d.effect, d.bulk_run_id])).toEqual([[`bulk-${id}`, 'bulk_apply', id]]);
 
       expect((await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum }) })).status).toBe(409);
+    });
+
+    it('starts a list read only with the checksum of the list it shows the owner', async () => {
+      const host = 'shop.example.com';
+      const source = parseListSource(host, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: { status: 'draft' } }, 'PUT', () => null);
+      const planned = bulkLedger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, source, readContract: listReadContract(host, source) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+      expect(shown['listFirstPage']).toBe(`https://${host}/wp-json/wc/v3/products?category=12&orderby=id&order=asc&_fields=id&per_page=50&page=1`);
+      expect(shown['listStartChecksum']).toBe(bulkLedger.listStartChecksum(id));
+      expect(shown['list']).toMatchObject({ state: 'pending', filters: { category: '12' }, idField: 'id', method: 'PUT', after: { status: 'draft' } });
+      expect(shown['listNote']).toBe(BULK_LIST_NOTE);
+
+      const resume = (body: unknown): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
+      expect((await resume({})).status).toBe(400);
+      expect((await resume({ listChecksum: 'stale' })).status).toBe(409);
+      expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+      const started = await resume({ listChecksum: shown['listStartChecksum'] });
+      expect(started.status).toBe(200);
+      expect(bulkLedger.getStatus(id)!.haltReason).toBeNull();
+      expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_preview']]);
+      // Started, not halted: the same checksum starts nothing a second time.
+      expect((await resume({ listChecksum: shown['listStartChecksum'] })).status).toBe(409);
     });
 
     it('refuses to approve an external run, and resumes a halted external preview without a checksum', async () => {

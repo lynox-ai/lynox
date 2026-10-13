@@ -91,6 +91,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -7812,9 +7813,9 @@ export class LynoxHTTPApi {
       errorResponse(res, 409, 'This run was planned under an access that has ended, or one that cannot be confirmed, so it cannot be approved or started.', 'mandate_ended');
       return true;
     };
-    const checksumOf = (body: unknown): string | null => {
+    const checksumOf = (body: unknown, field: 'checksum' | 'listChecksum' = 'checksum'): string | null => {
       if (!body || typeof body !== 'object') return null;
-      const c = (body as Record<string, unknown>)['checksum'];
+      const c = (body as Record<string, unknown>)[field];
       return typeof c === 'string' && c.length > 0 ? c : null;
     };
     const BULK_REFUSALS: Record<string, [number, string]> = {
@@ -7879,7 +7880,16 @@ export class LynoxHTTPApi {
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
       const actionable = status.phase === 'previewed' || status.phase === 'approved' || status.phase === 'writing';
-      jsonResponse(res, 200, { ...withBinding(status), checksum: actionable ? ledger.computeChecksum(params['id']!) : null });
+      // A list still to be read is started against what the owner sees here: the address its
+      // first page is read at, and the checksum over its source and read contract (PRD bulk-loop §3.2).
+      const listRun = status.list?.state === 'pending' ? ledger.getListRun(params['id']!) : null;
+      jsonResponse(res, 200, {
+        ...withBinding(status),
+        checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
+        listFirstPage: listRun ? listPageUrl(listRun.host, listRun.source, 1) : null,
+        listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
+        listNote: status.list ? BULK_LIST_NOTE : null,
+      });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id/targets', async (req, res, params) => {
@@ -7925,7 +7935,12 @@ export class LynoxHTTPApi {
       // A halted external preview has nothing approved to confirm: resuming it reads on.
       if (ledger.getStatus(params['id']!)?.phase === 'planned') {
         if (refuseEndedPlanner(res, ledger, params['id']!)) return;
-        const read = ledger.resumePreview(params['id']!);
+        const listChecksum = checksumOf(body, 'listChecksum');
+        if (listChecksum === null && ledger.listStartChecksum(params['id']!) !== null) {
+          errorResponse(res, 400, 'Missing "listChecksum" — start the list read you were shown.');
+          return;
+        }
+        const read = ledger.resumePreview(params['id']!, Date.now(), { listChecksum: listChecksum ?? undefined });
         if (!read.ok) { refuse(res, read.reason); return; }
         jsonResponse(res, 200, withBinding(read.status));
         return;

@@ -219,11 +219,19 @@ describe('bulk_plan over workspace files', () => {
     expect(ledger.listRuns()).toEqual([]);
   });
 
-  it('refuses both sources at once, and neither', async () => {
-    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'a.json', source_collection: 'x' }, agent()))
-      .toBe('Error: Give exactly one of source_file or source_collection.');
-    expect(await bulkPlanTool.handler({ target_system: 'workspace' }, agent()))
-      .toBe('Error: Give exactly one of source_file or source_collection.');
+  it('refuses two or three sources at once, and none', async () => {
+    const list = { path: '/wp-json/wc/v3/products', after: { status: 'draft' } };
+    for (const sources of [
+      { source_file: 'a.json', source_collection: 'x' },
+      { source_file: 'a.json', source_list: list },
+      { source_collection: 'x', source_list: list },
+      { source_file: 'a.json', source_collection: 'x', source_list: list },
+      {},
+    ]) {
+      expect(await bulkPlanTool.handler({ target_system: 'http', target_host: 'shop.example.com', ...sources }, agent()))
+        .toBe('Error: Give exactly one of source_file, source_collection or source_list.');
+    }
+    expect(ledger.listRuns()).toEqual([]);
   });
 });
 

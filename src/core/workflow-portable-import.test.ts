@@ -11,6 +11,7 @@ import {
   MAX_IMPORT_BYTES,
   PortableImportError,
 } from './workflow-portable.js';
+import { contractGrants } from '../tools/permission-guard.js';
 
 function makePlanned(overrides: Partial<PlannedPipeline> = {}): PlannedPipeline {
   return {
@@ -111,6 +112,18 @@ describe('parseAndValidatePortable — §5 A1 consent/trust boundary', () => {
     expect('capabilityContract' in res.content).toBe(false);
     // …but reports it for the consent surface (transparency, never stored).
     expect(res.inboundContract?.grantedTools).toEqual(['http_request']);
+  });
+
+  it('drops a query grant smuggled into the inbound contract — no import can carry one', () => {
+    const portable = toPortableWorkflow(makePlanned());
+    const workflow = portable.workflow as unknown as Record<string, unknown>;
+    const contract = { ...(workflow['capabilityContract'] as Record<string, unknown>), origin: 'reviewed', queryParams: { page: { regex: '.*' } } };
+    const res = parseAndValidatePortable(asBlock({ ...portable, workflow: { ...workflow, capabilityContract: contract } }));
+    expect(res.inboundContract).toBeDefined();
+    expect('queryParams' in res.inboundContract!).toBe(false);
+    // And what the import reports grants no query, whatever the block said.
+    expect(contractGrants('http_request', { method: 'GET', url: 'https://api.example.com/spend?page=1' }, { ...res.inboundContract!, origin: 'reviewed' })).toBe(false);
+    expect(contractGrants('http_request', { method: 'GET', url: 'https://api.example.com/spend' }, { ...res.inboundContract!, origin: 'reviewed' })).toBe(true);
   });
 
   it('strips a smuggled confirmedAt / id / executed inside the workflow object', () => {
