@@ -705,10 +705,13 @@ interface DebugKnowledgeBlock {
   may_be_incomplete: boolean; entries: DebugKnowledgeEntry[]; pending_entries: DebugKnowledgeEntry[];
   /** Counts with the capture-time range — what the capped lists above cannot say. Scoped like
    *  the lists: `active` over the whole store, as the active list already is; every status
-   *  for THIS thread. `null` when the store is absent or the counts could not be read. */
+   *  for the entries FIRST captured in this thread (`source_thread_id`, the key the queue
+   *  list uses). A fact said here that another conversation had already captured is folded
+   *  into that entry and counts there, not here. `null` when the store is absent or the
+   *  counts could not be read. */
   status_counts: {
     active_all_threads: KnowledgeStatusCount;
-    this_thread: Record<KnowledgeStatus, KnowledgeStatusCount>;
+    captured_in_this_thread: Record<KnowledgeStatus, KnowledgeStatusCount>;
   } | null;
   error?: string;
 }
@@ -804,12 +807,13 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
   // The lists are capped, so neither answers "how many, of which status, since when?"; these
   // counts do, and they read no text. They are scoped like the lists, and for the same
   // reason as the thread-scoped queue: this is a file that gets stored and forwarded. The
-  // active list already spans every thread, so its total adds nothing new in kind; the
+  // active list already spans every thread, so its total is the same kind of data, only
+  // past the list's 200 rows; the
   // review queue and the declined and retired entries of OTHER threads stay out, even as
   // numbers. Their own try: a count that fails must not discard readable entries.
   let statusCounts: DebugKnowledgeBlock['status_counts'] = null;
   try {
-    statusCounts = { active_all_threads: store.statusSummary().active, this_thread: store.statusSummary(threadId) };
+    statusCounts = { active_all_threads: store.statusSummary().active, captured_in_this_thread: store.statusSummary(threadId) };
   } catch { failed = failed ?? 'status counts unreadable'; }
   const block: DebugKnowledgeBlock = {
     substrate: DK_SUBSTRATE, available: true,

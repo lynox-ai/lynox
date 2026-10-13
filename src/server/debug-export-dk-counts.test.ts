@@ -43,6 +43,8 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     // ANOTHER thread's queue and declined entry: they must not show up, not even as numbers.
     const theirs = [0, 1, 2].map(i => ks.write({ text: `queued elsewhere ${i}`, sourceChannel: 'mail', sourceUntrusted: true, sourceThreadId: 'other-thread' }));
     ks.reviewEntry(theirs[0]!.id, 'reject');
+    // And one active entry captured there: the store's total must include it.
+    ks.write({ text: 'kept elsewhere', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'other-thread' });
     // Every row above was written in the same second; spread two active rows apart so the
     // range has two distinct ends to get wrong.
     const db = (ks as unknown as { db: Database.Database }).db;
@@ -57,10 +59,10 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     expect(block.entries_shown, 'precondition: the list is capped').toBe(200);
     expect(block.status_counts).not.toBeNull();
     const all = block.status_counts!.active_all_threads;
-    expect(all.count).toBe(ACTIVE + 2);
+    expect(all.count, 'threadless, this thread\'s and the other thread\'s').toBe(ACTIVE + 2 + 1);
     expect(all.first_created_at).toBe('2026-01-02 03:04:05');
     expect(all.last_created_at).toBe('2027-06-07 08:09:10');
-    const here = block.status_counts!.this_thread;
+    const here = block.status_counts!.captured_in_this_thread;
     expect(here.pending_review.count).toBe(1);
     expect(here.rejected.count).toBe(1);
     expect(here.superseded.count).toBe(1);
@@ -74,9 +76,9 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     const { ks } = make();
     ks.write({ text: 'only one fact', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 't' });
     const c = readDurableKnowledgeForDebug(engineOf(ks), 't').status_counts!;
-    expect(c.this_thread.active.count).toBe(1);
-    expect(c.this_thread.rejected).toEqual({ count: 0, first_created_at: null, last_created_at: null });
-    expect(Object.keys(c.this_thread).sort()).toEqual(['active', 'pending_review', 'rejected', 'superseded']);
+    expect(c.captured_in_this_thread.active.count).toBe(1);
+    expect(c.captured_in_this_thread.rejected).toEqual({ count: 0, first_created_at: null, last_created_at: null });
+    expect(Object.keys(c.captured_in_this_thread).sort()).toEqual(['active', 'pending_review', 'rejected', 'superseded']);
   });
 
   it('a count that cannot be read says so, and keeps the readable entries', () => {
