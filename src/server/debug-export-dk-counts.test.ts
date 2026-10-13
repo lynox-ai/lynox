@@ -32,12 +32,14 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
   it('counts active entries over the whole store, and every status for this thread, past the 200 the lists stop at', () => {
     const { ks } = make();
     const ACTIVE = 205;
+    // Captured in no thread: they count towards the store's total, not this thread's.
     for (let i = 0; i < ACTIVE; i++) ks.write({ text: `fact number ${i}`, sourceChannel: 'ui', sourceUntrusted: false });
     // This thread: two queued, one of them then declined, one retired.
     const mine = [0, 1].map(i => ks.write({ text: `queued here ${i}`, sourceChannel: 'mail', sourceUntrusted: true, sourceThreadId: 'this-thread' }));
     ks.reviewEntry(mine[0]!.id, 'reject');
     const retired = ks.write({ text: 'retired here', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'this-thread' });
     ks.retireEntry(retired.id, 'user_asserted');
+    const keptHere = [0, 1].map(i => ks.write({ text: `kept here ${i}`, sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'this-thread' }));
     // ANOTHER thread's queue and declined entry: they must not show up, not even as numbers.
     const theirs = [0, 1, 2].map(i => ks.write({ text: `queued elsewhere ${i}`, sourceChannel: 'mail', sourceUntrusted: true, sourceThreadId: 'other-thread' }));
     ks.reviewEntry(theirs[0]!.id, 'reject');
@@ -47,20 +49,24 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     const activeIds = (db.prepare("SELECT id FROM knowledge_entries WHERE status = 'active' ORDER BY rowid LIMIT 2").all() as Array<{ id: string }>).map(r => r.id);
     db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-01-02 03:04:05', activeIds[0]);
     db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2027-06-07 08:09:10', activeIds[1]);
+    db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-03-03 00:00:00', keptHere[0]!.id);
+    db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-04-04 00:00:00', keptHere[1]!.id);
 
     const block = readDurableKnowledgeForDebug(engineOf(ks), 'this-thread');
 
     expect(block.entries_shown, 'precondition: the list is capped').toBe(200);
     expect(block.status_counts).not.toBeNull();
     const all = block.status_counts!.active_all_threads;
-    expect(all.count).toBe(ACTIVE);
+    expect(all.count).toBe(ACTIVE + 2);
     expect(all.first_created_at).toBe('2026-01-02 03:04:05');
     expect(all.last_created_at).toBe('2027-06-07 08:09:10');
     const here = block.status_counts!.this_thread;
     expect(here.pending_review.count).toBe(1);
     expect(here.rejected.count).toBe(1);
     expect(here.superseded.count).toBe(1);
-    expect(here.active.count, 'none of the 205 was captured in this thread').toBe(0);
+    expect(here.active.count, 'only the two captured here').toBe(2);
+    expect(here.active.first_created_at).toBe('2026-03-03 00:00:00');
+    expect(here.active.last_created_at).toBe('2026-04-04 00:00:00');
     expect(block.error).toBeUndefined();
   });
 
