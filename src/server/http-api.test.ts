@@ -16518,10 +16518,11 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         mockGoogleRevoke.mockClear();
         mockDeleteUploadedBackups.mockClear();
         const refused = await as(ADMIN, '/api/admin/google/revoke', { method: 'POST', body: JSON.stringify({ delete_drive_backups: flag }) });
-        expect(refused.status).toBe(400);
-        expect(((await refused.json()) as { code?: string }).code).toBe('drive_deletion_owner_only');
+        // What the refusal is for comes first: nothing deleted, nothing revoked.
         expect(mockDeleteUploadedBackups).not.toHaveBeenCalled();
         expect(mockGoogleRevoke).not.toHaveBeenCalled();
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as { code?: string }).code).toBe('drive_deletion_owner_only');
       }
       // `false` asks for no deletion, so the alias passes it on and the revoke runs.
       mockGoogleRevoke.mockClear();
