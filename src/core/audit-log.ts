@@ -102,17 +102,26 @@ export function httpTarget(method: string, url: string): string {
   }
 }
 
+/** An escape of a character that never needs one (RFC 3986 unreserved). */
+const UNRESERVED_ESCAPE = /%(4[1-9A-F]|5[0-9A]|6[1-9A-F]|7[0-9A]|3[0-9]|2D|2E|5F|7E)/gi;
+
 /**
  * What a read row names as its target: the request's own path on this instance, plus the query
- * parameters the route declares as naming what it reads (`path=`, `threadId=`), and no other
- * query value. Ids stay readable, unlike in `httpTarget`: which thread, file or contact was read
- * is what the row is for, and these are the instance's own names, not a third party's keys.
- * The path is decoded first, so a percent-encoded key is masked like a plain one.
+ * parameters the route declares as naming what it asked for (`path=`, `threadId=`), and no other
+ * query value. Ids stay readable, unlike in `httpTarget`: which thread, file or contact was asked
+ * for is what the row is for, and these are the instance's own names, not a third party's keys.
+ *
+ * The row is written by the actor it records, so nothing it sends may change the row's shape.
+ * Only escapes of letters, digits and `-._~` are undone, so a percent-encoded key is masked like
+ * a plain one while `%3F`, `%26`, `%2F` and any non-ASCII stay escaped. A value is escaped the
+ * same way (`/` kept for readability), so it cannot add a pair of its own.
  */
 export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<readonly [string, string]> = []): string {
-  let path = pathname;
-  try { path = decodeURIComponent(pathname); } catch { /* malformed escapes: the raw path */ }
-  const query = identifiers.map(([name, value]) => `${name}=${value}`).join('&');
+  const unescape = (s: string): string => s.replace(UNRESERVED_ESCAPE, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+  const query = identifiers
+    .map(([name, value]) => `${name}=${unescape(encodeURIComponent(value)).replace(/%2F/gi, '/')}`)
+    .join('&');
+  const path = unescape(pathname);
   return maskSecretPatterns(query === '' ? path : `${path}?${query}`, { includeGeneric: true });
 }
 

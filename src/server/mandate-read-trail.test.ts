@@ -154,6 +154,35 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     expect(JSON.stringify(got)).not.toContain('private-words');
   });
 
+  it('keeps the shape of the row out of the actor\'s hands', async () => {
+    // A value cannot add a pair, an escaped `?` in the path stays a path, and an escaped
+    // control character stays escaped. An empty identifier names nothing and is left out.
+    for (const path of [
+      '/api/files/read?path=a%26hidden%3D1',
+      '/api/threads/t1%3Fpath%3Dnotes%2Fx.txt',
+      '/api/threads/a%E2%80%AEb',
+      '/api/history/runs?sessionId=&thread_id=t-9',
+    ]) {
+      const res = await ask('GET', path, mandateCookie);
+      await res.arrayBuffer();
+    }
+    expect(newReadRows().map((r) => r.target)).toEqual([
+      '/api/files/read?path=a%26hidden%3D1',
+      '/api/threads/t1%3Fpath%3Dnotes%2Fx.txt',
+      '/api/threads/a%E2%80%AEb',
+      '/api/history/runs?thread_id=t-9',
+    ]);
+  });
+
+  it('masks an encoded key next to a malformed escape', async () => {
+    const tail = 'A1b2'.repeat(6);
+    const res = await ask('GET', `/api/threads/%73k-ant-${tail}%ZZ`, mandateCookie);
+    await res.arrayBuffer();
+    const got = newReadRows();
+    expect(got).toHaveLength(1);
+    expect(got[0]?.target).not.toContain(tail);
+  });
+
   it('masks a percent-encoded secret shape in the path as well', async () => {
     // Short enough that only the vendor shape can catch it, not the 40-character catch-all:
     // the encoded `s` hides the shape until the path is decoded.

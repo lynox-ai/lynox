@@ -1392,9 +1392,11 @@ function profileOAuthRedirectUri(): string {
 }
 
 /**
- * The query parameters that name what a GET route reads, by route as registered (D15, PRD
- * customer-granted-operator-access §3.6). A mandate's read row carries their values; every other
- * query value stays out of it (search text, filters, OAuth codes). A test reads every GET route's
+ * The query parameters that name what a GET route is asked to read, by route as registered (D15,
+ * PRD customer-granted-operator-access §3.6). A mandate's read row carries the values the request
+ * sent; every other query value stays out of it (search text, filters, OAuth codes). The row
+ * records what was asked for, not how the handler resolved it: `/api/history/runs` with `q` set
+ * searches and ignores `thread_id`, and its row still names the `thread_id` that was sent. A test reads every GET route's
  * handler and holds this table to it in both directions: a route that reads one of these names
  * declares it, and a declared route reads it.
  */
@@ -1408,6 +1410,7 @@ export const READ_IDENTIFIERS: ReadonlyMap<string, readonly string[]> = new Map(
   ['GET /api/inbox/items', ['tenantId']],
   ['GET /api/inbox/counts', ['tenantId']],
   ['GET /api/inbox/rules', ['accountId', 'tenantId']],
+  ['GET /api/metrics', ['name']],
 ]);
 
 function parseDynamicRoute(scope: RouteScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): DynamicRoute {
@@ -2004,7 +2007,8 @@ export class LynoxHTTPApi {
       const log = this.engine?.getAuditLog() ?? null;
       if (log === null) throw new Error('no audit log');
       const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
-        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
+                // An empty value names nothing; a route that reads it as "no filter" reads more.
+        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null || v === '' ? [] : [[name, v]]; });
       log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
     } catch {
       errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');

@@ -1,12 +1,22 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { READ_IDENTIFIERS } from './http-api.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { reloadConfig } from '../core/config.js';
+import { LynoxHTTPApi, READ_IDENTIFIERS } from './http-api.js';
 
 /**
  * The query parameters a mandate's read row may carry (D15, `READ_IDENTIFIERS`), held to the
  * handlers that read them. Read from the source: which names a handler reads is a property of
- * its code, not of a request. Every name a `user` GET route reads is either an identifier
- * (declared at that route) or named here as not one, so a new name fails until it is placed.
+ * its code, not of a request. Every name the file reads is either an identifier (declared at
+ * its route) or named here as not one, so a new name fails until it is placed.
+ *
+ * What a text scan cannot see is made to fail rather than pass: a read in any form other than
+ * `searchParams.get('<name>')` must be listed, and the scan must find every `user` GET route of
+ * the real table. A literal read in code outside a registration (a handler held in a `const`, a
+ * shared helper) is credited to the registration above it. For an identifier that fails closed:
+ * a route that does not declare it is named.
  */
 const NOT_IDENTIFYING = new Set([
   // Paging, ordering and windows.
@@ -17,13 +27,19 @@ const NOT_IDENTIFYING = new Set([
   'q',
   // An OAuth provider's answer: a code and a state are credentials.
   'code', 'state', 'error',
+  // Read outside a mandate's GET routes, or not naming an object: usage period (a helper of
+  // the usage routes), a memory delete's pattern, an admin cleanup's preview, an admin window.
+  'period', 'pattern', 'dryRun', 'hours',
 ]);
 const IDENTIFYING = new Set([...READ_IDENTIFIERS.values()].flat());
 /** Routes that read the query through a helper taking a variable name; each says which names. */
 const THROUGH_HELPER = new Map([['GET /api/bulk/runs/:id/targets', ['offset', 'limit']]]);
+/** Registration keys written as a template, by what the template names. */
+const TEMPLATE_KEYS = new Map([['GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}', 'GET /api/oauth/callback']]);
+const SOURCE = readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8');
 
 function userGetRoutesWithQueryReads(): Map<string, { names: Set<string>; dynamic: boolean }> {
-  const src = readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8');
+  const src = SOURCE;
   const any = /addStatic\(|parseDynamicRoute\(/g;
   const starts: number[] = [];
   for (let m = any.exec(src); m !== null; m = any.exec(src)) starts.push(m.index);
@@ -33,7 +49,8 @@ function userGetRoutesWithQueryReads(): Map<string, { names: Set<string>; dynami
     const end = starts.find((s) => s > m!.index) ?? src.length;
     const body = src.slice(m.index, end);
     const names = new Set([...body.matchAll(/searchParams\.get\('([^']+)'\)/g)].map((x) => x[1]!));
-    out.set(`GET ${m[1] ?? m[2]!}`, { names, dynamic: /searchParams\.(get|has)\((?!')/.test(body) });
+    const key = `GET ${m[1] ?? m[2]!}`;
+    out.set(TEMPLATE_KEYS.get(key) ?? key, { names, dynamic: /searchParams\.(get|has)\((?!')/.test(body) });
   }
   return out;
 }
@@ -47,9 +64,27 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     expect(routes.get('GET /api/files/download')?.names.has('path')).toBe(true);
   });
 
-  it('places every query name a GET route reads', () => {
-    const unplaced = [...routes].flatMap(([k, r]) => [...r.names].filter((n) => !IDENTIFYING.has(n) && !NOT_IDENTIFYING.has(n)).map((n) => `${k} ${n}`));
-    expect(unplaced).toEqual([]);
+  it('places every query name the file reads', () => {
+    const names = new Set([...SOURCE.matchAll(/searchParams\.get\('([^']+)'\)/g)].map((x) => x[1]!));
+    expect(names.size).toBeGreaterThan(20);
+    expect([...names].filter((n) => !IDENTIFYING.has(n) && !NOT_IDENTIFYING.has(n))).toEqual([]);
+  });
+
+  it('reads the query in no form it cannot check', () => {
+    // Every use of `searchParams` is a literal `get`/`has`, the dispatcher handing it to the read
+    // trail, or a listed helper. An alias, `getAll`, iteration or `Object.fromEntries` fails here.
+    const other = SOURCE.split('\n')
+      .filter((l) => /searchParams|new URLSearchParams\(|\burl\.search\b/.test(l))
+      .filter((l) => !/^\s*(\/\/|\*)/.test(l))
+      .map((l) => l.replace(/searchParams\.(get|has)\('[^']+'\)/g, ''))
+      .filter((l) => /searchParams|new URLSearchParams\(|\burl\.search\b/.test(l))
+      .map((l) => l.trim());
+    expect(other).toEqual([
+      "if (!this._recordedMandateRead(req, res, method, stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname, url.searchParams)) return;",
+      'if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;',
+      'const v = Number(url.searchParams.get(name));',
+      'return url.searchParams.has(name) && Number.isInteger(v) && v >= 0 ? v : undefined;',
+    ]);
   });
 
   it('declares every identifier a route reads', () => {
@@ -66,5 +101,48 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     const dynamic = [...routes].filter(([, r]) => r.dynamic).map(([k]) => k);
     expect(dynamic).toEqual([...THROUGH_HELPER.keys()]);
     for (const names of THROUGH_HELPER.values()) for (const n of names) expect(NOT_IDENTIFYING.has(n)).toBe(true);
+  });
+});
+
+describe('the scan against the real route table', () => {
+  let api: LynoxHTTPApi;
+  let dir: string;
+  const saved: Record<string, string | undefined> = {};
+  const ENV = ['LYNOX_DATA_DIR', 'LYNOX_HTTP_SECRET', 'LYNOX_ALLOW_PLAIN_HTTP', 'LYNOX_VAULT_KEY', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'];
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-read-ids-'));
+    for (const k of ENV) saved[k] = process.env[k];
+    process.env['LYNOX_DATA_DIR'] = dir;
+    // Built at RUNTIME: this repo is public, and the commit-time scan looks for key shapes.
+    process.env['LYNOX_HTTP_SECRET'] = `t-${randomBytes(12).toString('hex')}`;
+    process.env['LYNOX_ALLOW_PLAIN_HTTP'] = 'true';
+    process.env['LYNOX_VAULT_KEY'] = `v-${randomBytes(12).toString('hex')}`;
+    delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_MANAGED_MODE'];
+    reloadConfig();
+    api = new LynoxHTTPApi();
+    await api.init();
+  }, 120_000);
+
+  afterAll(async () => {
+    try {
+      await api?.shutdown();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+      reloadConfig();
+    }
+  });
+
+  it('scans exactly the user GET routes the server registers', () => {
+    const routes = userGetRoutesWithQueryReads();
+    const table = api.routeStancesForTesting().filter((r) => r.method === 'GET' && r.scope === 'user').map((r) => `GET ${r.path}`);
+    expect(table.length).toBeGreaterThan(80);
+    expect(table.filter((k) => !routes.has(k))).toEqual([]);
+    expect([...routes.keys()].filter((k) => !table.includes(k))).toEqual([]);
   });
 });
