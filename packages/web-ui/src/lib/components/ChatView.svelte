@@ -1785,17 +1785,18 @@
 			return;
 		}
 
+		// Chat input guard: warn if text looks like an API key or secret. Before the answer
+		// branch, so text typed into this box as the answer to an open question is checked too.
+		if (looksLikeSecret(task)) {
+			addToast(t('chat.secret_warning'), 'error', 6000);
+			return;
+		}
+
 		// If a prompt is active, treat chat input as answer
 		if (pendingPermission && task) {
 			inputText = '';
 			if (textareaEl) textareaEl.style.height = 'auto';
 			answerPrompt(task);
-			return;
-		}
-
-		// Chat input guard: warn if text looks like an API key or secret
-		if (looksLikeSecret(task)) {
-			addToast(t('chat.secret_warning'), 'error', 6000);
 			return;
 		}
 

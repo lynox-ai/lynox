@@ -206,6 +206,39 @@ describe('PromptStore', () => {
     });
   });
 
+  describe('a credential typed as an answer is masked before it is stored', () => {
+    // Built at run time: no key-shaped literal in the source.
+    const body = 'q1w2e3r4t5y6'.repeat(8);
+    const pem = ['-----BEGIN ', 'PRIVATE KEY-----\n', body, '\n-----END ', 'PRIVATE KEY-----'].join('');
+    const vendor = ['sk', 'proj', 'Ab1Cd2Ef3Gh4Ij5_Kl6Mn7-Op8Qr9St0Uv1Wx2Yz3'].join('-');
+
+    it('a single answer: neither the stored row nor what waitForAnswer hands on holds the key, and the note points to ask_secret', async () => {
+      const id = store.insertAskUser('s1', 'q');
+      store.answerUser(id, `here it is: ${pem}`);
+      const row = await store.waitForAnswer(id);
+      expect(row?.answer).not.toContain(body);
+      expect(row?.answer).toContain('here it is: ***');
+      expect(row?.answer).toContain('collect it with ask_secret');
+    });
+
+    it('every tab answer and a partial answer, without the note', () => {
+      const id = store.insertAskUserTabs('s1', [{ question: 'q1' }, { question: 'q2' }]);
+      store.setPartialAnswers(id, [vendor, null]);
+      expect(store.getById(id)?.partial_answers_json).toBe(JSON.stringify([`***${vendor.slice(-4)}`, null]));
+      store.answerUserTabs(id, ['plain', `key ${vendor}`]);
+      const answers = JSON.parse(store.getById(id)!.answer!) as string[];
+      expect(answers[0]).toBe('plain');
+      expect(answers[1]).not.toContain(vendor);
+      expect(answers[1]).toBe(`key ***${vendor.slice(-4)}`);
+    });
+
+    it('control: an answer without a credential is stored as typed', () => {
+      const id = store.insertAskUser('s1', 'q');
+      store.answerUser(id, 'Yes, the shop is beispiel-laden.myshopify.com');
+      expect(store.getById(id)?.answer).toBe('Yes, the shop is beispiel-laden.myshopify.com');
+    });
+  });
+
   describe('unicity per session', () => {
     it('rejects a second pending prompt in the same session', () => {
       store.insertAskUser('s1', 'q1');

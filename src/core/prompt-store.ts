@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
 import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -519,9 +520,14 @@ export class PromptStore {
 
   /** Answer a single-question ask_user. Idempotent: returns true only the
    * first time the prompt transitions to 'answered' (matches status='pending'
-   * AND not expired). Subsequent calls return false but do not error. */
+   * AND not expired). Subsequent calls return false but do not error.
+   *
+   * A typed answer is stored only through this method, `answerUserTabs` and
+   * `setPartialAnswers`, whichever route brought it, so a credential typed as an
+   * answer is masked here (`withoutTypedCredentials`, as at the run route): before
+   * the row stores it and before the asking tool hands it to the model. */
   answerUser(promptId: string, answer: string): boolean {
-    const result = this._getAnswerStmt().run(answer, promptId);
+    const result = this._getAnswerStmt().run(withoutTypedCredentials(answer), promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
@@ -533,16 +539,22 @@ export class PromptStore {
     // Shared UPDATE path: stores JSON-encoded array in the same `answer`
     // column single-question uses. Handler disambiguates by presence of
     // questions_json on the row.
-    const result = this._getAnswerStmt().run(JSON.stringify(answers), promptId);
+    // Masked without the note: a tab answer can become knowledge the user asserted
+    // (onboarding basics), and the note is the engine's text, not the user's.
+    const masked = answers.map((a) => maskCredentialInput(a).text);
+    const result = this._getAnswerStmt().run(JSON.stringify(masked), promptId);
     const changed = result.changes > 0;
     if (changed) this._emitSettled(promptId);
     return changed;
   }
 
   /** Optional: persist partial answers so a reconnect mid-batch can restore
-   * progress. Doesn't settle the prompt — the handler keeps awaiting. */
+   * progress. Doesn't settle the prompt — the handler keeps awaiting. Masked
+   * like a final answer, without the note: the partial goes back to the form,
+   * not to the model. */
   setPartialAnswers(promptId: string, partial: (string | null)[]): boolean {
-    const result = this._getSetPartialStmt().run(JSON.stringify(partial), promptId);
+    const masked = partial.map((a) => (a === null ? null : maskCredentialInput(a).text));
+    const result = this._getSetPartialStmt().run(JSON.stringify(masked), promptId);
     return result.changes > 0;
   }
 
