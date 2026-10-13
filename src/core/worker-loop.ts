@@ -661,11 +661,8 @@ export class WorkerLoop {
   #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined): void {
     if (starter === undefined) return;
     if (!principalHasEnded(starter, (id) => this.engine.getMandateEnds()?.isLive(id) ?? false)) return;
-    // The entry is only the bookkeeping that records it as a stop; the decision needs none.
-    if (entry !== undefined) {
-      entry.stopRequested = true;
-      entry.ownerStop.abort();
-    }
+    // The entry only records it as a stop; the decision needs none.
+    if (entry !== undefined) entry.stopRequested = true;
     throw new RunAbortedError();
   }
 
