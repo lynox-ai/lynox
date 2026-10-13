@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { crossSiteWriteRefusal, CROSS_SITE_WRITE_REFUSAL, hostRefusal, NO_SECRET_HOST_REFUSAL, normalizeAllowedOrigins } from './cross-site-write.js';
+import { ambientCrossSiteRefusal, AMBIENT_CROSS_SITE_REFUSAL, crossSiteWriteRefusal, CROSS_SITE_WRITE_REFUSAL, hostRefusal, NO_SECRET_HOST_REFUSAL, normalizeAllowedOrigins } from './cross-site-write.js';
 
 const base = { method: 'POST', origin: undefined, fetchSite: undefined, host: '127.0.0.1:3000', allowedOrigins: [] as string[] };
 const decide = (over: Partial<typeof base> & { origin?: string; fetchSite?: string; host?: string }) =>
@@ -96,5 +96,72 @@ describe('normalizeAllowedOrigins', () => {
 describe('Origin: null', () => {
   it('is refused even when an entry somehow reads `null`', () => {
     expect(crossSiteWriteRefusal({ method: 'POST', origin: 'null', fetchSite: 'cross-site', host: '127.0.0.1:3000', allowedOrigins: ['null'] })).toBe(CROSS_SITE_WRITE_REFUSAL);
+  });
+});
+
+describe('ambientCrossSiteRefusal — a credential the browser attaches on its own', () => {
+  const amb = { origin: undefined, fetchSite: undefined, host: 'tenant.example.org:3000', allowedOrigins: [] as string[], ownOrigins: ['https://tenant.example.org:3000'] as readonly string[] };
+  const judge = (over: Partial<typeof amb> & { origin?: string; fetchSite?: string; host?: string }) =>
+    ambientCrossSiteRefusal({ ...amb, ...over });
+
+  it('refuses another site and a sibling host, with or without an Origin', () => {
+    expect(judge({ fetchSite: 'cross-site' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ fetchSite: 'same-site' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ fetchSite: 'same-site', origin: 'https://other.example.org' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ origin: 'https://evil.example' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+  });
+
+  it('lets through what the browser calls its own page or a direct visit, whatever the Origin', () => {
+    expect(judge({ fetchSite: 'same-origin', origin: 'https://evil.example' })).toBeNull();
+    expect(judge({ fetchSite: 'none' })).toBeNull();
+    expect(judge({ fetchSite: 'none', origin: 'https://evil.example' })).toBeNull();
+  });
+
+  it('ALLOWED ON PURPOSE: neither header (curl, the CLI, a server-side fetch)', () => {
+    expect(judge({})).toBeNull();
+  });
+
+  it('takes an allowed, a localhost and its own Origin even from a sibling host', () => {
+    expect(judge({ fetchSite: 'same-site', origin: 'https://ui.example.org', allowedOrigins: ['https://ui.example.org'] })).toBeNull();
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://localhost:5173' })).toBeNull();
+    expect(judge({ fetchSite: 'same-site', origin: 'https://tenant.example.org:3000' })).toBeNull();
+  });
+
+  it('takes its own host by NAME only with the cookie, and on the schemes the caller gives', () => {
+    expect(judge({ fetchSite: 'same-site', origin: 'https://tenant.example.org:3000', ownOrigins: [] })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://tenant.example.org:3000' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ fetchSite: 'cross-site', origin: 'https://tenant.example.org:3001' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    // Both schemes, when the caller cannot tell which one the browser used.
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://tenant.example.org:3000', ownOrigins: ['https://tenant.example.org:3000', 'http://tenant.example.org:3000'] })).toBeNull();
+    // Without the cookie the own origin counts as an IP address only.
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://192.168.1.5:3000', host: '192.168.1.5:3000', ownOrigins: [] })).toBeNull();
+  });
+});
+
+// The Origin rule is one definition for both checks. Each case is asked of both callers, so a
+// change to the shared rule shows in each.
+describe('the Origin rule both checks share', () => {
+  const write = (origin: string, host: string, allowedOrigins: string[] = []) =>
+    crossSiteWriteRefusal({ method: 'POST', origin, fetchSite: 'cross-site', host, allowedOrigins });
+  const ambient = (origin: string, host: string, allowedOrigins: string[] = []) =>
+    ambientCrossSiteRefusal({ origin, fetchSite: 'cross-site', host, allowedOrigins, ownOrigins: [] });
+
+  it('refuses `null`, even when an entry reads `null`', () => {
+    expect(write('null', '127.0.0.1:3000', ['null'])).toBe(CROSS_SITE_WRITE_REFUSAL);
+    expect(ambient('null', '127.0.0.1:3000', ['null'])).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+  });
+
+  it('compares the port: its own address on another port is another origin', () => {
+    expect(write('http://127.0.0.2:4000', '127.0.0.2:3000')).toBe(CROSS_SITE_WRITE_REFUSAL);
+    expect(ambient('http://127.0.0.2:4000', '127.0.0.2:3000')).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(write('http://127.0.0.2:3000', '127.0.0.2:3000')).toBeNull();
+    expect(ambient('http://127.0.0.2:3000', '127.0.0.2:3000')).toBeNull();
+  });
+
+  it('takes a listed origin and a localhost origin', () => {
+    expect(write('https://ui.example.org', 'x:1', ['https://ui.example.org'])).toBeNull();
+    expect(ambient('https://ui.example.org', 'x:1', ['https://ui.example.org'])).toBeNull();
+    expect(write('http://localhost:5173', 'x:1')).toBeNull();
+    expect(ambient('http://localhost:5173', 'x:1')).toBeNull();
   });
 });
