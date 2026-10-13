@@ -1069,6 +1069,13 @@ const MIGRATIONS: string[] = [
      minted_at  TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_subject_mints_thread ON subject_mints(thread_id);`,
+
+  // v31: who planned a bulk run, and under which grant (PRD customer-granted-operator-access
+  // §3.13 B7). `principal` is the planner's tag, written on every new run, so NULL means a run
+  // from before this version; `mandate_id` is the grant a mandate's run ends with.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (31);
+   ALTER TABLE bulk_runs ADD COLUMN principal TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN mandate_id TEXT;`,
 ];
 
 /**

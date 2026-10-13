@@ -160,7 +160,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         const method = input.write_method ?? 'PATCH';
         if (!(BULK_WRITE_METHODS as readonly string[]).includes(method)) throw new BulkSourceError('write_method must be PATCH, PUT or POST.');
         const out = ledger.recordExternalPlan({
-          createdBy: agent.currentThreadId, host, targets: external, contract: mintBulkContract(host, keys, method),
+          createdBy: agent.currentThreadId, principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method),
         });
         if (!out.ok) {
           return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -179,7 +179,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       }
 
       const status = ledger.recordDryRun({
-        createdBy: agent.currentThreadId, targetSystem: input.target_system, scope, targets,
+        createdBy: agent.currentThreadId, principal: agent.principal, targetSystem: input.target_system, scope, targets,
         targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
         atomic: input.atomic === true,
       });

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { mkdtempSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync, mkdirSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,7 +30,7 @@ let ledger: BulkLedger;
 let store: DataStore;
 
 function agent(): IAgent {
-  return { toolContext: { bulkLedger: ledger, dataStore: store }, currentThreadId: 'thread-1' } as unknown as IAgent;
+  return { toolContext: { bulkLedger: ledger, dataStore: store }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
 }
 
 /** Every file under `root` with its bytes and mtime — the "byte-identical" witness. */
@@ -126,6 +127,16 @@ describe('bulk_plan over workspace files', () => {
         expect(t.before).toEqual({ absent: true });
       }
     }
+  });
+
+  it('records the principal of the run that called it as the planner (§3.13 B7)', async () => {
+    writeFileSync(join(ws, 'one.md'), 'old\n');
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'one.md', after: 'new\n' }]));
+    const grant = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+    const asMandate = { ...agent(), principal: grant } as unknown as IAgent;
+    const id = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: join(ws, 'plan.json') }, asMandate));
+    expect(engineDb.getDb().prepare('SELECT created_by, principal, mandate_id FROM bulk_runs WHERE id = ?').get(id))
+      .toEqual({ created_by: 'thread-1', principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' });
   });
 
   it('returns no target key, value or diff to the model — from bulk_plan or bulk_status', async () => {
@@ -365,7 +376,7 @@ describe('bulk_plan over data-store rows', () => {
 describe('bulk_status on an instance without a vault key', () => {
   it('says the approval checksum does not bind — and says nothing when it does', async () => {
     const plan = (l: BulkLedger): string => l.recordDryRun({
-      createdBy: 't', targetSystem: 'workspace', scope: 's',
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 's',
       targets: [{ key: 'a.md', before: { absent: true }, after: 'x' }],
     }).id;
     const line = /Approval checksum: unkeyed/;

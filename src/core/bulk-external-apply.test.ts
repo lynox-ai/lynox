@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn() },
@@ -134,7 +135,7 @@ async function previewedRun(
 ): Promise<string> {
   const targets = planExternal(rows, HOST, planScan);
   const out = ledger.recordExternalPlan({
-    createdBy: 't', host: HOST, targets, contract: mintBulkContract(HOST, targets.filter((t) => !('invalid' in t)).map((t) => t.key), method),
+    createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets, contract: mintBulkContract(HOST, targets.filter((t) => !('invalid' in t)).map((t) => t.key), method),
   });
   if (!out.ok) throw new Error(out.reason);
   if (!ledger.resumePreview(out.status.id).ok) throw new Error('not started');
@@ -638,7 +639,7 @@ describe('applying an external run', () => {
 
   it('a local target found already written records no read-back image', async () => {
     const run = ledger.recordDryRun({
-      createdBy: 't', targetSystem: 'workspace', scope: 'w',
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
       targets: [{ key: '/k', before: { absent: false, value: 'old' }, after: 'new' }],
     });
     ledger.approve(run.id, { checksum: ledger.computeChecksum(run.id)! });

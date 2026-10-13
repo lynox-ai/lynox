@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn() },
@@ -228,7 +229,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
   function runWithMailContract(phase: 'previewed' | 'approved'): string {
     const targets: ExternalPlanned[] = [{ key: GMAIL_VACATION, after: { enableAutoReply: true } }];
     const out = ledger.recordExternalPlan({
-      createdBy: 't', host: 'gmail.googleapis.com', targets, contract: mintBulkContract('gmail.googleapis.com', [GMAIL_VACATION], 'PUT'),
+      createdBy: 't', principal: OWNER_PRINCIPAL, host: 'gmail.googleapis.com', targets, contract: mintBulkContract('gmail.googleapis.com', [GMAIL_VACATION], 'PUT'),
     });
     if (!out.ok) throw new Error(out.reason);
     const id = out.status.id;

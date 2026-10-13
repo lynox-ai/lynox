@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { OWNER_PRINCIPAL } from './request-principal.js';
 
 vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn() },
@@ -100,7 +101,7 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
 function planRun(rows: { target: string; after: unknown }[], start = true, scan: (text: string) => string | null = detectSecretInContent): string {
   const targets = planExternal(rows, HOST, scan);
   const keys = targets.filter((t) => !('invalid' in t)).map((t) => t.key);
-  const out = ledger.recordExternalPlan({ createdBy: 't', host: HOST, targets, contract: contractFor(keys) });
+  const out = ledger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets, contract: contractFor(keys) });
   if (!out.ok) throw new Error(out.reason);
   if (start && out.status.phase === 'planned' && !ledger.resumePreview(out.status.id).ok) throw new Error('not started');
   return out.status.id;
@@ -197,7 +198,7 @@ describe('planning an external run', () => {
     const first = planRun([{ target: url(0), after: { price: '1' } }]);
     const targets = planExternal([{ target: url(1), after: { price: '1' } }], HOST, detectSecretInContent);
     const again = (): ReturnType<BulkLedger['recordExternalPlan']> =>
-      ledger.recordExternalPlan({ createdBy: 't', host: HOST, targets, contract: contractFor([url(1)]) });
+      ledger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, targets, contract: contractFor([url(1)]) });
     expect(again()).toEqual({ ok: false, reason: 'external_in_progress' });
     ledger.halt(first, BULK_HALT_REASONS.credential);
     expect(again().ok).toBe(true);
@@ -341,7 +342,7 @@ describe('the preview effect', () => {
       const runId = planRun([{ target: url(0), after: { price: '1' } }]);
       ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
       expect((await runBulkPreview(runId, previewDeps(client()))).status).toBe('refused');
-      const local = ledger.recordDryRun({ createdBy: 't', targetSystem: 'workspace', scope: 'w', targets: [] as PlannedTarget[] });
+      const local = ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w', targets: [] as PlannedTarget[] });
       expect((await runBulkPreview(local.id, previewDeps(client()))).status).toBe('refused');
       expect((await runBulkPreview('nope', previewDeps(client()))).status).toBe('refused');
       expect(s.requests).toEqual([]);
@@ -680,7 +681,7 @@ describe('the preview effect', () => {
         async get(u, signal) {
           const r = await c.get(u, signal);
           for (let i = 0; i < BULK_MAX_PREVIEWED_RUNS; i++) {
-            ledger.recordDryRun({ createdBy: 't', targetSystem: 'workspace', scope: `w${String(i)}`, targets: [] as PlannedTarget[] });
+            ledger.recordDryRun({ createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: `w${String(i)}`, targets: [] as PlannedTarget[] });
           }
           return r;
         },
@@ -708,7 +709,7 @@ describe('the approval checksum of an external run', () => {
 
     // A local run: the digest over exactly the parts it had before contracts existed.
     const local = ledger.recordDryRun({
-      createdBy: 't', targetSystem: 'workspace', scope: 'w',
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
       targets: [{ key: '/a', before: { absent: false, value: 'x' }, after: 'y' }],
     });
     const row = engineDb.getDb().prepare('SELECT * FROM bulk_runs WHERE id = ?').get(local.id) as Record<string, string | number | null>;
@@ -766,6 +767,19 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
 }
 
 describe('bulk_plan → trigger → worker tick → previewed', () => {
+  it('plans through the tool under the principal of the run that called it (§3.13 B7)', async () => {
+    const ws = join(dir, 'workspace');
+    mkdirSync(ws);
+    setTenantWorkspace(ws);
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: url(0), after: { price: '15.00' } }]));
+    const grant = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+    const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: grant } as unknown as IAgent;
+    const planned = await bulkPlanTool.handler({ target_system: 'http', target_host: HOST, source_file: 'src.json' }, agent);
+    const runId = /Bulk run ([0-9a-f-]{36})/.exec(planned)![1]!;
+    expect(engineDb.getDb().prepare('SELECT created_by, principal, mandate_id FROM bulk_runs WHERE id = ?').get(runId))
+      .toEqual({ created_by: 'thread-1', principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' });
+  });
+
   it('plans through the tool, reads through the worker with the stored credential, reports counts only', async () => {
     const ws = join(dir, 'workspace');
     mkdirSync(ws);
@@ -777,7 +791,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         { target: url(0), after: { price: '15.00' } },
         { target: url(1), after: { price: '12.00' } },
       ]));
-      const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1' } as unknown as IAgent;
+      const agent = { toolContext: { bulkLedger: ledger }, currentThreadId: 'thread-1', principal: OWNER_PRINCIPAL } as unknown as IAgent;
       const planned = await bulkPlanTool.handler({ target_system: 'http', target_host: 'SHOP.example.com.', source_file: 'src.json' }, agent);
       expect(planned).toContain('Nothing is read either until the user starts it outside this chat.');
       expect(planned).toContain('phase planned');

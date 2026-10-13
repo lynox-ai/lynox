@@ -21,7 +21,7 @@ import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody,
 import { EngineDb } from '../core/engine-db.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { AuditLog } from '../core/audit-log.js';
-import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
@@ -207,7 +207,10 @@ const mockSessionGet = vi.fn().mockReturnValue(mockSessionInstance);
 const mockSessionStoreReset = vi.fn();
 const mockSessionStoreResetAll = vi.fn();
 /** The bulk-run routes read a REAL ledger (a temp engine.db) — null = flag off. */
-const bulkHolder: { ledger: BulkLedger | null } = { ledger: null };
+// `ownership` is what a run's planner is read against (§3.13 B7). The default reads every grant
+// as ended and no conversation as anyone's: the owner's runs, which carry 'owner', are untouched.
+const NO_OWNERSHIP: BulkOwnership = { isLive: () => false, threadCreator: () => undefined, threadsKnown: true };
+const bulkHolder: { ledger: BulkLedger | null; ownership: BulkOwnership } = { ledger: null, ownership: NO_OWNERSHIP };
 
 vi.mock('../core/engine.js', () => ({
   Engine: vi.fn().mockImplementation(function (this: Record<string, unknown>) {
@@ -291,6 +294,7 @@ vi.mock('../core/engine.js', () => ({
       isAmbiguousTriggerId: vi.fn().mockReturnValue(false),
     });
     this.getBulkLedger = vi.fn(() => bulkHolder.ledger);
+    this.getBulkOwnership = vi.fn(() => bulkHolder.ownership);
     this.getTaskManager = vi.fn().mockReturnValue({
       list: mockTaskList,
       create: mockTaskCreate,
@@ -6730,7 +6734,7 @@ describe('LynoxHTTPApi', () => {
       const db = new EngineDb(join(dir, 'engine.db'), 'route-key');
       const ledger = new BulkLedger(db);
       ledger.recordDryRun({
-        createdBy: 't1', targetSystem: 'workspace', scope: 'w',
+        createdBy: 't1', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'w',
         targets: [{ key: `/ws/${MARK}.md`, before: { absent: false, value: `old ${MARK}` }, after: `new ${MARK}` }],
       });
       const getBulkLedger = vi.fn(() => ledger);
@@ -8158,7 +8162,7 @@ describe('LynoxHTTPApi', () => {
     let bulkDb: EngineDb;
     let bulkLedger: BulkLedger;
     const planRun = (): string => bulkLedger.recordDryRun({
-      createdBy: 't', targetSystem: 'workspace', scope: 'mem',
+      createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
       targets: [
         { key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' },
         { key: 'k1', before: { absent: true }, after: 'w1' },
@@ -8172,8 +8176,59 @@ describe('LynoxHTTPApi', () => {
     });
     afterEach(() => {
       bulkHolder.ledger = null;
+      bulkHolder.ownership = NO_OWNERSHIP;
       bulkDb.close();
       rmSync(bulkDir, { recursive: true, force: true });
+    });
+
+    describe('a run whose planner has ended (§3.13 B7)', () => {
+      const GRANT = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+      const live = (...ids: string[]): BulkOwnership => ({ isLive: (id) => ids.includes(id), threadCreator: () => undefined, threadsKnown: true });
+      const mandateRun = (): string => bulkLedger.recordDryRun({
+        createdBy: 't', principal: GRANT, targetSystem: 'workspace', scope: 'mem',
+        targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
+      }).id;
+      const mandatePlan = (): string => {
+        const host = 'shop.example.com';
+        const key = `https://${host}/p/1`;
+        const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: GRANT, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
+        if (!planned.ok) throw new Error('not planned');
+        return planned.status.id;
+      };
+
+      it('is withdrawn instead of approved, with the code the client reads', async () => {
+        const id = mandateRun();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'mandate_ended' });
+        expect(bulkLedger.getStatus(id)!.phase).toBe('aborted');
+        expect(new TriggerStore(bulkDb).getById(`bulk-${id}`)).toBeUndefined();
+      });
+
+      it('control: the owner approves it while the grant lives', async () => {
+        bulkHolder.ownership = live('grant-1');
+        const id = mandateRun();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+        expect(res.status).toBe(200);
+        expect(bulkLedger.getStatus(id)!.phase).toBe('approved');
+      });
+
+      it('is withdrawn instead of started when its read would start', async () => {
+        const id = mandatePlan();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: 'mandate_ended' });
+        expect(bulkLedger.getStatus(id)!.phase).toBe('aborted');
+        expect(new TriggerStore(bulkDb).getById(`bulk-preview-${id}`)).toBeUndefined();
+      });
+
+      it('control: the owner starts its read while the grant lives', async () => {
+        bulkHolder.ownership = live('grant-1');
+        const id = mandatePlan();
+        const res = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' });
+        expect(res.status).toBe(200);
+        expect(new TriggerStore(bulkDb).getById(`bulk-preview-${id}`)).toBeDefined();
+      });
     });
 
     it('answers 404 on every bulk route when bulk runs are off', async () => {
@@ -8223,7 +8278,7 @@ describe('LynoxHTTPApi', () => {
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;
       const planned = bulkLedger.recordExternalPlan({
-        createdBy: 't', host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]),
+        createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]),
       });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
@@ -8277,7 +8332,7 @@ describe('LynoxHTTPApi', () => {
     it('refuses to approve or resume an external run the network policy keeps from its host, and says bearer:user under an admin secret', async () => {
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;
-      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       expect(bulkLedger.resumePreview(id).ok).toBe(true);
@@ -8336,7 +8391,7 @@ describe('LynoxHTTPApi', () => {
 
       const host = 'shop.example.com';
       const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
-      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       bulkLedger.resumePreview(id);

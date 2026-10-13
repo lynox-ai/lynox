@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
+import { OWNER_PRINCIPAL, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
@@ -156,6 +157,7 @@ export const BULK_HALT_REASONS = {
   blocked: 'the network policy does not allow this host',
   contract: 'a target lies outside the run\'s contract',
   stoppedByOwner: 'the owner stopped the run',
+  mandateEnded: 'the access that planned this run has ended before it was approved',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
@@ -213,7 +215,58 @@ interface RunRow {
   targets_total: number; targets_applied: number; targets_failed: number; halt_reason: string | null;
   atomic: number; kind: BulkRunKind; source_run_id: string | null; target_collection: string | null;
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
-  contract_json: string | null;
+  contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
+}
+
+/**
+ * What decides whether a run's planner still stands behind it (§3.13 B7): whether a mandate's
+ * grant is live, and who a conversation belongs to. Both live outside engine.db's bulk tables
+ * — the ends in `mandate_ends`, the conversations in history.db — so the engine passes them in.
+ */
+export interface BulkOwnership {
+  isLive(mandateId: string): boolean;
+  /** Who started the conversation with this id: its `created_by` (history.db v57), or
+   *  undefined when there is no such conversation or it records nobody. */
+  threadCreator(threadId: string): string | null | undefined;
+  /** Whether the conversations can be read at all. When they cannot, a run from before v31
+   *  cannot be placed: it is refused, and left for a later sweep rather than ended. */
+  readonly threadsKnown: boolean;
+}
+
+/**
+ * When the engine began to refuse a mandate's request in a conversation it did not start
+ * (H2c, core a0bb9895, first released in v2.15.4 at 2026-10-12T09:33:19Z). From then on a
+ * run planned in the owner's conversation is the owner's; before, that does not follow.
+ * In `datetime('now')`'s form, which is what `bulk_runs.created_at` holds.
+ */
+export const BULK_OWNER_THREADS_SINCE = '2026-10-12 09:33:19';
+
+/** The two planner columns of a new run: its tag, and the grant a mandate planned it under. */
+function planner(p: RequestPrincipal): [string, string | null] {
+  return [principalTag(p), p.kind === 'mandate' ? p.mandateId ?? null : null];
+}
+
+/**
+ * Whether the planner of an unapproved run no longer stands behind it (§3.13 B7):
+ * - a run a mandate planned, once its grant is not live (ended, revoked, unknown, or none named);
+ * - a run from before v31, which names no planner: the owner's only when it was planned in a
+ *   conversation the owner started, after {@link BULK_OWNER_THREADS_SINCE}; every other one,
+ *   because who planned it cannot be shown.
+ * The owner's own runs never end this way. A planner tag that is neither the owner's nor a
+ * mandate's counts as ended.
+ */
+export function plannerHasEnded(
+  row: Pick<RunRow, 'principal' | 'mandate_id' | 'created_by' | 'created_at'>,
+  own: BulkOwnership,
+): boolean {
+  const owner = principalTag(OWNER_PRINCIPAL);
+  if (row.principal !== null) {
+    if (row.principal === owner) return false;
+    if (!isMandateTag(row.principal)) return true;
+    return row.mandate_id === null || !own.isLive(row.mandate_id);
+  }
+  if (row.created_by === null || row.created_at <= BULK_OWNER_THREADS_SINCE) return true;
+  return own.threadCreator(row.created_by) !== owner;
 }
 
 /** An external run as its preview effect reads it. Not model-facing. */
@@ -412,6 +465,8 @@ export class BulkLedger {
    */
   recordDryRun(params: {
     createdBy: string | undefined;
+    /** Who planned it: the request's principal. Required, so every run says (§3.13 B7). */
+    principal: RequestPrincipal;
     targetSystem: BulkTargetSystem;
     scope: string;
     targets: readonly PlannedTarget[];
@@ -433,8 +488,9 @@ export class BulkLedger {
     const runUndo: UndoKind | 'mixed' = undoKinds.size === 1 ? [...undoKinds][0]! : undoKinds.size === 0 ? 'none' : 'mixed';
 
     const insertRun = db.prepare(
-      `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, target_collection)
-       VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, ?)`,
+      `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, target_collection,
+         principal, mandate_id)
+       VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, ?, ?, ?)`,
     );
     const insertTarget = db.prepare(
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
@@ -446,6 +502,7 @@ export class BulkLedger {
         // guessed keys — the very values `target_key` is encrypted to protect.
         id, params.createdBy ?? null, this.engineDb.keyedHash(rulePairs(params.targetSystem, params.scope, params.targets)),
         params.targetSystem, runUndo, params.targets.length, params.atomic === true ? 1 : 0, params.targetCollection ?? null,
+        ...planner(params.principal),
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -496,6 +553,8 @@ export class BulkLedger {
    */
   recordExternalPlan(params: {
     createdBy: string | undefined;
+    /** Who planned it: the request's principal. Required, so every run says (§3.13 B7). */
+    principal: RequestPrincipal;
     host: string;
     targets: readonly ExternalPlanned[];
     contract: CapabilityContract;
@@ -519,8 +578,9 @@ export class BulkLedger {
       ).get() as { n: number };
       if (reading.n > 0) return false;
       db.prepare(
-        `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
+           principal, mandate_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
       ).run(
         id, params.createdBy ?? null,
         this.engineDb.keyedHash(rulePairs(targetSystem, params.host, params.targets)),
@@ -530,6 +590,7 @@ export class BulkLedger {
         // The start gate: nothing is read until the owner starts it (resumePreview). A plan
         // is what the model can make; a request with the host's credential is not.
         valid ? BULK_HALT_REASONS.awaitingStart : null,
+        ...planner(params.principal),
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -555,6 +616,48 @@ export class BulkLedger {
       title: `Bulk preview ${runId}`,
       nextRunAt: new Date(now).toISOString(),
     });
+  }
+
+  /**
+   * End every unapproved run whose planner has ended ({@link plannerHasEnded}): phase
+   * `aborted`, halted with {@link BULK_HALT_REASONS.mandateEnded}, and a planned run's preview
+   * trigger removed with it. Approved runs are the owner's act and stay. Returns how many ended.
+   */
+  expireEndedPlanners(own: BulkOwnership): number {
+    const rows = this.engineDb.getDb().prepare(
+      `SELECT id, principal, mandate_id, created_by, created_at FROM bulk_runs WHERE phase IN ('planned','previewed')`,
+    ).all() as Pick<RunRow, 'id' | 'principal' | 'mandate_id' | 'created_by' | 'created_at'>[];
+    let ended = 0;
+    for (const row of rows) {
+      if (row.principal === null && !own.threadsKnown) continue;
+      if (plannerHasEnded(row, own) && this.endRun(row.id)) ended += 1;
+    }
+    return ended;
+  }
+
+  /**
+   * Whether this run is refused because its planner has ended. The run is then ended as
+   * {@link expireEndedPlanners} ends it; a run from before v31 while the conversations cannot be
+   * read is refused and left as it is.
+   */
+  endIfPlannerEnded(runId: string, own: BulkOwnership): boolean {
+    const row = this.runRow(runId);
+    if (!row || !plannerHasEnded(row, own)) return false;
+    if (row.principal === null && !own.threadsKnown) return row.phase === 'planned' || row.phase === 'previewed';
+    return this.endRun(runId);
+  }
+
+  /** Ends an unapproved run; its own phase guard is what keeps an approved run, the owner's act, as it is. */
+  private endRun(runId: string): boolean {
+    const db = this.engineDb.getDb();
+    return db.transaction((): boolean => {
+      const res = db.prepare(
+        `UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ? AND phase IN ('planned','previewed')`,
+      ).run(BULK_HALT_REASONS.mandateEnded, runId);
+      if (res.changes !== 1) return false;
+      new TriggerStore(this.engineDb).remove(bulkPreviewTriggerId(runId));
+      return true;
+    })();
   }
 
   /** Counters and phase of one run. No target key, value or diff. */
@@ -983,10 +1086,11 @@ export class BulkLedger {
       // The undo writes the same host and paths as its source, under the same contract.
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, kind,
-           source_run_id, target_collection, contract_json)
-         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?)`,
+           source_run_id, target_collection, contract_json, principal, mandate_id)
+         VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, 'undo', ?, ?, ?, ?, ?)`,
       ).run(id, params.createdBy ?? null, this.engineDb.keyedHash(hashParts()), src.target_system, runUndo,
-        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json);
+        // Only the owner's route plans an undo (§3.13 E6), so the undo is the owner's.
+        planned.length, src.atomic, sourceRunId, src.target_collection, src.contract_json, ...planner(OWNER_PRINCIPAL));
       planned.forEach((t, seq) => {
         insertTarget.run(
           id, seq, this.engineDb.enc(t.key), t.change, undoFor(t.expected),

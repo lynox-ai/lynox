@@ -370,6 +370,7 @@ export class Engine {
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
@@ -1620,8 +1621,23 @@ export class Engine {
     // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
     // ledger lives there, and a registered tool with no ledger would only ever refuse.
     if (this.userConfig.bulk_runs_enabled === true && this.engineDb) {
-      this._toolContext.bulkLedger = new BulkLedger(this.engineDb);
+      const ledger = new BulkLedger(this.engineDb);
+      this._toolContext.bulkLedger = ledger;
       this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
+      // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
+      const own = this.getBulkOwnership();
+      const sweep = (): void => {
+        try {
+          ledger.expireEndedPlanners(own);
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      };
+      sweep();
+      this._mandateEnds?.onRevoke(sweep);
+      this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
+      this._bulkSweepTimer.unref?.();
     }
 
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
@@ -2399,6 +2415,19 @@ export class Engine {
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
 
+  /**
+   * What a bulk run's planner is read against (§3.13 B7). With no store of ends every mandate
+   * counts as ended; with no thread store a run from before v31 is refused and not ended.
+   */
+  getBulkOwnership(): import('./bulk-ledger.js').BulkOwnership {
+    const threads = this._threadStore;
+    return {
+      isLive: (mandateId) => this._mandateEnds?.isLive(mandateId) ?? false,
+      threadCreator: (threadId) => threads?.getThread(threadId)?.created_by,
+      threadsKnown: threads !== null,
+    };
+  }
+
   /** The subject-graph store, or null when `subject_graph_enabled` is off. Present for
    *  the R2b read surface (subjects list → footprint); reads only on the HTTP path. */
   getSubjectStore(): import('./subject-store.js').SubjectStore | null { return this._subjectStore; }
@@ -2827,6 +2856,10 @@ export class Engine {
     }
 
     // Stop prompt cleanup timer
+    if (this._bulkSweepTimer) {
+      clearInterval(this._bulkSweepTimer);
+      this._bulkSweepTimer = null;
+    }
     if (this._promptCleanupTimer) {
       clearInterval(this._promptCleanupTimer);
       this._promptCleanupTimer = null;
