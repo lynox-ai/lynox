@@ -25,8 +25,10 @@ import { maskSecretPatterns } from './secret-store.js';
  * - `returned` / `failed` — a tool call's outcome: it returned a result, or it threw. A
  *   returned call is not called done: the result is the tool's own text, and a tool that
  *   asks before it sends returns one when the answer was no.
+ * - `read` — a mandate read through a route (D15): one row, written before the answer, and
+ *   the read is not answered without it. A read has no outcome row.
  */
-export type AuditPhase = 'attempt' | 'done' | 'refused' | 'returned' | 'failed';
+export type AuditPhase = 'attempt' | 'done' | 'refused' | 'returned' | 'failed' | 'read';
 
 export interface AuditEntry {
   readonly principal: RequestPrincipal;
@@ -98,6 +100,16 @@ export function httpTarget(method: string, url: string): string {
   } catch {
     return `${method} <unparsed url>`;
   }
+}
+
+/**
+ * What a read row names as its target: the request's own path on this instance, without the
+ * query (`URL.pathname` never carries one). Ids stay readable, unlike in `httpTarget`: which
+ * thread or contact was read is what the row is for, and these are the instance's own names,
+ * not a third party's keys. Known secret shapes are masked all the same.
+ */
+export function requestPathTarget(pathname: string): string {
+  return maskSecretPatterns(pathname, { includeGeneric: true });
 }
 
 /** The fixed text a mandate's act gets when its trail cannot be written. */

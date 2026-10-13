@@ -77,7 +77,7 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
-import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
+import { newCorrelationId, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
@@ -1968,6 +1968,28 @@ export class LynoxHTTPApi {
     return entry;
   }
 
+  /**
+   * A mandate's read (D15, PRD §3.6 and §7(o)): one `read` row for every GET or HEAD of the
+   * `user` scope, written by the dispatcher before the handler runs, so a route is covered by
+   * being registered. The action is the route as registered, the target the path; never the
+   * query or the answer. The owner's reads leave no row. `false` when the row cannot be
+   * written: the dispatcher has answered 503 and the read is not answered, as a write is not.
+   */
+  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, scope: RouteScope | undefined, routePath: string, pathname: string): boolean {
+    if ((method !== 'GET' && method !== 'HEAD') || scope !== 'user') return true;
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return true;
+    try {
+      const log = this.engine?.getAuditLog() ?? null;
+      if (log === null) throw new Error('no audit log');
+      log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname), phase: 'read', correlationId: newCorrelationId() });
+    } catch {
+      errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
+      return false;
+    }
+    return true;
+  }
+
   /** The outcome row of a request trail: `done` when the act happened, `refused` otherwise. */
   private _endRequestTrail(trail: AuditEntry | null, phase: 'done' | 'refused', outcome?: string): void {
     if (trail === null) return;
@@ -3103,6 +3125,7 @@ export class LynoxHTTPApi {
       const stance = this.staticRouteStances.get(stanceKey);
       if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
       if (this._refusedByStance(req, res, stance)) return;
+      if (!this._recordedMandateRead(req, res, method, this.staticRouteScopes.get(stanceKey), stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname)) return;
       await staticHandler(req, res, {}, body);
       return;
     }
@@ -3122,6 +3145,7 @@ export class LynoxHTTPApi {
         }
         if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, route.stance)) return;
+        if (!this._recordedMandateRead(req, res, method, route.scope, route.path, pathname)) return;
         await route.handler(req, res, params, body);
         return;
       }
