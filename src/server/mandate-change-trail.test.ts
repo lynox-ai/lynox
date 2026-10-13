@@ -174,6 +174,23 @@ describe('a mandate\'s changes in the actor trail (real engine)', () => {
     }
   });
 
+  it('records failed for a change whose handler threw before answering', async () => {
+    const routes = inner().staticRoutes;
+    const real = routes.get('POST /api/push/subscribe');
+    if (real === undefined) throw new Error('fixture: no POST /api/push/subscribe');
+    routes.set('POST /api/push/subscribe', async () => { throw new Error('broke mid-change'); });
+    try {
+      const res = await subscribe(mandateCookie, 'https://fcm.googleapis.com/fcm/send/ida-threw');
+      await res.arrayBuffer();
+      expect(res.status).toBe(500);
+      const got = await newRows(2);
+      expect(got.map((r) => r.phase)).toEqual(['attempt', 'failed']);
+      expect(got[0]!.correlation_id).toBe(got[1]!.correlation_id);
+    } finally {
+      routes.set('POST /api/push/subscribe', real);
+    }
+  });
+
   it('writes a read row, not a change, for a GET', async () => {
     const res = await ask('GET', '/api/threads', mandateCookie);
     await res.arrayBuffer();

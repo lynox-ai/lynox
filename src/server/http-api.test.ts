@@ -14738,11 +14738,25 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
         const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
         store.register({ ...store.get(PROFILE)!, created_by: TAG });
         mockSecretSet.mockClear();
+        mockExchangeToken.mockClear();
         const res = await complete(cookie);
         expect(res.status).toBe(503);
         expect(await res.text()).toContain('Nothing was stored');
+        // The code is not spent at the provider either: the attempt goes before the exchange.
+        expect(mockExchangeToken).not.toHaveBeenCalled();
         expect(mockSecretSet).not.toHaveBeenCalled();
         expect(store.get(PROFILE)?.oauth_grant?.connected_by).not.toBe(TAG);
+      });
+
+      it('records attempt and failed when the provider refuses the exchange, which spent the code', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        mockExchangeToken.mockResolvedValueOnce({ ok: true, status: 400, responseOk: false, text: '' });
+        expect((await complete(cookie)).status).toBe(502);
+        expect(recorded.map((e) => [e.phase, e.action, e.target])).toEqual([
+          ['attempt', 'GET /api/oauth/callback', `profile:${PROFILE}`],
+          ['failed', 'GET /api/oauth/callback', `profile:${PROFILE}`],
+        ]);
       });
 
       it('records nothing for the owner\'s consent', async () => {
@@ -15578,7 +15592,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
    *  the target is the request's path, and the outcome row follows when the answer closes, so it
    *  is waited for. `closingAction` is the outcome row's action where the handler names what the
    *  request did beyond its action (a delete and the run it stopped, the trigger a start named). */
-  async function expectPair(action: string, target: string, outcome: 'done' | 'refused', closingAction = action): Promise<void> {
+  async function expectPair(action: string, target: string, outcome: 'done' | 'refused' | 'failed', closingAction = action): Promise<void> {
     for (let i = 0; i < 50 && rows().length < 2; i++) await new Promise((r) => setTimeout(r, 5));
     const r = rows();
     expect(r.map((x) => x.phase)).toEqual(['attempt', outcome]);
@@ -15799,7 +15813,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       await expectPair('POST /api/triggers/:id/run', '/api/triggers/trg-full/run', 'done', 'POST /api/triggers/:id/run trigger:trg-full-id');
     });
 
-    it('records refused when the start is refused, and when it throws', async () => {
+    it('records refused when the start is refused, and failed when it throws', async () => {
       const refused = loop(() => Promise.resolve({ ok: false, reason: 'already_running' }));
       await withEngine({ getWorkerLoop: () => refused.loop, getTaskManager: () => tm }, async () => {
         asMandate();
@@ -15812,7 +15826,8 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         asMandate();
         expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(500);
       });
-      await expectPair('POST /api/triggers/:id/run', '/api/triggers/trg-full-id/run', 'refused', 'POST /api/triggers/:id/run trigger:trg-full-id');
+      // A 500 is not a refusal: the start broke while it was being made.
+      await expectPair('POST /api/triggers/:id/run', '/api/triggers/trg-full-id/run', 'failed', 'POST /api/triggers/:id/run trigger:trg-full-id');
     });
 
     it('answers 503, mints no marker and starts nothing when the attempt cannot be written', async () => {

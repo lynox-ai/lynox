@@ -78,7 +78,7 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
-import { newCorrelationId, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { newCorrelationId, requestPathTarget, type AuditEntry, type AuditPhase } from '../core/audit-log.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
@@ -2034,20 +2034,27 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Write the outcome row of an open trail, once its handler has finished: `done` when the
-   * handler answered 2xx, `refused` for any other answer or none (it threw before answering).
+   * Write the outcome row of an open trail, once its handler has finished:
+   * - `done` when the handler answered 2xx;
+   * - `refused` for any other answer below 500 (a 4xx): the change was turned down;
+   * - `failed` when it answered 5xx, or nothing (it threw before answering): the change broke
+   *   while it was being made, and a part of it may have happened.
    * Run after the handler, not when the connection closes: a client that leaves early does not
-   * decide the outcome, and the act it started is still recorded. For a streamed answer, `done`
-   * means the change was accepted and its stream began; what the run does later is in its own
-   * trail. A handler's note names what the request did beyond its action, on this row only.
+   * decide the outcome, and the act it started is still recorded. A handler that awaits its
+   * whole run (a chat run) is closed only when the run ends, so its outcome row can follow the
+   * attempt by minutes; a process that stops in between leaves the attempt without one. For a
+   * streamed answer, `done` means the change was accepted and its stream began; what the run did
+   * is in its own trail. A handler's note names what the request did beyond its action, on this
+   * row only.
    */
   private _closeTrail(req: IncomingMessage, res: ServerResponse): void {
     const entry = this._openTrails.get(req);
     if (entry === undefined) return;
     this._openTrails.delete(req);
-    const done = res.headersSent && res.statusCode >= 200 && res.statusCode < 300;
+    const status = res.headersSent ? res.statusCode : 0;
+    const phase: AuditPhase = status >= 200 && status < 300 ? 'done' : status === 0 || status >= 500 ? 'failed' : 'refused';
     const note = this._requestTrailNotes.get(req);
-    const closing: AuditEntry = { ...entry, phase: done ? 'done' : 'refused', action: note === undefined ? entry.action : `${entry.action} ${note}` };
+    const closing: AuditEntry = { ...entry, phase, action: note === undefined ? entry.action : `${entry.action} ${note}` };
     try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
   }
 
@@ -10088,6 +10095,15 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A mandate's consent spends the code at the provider and writes tokens into the vault: a
+      // change, recorded like one (PRD §3.6, §7(c)). The attempt goes before the exchange, so the
+      // code is not spent unrecorded. This route answers before dispatch, so it opens its trail
+      // itself; the caller closes it.
+      if (by.tag !== 'owner' && !this._openTrail(req, reader, `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, `profile:${signed.profileId}`)) {
+        sendOAuthHtml(res, 503, 'This connection cannot be recorded in the instance log right now. Nothing was stored.');
+        return;
+      }
+
       const exchanged = await exchangeToken({
         endpoint: vetting,
         params: authorizationCodeParams({
@@ -10129,14 +10145,6 @@ export class LynoxHTTPApi {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
         return;
       }
-      // A mandate's consent writes tokens into the vault: a change, recorded like one (PRD §3.6,
-      // §7(c)). This route answers before dispatch, so it opens its trail itself; the caller
-      // closes it.
-      if (by.tag !== 'owner' && !this._openTrail(req, reader, `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, `profile:${signed.profileId}`)) {
-        sendOAuthHtml(res, 503, 'This connection cannot be recorded in the instance log right now. Nothing was stored.');
-        return;
-      }
-
       // Guarded, and the message is deliberately NOT "nothing was stored".
       //
       // These are two synchronous SQLite writes. If the second one throws —
