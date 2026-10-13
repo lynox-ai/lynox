@@ -108,6 +108,28 @@ skipped, with a line on stderr saying so.
 So if you need an upload to stop **now** and you edited the file by hand, restart lynox. Do not
 assume the edit is already in effect.
 
+### Which folder in Drive
+
+The first upload creates a folder called `lynox-backups` in your Drive. lynox remembers it by its
+id, in the file `gdrive-backup-root` in the data directory, and from then on uploads only into
+that folder. It never takes over another folder of the same name, whoever created it.
+
+lynox creates a new `lynox-backups` folder, and remembers that one instead, when:
+
+- it has not remembered a folder yet. That includes the first upload after updating from a
+  version that did not remember one.
+- the remembered folder is gone, in the bin or no longer yours, or you connected a different
+  Google account.
+
+The earlier folder and the backups in it stay in Drive. lynox does not delete backups in Drive on
+a schedule (`backup_retention_days` applies to local backups only). Delete them yourself, or
+disconnect Google: that deletes backup files in every `lynox-backups` folder, the earlier ones
+included, as described under [Removing the copies in Drive](#removing-the-copies-in-drive).
+
+If lynox cannot write the `gdrive-backup-root` file, the upload fails and the log says so, in a
+line starting with `[lynox:backup] Google Drive upload failed`. The folder it created for that
+upload is deleted again. The local backup is not affected.
+
 ### Turning it off again
 
 Set `backup_gdrive` to `false` (or remove the line). New backups are no longer uploaded.

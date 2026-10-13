@@ -401,7 +401,7 @@ describe('the policy reaches every module that threads it', () => {
       getAccessToken: async () => 'access-token',
       hasScope: () => true,
       hostPolicy: DENY,
-    });
+    }, { rootPin: { read: () => null, write: () => {} } });
     const res = await up.upload('/tmp/does-not-matter', {} as never);
     expect(res.success).toBe(false);
     expect(res.error ?? '').toMatch(/network_policy=deny-all/);
