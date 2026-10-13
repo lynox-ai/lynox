@@ -336,7 +336,7 @@ export function createStepStreamHandler(opts: {
    *  calls are cheap re-checks, never a mis-attribution. */
   onToolActivity?: (() => void) | undefined;
 }): (event: StreamEvent) => void {
-  const pending: Array<{ name: string; input: unknown; start: number }> = [];
+  const pending: Array<{ name: string; input: unknown; start: number; toolUseId?: string | undefined }> = [];
   return (event: StreamEvent): void => {
     if (event.type === 'turn_end') {
       opts.onTokens(event.usage.input_tokens, event.usage.output_tokens);
@@ -348,9 +348,14 @@ export function createStepStreamHandler(opts: {
     const record = opts.recordToolCall;
     if (!record) return;
     if (event.type === 'tool_call' && !event.subAgent) {
-      pending.push({ name: event.name, input: event.input, start: Date.now() });
+      pending.push({ name: event.name, input: event.input, start: Date.now(), toolUseId: event.toolUseId });
     } else if (event.type === 'tool_result' && !event.subAgent) {
-      const idx = pending.findIndex(p => p.name === event.name);
+      // By id first. Results arrive in completion order, so pairing two calls of
+      // the same tool by name gave each row the other call's input. The name is
+      // only a fallback for a call that carried no id, and it never takes a call
+      // that did: that one belongs to the result bearing its id.
+      let idx = event.toolUseId !== undefined ? pending.findIndex(p => p.toolUseId === event.toolUseId) : -1;
+      if (idx < 0) idx = pending.findIndex(p => p.name === event.name && p.toolUseId === undefined);
       const matched = idx >= 0 ? pending.splice(idx, 1)[0] : undefined;
       record({
         toolName: event.name,

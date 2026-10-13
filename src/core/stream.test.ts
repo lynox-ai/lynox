@@ -61,6 +61,7 @@ describe('StreamProcessor', () => {
         name: 'bash',
         input: { command: 'ls' },
         agent: 'test-agent',
+        toolUseId: 'tool_1',
       });
     });
 

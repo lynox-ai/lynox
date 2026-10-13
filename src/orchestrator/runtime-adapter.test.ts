@@ -1617,6 +1617,33 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'first' });
   });
 
+  it('pairs by toolUseId when results arrive out of call order', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://a.example' }, agent: 'step', toolUseId: 'tu_a' });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://b.example' }, agent: 'step', toolUseId: 'tu_b' });
+    // B finishes first.
+    h({ type: 'tool_result', name: 'http_request', result: 'from-b', agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-a', agent: 'step', toolUseId: 'tu_a' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).url, c.outputJson])).toEqual([
+      ['https://b.example', 'from-b'],
+      ['https://a.example', 'from-a'],
+    ]);
+  });
+
+  it('the name fallback never takes a call that carried an id', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'bash', input: { command: 'with-id' }, agent: 'step', toolUseId: 'tu_1' });
+    h(toolCall('bash', { command: 'without-id' }));
+    h(toolResult('bash', 'out-without-id'));
+    h({ type: 'tool_result', name: 'bash', result: 'out-with-id', agent: 'step', toolUseId: 'tu_1' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).command, c.outputJson])).toEqual([
+      ['without-id', 'out-without-id'],
+      ['with-id', 'out-with-id'],
+    ]);
+  });
+
   it('does NOT record forwarded sub-agent events (only the step agent\'s own calls)', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });

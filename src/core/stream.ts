@@ -162,6 +162,7 @@ export class StreamProcessor {
       name: toolBlock.name,
       input: toolBlock.input,
       agent: this.agentName,
+      toolUseId: toolBlock.id,
     });
   }
 

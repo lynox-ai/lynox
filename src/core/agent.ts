@@ -3856,7 +3856,7 @@ export class Agent implements IAgent {
       if (this._needsInputStreamed.has(needsInput.reason)) throw needsInput.reason;
       const masked = this._maskedNeedsInput(needsInput.reason);
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, isError: true });
+        await this.onStream({ type: 'tool_result', name: toExecute[askedAt]!.name, result: masked.message, agent: this.name, toolUseId: toExecute[askedAt]!.id, isError: true });
       }
       throw masked;
     }
@@ -3929,7 +3929,7 @@ export class Agent implements IAgent {
     const skip = this._repeatGuard.check(guardKey);
     if (skip) {
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, isError: true });
+        await this.onStream({ type: 'tool_result', name: tc.name, result: skip.escalatedResult, agent: this.name, toolUseId: tc.id, isError: true });
       }
       return { type: 'tool_result', tool_use_id: tc.id, content: skip.escalatedResult, is_error: true };
     }
@@ -4223,7 +4223,7 @@ export class Agent implements IAgent {
         // headless run's owner learns of a refused write only through it (the step itself
         // still completes). Same shape as the escalated-skip result above.
         if (this.onStream) {
-          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, isError: true });
+          await this.onStream({ type: 'tool_result', name: tc.name, result: refusal, agent: this.name, toolUseId: tc.id, isError: true });
         }
         return {
           type: 'tool_result',
@@ -4516,7 +4516,7 @@ export class Agent implements IAgent {
       );
 
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });
+        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id });
       }
       return {
         type: 'tool_result',
@@ -4570,7 +4570,7 @@ export class Agent implements IAgent {
         // terminate the run. Emitting it here triggers the UI's global toast
         // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
         // next to a still-streaming response.
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, isError: true });
+        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the
