@@ -15231,6 +15231,25 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       .toBe(by === null ? undefined : tokenFingerprint(by));
     expect(grant?.minted_for).toBe(fpFor === null ? undefined : tokenFingerprint(fpFor));
   });
+
+  // Built new: no field of the replaced grant survives, a field this code does not know included.
+  it('keeps no field of the grant a new consent replaced', async () => {
+    const old = {
+      origin: 'callback', state: 'revoked', revoked_fp: 'dead-fp', revoked_at: '2026-01-01T00:00:00.000Z',
+      minted_by: 'old-client-fp', minted_for: 'old-token-fp', connected_by: 'mandate:eva@kanzlei.example',
+      connected_mandate_id: 'm-old', a_future_field: 'from the old grant',
+    } as import('../core/api-store.js').OAuthGrantRecord;
+    const { cookie, store } = await arrange({ grant: old });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const grant = store.get(PROFILE)?.oauth_grant ?? {};
+    expect(Object.keys(grant).sort()).toEqual(['connected_by', 'minted_by', 'minted_for', 'origin', 'state', 'written']);
+    expect(grant).toMatchObject({ origin: 'callback', state: 'connected', connected_by: 'owner' });
+  });
 });
 
 // PRD customer-granted-operator-access §3.12, §3.13 (piece H1a). Until the recipient's
