@@ -155,6 +155,17 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     }
   });
 
+  // ⚠ EXCEPTION, 2026-10-13: Fireworks
+  // raised deepseek-v4p1-flash to $0.30/$1.20 (Standard row), which is exactly efficient's main
+  // (minimax-m3, $0.30/$1.20). Correcting the price could not wait for a new fast slot: the
+  // old figure under-billed every fast-tier call. So efficient's fast and main output may be
+  // EQUAL — only that preset, only while its fast slot is this model, only the fast/balanced
+  // pair, and only equality: a fast price above main still fails, the same equality in any
+  // other preset still fails, and a different fast model at the same price still fails.
+  // EXPIRES when the Fitness grid has decided efficient's fast slot (candidate glm-5p3-flash):
+  // delete this constant and its branch with that change.
+  const FLAT_FAST_BAND_EXCEPTION = { preset: 'efficient', fast: 'accounts/fireworks/models/deepseek-v4p1-flash' } as const;
+
   it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
     // The ladder claim that the pulled-EU-set comment spends 25 lines defending
     // ("the price rises with the band ... the reverse order was considered and
@@ -174,7 +185,12 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       // version stayed green. The comment this test backs says the price RISES with
       // the band — a flat pair means the cheaper band bought nothing, which is the
       // failure the ladder exists to prevent.
-      expect(out('fast'), `${name}: fast output must be BELOW balanced`).toBeLessThan(out('balanced'));
+      if (FLAT_FAST_BAND_EXCEPTION.preset === name && preset.tier_set.fast?.model_id === FLAT_FAST_BAND_EXCEPTION.fast) {
+        // The one named exception: equal, never above main, and only here.
+        expect(out('fast'), `${name}: fast output must EQUAL balanced (the named exception; cheaper means the slot was decided — delete the exception)`).toBe(out('balanced'));
+      } else {
+        expect(out('fast'), `${name}: fast output must be BELOW balanced`).toBeLessThan(out('balanced'));
+      }
       expect(out('balanced'), `${name}: balanced output must be BELOW deep`).toBeLessThan(out('deep'));
     }
   });

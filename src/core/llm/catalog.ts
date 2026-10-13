@@ -524,10 +524,10 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         id: 'accounts/fireworks/models/deepseek-v4p1-flash',
         label: 'DeepSeek v4.1 Flash',
         context_window: 1_000_000,
-        pricing: { input: 0.22, output: 0.66 },
+        pricing: { input: 0.30, output: 1.20 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; the FAST slot of efficient and balanced since 2026-09-30, replacing deepseek-v4-flash-0731 after the provider withdrew it (404 measured live). Same hybrid-reasoning defect as its predecessor: empty answer below the small-budget bound on hard prompts without the reasoning suppression, which is declared for it. Priced $0.22/$0.66 per 1M (cached 0.007), verified 2026-09-30 on the provider\'s public MODEL PAGE — the pricing OVERVIEW page does not carry this id, which is a different page. It costs MORE than the predecessor it replaces (0.14/0.28).',
+        notes: '1M context; the FAST slot of efficient and balanced since 2026-09-30, replacing deepseek-v4-flash-0731 after the provider withdrew it (404 measured live). Same hybrid-reasoning defect as its predecessor: empty answer below the small-budget bound on hard prompts without the reasoning suppression, which is declared for it. Priced $0.30/$1.20 per 1M (cached 0.006), the Standard row of the provider\'s serverless pricing page, read 2026-10-13 (the 2026-09-30 model-page figure $0.22/$0.66 was too low). It costs MORE than the predecessor it replaces (0.14/0.28).',
       },
       {
         id: 'accounts/fireworks/models/glm-5p3',

@@ -1269,17 +1269,19 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // on the wire before a model claims it), so it stays text-only until that has run. The
     // direction is safe: images are refused on this slot, not silently mishandled.
     features: FIREWORKS_TEXT_FEATURES,
-    // Read off the provider's public MODEL PAGE 2026-09-30 (the pricing OVERVIEW
-    // page does not carry this id at all — a different page). $0.22/M uncached, $0.007/M
-    // cached, $0.66/M output. The mapping was verified against two models whose rows
-    // already existed — glm-5p2 (1.40/0.14/4.40) and minimax-m3 (0.30/0.06/1.20) —
-    // so `input` is the uncached rate and `cacheRead` the cached one, not guessed.
+    // Fireworks Standard row of docs.fireworks.ai/serverless/pricing, raw text 2026-10-13:
+    // "DeepSeek V4.1 Flash $0.30 / $0.006 / $1.20" (input / cached input / output). Standard,
+    // not the "(US)" row ($0.45/$0.009/$1.80): Standard is the default mode ("No service_tier
+    // parameter is needed"), and this engine sends no `service_tier` — read, not measured
+    // against a bill.
+    // The 2026-09-30 figure ($0.22/$0.007/$0.66, read off the then model page, now a 404)
+    // under-billed every fast-tier call: 1.36x the input and 1.82x the output.
     //
     // ⚠ NOT the predecessor's price, which is why carrying it forward would have been
     // wrong rather than merely unverified: -0731 was 0.14/0.28, so this successor is
-    // 1.6x the input and 2.4x the OUTPUT. A carried number would have under-billed
+    // 2.14x the input and 4.29x the OUTPUT. A carried number would have under-billed
     // every fast-tier call on both presets.
-    pricing: { input: 0.22, output: 0.66, cacheWrite: 0.22, cacheRead: 0.007 },
+    pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.006 },
     uiLabel: 'DeepSeek v4.1 Flash',
     provenance: 'CN',
     // Same hybrid-reasoning defect as the -0731 predecessor it replaces, measured on
