@@ -397,11 +397,9 @@ function persistChatNow(): void {
 	}
 	if (typeof localStorage === 'undefined') return;
 	const root = readPersistedRoot();
-	// A thread the server deleted is not written back while it is still on screen.
-	if (sessionId !== null && _deletedOnServer.has(sessionId)) {
-		if (root.sessionId === sessionId) { root.sessionId = null; writePersistedRoot(root); }
-		return;
-	}
+	// A thread the server deleted is not written back while it is still on screen. Its saved
+	// copy and the pointer to it went when the 410 arrived (`dropPersistedThread`).
+	if (sessionId !== null && _deletedOnServer.has(sessionId)) return;
 	root.sessionId = sessionId;
 	if (sessionId) {
 		root.threads[sessionId] = messages;
