@@ -3383,7 +3383,12 @@ describe('LynoxHTTPApi', () => {
     const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
     const engineRef = (): { getRunBufferManager: () => unknown; getRunExecutor: () => unknown; getThreadStore: () => unknown } =>
       (api as unknown as { engine: { getRunBufferManager: () => unknown; getRunExecutor: () => unknown; getThreadStore: () => unknown } }).engine;
-    afterEach(() => { api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL); });
+    // Put back the cookie-borne resolver, not a constant owner: the blocks after this one read
+    // principals from real session cookies.
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    let cookieResolver: Resolver;
+    beforeEach(() => { cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+    afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); });
 
     async function readUntilEnd(res: Response, ms = 3000): Promise<{ sse: string; closed: boolean }> {
       const reader = res.body!.getReader();
@@ -3411,6 +3416,8 @@ describe('LynoxHTTPApi', () => {
         const origEx = ref.getRunExecutor;
         const origThreads = ref.getThreadStore;
         ref.getRunExecutor = (): unknown => ex;
+        const origEnds = (ref as unknown as { getMandateEnds: () => unknown }).getMandateEnds;
+        (ref as unknown as { getMandateEnds: () => unknown }).getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
         // A thread the mandate started, so its run is let in (§3.13 E1).
         ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
         api.setPrincipalResolverForTesting(() => principal);
@@ -3444,9 +3451,44 @@ describe('LynoxHTTPApi', () => {
           if (prevKey === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = prevKey;
           ref.getRunExecutor = origEx;
           ref.getThreadStore = origThreads;
+          (ref as unknown as { getMandateEnds: () => unknown }).getMandateEnds = origEnds;
         }
       });
     }
+
+    it('does not start a mandate\'s chat run whose grant ended while the request was on its way', async () => {
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(5);
+      const ref = engineRef() as ReturnType<typeof engineRef> & { getMandateEnds: () => unknown };
+      const origEx = ref.getRunExecutor;
+      const origThreads = ref.getThreadStore;
+      const origEnds = ref.getMandateEnds;
+      ref.getRunExecutor = (): unknown => ex;
+      ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
+      // The seam skips the door's check, so this stands for a grant that ended after it.
+      ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => false });
+      api.setPrincipalResolverForTesting(() => EVA);
+      const prevKey = process.env['ANTHROPIC_API_KEY'];
+      process.env['ANTHROPIC_API_KEY'] = 'test-only-placeholder';
+      mockSessionRun.mockClear();
+      try {
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) });
+        const out = await readUntilEnd(res);
+        expect(out.closed).toBe(true);
+        expect(mockSessionRun).not.toHaveBeenCalled();
+        expect(ex.activeCount).toBe(0);
+        // Twin: the same request on a live grant runs.
+        ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
+        const live = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) });
+        await readUntilEnd(live);
+        expect(mockSessionRun).toHaveBeenCalledOnce();
+      } finally {
+        if (prevKey === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = prevKey;
+        ref.getRunExecutor = origEx;
+        ref.getThreadStore = origThreads;
+        ref.getMandateEnds = origEnds;
+      }
+    });
 
     it('closes a mandate\'s tail of a run when its grant ends, and leaves the run and the owner\'s tail', async () => {
       const { RunBufferManager } = await import('../core/run-buffer.js');
@@ -15816,7 +15858,9 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
         await gate;
         return 'done';
       });
-      asMandate();
+      // A run starts only under a live grant (§3.13 B8), as a cookie's mandate always names one.
+      swap('getMandateEnds', () => ({ record: (): void => {}, isLive: (): boolean => true }));
+      api.setPrincipalResolverForTesting(() => ({ ...MANDATE, mandateId: 'TEST-GRANT-1' }));
       const res = await jsonFetch(`/api/sessions/${OWN}/run`, { method: 'POST', body: JSON.stringify({ task: 'hi', protocol: 1 }) });
       expect(res.status).toBe(200);
       let asked = prompts.getPending(OWN);

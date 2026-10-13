@@ -159,6 +159,9 @@ function makeEngine(opts?: {
     getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
     // The park masks the question for the OFF-BOX copy, so this method is on the path now.
     getSecretStore: vi.fn(() => null),
+    // The real Engine always has this. Every grant here is live: a mandate's run reaches the
+    // worker only past the door, and the tests of an ended grant pass their own engine.
+    getMandateEnds: vi.fn(() => ({ isLive: () => true })),
   } as unknown as Engine;
 }
 
@@ -550,7 +553,7 @@ describe('WorkerLoop', () => {
   });
 
   describe('handRunCovers', () => {
-    const EVA = { triggerId: 't', principal: { kind: 'mandate' as const, email: 'eva@kanzlei.example' } };
+    const EVA = { triggerId: 't', principal: { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' } };
     const M = 'mandate:eva@kanzlei.example';
     it('covers the proposal its holder set up or last changed', () => {
       expect(handRunCovers(EVA, { created_by: M })).toBe(true);
@@ -2514,8 +2517,8 @@ describe('WorkerLoop', () => {
 
   // ---- the one-time hand-run door (PRD customer-granted-operator-access §3.12 point 6) ----
   describe('the one-time hand-run door', () => {
-    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
-    const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example' };
+    const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
+    const ARNO = { kind: 'mandate' as const, email: 'arno@kanzlei.example', mandateId: 'TEST-GRANT-ARNO' };
     /** Eva's unstamped proposal: an autonomous agent action, the strictest backstop. */
     const proposal = (over?: Partial<TriggerRecord>): TriggerRecord => makeTask({
       id: 'hr-prop', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example',
@@ -2782,7 +2785,7 @@ describe('WorkerLoop', () => {
       id: 't-prop-wf', pipeline_id: template['id'] as string, effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined,
       created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined,
     });
-    const marker = loop.claimHandRunMinter()('t-prop-wf', { kind: 'mandate', email: 'eva@kanzlei.example' });
+    const marker = loop.claimHandRunMinter()('t-prop-wf', { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' });
     await (loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> }).executeTask(trigger, null, marker);
 
     expect(mockRunManifest).not.toHaveBeenCalled();
@@ -2807,7 +2810,7 @@ describe('WorkerLoop', () => {
     const exec = loop as unknown as { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
     const page = '<html><body><main>Headline One</main></body></html>';
     mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
-    await exec.executeTask(proposalRow, null, loop.claimHandRunMinter()('t-watch-prop', { kind: 'mandate', email: 'eva@kanzlei.example' }));
+    await exec.executeTask(proposalRow, null, loop.claimHandRunMinter()('t-watch-prop', { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' }));
     expect(analysisSession.run).toHaveBeenCalledTimes(1);
     expect(updateWatchConfig).not.toHaveBeenCalled();
     mockFetchPinned.mockResolvedValueOnce(new Response(page, { status: 200 }));
@@ -2983,7 +2986,7 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       makeNotificationRouter(), 60_000,
     );
     closers.unshift(() => { loop.stop(); });
-    const marker = loop.claimHandRunMinter()('hr-ask', { kind: 'mandate', email: 'eva@kanzlei.example' });
+    const marker = loop.claimHandRunMinter()('hr-ask', { kind: 'mandate', email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' });
     expect(await loop.runTriggerNow('hr-ask', marker)).toEqual({ ok: true });
     for (let i = 0; i < 200 && !store.getPending(SESSION_ID); i++) await new Promise((r) => setTimeout(r, 5));
     const row = store.getPending(SESSION_ID);
@@ -3421,7 +3424,7 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
 // ---------------------------------------------------------------------------
 describe('a test run by hand while the stamp changes underneath it', () => {
   const M = 'mandate:eva@kanzlei.example';
-  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
   let dir: string;
   let history: RunHistory;
   let engineDb: EngineDb;
@@ -3739,7 +3742,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
 
   it('255-e twin: a mandate\'s answer from before v60 names no grant and is let go the same way', async () => {
     // A store that calls every grant live: what refuses here is that the question names none.
-    const h = parkedAfterRestart({ principal: EVA, handRun: true }, true, undefined, () => true);
+    const h = parkedAfterRestart({ principal: { kind: 'mandate', email: EVA.email }, handRun: true }, true, undefined, () => true);
     expect(h.store.answerUser(h.promptId, 'A')).toBe(true);
     const create = h.engine.createSession as unknown as ReturnType<typeof vi.fn>;
     const calls = create.mock.calls.length;
@@ -3813,7 +3816,7 @@ describe('a test run by hand while the stamp changes underneath it', () => {
  * (agent.test.ts); these pin that the worker hands the starter to every build site.
  */
 describe('hand runs carry the starter\'s principal', () => {
-  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example' };
+  const EVA = { kind: 'mandate' as const, email: 'eva@kanzlei.example', mandateId: 'TEST-GRANT-EVA' };
   type Exec = { executeTask: (t: TriggerRecord, c: number | null, m?: HandRunMarker) => Promise<void> };
   const runAgentRow = (over: Partial<TriggerRecord>): TriggerRecord => makeTask({
     id: 'hr-lock', effect: 'run_agent', created_by: 'mandate:eva@kanzlei.example',
@@ -3846,6 +3849,33 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(session.run).toHaveBeenCalledTimes(1);
     expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
     expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  it.each([
+    ['ended by the time its turn starts, is stopped before the provider', false],
+    ['still live, runs', true],
+  ] as const)('a run whose starter\'s grant is %s (§3.13 B8)', async (_what, live) => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, engine, session } = setup(task);
+    // The grant was live when the run was let in, and is asked again right before the turn.
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: (id: string) => live && id === 'TEST-GRANT-EVA' });
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    if (live) {
+      expect(session.run).toHaveBeenCalledTimes(1);
+    } else {
+      expect(session.run).not.toHaveBeenCalled();
+      expect(engine.getTaskManager()!.recordTaskRun).toHaveBeenCalledWith('hr-lock', expect.anything(), 'stopped', expect.anything());
+    }
+  });
+
+  it('a run the owner started is not asked about any grant', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ created_by: 'owner', confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, engine, session } = setup(task);
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(session.run).toHaveBeenCalledTimes(1);
   });
 
   it('a run the mandate started is not retried when it fails, and is the mandate\'s while it runs', async () => {
@@ -3966,6 +3996,20 @@ describe('hand runs carry the starter\'s principal', () => {
     await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
     expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
     expect(runOptsOf(session)?.['principal']).toEqual(EVA);
+  });
+
+  it('a watch whose starter\'s grant ended before its analysis is stopped before the provider (§3.13 B8)', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({
+      source: 'watch', confirmed_at: undefined,
+      watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }),
+    });
+    const { loop, engine, session } = setup(task);
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    mockFetchPinned.mockResolvedValueOnce(new Response('<html><body><main>One</main></body></html>', { status: 200 }));
+    await (loop as unknown as Exec).executeTask(task, null, loop.claimHandRunMinter()('hr-lock', EVA));
+    expect(sessionOptsOf(engine)?.['principal']).toEqual(EVA);
+    expect(session.run).not.toHaveBeenCalled();
   });
 
   // RF-1 (PRD H2 row): a run_workflow proposal of a mandate, on a workflow the owner stamped,

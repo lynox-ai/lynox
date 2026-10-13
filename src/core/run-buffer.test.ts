@@ -150,6 +150,8 @@ describe('closeEndedTails', () => {
     buf.subscribe(anon.onEvent, anon.onEnd);
     expect(mgr.closeEndedTails(() => true)).toBe(0);
     expect(mgr.closeEndedTails(() => false)).toBe(1);
+    // A closed tail is gone: the next sweep does not close it again.
+    expect(mgr.closeEndedTails(() => false)).toBe(0);
     expect(eva.close).toHaveBeenCalledOnce();
     expect(owner.close).not.toHaveBeenCalled();
     expect(buf.ended).toBe(false);

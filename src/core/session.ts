@@ -396,6 +396,13 @@ export class Session {
    *  compaction's session-shared mutations — the cheap-tier `_model`/agent swap
    *  AND the buffer reset+reload. Cleared when the compaction settles. */
   private _compactionInFlight: Promise<void> | null = null;
+  /**
+   * A stop that arrived while this turn had not yet reached the agent. `Agent.send` starts
+   * each run on a fresh controller, so an `abort()` landing in the awaits before it (a
+   * compaction in flight, retrieval, hooks) would reach no run at all. Cleared when a user
+   * turn begins, read right before its send.
+   */
+  private _stopBeforeSend = false;
   /** One-shot guard: the "prepare & compact" offer is streamed once per fill,
    *  reset when usage drops back below COMPACT_PREPARE_PERCENT or after a
    *  compaction, so it can re-offer on the next fill but doesn't nag every turn. */
@@ -723,6 +730,7 @@ export class Session {
     // Before anything that could rebuild the agent below, so every rebuild of this run is
     // built for this run's principal. Absent = keep the one before (see `RunOptions`).
     if (runOptions?.principal !== undefined) this._principal = runOptions.principal;
+    if (runOptions?.internal !== true) this._stopBeforeSend = false;
 
     // Serialize user turns behind an in-flight background auto-compaction: it
     // mutates session-shared state (the message buffer + the cheap-tier
@@ -1179,6 +1187,9 @@ export class Session {
     const runAgent = this.agent;
     if (runOptions?.internal !== true) this._lastRunStop = null;
     try {
+      // Stopped before the agent could hear it: ends the turn as a stop, before the provider,
+      // through the same recording as a stop the agent heard.
+      if (runOptions?.internal !== true && this._stopBeforeSend) throw new RunAbortedError();
       const result = await runAgent.send(
         userContent,
         {
@@ -1678,6 +1689,7 @@ export class Session {
    * outside it. An agentless session has nothing to abort and says so by doing nothing.
    */
   abort(): void {
+    this._stopBeforeSend = true;
     this.agent?.abort();
     // `?.members`, not `.members`: the chain guards the agent and the scope is only
     // guaranteed for `Agent` itself. This method runs inside a bare `setTimeout` callback

@@ -286,7 +286,10 @@ describe('Engine boot — mandate ends', () => {
         expect(owners).not.toHaveBeenCalled();
         expect(tail).toHaveBeenCalledOnce();
         expect(worker).toHaveBeenCalled();
+        // Handed the store's own answer, not a constant: the revoked grant is ended, a live one is not.
+        engine.getMandateEnds()!.record({ ...GRANT, mandateId: 'M-other', mandateExp: Math.floor(Date.now() / 1000) + 3_600 }, 100);
         expect(worker.mock.calls[0]![0]('M-run')).toBe(false);
+        expect(worker.mock.calls[0]![0]('M-other')).toBe(true);
       } finally { worker.mockRestore(); }
     });
 
@@ -303,12 +306,14 @@ describe('Engine boot — mandate ends', () => {
       try { engine = await boot(dir); } finally { spy.mockRestore(); }
       const now = Math.floor(Date.now() / 1000);
       live(engine, now + 2);
-      const { mine, owners } = runs(engine);
+      const { mine, owners, tail } = runs(engine);
       for (const s of sweeps) s();
       expect(mine).not.toHaveBeenCalled();
+      expect(tail).not.toHaveBeenCalled();
       const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
       try { for (const s of sweeps) s(); } finally { clock.mockRestore(); }
       expect(mine).toHaveBeenCalled();
+      expect(tail).toHaveBeenCalledOnce();
       expect(owners).not.toHaveBeenCalled();
     });
 

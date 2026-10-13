@@ -653,6 +653,20 @@ export class WorkerLoop {
   }
 
   /**
+   * Right before a turn reaches the provider: a run whose starter's grant has ended by now is
+   * stopped here, recorded as `stopped` (PRD customer-granted-operator-access §3.13 B8). The
+   * grant was live when the run was let in; a sweep finds a run only once it is registered,
+   * and one that lands before the run's session exists has nothing to abort.
+   */
+  #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined): void {
+    if (entry === undefined || starter === undefined) return;
+    if (!principalHasEnded(starter, (id) => this.engine.getMandateEnds()?.isLive(id) ?? false)) return;
+    entry.stopRequested = true;
+    entry.ownerStop.abort();
+    throw new RunAbortedError();
+  }
+
+  /**
    * Stop every running task whose starter's grant has ended (PRD customer-granted-operator-access
    * §3.13 B8; `principalHasEnded`): a mandate's hand run, or a question of a mandate's picked up
    * after its answer. A run the schedule fired has no starter and is the owner's, so it stays.
@@ -2192,6 +2206,7 @@ export class WorkerLoop {
 
     // Attribute the run to its trigger source (P1) so this scheduled
     // automation turn is distinguishable from a user chat turn in run-history.
+    this.#stopIfStarterEnded(active, starter);
     const result = await session.run(prompt, { triggerOrigin: task.source, ...(starter ? { principal: starter } : {}) });
 
     // ⛔ A run that ended ON A CAP is not a clean success, and this worker had no way of
@@ -2738,6 +2753,7 @@ export class WorkerLoop {
     // a non-critical dangerous tool would AUTO-GRANT — see permission-guard
     // _detectDanger). Removing the capability beats gating it. Same mechanism the
     // compaction summarizer uses for the same "pure summarize" shape.
+    this.#stopIfStarterEnded(stopEntry, starter);
     const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch', ...(starter ? { principal: starter } : {}) });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
