@@ -2772,6 +2772,7 @@ describe('WorkerLoop', () => {
       getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null), workerRunModelOverride: vi.fn(() => ({})),
       getSecretStore: vi.fn(() => null),
+      getMandateEnds: vi.fn(() => ({ isLive: () => true })),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: template['id'], manifest_json: templateJson })),
         insertPipelineRun: vi.fn(), insertPipelineStepResult: vi.fn(),
@@ -4015,7 +4016,7 @@ describe('hand runs carry the starter\'s principal', () => {
   // RF-1 (PRD H2 row): a run_workflow proposal of a mandate, on a workflow the owner stamped,
   // with the mandate's parameters, run through the one-time door. Its steps are built from
   // the list `runGuardedSavedWorkflow` hands the runner — there is no session on this path.
-  async function workflowParentTools(marker: 'mandate' | 'none'): Promise<string[]> {
+  async function workflowParentTools(marker: 'mandate' | 'none', live = true): Promise<string[]> {
     mockRunManifest.mockReset();
     mockRunManifest.mockResolvedValue({ status: 'completed', outputs: {}, totalCostUsd: 0 });
     const template = {
@@ -4029,10 +4030,12 @@ describe('hand runs carry the starter\'s principal', () => {
       id: 'rf1-prop', pipeline_id: 'rf1-wf', effect: 'run_workflow', schedule_cron: undefined, next_run_at: undefined,
       created_by: 'mandate:eva@kanzlei.example', confirmed_at: undefined, pipeline_params: JSON.stringify({ who: 'eva' }),
     });
+    const taskManager = makeTaskManager([task]);
     const engine = {
-      getTaskManager: vi.fn(() => makeTaskManager([task])),
+      getTaskManager: vi.fn(() => taskManager),
       getUserConfig: vi.fn(() => ({})), escalateToUser: vi.fn(() => null),
       getSecretStore: vi.fn(() => null),
+      getMandateEnds: vi.fn(() => ({ isLive: () => live })),
       getContext: vi.fn(() => null),
       getHooks: vi.fn(() => []),
       getToolContext: vi.fn(() => ({ tools })),
@@ -4051,6 +4054,11 @@ describe('hand runs carry the starter\'s principal', () => {
     // owner's schedule instead, so the runner is reached both times.
     const row = marker === 'mandate' ? task : { ...task, created_by: 'owner' };
     await (loop as unknown as Exec).executeTask(row, null, m);
+    if (!live) {
+      expect(mockRunManifest, 'no step ran').not.toHaveBeenCalled();
+      expect(taskManager.recordTaskRun).toHaveBeenCalledWith('rf1-prop', expect.anything(), 'stopped', expect.anything());
+      return [];
+    }
     expect(mockRunManifest, 'the workflow ran').toHaveBeenCalledTimes(1);
     const opts = mockRunManifest.mock.calls[0]![2] as { parentTools?: Array<{ definition: { name: string } }> };
     return (opts.parentTools ?? []).map(t => t.definition.name);
@@ -4062,6 +4070,11 @@ describe('hand runs carry the starter\'s principal', () => {
     // And the steps are built for the mandate, so its lock also refuses them the protected
     // secrets and their writes carry its name.
     expect((mockRunManifest.mock.calls[0]![2] as { principal?: unknown }).principal).toEqual(EVA);
+  });
+
+  it('a mandate\'s test run of a run_workflow proposal whose grant ended before it started runs no step (§3.13 B8)', async () => {
+    vi.useRealTimers();
+    expect(await workflowParentTools('mandate', false)).toEqual([]);
   });
 
   it('RF-1 control: the owner\'s schedule of the same workflow keeps the engine\'s set', async () => {

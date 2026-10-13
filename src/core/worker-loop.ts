@@ -659,10 +659,13 @@ export class WorkerLoop {
    * and one that lands before the run's session exists has nothing to abort.
    */
   #stopIfStarterEnded(entry: ActiveTask | undefined, starter: RequestPrincipal | undefined): void {
-    if (entry === undefined || starter === undefined) return;
+    if (starter === undefined) return;
     if (!principalHasEnded(starter, (id) => this.engine.getMandateEnds()?.isLive(id) ?? false)) return;
-    entry.stopRequested = true;
-    entry.ownerStop.abort();
+    // The entry is only the bookkeeping that records it as a stop; the decision needs none.
+    if (entry !== undefined) {
+      entry.stopRequested = true;
+      entry.ownerStop.abort();
+    }
     throw new RunAbortedError();
   }
 
@@ -1371,6 +1374,7 @@ export class WorkerLoop {
             // The run reads the owner's stop (`ownerStop`) before each step and ends its step
             // agents on it, so it has a stop handle — set at the hand-over.
             entry.readsSignal = true;
+            this.#stopIfStarterEnded(entry, starter);
             await this.executePipeline(task, starter, entry.ownerStop.signal);
             break;
           case 'run_agent':
