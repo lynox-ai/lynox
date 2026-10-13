@@ -2342,9 +2342,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // What the gates above read off the headers, and the redirect guard below reads again. The
     // attach sets a header (replacing one of the same name), and a slot named like a method
     // override, a routing header or the body's type would change that reading after it was
-    // checked; `gateReading` (`outbound-write.ts`) is compared before and after. It runs after
-    // the whole attach, so a slot past the denylist has had its vault read, and its token
-    // renewed, by the time the request is refused.
+    // checked; `gateReading` (`outbound-write.ts`) is compared before and after.
     const readingNow = (): string => gateReading(method, headers, input.url, gateBodyReadings(input.body, headers));
     const readBeforeAttach = readingNow();
     const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);

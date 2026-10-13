@@ -52,7 +52,10 @@ export type ExternalRead =
   | { kind: 'failed' }
   /** 401/403: the host did not accept the credential the engine attached. */
   | { kind: 'unauthorized' }
-  /** The engine did not attach a credential, so it sent nothing. */
+  /**
+   * The engine did not attach a credential, or attaching it changed how the request is read
+   * (`gateReading`); nothing was sent.
+   */
   | { kind: 'no_credential' }
   /** The network policy or the address check refused the host; nothing was sent. */
   | { kind: 'blocked' }
@@ -372,10 +375,10 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const headers: Record<string, string> = { accept: 'application/json' };
     if (method !== 'GET') headers['content-type'] = 'application/json';
     // Compared before and after the attach, as `http_request` does: a slot that changed what the
-    // contract was checked against halts the run instead of sending (`gateReading`).
+    // contract was checked against is not sent with (`gateReading`), and the run halts.
     const readBeforeAttach = gateReading(method, headers, url, payload);
     if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
-    if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'blocked' };
+    if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     let res: Response;

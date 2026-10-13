@@ -458,13 +458,16 @@ describe('applying an external run', () => {
     }
   });
 
-  // The contract granted a PATCH; a slot that turns it into a DELETE (or names another write, or
-  // re-targets it) after that check must not go out. The denylist keeps such a slot from being
-  // attached; this is the comparison behind it, for a name the list does not know yet.
+  // The contract granted a PATCH; a slot that turns it into a DELETE (or names another write,
+  // re-targets it, or changes how its body is read) after that check must not go out. The
+  // denylist keeps such a slot from being attached; this fake attach goes past it, to test the
+  // comparison behind it. The body holds a form override in a JSON string: as JSON it names
+  // nothing, read as the form the Content-Type slot declares it names a DELETE.
   it.each([
     ['x-http-method-override', 'DELETE'],
     ['x-method-override', 'PUT'],
     ['x-forwarded-host', 'internal.example'],
+    ['content-type', 'application/x-www-form-urlencoded'],
   ])('SECURITY: an attach that sets %s halts the write and sends nothing', async (name, value) => {
     const s = shop();
     const restore = serve(s);
@@ -477,7 +480,26 @@ describe('applying an external run', () => {
         rateLimit: () => null,
         scan: detectSecretInContent,
       });
-      expect((await c.write(url(0), 'PATCH', { note: 'plain' })).kind).toBe('blocked');
+      expect((await c.write(url(0), 'PATCH', { note: 'a&_method=DELETE&b' })).kind).toBe('no_credential');
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('SECURITY: a read whose attach sets a method override sends nothing either', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = externalClient({
+        contract: mintBulkContract(HOST, [url(0)]),
+        hostPolicy: createToolContext({}),
+        ackHosts: undefined,
+        attach: async (_u, headers) => { headers['x-http-method-override'] = 'DELETE'; return true; },
+        rateLimit: () => null,
+        scan: detectSecretInContent,
+      });
+      expect((await c.get(url(0))).kind).toBe('no_credential');
       expect(s.requests).toEqual([]);
     } finally {
       restore();
