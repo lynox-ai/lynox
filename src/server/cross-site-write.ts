@@ -28,7 +28,6 @@
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 export const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
-const LOCALHOST_NAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 function isIpLiteral(hostname: string): boolean {
   if (hostname.startsWith('[') && hostname.endsWith(']')) return true; // IPv6, as URL writes it
@@ -62,7 +61,8 @@ export function hostRefusal(input: { host: string | undefined; allowedOrigins: r
   if (host === undefined || host === '') return null;
   let hostname: string;
   try { hostname = new URL(`http://${host}`).hostname; } catch { return NO_SECRET_HOST_REFUSAL; }
-  if (LOCALHOST_NAMES.has(hostname) || isIpLiteral(hostname)) return null;
+  // 127.0.0.1 and [::1] are IP literals; `localhost` is the one name that cannot be pointed elsewhere.
+  if (hostname === 'localhost' || isIpLiteral(hostname)) return null;
   for (const origin of input.allowedOrigins) {
     try { if (new URL(origin).hostname === hostname) return null; } catch { /* not an origin */ }
   }
