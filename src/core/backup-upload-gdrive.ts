@@ -75,6 +75,8 @@ const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
  *
  * Once a root is pinned, the uploader takes that folder while the account can see it: a second
  * folder of the same name that later appears in the user's Drive is not taken in its place.
+ * The pin is the only way the uploader finds its root again; it never takes a folder by its name.
+ * An uploader without one cannot upload, and one whose pin cannot be written fails the upload.
  */
 export interface RootFolderPin {
   read(): string | null;
@@ -93,8 +95,11 @@ export function fileRootPin(dir: string): RootFolderPin {
       let text: string;
       try {
         text = readFileSync(path, 'utf8').trim();
-      } catch {
-        return null;
+      } catch (err: unknown) {
+        // Only a missing file is "no pin". Any other failure to read it is an error: taken as no
+        // pin, it would create a new root and overwrite the pin of the existing one.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw err;
       }
       return DRIVE_ID.test(text) ? text : null;
     },
@@ -194,7 +199,7 @@ async function driveFetch(auth: BackupAuthProvider, url: string, options?: Reque
  */
 export class GDriveBackupUploader {
   private readonly auth: BackupAuthProvider;
-  /** Without a pin the root is looked up by name after every restart. */
+  /** Without a pin the uploader has nowhere to keep its root, and refuses to upload. */
   private readonly rootPin: RootFolderPin | undefined;
   private rootFolderId: string | null = null;
 
@@ -334,7 +339,13 @@ export class GDriveBackupUploader {
 
   // ── Private helpers ──
 
-  /** Find or create the root 'lynox-backups' folder. */
+  /**
+   * Find or create the root 'lynox-backups' folder.
+   *
+   * A root that cannot be pinned is not kept: the next start would not find it and would create
+   * another, one more folder per start. So without a pin, or when the pin cannot be written, the
+   * upload fails, and the folder this call just created is deleted again by its id.
+   */
   private async ensureRootFolder(): Promise<string> {
     if (this.rootFolderId) return this.rootFolderId;
 
@@ -343,6 +354,7 @@ export class GDriveBackupUploader {
       this.rootFolderId = existing;
       return existing;
     }
+    if (!this.rootPin) throw new Error(`No place to keep the ${BACKUP_FOLDER_NAME} folder id; not creating one.`);
 
     // Create it
     const response = await driveFetch(this.auth, `${DRIVE_BASE}/files`, {
@@ -359,74 +371,55 @@ export class GDriveBackupUploader {
     }
 
     const folder = await response.json() as DriveFile;
+    if (typeof folder.id !== 'string' || !DRIVE_ID.test(folder.id)) {
+      throw new Error(`Drive did not return a usable id for the new ${BACKUP_FOLDER_NAME} folder; it may be left in Drive.`);
+    }
+    try {
+      this.rootPin.write(folder.id);
+    } catch (err: unknown) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const removed = await this.removeFolder(folder.id);
+      throw new Error(`Could not keep the ${BACKUP_FOLDER_NAME} folder id: ${reason}. `
+        + (removed ? 'The folder just created was deleted again.' : `The folder just created (${folder.id}) could not be deleted and is left in Drive.`));
+    }
     this.rootFolderId = folder.id;
-    this.pin(folder.id);
     return folder.id;
   }
 
+  /** Delete one folder by its id; whether Drive confirmed it. */
+  private async removeFolder(id: string): Promise<boolean> {
+    try {
+      const response = await driveFetch(this.auth, `${DRIVE_BASE}/files/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
   /**
-   * Find the root 'lynox-backups' folder this app created and the user owns (null if none).
+   * The pinned root, while it is still this instance's (null otherwise).
    *
-   * With a pinned root, that folder: it counts while it is a folder the user owns, this app is
-   * authorized for and that is not in the bin. When the account sees it but it no longer is all
-   * of that, the answer is null and the caller creates a new root — no lookup by name, which
-   * would let a folder that appeared since stand in for the pinned one. When the account does
-   * not see it at all (Drive answers 404), the pin names nothing this account has — it was
-   * deleted, or the instance is now connected to another Google account — and the lookup goes
-   * by name, as without a pin; otherwise switching back to an earlier account would hide that
-   * account's backups behind a new root. A Drive that cannot be asked is an error, not a
-   * missing root: a new root created on a passing failure would leave the backups split over two.
+   * It counts while it is a folder the user owns, this app is authorized for and that is not in
+   * the bin. Without a pin, when the account does not see the pinned folder (Drive answers 404:
+   * it was deleted, or the instance is now connected to another Google account), or when it sees
+   * it but it no longer is all of that, the answer is null and the caller creates a new root.
    *
-   * Without a pin, by name. A name alone does not identify it: under the full `drive` scope a
-   * listing by name also returns folders other accounts shared with the user (under `drive.file`
-   * alone, those the app has opened) and folders the user made by hand. Only one the user owns
-   * (the query) and this app is authorized for (the check below) counts — owned alone admits a
-   * hand-made folder, authorized alone admits a folder another account of the same app shared in.
-   * The one found is pinned. Without a match the caller creates its own. Authorization belongs
-   * to the app that created the folder, so after the instance moves to a different Google app
-   * the earlier root no longer matches and a new one is created beside it.
+   * There is no lookup by name: a folder of that name is not necessarily one this instance
+   * created, so the name is not used to find the root. Never adopting one costs a second root once, on the first start after an
+   * update and after a change of Google account; the backups in the earlier root stay where they
+   * are, and `deleteUploadedBackups` still finds them by name when Google is disconnected.
+   *
+   * A Drive that cannot be asked is an error, not a missing root: a new root created on a passing
+   * failure would leave the backups split over two.
    */
   private async findRootFolder(): Promise<string | null> {
     if (this.rootFolderId) return this.rootFolderId;
 
     const pinned = this.rootPin?.read() ?? null;
-    if (pinned !== null) {
-      const seen = await this.pinnedRoot(pinned);
-      if (seen === 'own') {
-        this.rootFolderId = pinned;
-        return pinned;
-      }
-      if (seen === 'not-own') return null;
-    }
-
-    let pageToken: string | undefined;
-    for (let page = 0; page < MAX_LISTING_PAGES; page++) {
-      const params = new URLSearchParams({
-        q: `name = '${BACKUP_FOLDER_NAME}' and mimeType = '${FOLDER_MIME}' and 'me' in owners and trashed = false`,
-        fields: 'nextPageToken,files(id,isAppAuthorized)',
-        pageSize: '100',
-      });
-      if (pageToken) params.set('pageToken', pageToken);
-
-      const response = await driveFetch(this.auth, `${DRIVE_BASE}/files?${params.toString()}`);
-      // An error, not "no root": a root created and pinned on a passing failure would stand in
-      // for the existing one from then on.
-      if (!response.ok) throw new Error(`Could not look up the ${BACKUP_FOLDER_NAME} folder: ${String(response.status)}`);
-
-      const data = await response.json() as {
-        nextPageToken?: string | undefined;
-        files?: Array<{ id: string; isAppAuthorized?: boolean | undefined }> | undefined;
-      };
-      const own = data.files?.find(f => f.isAppAuthorized === true);
-      if (own) {
-        this.rootFolderId = own.id;
-        this.pin(own.id);
-        return own.id;
-      }
-      pageToken = data.nextPageToken;
-      if (!pageToken) return null;
-    }
-    return null;
+    if (pinned === null) return null;
+    if (await this.pinnedRoot(pinned) !== 'own') return null;
+    this.rootFolderId = pinned;
+    return pinned;
   }
 
   /**
@@ -445,18 +438,6 @@ export class GDriveBackupUploader {
     // `trashed` is compared against true: a response that leaves it out is not a folder in the bin.
     const own = f.mimeType === FOLDER_MIME && f.trashed !== true && f.ownedByMe === true && f.isAppAuthorized === true;
     return own ? 'own' : 'not-own';
-  }
-
-  /**
-   * Keep `id` as the root. A pin that cannot be written leaves the backup itself untouched: the
-   * next restart then looks the root up by name, as an uploader without a pin does.
-   */
-  private pin(id: string): void {
-    try {
-      this.rootPin?.write(id);
-    } catch {
-      // See above.
-    }
   }
 
   /** Create a subfolder inside a parent folder. */
@@ -663,7 +644,7 @@ const DELETE_CALL_TIMEOUT_MS = 30_000;
 const DELETE_DEADLINE_MS = 120_000;
 /**
  * A listing that needs more pages than this stops rather than looping. The deletion says so in
- * its result; the root lookup treats it as no match, and a new root is created.
+ * its result; the download refuses the backup.
  */
 const MAX_LISTING_PAGES = 500;
 /**
@@ -766,6 +747,11 @@ export function driveAuthFrom(google: {
  * any folder named `lynox-backups` → a folder in it named like a backup directory that lynox
  * created → the files in that folder that lynox created. "Created by lynox" is
  * `isAppAuthorized === true` ("created or opened by the requesting app").
+ *
+ * Every root of that name, not only the pinned one, and this is load-bearing: the uploader never
+ * takes a root by its name, so after an update or a change of Google account it creates a new
+ * one, and the backups in the earlier root are reached only here. Narrowing this to the pinned
+ * root would leave them in Drive after a disconnect.
  *
  * The root itself is not checked: the checks that keep foreign content out are on the level
  * below. The backup folder must be one lynox created and carry a backup-directory name, and

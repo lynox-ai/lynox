@@ -258,7 +258,7 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
     const engine = await boot();
 
     const uploader = engine.getBackupManager()!.getGDriveUploader() as unknown as { rootPin?: RootFolderPin | undefined };
-    expect(uploader.rootPin, 'without a pin the root is looked up by name after every restart').toBeDefined();
+    expect(uploader.rootPin, 'without a pin the uploader has nowhere to keep its root and refuses to upload').toBeDefined();
     uploader.rootPin!.write('root-id');
     expect(readFileSync(join(dir, 'gdrive-backup-root'), 'utf8').trim()).toBe('root-id');
   });
