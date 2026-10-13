@@ -6852,8 +6852,16 @@ describe('LynoxHTTPApi', () => {
           stats: async () => ({ memoryCount: 1, entityCount: 0, relationCount: 0, communityCount: 0 }),
           getDb: () => ({ listAllActiveMemories: () => [{ text: 'a legacy fact', namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.75, confirmation_count: 1, created_at: '2026-07-18T08:43:54.907Z' }] }),
         }),
-        getKnowledgeStore: () => store,
+        // A store fake without `statusSummary` would send every export down the counts-failure
+        // path unnoticed, so one is supplied unless the case brings its own.
+        getKnowledgeStore: () => (store !== null && typeof store === 'object' && !('statusSummary' in store)
+          ? { statusSummary: () => zeroCounts(), ...store }
+          : store),
       };
+    }
+    function zeroCounts(): Record<string, { count: number; first_created_at: string | null; last_created_at: string | null }> {
+      const z = { count: 0, first_created_at: null, last_created_at: null };
+      return { active: { ...z }, pending_review: { ...z }, rejected: { ...z }, superseded: { ...z } };
     }
 
     it('carries durable-knowledge entries, labelled as their own substrate', async () => {
@@ -6877,6 +6885,9 @@ describe('LynoxHTTPApi', () => {
         expect(body.memory.durable_knowledge.substrate).toContain('knowledge_entries');
         expect(body.memory.active_memories.map(m => m.text)).toEqual(['a legacy fact']);
         expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);
+        // A clean export carries its counts and no error.
+        expect((body.memory.durable_knowledge as unknown as { error?: string }).error).toBeUndefined();
+        expect((body.memory.durable_knowledge as unknown as { status_counts: unknown }).status_counts).not.toBeNull();
         // The legacy flag must be FALSE here too — asserting only the true case lets a
         // hardcoded `true` (or a `>= 199` boundary) survive.
         expect((body as unknown as { memory: { active_memories_may_be_incomplete: boolean } }).memory.active_memories_may_be_incomplete).toBe(false);

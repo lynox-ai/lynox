@@ -11,10 +11,11 @@ import { KnowledgeStore } from '../core/knowledge-store.js';
 type EngineArg = Parameters<typeof readDurableKnowledgeForDebug>[0];
 
 /**
- * The debug export's durable-knowledge lists are capped at 200 and the queue list covers the
- * exported thread only, so neither could say how many entries the store holds, of which
- * status, or since when. `status_counts` does, over the whole store; checked here against a
- * real store with more rows than the cap, in every status.
+ * The debug export's durable-knowledge lists are capped at 200, so they could not say how
+ * many entries there are, of which status, or since when. `status_counts` does, scoped like
+ * the lists: active entries over the whole store, every status for the exported thread.
+ * Checked here against a real store with more rows than the cap, in every status, and with
+ * another thread's queue that must stay out.
  */
 describe('debug export: durable-knowledge status counts (real store)', () => {
   const dirs: string[] = [];
@@ -28,15 +29,18 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
   };
   const engineOf = (ks: KnowledgeStore): EngineArg => ({ getKnowledgeStore: () => ks }) as unknown as EngineArg;
 
-  it('counts every status over the whole store, past the 200 the lists stop at', () => {
+  it('counts active entries over the whole store, and every status for this thread, past the 200 the lists stop at', () => {
     const { ks } = make();
     const ACTIVE = 205;
     for (let i = 0; i < ACTIVE; i++) ks.write({ text: `fact number ${i}`, sourceChannel: 'ui', sourceUntrusted: false });
-    // Queued in ANOTHER thread: the thread-scoped queue list cannot see them; the count must.
-    const queued = [0, 1, 2].map(i => ks.write({ text: `queued ${i}`, sourceChannel: 'mail', sourceUntrusted: true, sourceThreadId: 'other-thread' }));
-    ks.reviewEntry(queued[0]!.id, 'reject');
-    const retired = ks.write({ text: 'retired fact', sourceChannel: 'ui', sourceUntrusted: false });
+    // This thread: two queued, one of them then declined, one retired.
+    const mine = [0, 1].map(i => ks.write({ text: `queued here ${i}`, sourceChannel: 'mail', sourceUntrusted: true, sourceThreadId: 'this-thread' }));
+    ks.reviewEntry(mine[0]!.id, 'reject');
+    const retired = ks.write({ text: 'retired here', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 'this-thread' });
     ks.retireEntry(retired.id, 'user_asserted');
+    // ANOTHER thread's queue and declined entry: they must not show up, not even as numbers.
+    const theirs = [0, 1, 2].map(i => ks.write({ text: `queued elsewhere ${i}`, sourceChannel: 'mail', sourceUntrusted: true, sourceThreadId: 'other-thread' }));
+    ks.reviewEntry(theirs[0]!.id, 'reject');
     // Every row above was written in the same second; spread two active rows apart so the
     // range has two distinct ends to get wrong.
     const db = (ks as unknown as { db: Database.Database }).db;
@@ -47,25 +51,26 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     const block = readDurableKnowledgeForDebug(engineOf(ks), 'this-thread');
 
     expect(block.entries_shown, 'precondition: the list is capped').toBe(200);
-    expect(block.pending_shown, 'precondition: the queue list sees this thread only').toBe(0);
     expect(block.status_counts).not.toBeNull();
-    const c = block.status_counts!;
-    expect(c.active.count).toBe(ACTIVE);
-    expect(c.pending_review.count).toBe(2);
-    expect(c.rejected.count).toBe(1);
-    expect(c.superseded.count).toBe(1);
-    expect(c.active.first_created_at).toBe('2026-01-02 03:04:05');
-    expect(c.active.last_created_at).toBe('2027-06-07 08:09:10');
+    const all = block.status_counts!.active_all_threads;
+    expect(all.count).toBe(ACTIVE);
+    expect(all.first_created_at).toBe('2026-01-02 03:04:05');
+    expect(all.last_created_at).toBe('2027-06-07 08:09:10');
+    const here = block.status_counts!.this_thread;
+    expect(here.pending_review.count).toBe(1);
+    expect(here.rejected.count).toBe(1);
+    expect(here.superseded.count).toBe(1);
+    expect(here.active.count, 'none of the 205 was captured in this thread').toBe(0);
     expect(block.error).toBeUndefined();
   });
 
   it('reports a status with no rows as 0, not as missing', () => {
     const { ks } = make();
-    ks.write({ text: 'only one fact', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.write({ text: 'only one fact', sourceChannel: 'ui', sourceUntrusted: false, sourceThreadId: 't' });
     const c = readDurableKnowledgeForDebug(engineOf(ks), 't').status_counts!;
-    expect(c.active.count).toBe(1);
-    expect(c.rejected).toEqual({ count: 0, first_created_at: null, last_created_at: null });
-    expect(Object.keys(c).sort()).toEqual(['active', 'pending_review', 'rejected', 'superseded']);
+    expect(c.this_thread.active.count).toBe(1);
+    expect(c.this_thread.rejected).toEqual({ count: 0, first_created_at: null, last_created_at: null });
+    expect(Object.keys(c.this_thread).sort()).toEqual(['active', 'pending_review', 'rejected', 'superseded']);
   });
 
   it('a count that cannot be read says so, and keeps the readable entries', () => {

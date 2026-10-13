@@ -698,12 +698,18 @@ interface DebugKnowledgeEntry {
 }
 
 /** Every return path of {@link readDurableKnowledgeForDebug} has this exact shape. */
+type KnowledgeStatusCount = { count: number; first_created_at: string | null; last_created_at: string | null };
+
 interface DebugKnowledgeBlock {
   substrate: string; available: boolean; entries_shown: number; pending_shown: number;
   may_be_incomplete: boolean; entries: DebugKnowledgeEntry[]; pending_entries: DebugKnowledgeEntry[];
-  /** Whole-store counts per status with the `created_at` range — what the capped lists above
-   *  cannot say. `null` when the store is absent or the count could not be read. */
-  status_counts: Record<KnowledgeStatus, { count: number; first_created_at: string | null; last_created_at: string | null }> | null;
+  /** Counts with the capture-time range — what the capped lists above cannot say. Scoped like
+   *  the lists: `active` over the whole store, as the active list already is; every status
+   *  for THIS thread. `null` when the store is absent or the counts could not be read. */
+  status_counts: {
+    active_all_threads: KnowledgeStatusCount;
+    this_thread: Record<KnowledgeStatus, KnowledgeStatusCount>;
+  } | null;
   error?: string;
 }
 
@@ -795,13 +801,15 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
     pending = raw.map(e => projectKnowledgeEntry(e, threadId));
     if (raw.length >= ENTRY_CAP) incomplete = true;
   } catch { failed = failed ? 'durable knowledge unreadable' : 'pending queue unreadable'; incomplete = true; }
-  // The lists are capped and the queue list is this thread's only, so neither answers "how
-  // many does the store hold, of which status, since when?". A capped list that is right
-  // about its first 200 rows says nothing about the rest; these counts do, and they read no
-  // text. Their own try: a count that fails must not discard readable entries.
+  // The lists are capped, so neither answers "how many, of which status, since when?"; these
+  // counts do, and they read no text. They are scoped like the lists, and for the same
+  // reason as the thread-scoped queue: this is a file that gets stored and forwarded. The
+  // active list already spans every thread, so its total adds nothing new in kind; the
+  // review queue and the declined and retired entries of OTHER threads stay out, even as
+  // numbers. Their own try: a count that fails must not discard readable entries.
   let statusCounts: DebugKnowledgeBlock['status_counts'] = null;
   try {
-    statusCounts = store.statusSummary();
+    statusCounts = { active_all_threads: store.statusSummary().active, this_thread: store.statusSummary(threadId) };
   } catch { failed = failed ?? 'status counts unreadable'; }
   const block: DebugKnowledgeBlock = {
     substrate: DK_SUBSTRATE, available: true,
