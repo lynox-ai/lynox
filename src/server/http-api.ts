@@ -37,6 +37,7 @@ import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
+import { crossSiteWriteRefusal, hostRefusal, normalizeAllowedOrigins, LOCALHOST_ORIGIN } from './cross-site-write.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
@@ -309,7 +310,7 @@ const USAGE_SUMMARY_TTL_MS = 30_000;
  * costs nothing and an uncached one lets a single authenticated client spend cores.
  */
 const CAPTURE_REPORT_TTL_MS = 30_000;
-const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
+const ALLOWED_ORIGINS = normalizeAllowedOrigins((process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(','));
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
 const TLS_KEY = process.env['LYNOX_TLS_KEY'] ?? '';
@@ -2754,6 +2755,16 @@ export class LynoxHTTPApi {
       ? '/api/' + url.pathname.slice('/api/v1/'.length)
       : url.pathname;
 
+    // Without a secret every request is the owner. A host name answers only when it is allowed,
+    // for reads as well as writes, before any route runs (`cross-site-write.ts`).
+    if (!secret) {
+      const refusal = hostRefusal({ host: singleHeader(req.headers['host']), allowedOrigins: ALLOWED_ORIGINS });
+      if (refusal !== null) {
+        errorResponse(res, 403, refusal);
+        return;
+      }
+    }
+
     // Health check (unauthenticated — used by container probes, Web UI status bar, and managed hosting monitor).
     // Returns system + process metrics (no user data, no thread content, no secrets — counters only).
     if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
@@ -2806,9 +2817,9 @@ export class LynoxHTTPApi {
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
     const requestOrigin = req.headers['origin'] ?? '';
     // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
-    const isLocalhostOrigin = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin);
+    const isLocalhostOrigin = LOCALHOST_ORIGIN.test(requestOrigin);
     const corsOrigin = ALLOWED_ORIGINS.length > 0
-      ? (ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
+      ? (requestOrigin !== 'null' && ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
       : (secret ? '' : (isLocalhostOrigin ? requestOrigin : ''));
 
     if (method === 'OPTIONS') {
@@ -2824,6 +2835,23 @@ export class LynoxHTTPApi {
 
     if (corsOrigin) {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+
+    // Without a secret every request below is admin, so a write is accepted from a browser only
+    // where the browser says it came from this server, localhost, or an allowed origin. The rule
+    // and its cases are in `cross-site-write.ts`.
+    if (!secret) {
+      const refusal = crossSiteWriteRefusal({
+        method,
+        origin: singleHeader(req.headers['origin']),
+        fetchSite: singleHeader(req.headers['sec-fetch-site']),
+        host: singleHeader(req.headers['host']),
+        allowedOrigins: ALLOWED_ORIGINS,
+      });
+      if (refusal !== null) {
+        errorResponse(res, 403, refusal);
+        return;
+      }
     }
 
     // Auth — Bearer token, session cookie, or migration token (same-origin Web UI).
