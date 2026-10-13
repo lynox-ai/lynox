@@ -860,6 +860,29 @@ export class KnowledgeStore {
   }
 
   /**
+   * Every status with its row count and the oldest and newest `created_at` (when the entries
+   * were CAPTURED, not when their status changed) — the numbers a capped entry list cannot
+   * give. Over the whole store, or, with `threadId`, over the entries captured in that one
+   * conversation (`source_thread_id`, the key the thread's review queue uses). Statuses with
+   * no rows are present with a count of 0, so "none" and "not reported" cannot be confused.
+   * Reads no text, so nothing is decrypted.
+   */
+  statusSummary(threadId?: string): Record<KnowledgeStatus, { count: number; first_created_at: string | null; last_created_at: string | null }> {
+    const rows = (threadId === undefined
+      ? this.db.prepare('SELECT status, COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last FROM knowledge_entries GROUP BY status').all()
+      : this.db.prepare('SELECT status, COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last FROM knowledge_entries WHERE source_thread_id = ? GROUP BY status').all(threadId)
+    ) as Array<{ status: string; n: number; first: string | null; last: string | null }>;
+    const empty = { count: 0, first_created_at: null, last_created_at: null };
+    const out: Record<KnowledgeStatus, { count: number; first_created_at: string | null; last_created_at: string | null }> = {
+      active: { ...empty }, pending_review: { ...empty }, rejected: { ...empty }, superseded: { ...empty },
+    };
+    for (const r of rows) {
+      if (Object.hasOwn(out, r.status)) out[r.status as KnowledgeStatus] = { count: r.n, first_created_at: r.first, last_created_at: r.last };
+    }
+    return out;
+  }
+
+  /**
    * How many QUEUED entries name this subject — count only, never their text.
    *
    * The recall-time nudge (DK plan package 1). A queued entry is not knowledge yet: it was

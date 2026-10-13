@@ -31,7 +31,7 @@ import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom 
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
-import type { KnowledgeEntry } from '../types/memory.js';
+import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
@@ -700,9 +700,21 @@ interface DebugKnowledgeEntry {
 }
 
 /** Every return path of {@link readDurableKnowledgeForDebug} has this exact shape. */
+type KnowledgeStatusCount = { count: number; first_created_at: string | null; last_created_at: string | null };
+
 interface DebugKnowledgeBlock {
   substrate: string; available: boolean; entries_shown: number; pending_shown: number;
   may_be_incomplete: boolean; entries: DebugKnowledgeEntry[]; pending_entries: DebugKnowledgeEntry[];
+  /** Counts with the capture-time range — what the capped lists above cannot say. Scoped like
+   *  the lists: `active` over the whole store, as the active list already is; every status
+   *  for the entries FIRST captured in this thread (`source_thread_id`, the key the queue
+   *  list uses). A fact said here that another conversation had already captured is folded
+   *  into that entry and counts there, not here. `null` when the store is absent or the
+   *  counts could not be read. */
+  status_counts: {
+    active_all_threads: KnowledgeStatusCount;
+    captured_in_this_thread: Record<KnowledgeStatus, KnowledgeStatusCount>;
+  } | null;
   error?: string;
 }
 
@@ -712,7 +724,7 @@ const DK_SUBSTRATE = 'knowledge_entries (durable knowledge)';
  *  prevent. Same device as the Art. 15 export's `EMPTY_KNOWLEDGE`. */
 const EMPTY_DK: Omit<DebugKnowledgeBlock, 'entries' | 'pending_entries'> = {
   substrate: DK_SUBSTRATE, available: false, entries_shown: 0, pending_shown: 0,
-  may_be_incomplete: false,
+  may_be_incomplete: false, status_counts: null,
 };
 
 /**
@@ -794,12 +806,24 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
     pending = raw.map(e => projectKnowledgeEntry(e, threadId));
     if (raw.length >= ENTRY_CAP) incomplete = true;
   } catch { failed = failed ? 'durable knowledge unreadable' : 'pending queue unreadable'; incomplete = true; }
+  // The lists are capped, so neither answers "how many, of which status, since when?"; these
+  // counts do, and they read no text. They are scoped like the lists, and for the same
+  // reason as the thread-scoped queue: this is a file that gets stored and forwarded. The
+  // active list already spans every thread, so its total is the same kind of data, only
+  // past the list's 200 rows; the
+  // review queue and the declined and retired entries of OTHER threads stay out, even as
+  // numbers. Their own try: a count that fails must not discard readable entries.
+  let statusCounts: DebugKnowledgeBlock['status_counts'] = null;
+  try {
+    statusCounts = { active_all_threads: store.statusSummary().active, captured_in_this_thread: store.statusSummary(threadId) };
+  } catch { failed = failed ?? 'status counts unreadable'; }
   const block: DebugKnowledgeBlock = {
     substrate: DK_SUBSTRATE, available: true,
     entries_shown: entries.length, pending_shown: pending.length,
     // `may_be_incomplete` rather than `truncated`, for the reason spelled out at the Art. 15
     // export below: hitting exactly the cap cannot be told from having exactly that many.
     may_be_incomplete: incomplete, entries, pending_entries: pending,
+    status_counts: statusCounts,
   };
   return failed ? { ...block, error: failed } : block;
 }
