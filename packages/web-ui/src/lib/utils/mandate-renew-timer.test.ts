@@ -189,6 +189,12 @@ describe('startMandateRenewTimer', () => {
 		expect(ended.listeners.size).toBe(0);
 	});
 
+	it('on the four-minute mark itself, plans the further try instead of asking again at once', async () => {
+		const h = harness([mandate(T + 240)]);
+		await startMandateRenewTimer(h.deps).ready;
+		expect(h.plannedAtS()).toBe(T + 240 - 60);
+	});
+
 	it('plans the retry at once when the end is already inside the four minutes', async () => {
 		const h = harness([mandate(T + 200)]);
 		await startMandateRenewTimer(h.deps).ready;
