@@ -25,6 +25,7 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
 
 /** Local target systems a run can plan and write. An external run's system is
  *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
@@ -132,6 +133,11 @@ export interface BulkRunStatus {
   /** An external run may be approved for more than one target (a probe is confirmed for
    *  its host and verb, or it is local). */
   probeConfirmed: boolean;
+  /** An external run's write form ({@link writeFormOf}): `unmeasured` when any target is a form
+   *  nobody has measured; approving it then takes an explicit confirmation, and it writes one
+   *  target first in every run. Null for a local run and for a list not read yet. For the owner's surfaces only: the
+   *  text the model reads (`formatStatus` in the bulk tools) does not print it. */
+  writeForm: 'measured' | 'unmeasured' | null;
   /** `keyed`: the approval checksum is an HMAC under the vault key, so only the engine can
    *  produce one that matches. `unkeyed` (no vault key): plain SHA-256 — it still detects
    *  a run that changed by accident, but whoever can write the engine database can change
@@ -360,6 +366,10 @@ export function resourceKindOf(path: string): string {
   const trimmed = path.replace(/\/+$/, '');
   return trimmed.slice(0, trimmed.lastIndexOf('/') + 1);
 }
+
+/** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
+ *  and starts with `/`, so a marked one never equals a plain one. */
+const UNMEASURED_PROBE = 'unmeasured:';
 
 /** The target paths an external run's stored contract grants. */
 function parseContractPaths(json: string | null): string[] {
@@ -955,6 +965,7 @@ export class BulkLedger {
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
+      writeForm: this.writeFormOfRun(row),
       checksumBinding: this.engineDb.hashIsKeyed ? 'keyed' : 'unkeyed',
       haltReason: row.halt_reason,
       list: this.listStatus(row),
@@ -1046,17 +1057,37 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
-    // Every kind of resource the run writes needs its own probe.
+    // An undo writes only to targets its source wrote, with the form the source already used
+    // past its own probe on an unmeasured target. A probe for the undo would only block it
+    // without measuring anything, and an undo cannot be a probe itself.
+    if (run.kind === 'undo' && this.writeFormOfRun(run) === 'unmeasured') return true;
+    const paths = parseContractPaths(run.contract_json);
     const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
-    return kinds.every((kind) => probed.get(host, method, kind) !== undefined);
+    const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
+    // Every kind of resource the run writes needs its own probe. Where the run writes an
+    // unmeasured form of that kind, nobody knows whether a second run acts like the first:
+    // the probe must be this run's, and it must have been written to an unmeasured target.
+    return kinds.every((kind) => (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))
+      ? own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined
+      : probed.get(host, method, kind) !== undefined));
+  }
+
+  /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
+   *  not read yet (its contract only reads, so its write form is not known). */
+  private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
+    const host = externalHostOf(run.target_system);
+    if (host === null || run.list_state === 'pending') return null;
+    return writeFormOf(host, parseContractPaths(run.contract_json), parseContractMethods(run.contract_json));
   }
 
   /**
    * The owner confirms a probe: an external apply run wrote exactly one target with its
    * verb, and the owner checked on the provider's side that the target kept the fields the
-   * write did not send. From then on runs to that host with that verb, over targets of that
-   * kind ({@link resourceKindOf}), may be approved or resumed for more than one target. A
-   * target found already holding its value was not written and proves nothing, so it does
+   * write did not send. From then on runs of a measured form ({@link writeFormOf}) to that host
+   * with that verb, over targets of that kind ({@link resourceKindOf}), may be approved or
+   * resumed for more than one target. A probe written to an unmeasured target is kept apart
+   * ({@link UNMEASURED_PROBE}): it widens only the run that wrote it, and never a measured run.
+   * A target found already holding its value was not written and proves nothing, so it does
    * not count.
    */
   confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
@@ -1074,7 +1105,8 @@ export class BulkLedger {
     if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') {
       return { ok: false, reason: 'not_a_probe' };
     }
-    const kind = resourceKindOf(new URL(this.engineDb.dec(only.target_key)).pathname);
+    const path = new URL(this.engineDb.dec(only.target_key)).pathname;
+    const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
@@ -1113,14 +1145,20 @@ export class BulkLedger {
     checksum: string;
     approvedBy?: string | undefined;
     maxTargets?: number | undefined;
+    /** The approver's explicit confirmation that the run writes an unmeasured form. */
+    unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
+    // An undo restores what its source wrote; the source's approver already confirmed the form.
+    if (run.kind === 'apply' && this.writeFormOfRun(run) === 'unmeasured' && params.unmeasuredConfirmed !== true) {
+      return { ok: false, reason: 'unmeasured_unconfirmed' };
+    }
     const writing = this.countWriting(runId);
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;

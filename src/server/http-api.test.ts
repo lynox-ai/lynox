@@ -28,6 +28,7 @@ import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -8400,6 +8401,13 @@ describe('LynoxHTTPApi', () => {
     let bulkDir: string;
     let bulkDb: EngineDb;
     let bulkLedger: BulkLedger;
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
     const planRun = (): string => bulkLedger.recordDryRun({
       createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
       targets: [
@@ -8558,8 +8566,9 @@ describe('LynoxHTTPApi', () => {
 
       bulkLedger.recordRead(id, 0, { before: { price: '2' } });
       expect(bulkLedger.finishPreview(id)).toBe(true);
-      const approve = (): Promise<Response> =>
-        jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+      // The fixture shop's `/products/<id>` is not a measured write form.
+      const approve = (extra: Record<string, unknown> = { unmeasuredConfirmed: true }): Promise<Response> =>
+        jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), ...extra }) });
 
       // No profile for the host: the credential would not be attached, so no approval.
       mockGetApiStore.mockReturnValue(null);
@@ -8580,11 +8589,20 @@ describe('LynoxHTTPApi', () => {
       mockGetApiStore.mockReturnValue(store);
       mockSecretResolve.mockImplementation((k: string) => (k === 'SHOP_TOKEN' ? 'not-a-real-token-only-a-fixture' : null));
       try {
+        // Shown with its note and the statement to confirm; approved only with the literal `true`.
+        const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+        for (const extra of [{}, { unmeasuredConfirmed: 'true' }, { unmeasuredConfirmed: 1 }]) {
+          const unconfirmed = await approve(extra);
+          expect(unconfirmed.status, JSON.stringify(extra)).toBe(409);
+          expect(((await unconfirmed.json()) as { error: string }).error).toContain(BULK_UNMEASURED_CONFIRMATION);
+        }
+        expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
         const ok = await approve();
         expect(ok.status).toBe(200);
         expect(bulkLedger.getStatus(id)!.phase).toBe('approved');
         const row = bulkDb.getDb().prepare('SELECT approved_by FROM bulk_runs WHERE id = ?').get(id) as { approved_by: string };
-        expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer' });
+        expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer', unmeasuredConfirmed: true });
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
@@ -8614,7 +8632,7 @@ describe('LynoxHTTPApi', () => {
       const origCtx = engineRef.getToolContext;
       const adminBefore = process.env['LYNOX_HTTP_ADMIN_SECRET'];
       const post = (path: string): Promise<Response> =>
-        jsonFetch(`/api/bulk/runs/${id}/${path}`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id) }) });
+        jsonFetch(`/api/bulk/runs/${id}/${path}`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true }) });
       try {
         engineRef.getToolContext = () => ({ tools: [], networkPolicy: 'deny-all', allowedHosts: undefined, allowedWildcards: [], enforceHttps: false });
         const blocked = await post('approve');
@@ -8625,7 +8643,7 @@ describe('LynoxHTTPApi', () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'not-the-test-secret-admin-fixture');
         expect((await post('approve')).status).toBe(200);
         const row = bulkDb.getDb().prepare('SELECT approved_by FROM bulk_runs WHERE id = ?').get(id) as { approved_by: string };
-        expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer:user' });
+        expect(JSON.parse(row.approved_by)).toEqual({ auth: 'bearer:user', unmeasuredConfirmed: true });
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', adminBefore);
 
         // Halted on a blocked host, the resume is checked the same way.
@@ -8646,6 +8664,24 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('shows the unmeasured-form note with an external apply run only — not with a local run, not with an undo', async () => {
+      const local = await (await jsonFetch(`/api/bulk/runs/${planRun()}`)).json() as Record<string, unknown>;
+      expect(local).toMatchObject({ writeForm: null, writeFormNote: null, writeFormConfirmation: null });
+
+      const host = 'shop.example.com';
+      const key = `https://${host}/products/1`;
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { price: '1' } }], contract: mintBulkContract(host, [key]) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+      expect(shown).toMatchObject({ writeForm: 'unmeasured', writeFormNote: BULK_UNMEASURED_NOTE, writeFormConfirmation: BULK_UNMEASURED_CONFIRMATION });
+      // The same run read as an undo: it restores under its source's confirmation, and does
+      // not write one target first, so neither the note nor the statement applies.
+      bulkDb.getDb().prepare(`UPDATE bulk_runs SET kind = 'undo' WHERE id = ?`).run(id);
+      const asUndo = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+      expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
+    });
+
     it('confirms a probe only for an external run that wrote one target, and a resume widens only after one', async () => {
       const local = planRun();
       const notProbe = await jsonFetch(`/api/bulk/runs/${local}/confirm-probe`, { method: 'POST', body: '{}' });
@@ -8662,7 +8698,7 @@ describe('LynoxHTTPApi', () => {
       bulkLedger.recordRead(id, 1, { before: { price: '2' } });
       bulkLedger.finishPreview(id);
       const checksum = bulkLedger.computeChecksum(id)!;
-      expect(bulkLedger.approve(id, { checksum, maxTargets: 1 }).ok).toBe(true);
+      expect(bulkLedger.approve(id, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
       // The host is reachable with a credential, so what answers is the probe rule.
       const { ApiStore } = await import('../core/api-store.js');
       const store = new ApiStore();

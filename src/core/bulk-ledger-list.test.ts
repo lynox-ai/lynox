@@ -52,6 +52,8 @@ describe('recordExternalListPlan', () => {
     expect(s.phase).toBe('planned');
     expect(s.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
     expect(s.total).toBe(0);
+    // Its contract only reads: the form it will write is not known until the list is read.
+    expect(s.writeForm).toBeNull();
     expect(s.list).toEqual({
       state: 'pending', path: '/wp-json/wc/v3/products', filters: { category: '12' }, idField: 'id',
       method: 'PUT', after: { status: 'draft' }, pagesRead: 0,
@@ -189,6 +191,8 @@ describe('finishList', () => {
     expect(run.state).toBe('done');
     expect(run.haltReason).toBe(BULK_HALT_REASONS.listed);
     expect(JSON.parse(run.contractJson!)).toEqual(mint(minted));
+    // WooCommerce products written with PUT: a measured form, through the real table.
+    expect(ledger.getStatus(id)!.writeForm).toBe('measured');
     const ruleAfter = engineDb.getDb().prepare('SELECT rule_hash FROM bulk_runs WHERE id = ?').get(id) as { rule_hash: string };
     expect(ruleAfter.rule_hash).not.toBe(ruleBefore.rule_hash);
     expect(ledger.listStartChecksum(id)).toBeNull();
