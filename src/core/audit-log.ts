@@ -25,8 +25,10 @@ import { maskSecretPatterns } from './secret-store.js';
  * - `returned` / `failed` — a tool call's outcome: it returned a result, or it threw. A
  *   returned call is not called done: the result is the tool's own text, and a tool that
  *   asks before it sends returns one when the answer was no.
+ * - `read` — a mandate read through a route (D15): one row, written before the answer, and
+ *   the read is not answered without it. A read has no outcome row.
  */
-export type AuditPhase = 'attempt' | 'done' | 'refused' | 'returned' | 'failed';
+export type AuditPhase = 'attempt' | 'done' | 'refused' | 'returned' | 'failed' | 'read';
 
 export interface AuditEntry {
   readonly principal: RequestPrincipal;
@@ -98,6 +100,69 @@ export function httpTarget(method: string, url: string): string {
   } catch {
     return `${method} <unparsed url>`;
   }
+}
+
+/**
+ * Characters that would let a target pose as something it is not, escaped wherever the actor's
+ * text is written into a row: the escape sign itself, the query and fragment marks, `&` and `=`,
+ * and every control, format and line or paragraph separator (bidi overrides among them). A `/`
+ * is never escaped: the row's own slashes are written between parts, and in a value it is a
+ * slash.
+ */
+const ROW_SHAPING = /[%?#&=\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const escapeForRow = (s: string): string => s.replace(ROW_SHAPING, (c) => encodeURIComponent(c));
+
+/** A run of the actor's text, undone from its escapes, or an escaped byte that is not UTF-8. */
+type Piece = { readonly text: string } | { readonly raw: string };
+
+/** Undo every escape. A byte that does not start valid UTF-8 stays a `raw` piece, as sent. */
+function decodePieces(s: string): Piece[] {
+  const out: Piece[] = [];
+  let at = 0;
+  for (const m of s.matchAll(/(?:%[0-9A-Fa-f]{2})+/g)) {
+    if (m.index > at) out.push({ text: s.slice(at, m.index) });
+    const bytes = m[0].match(/%[0-9A-Fa-f]{2}/g)!;
+    for (let b = 0; b < bytes.length;) {
+      let n = 4;
+      for (; n > 0; n--) {
+        if (b + n > bytes.length) continue;
+        try { out.push({ text: decodeURIComponent(bytes.slice(b, b + n).join('')) }); break; } catch { /* shorter */ }
+      }
+      if (n === 0) { out.push({ raw: bytes[b]! }); b += 1; } else b += n;
+    }
+    at = m.index + m[0].length;
+  }
+  if (at < s.length) out.push({ text: s.slice(at) });
+  return out;
+}
+
+/**
+ * What a read row names as its target: the request's own path on this instance, plus the query
+ * parameters the route declares as naming what it was asked for (`path=`, `threadId=`), each as
+ * sent (an empty one too), and no other query value. Ids stay readable, unlike in `httpTarget`:
+ * which thread, file or contact was asked for is what the row is for, and these are the
+ * instance's own names, not a third party's keys.
+ *
+ * The row is written by the actor it records, so the text is read twice:
+ * - to FIND a secret: every escape undone, an encoded slash as a slash, a byte that is not UTF-8
+ *   as U+FFFD (a boundary, so a key behind it is still a key). When a known secret shape is
+ *   there, the row is that text, masked, then escaped; it no longer tells an encoded slash from
+ *   a plain one, which matters less than the key;
+ * - to WRITE the row otherwise: every escape undone, then re-escaped where it could shape the
+ *   row, so a path cannot pose as a query, a value cannot add a pair, `%2F` and `%252F` stay
+ *   apart, and an escaped byte that is not UTF-8 is written as sent.
+ * A double-encoded key (`%2573…`) is undone once only, as the handler undoes it.
+ */
+export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<readonly [string, string]> = []): string {
+  const mask = (s: string): string => maskSecretPatterns(s, { includeGeneric: true });
+  const parts = pathname.split('/').map((segment) => segment.split(/%2F/i).map(decodePieces));
+  const found = parts.map((sub) => sub.map((pieces) => pieces.map((p) => ('text' in p ? p.text : '\uFFFD')).join('')).join('/')).join('/');
+  const masked = mask(found);
+  const path = masked !== found
+    ? masked.split('/').map(escapeForRow).join('/')
+    : parts.map((sub) => sub.map((pieces) => pieces.map((p) => ('text' in p ? escapeForRow(p.text) : p.raw)).join('')).join('%2F')).join('/');
+  const query = identifiers.map(([name, value]) => `${name}=${escapeForRow(mask(value))}`).join('&');
+  return query === '' ? path : `${path}?${query}`;
 }
 
 /** The fixed text a mandate's act gets when its trail cannot be written. */

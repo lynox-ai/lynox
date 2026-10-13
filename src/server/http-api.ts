@@ -77,7 +77,7 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
-import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
+import { newCorrelationId, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
@@ -1392,6 +1392,28 @@ function profileOAuthRedirectUri(): string {
   }
 }
 
+/**
+ * The query parameters that name what a GET route is asked to read, by route as registered (D15,
+ * PRD customer-granted-operator-access §3.6). A mandate's read row carries the values the request
+ * sent; every other query value stays out of it (search text, filters, OAuth codes). The row
+ * records what was asked for, not how the handler resolved it: `/api/history/runs` with `q` set
+ * searches and ignores `thread_id`, and its row still names the `thread_id` that was sent. A test reads every GET route's
+ * handler and holds this table to it in both directions: a route that reads one of these names
+ * declares it, and a declared route reads it.
+ */
+export const READ_IDENTIFIERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET /api/files', ['path']],
+  ['GET /api/files/read', ['path']],
+  ['GET /api/files/download', ['path']],
+  ['GET /api/knowledge/queue', ['threadId']],
+  ['GET /api/knowledge/queue/count', ['thread']],
+  ['GET /api/history/runs', ['sessionId', 'thread_id']],
+  ['GET /api/inbox/items', ['tenantId']],
+  ['GET /api/inbox/counts', ['tenantId']],
+  ['GET /api/inbox/rules', ['accountId', 'tenantId']],
+  ['GET /api/metrics', ['name']],
+]);
+
 function parseDynamicRoute(scope: RouteScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): DynamicRoute {
   const paramNames: string[] = [];
   const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
@@ -1967,6 +1989,33 @@ export class LynoxHTTPApi {
       return false;
     }
     return entry;
+  }
+
+  /**
+   * A mandate's read (D15, PRD §3.6 and §7(o)): one `read` row for every GET or HEAD it makes,
+   * written by the dispatcher before the handler runs, so a route is covered by
+   * being registered. The action is the route as registered, the target the path; never the
+   * query or the answer. The owner's reads leave no row. `false` when the row cannot be
+   * written: the dispatcher has answered 503 and the read is not answered, as a write is not.
+   */
+  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string, query: URLSearchParams): boolean {
+    // No scope test: an `admin` route refuses a mandate before dispatch (D6), so every read a
+    // mandate reaches here is a `user` route's.
+    if (method !== 'GET' && method !== 'HEAD') return true;
+    const principal = this._principalOf(req);
+    if (isOwnerPrincipal(principal)) return true;
+    try {
+      const log = this.engine?.getAuditLog() ?? null;
+      if (log === null) throw new Error('no audit log');
+      const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
+                // As sent, an empty value too: a route may read it as "no filter" and so read more.
+        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
+      log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
+    } catch {
+      errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
+      return false;
+    }
+    return true;
   }
 
   /** The outcome row of a request trail: `done` when the act happened, `refused` otherwise. */
@@ -3104,6 +3153,7 @@ export class LynoxHTTPApi {
       const stance = this.staticRouteStances.get(stanceKey);
       if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
       if (this._refusedByStance(req, res, stance)) return;
+      if (!this._recordedMandateRead(req, res, method, stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname, url.searchParams)) return;
       await staticHandler(req, res, {}, body);
       return;
     }
@@ -3123,6 +3173,7 @@ export class LynoxHTTPApi {
         }
         if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, route.stance)) return;
+        if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
         await route.handler(req, res, params, body);
         return;
       }

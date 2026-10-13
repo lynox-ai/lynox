@@ -230,6 +230,9 @@ vi.mock('../core/engine.js', () => ({
     // No engine.db: no mandate is live and no release exists (tests that need either swap them).
     this.getMandateEnds = vi.fn().mockReturnValue(null);
     this.getSecretReleases = vi.fn().mockReturnValue(null);
+    // A trail that takes every row: a mandate's read is refused without one (D15). Tests that
+    // check what is written, or what happens when it cannot be, swap it.
+    this.getAuditLog = vi.fn().mockReturnValue({ record: vi.fn() });
     // Read by the erasure's precondition; null/false = nothing live that would refuse it.
     this.getMailContext = vi.fn().mockReturnValue(null);
     this.getInboxRuntime = vi.fn().mockReturnValue(null);
