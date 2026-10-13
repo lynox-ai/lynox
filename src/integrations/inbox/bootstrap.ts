@@ -20,7 +20,7 @@ import {
   type AnthropicLike,
   wrapAnthropicAsLLMCaller,
 } from './classifier/llm.js';
-import { createMistralEuLLMCaller } from './classifier/llm-mistral.js';
+import { createMistralEuLLMCaller, DEFAULT_MISTRAL_MODEL } from './classifier/llm-mistral.js';
 import type { ClassifierQueue } from './classifier/queue.js';
 import { runColdStartForAccount } from './cold-start-adapter.js';
 import type { NotificationRouter } from '../../core/notification-router.js';
@@ -224,7 +224,7 @@ export function bootstrapInbox(opts: BootstrapInboxOptions): InboxRuntime {
         const id = opts.runHistory.insertRun({
           taskText: 'inbox classifier',
           modelTier: region === 'eu' ? 'fast' : 'haiku',
-          modelId: opts.modelIdOverride ?? (region === 'eu' ? 'mistral-small-latest' : 'haiku-default'),
+          modelId: opts.modelIdOverride ?? (region === 'eu' ? DEFAULT_MISTRAL_MODEL : 'haiku-default'),
           runType: 'single',
           tenantId: opts.tenantId,
           kind: 'llm',

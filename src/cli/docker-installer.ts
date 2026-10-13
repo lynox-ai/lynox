@@ -600,7 +600,7 @@ export async function runDockerInstaller(): Promise<void> {
         { label: 'ministral-14b-2512', value: 'ministral-14b-2512', hint: 'balanced cost/quality' },
         { label: 'ministral-8b-2512', value: 'ministral-8b-2512', hint: 'low-cost orchestration' },
         { label: 'mistral-large-2512', value: 'mistral-large-2512', hint: 'Large 3 — legacy' },
-        { label: 'codestral-latest', value: 'codestral-latest', hint: 'code-focused' },
+        { label: 'codestral-2508', value: 'codestral-2508', hint: 'code-focused' },
       ], { default: 0, rl: stdin.isTTY ? undefined : rl }) ?? 'mistral-medium-2604';
       envVars['OPENAI_MODEL_ID'] = modelChoice;
       stdout.write(`  ${GREEN}✓${RESET} Model: ${modelChoice}\n`);

@@ -81,11 +81,11 @@ describeOnline('OpenAI Provider — Mistral Large via OpenAI Adapter', () => {
   function createMistralAgent(name: string): Agent {
     return new Agent({
       name,
-      model: 'mistral-large-latest',
+      model: 'mistral-large-2512',
       provider: 'openai',
       apiKey: MISTRAL_KEY!,
       apiBaseURL: 'https://api.mistral.ai/v1',
-      openaiModelId: 'mistral-large-latest',
+      openaiModelId: 'mistral-large-2512',
       tools: TOOLS,
       maxIterations: 5,
     });
@@ -130,11 +130,11 @@ describeOnline('OpenAI Provider — Mistral Large via OpenAI Adapter', () => {
     // Simulate what spawn.ts does: create agent with profile-based config
     const agent = new Agent({
       name: 'spawn-mistral',
-      model: 'mistral-large-latest',
+      model: 'mistral-large-2512',
       provider: 'openai',
       apiKey: MISTRAL_KEY!,
       apiBaseURL: 'https://api.mistral.ai/v1',
-      openaiModelId: 'mistral-large-latest',
+      openaiModelId: 'mistral-large-2512',
       tools: TOOLS,
       maxIterations: 3,
       spawnDepth: 1,

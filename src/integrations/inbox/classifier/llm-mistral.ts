@@ -15,14 +15,19 @@
 import { scrubErrorMessage } from '../sensitive-content.js';
 import type { LLMCaller } from './index.js';
 
-/** Default model — Mistral Small is the price/quality fit for classification. */
-export const DEFAULT_MISTRAL_MODEL = 'mistral-small-latest';
+/**
+ * Default model — Mistral Small is the price/quality fit for classification. A dated tag, never
+ * `-latest`: the aliases carry much lower rate limits and roll silently. `GET /v1/models` listed
+ * `mistral-small-latest` as an alias of `mistral-small-2603` on 2026-10-13, so this id is the model
+ * the alias resolved to on that day. What the alias pointed at before then is not recorded.
+ */
+export const DEFAULT_MISTRAL_MODEL = 'mistral-small-2603';
 export const DEFAULT_MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
 export const DEFAULT_MAX_TOKENS = 256;
 
 export interface MistralEuOptions {
   apiKey: string;
-  /** Override the model. Defaults to mistral-small-latest. */
+  /** Override the model. Defaults to {@link DEFAULT_MISTRAL_MODEL}. */
   modelId?: string | undefined;
   /** Override base URL (e.g. for a private EU proxy). */
   baseURL?: string | undefined;

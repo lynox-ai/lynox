@@ -365,7 +365,7 @@
 									<option value="mistral-large-2512">mistral-large-2512 (recommended)</option>
 									<option value="ministral-14b-2512">ministral-14b-2512 (balanced cost/quality)</option>
 									<option value="ministral-8b-2512">ministral-8b-2512 (low-cost orchestration)</option>
-									<option value="codestral-latest">codestral-latest (code-focused)</option>
+									<option value="codestral-2508">codestral-2508 (code-focused)</option>
 								</select>
 							</div>
 							<div class="space-y-2">
