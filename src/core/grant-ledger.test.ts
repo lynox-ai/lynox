@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -75,18 +75,55 @@ describe('grant ledger', () => {
     expect(grantOf('shop')).toBe(g);
   });
 
-  it.each([
-    ['another vault key', { auth: { type: 'bearer' as const, vault_keys: ['OTHER_KEY'] } }],
-    ['another auth type', { auth: { type: 'header' as const, vault_keys: ['SHOP_KEY'], header_name: 'X-Key' } }],
-    ['another header name', { auth: { type: 'bearer' as const, vault_keys: ['SHOP_KEY'], header_name: 'X-Other' } }],
-  ])('a save with %s mints a new grant (reason credentials)', (_label, over) => {
-    store.save(profile('shop'));
+  // One row per component of the credential tuple, each changing ONLY that component, so a
+  // tuple that drops any one of them fails its own row.
+  type Auth = NonNullable<ApiProfile['auth']>;
+  const baseAuth: Auth = {
+    type: 'oauth2', vault_keys: ['SHOP_KEY'], basic_format: 'user_pass_split',
+    username_key: 'SHOP_USER', password_key: 'SHOP_PASS', header_name: 'X-Key', query_param: 'key',
+    oauth: { grant_type: 'refresh_token', client_id_key: 'C_ID', client_secret_key: 'C_SECRET', refresh_token_key: 'C_REFRESH' },
+  };
+  it.each<[string, (a: Auth) => Auth]>([
+    ['auth type', (a) => ({ ...a, type: 'bearer' })],
+    ['vault keys', (a) => ({ ...a, vault_keys: ['OTHER_KEY'] })],
+    ['basic format', (a) => ({ ...a, basic_format: 'pre_encoded_b64' })],
+    ['username key', (a) => ({ ...a, username_key: 'OTHER_USER' })],
+    ['password key', (a) => ({ ...a, password_key: 'OTHER_PASS' })],
+    ['header name', (a) => ({ ...a, header_name: 'X-Other' })],
+    ['query param', (a) => ({ ...a, query_param: 'token' })],
+    ['grant type', (a) => ({ ...a, oauth: { ...a.oauth, grant_type: 'client_credentials' } })],
+    ['client id key', (a) => ({ ...a, oauth: { ...a.oauth, client_id_key: 'OTHER_ID' } })],
+    ['client secret key', (a) => ({ ...a, oauth: { ...a.oauth, client_secret_key: 'OTHER_SECRET' } })],
+    ['refresh token key', (a) => ({ ...a, oauth: { ...a.oauth, refresh_token_key: 'OTHER_REFRESH' } })],
+  ])('a save that changes only the %s mints a new grant (reason credentials)', (_label, change) => {
+    store.save(profile('shop', { auth: baseAuth }));
     const g = grantOf('shop');
-    store.save(profile('shop', over));
+    store.save(profile('shop', { auth: change(baseAuth) }));
     const next = grantOf('shop');
     expect(next).not.toBe(g);
     expect(ledger.get(next!)).toMatchObject({ connection_id: 'shop', reason: 'credentials' });
     expect(ledger.get(g!)).toBeDefined(); // the old grant stays in the ledger
+  });
+
+  it('an empty vault-key list and no list are the same configuration', () => {
+    store.save(profile('shop', { auth: { type: 'bearer', vault_keys: [] } }));
+    const g = grantOf('shop');
+    store.save(profile('shop', { auth: { type: 'bearer' } }));
+    expect(grantOf('shop')).toBe(g);
+  });
+
+  it('a write that throws during a mint leaves memory and ledger as they were', () => {
+    store.save(profile('shop'));
+    const g = grantOf('shop');
+    const upsert = conn.upsert.bind(conn);
+    conn.upsert = () => { throw new Error('disk full'); };
+    expect(() => store.save(profile('shop'), undefined, { newConsent: true })).toThrow('disk full');
+    conn.upsert = upsert;
+    expect(grantOf('shop')).toBe(g);
+    expect(ledger.forConnection('shop')).toHaveLength(1);
+    // A later plain save stores the recorded grant, not one the ledger never saw.
+    store.save(profile('shop', { description: 'later' }));
+    expect(storedGrantOf('shop')).toBe(g);
   });
 
   it('a save flipping the OAuth grant type mints', () => {
@@ -159,6 +196,35 @@ describe('grant ledger', () => {
       expect(ledger.get(grantOf('copy')!)).toMatchObject({ reason: 'split', connection_id: 'copy' });
       wire();
       expect(store.backfillGrants()).toBe(0);
+    });
+
+    it('replaces a grant the ledger records for another connection, also when no one else holds it', () => {
+      store.save(profile('shop'));
+      const g = grantOf('shop')!;
+      store.remove('shop');
+      seed({ ...profile('other'), oauth_grant: { grant_id: g } });
+      wire();
+      expect(store.backfillGrants()).toBe(1);
+      expect(grantOf('other')).not.toBe(g);
+      expect(ledger.get(grantOf('other')!)).toMatchObject({ connection_id: 'other', reason: 'backfill' });
+    });
+
+    it('a profile whose write throws gets no grant in memory, and the others still get theirs', () => {
+      seed(profile('one'));
+      seed(profile('two'));
+      wire();
+      const upsert = conn.upsert.bind(conn);
+      conn.upsert = (row) => { if (row.id === 'one') throw new Error('disk full'); upsert(row); };
+      const errors = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        expect(store.backfillGrants()).toBe(1);
+      } finally {
+        errors.mockRestore();
+        conn.upsert = upsert;
+      }
+      expect(grantOf('one')).toBeUndefined();
+      expect(ledger.forConnection('one')).toHaveLength(0);
+      expect(ledger.get(grantOf('two')!)).toMatchObject({ connection_id: 'two' });
     });
 
     it('when the ledger names neither sharer, both get a fresh grant', () => {

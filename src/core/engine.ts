@@ -1561,7 +1561,7 @@ export class Engine {
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
         // The grant ledger (PRD connection-attribution A1), and its boot backfill: every
-        // connection leaves the boot with a grant the ledger knows. A failure here costs
+        // connection the store registered leaves the boot with a grant the ledger knows. A failure here costs
         // attribution, not the connections, so it is reported and the boot goes on.
         const { GrantLedger } = await import('./grant-ledger.js');
         this._apiStore.setGrantLedger(new GrantLedger(this.engineDb.getDb()));

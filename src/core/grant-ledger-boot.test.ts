@@ -14,7 +14,7 @@ import { GrantLedger } from './grant-ledger.js';
  * themselves; delete the wiring line and they all stay green while no connection
  * ever gets a grant. So this boots a real Engine, three times.
  */
-describe('Engine boot — every api connection leaves the boot with a grant the ledger knows', () => {
+describe('Engine boot — every registered api connection leaves the boot with a grant the ledger knows', () => {
   const dirs: string[] = [];
   const saved = new Map<string, string | undefined>();
   const setEnv = (k: string, v: string | undefined): void => {

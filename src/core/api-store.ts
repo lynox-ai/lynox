@@ -877,7 +877,12 @@ export function credentialTuple(profile: ApiProfile): string {
     auth?.password_key ?? null,
     auth?.header_name ?? null,
     auth?.query_param ?? null,
-    Array.isArray(vaultKeys) ? vaultKeys.filter((k): k is string => typeof k === 'string') : null,
+    // An empty list configures nothing, the same as no list. `grant_type` stays as written:
+    // an absent one is not read as `client_credentials` everywhere (the unattended renewal
+    // refuses a callback profile without one), so the two are different configurations.
+    Array.isArray(vaultKeys) && vaultKeys.some((k) => typeof k === 'string')
+      ? vaultKeys.filter((k): k is string => typeof k === 'string')
+      : null,
   ]);
 }
 
@@ -939,9 +944,10 @@ export class ApiStore {
   /**
    * The boot backfill (PRD connection-attribution A2(6)). Gives a fresh grant to every
    * profile whose grant is absent or unknown to the ledger — a profile from before the
-   * ledger, or a flat-JSON file copied from another engine with its record — and splits two
-   * profiles that share one: the profile the ledger row names keeps it, the other gets a
-   * fresh one, and when the ledger names neither, both do. Runs at every boot and is
+   * ledger, or a flat-JSON file copied from another engine with its record — and to every
+   * profile whose grant the ledger records for another connection. So of two profiles that
+   * share one, the profile the ledger row names keeps it, the other gets a fresh one, and
+   * when the ledger names neither, both do. Runs at every boot and is
    * idempotent: a second run finds nothing to do. Returns how many grants it minted.
    */
   backfillGrants(): number {
@@ -956,20 +962,29 @@ export class ApiStore {
     const reissue = (id: string, reason: 'backfill' | 'split'): void => {
       const current = this.profiles.get(id);
       if (!current) return;
-      ledger.transaction(() => {
-        const next = withGrantId(current, ledger.mint(id, 'api', reason));
-        this.profiles.set(id, next);
-        this.connStore?.upsert(profileToConnectionRow(next));
-      });
-      minted++;
+      try {
+        // Stored first, then held: a write that throws rolls the ledger row back and leaves
+        // the profile in memory as it was, so no grant the ledger never recorded is carried on.
+        ledger.transaction(() => {
+          const next = withGrantId(current, ledger.mint(id, 'api', reason));
+          this.connStore?.upsert(profileToConnectionRow(next));
+          this.profiles.set(id, next);
+        });
+        minted++;
+      } catch (err: unknown) {
+        // One profile's failure does not cost the others their grant; this one is retried
+        // at the next boot.
+        process.stderr.write(`[lynox:api-store] Grant backfill for ${JSON.stringify(id)} failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     };
     for (const p of [...this.profiles.values()]) {
       const g = p.oauth_grant?.grant_id;
       if (typeof g !== 'string' || g === '') { reissue(p.id, 'backfill'); continue; }
       const row = ledger.get(g);
-      const sharers = holders.get(g) ?? [p.id];
       if (row === undefined) { reissue(p.id, 'backfill'); continue; }
-      if (sharers.length > 1 && row.connection_id !== p.id) reissue(p.id, 'split');
+      // A grant the ledger records for another connection is not this profile's, whether or
+      // not that connection still holds it; the one the ledger names keeps it.
+      if (row.connection_id !== p.id) reissue(p.id, (holders.get(g)?.length ?? 1) > 1 ? 'split' : 'backfill');
     }
     return minted;
   }
@@ -1376,6 +1391,13 @@ export class ApiStore {
       });
     } catch (err: unknown) {
       if (err instanceof SaveRefused) return { ok: false, reason: err.reason };
+      // The write threw after the profile was registered in memory: the ledger row is rolled
+      // back, so the memory copy goes back too, or a later save would keep a grant the ledger
+      // never recorded.
+      const registered = this.profiles.get(profile.id);
+      if (registered) this._releaseHost(registered);
+      this.profiles.delete(profile.id);
+      if (prev) this._admit(prev, 'save');
       throw err;
     }
   }
