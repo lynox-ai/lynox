@@ -299,7 +299,7 @@ describe('once a root is pinned, the uploader keeps it', () => {
     const pin = memPin('gone');
     await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
     const [root] = rootsWritten();
-    expect(root).toBeDefined();
+    expect(root).toMatch(/^new-/);
     expect(pin.value).toBe(root);
   });
 
@@ -353,6 +353,25 @@ describe('once a root is pinned, the uploader keeps it', () => {
     drive.set('mine', { id: 'mine', name: '2026-10-08T00000000Z', mimeType: FOLDER, parents: ['own'], ownedByMe: true, isAppAuthorized: true });
     const listed = await new GDriveBackupUploader(auth, { rootPin: memPin('own') }).list();
     expect(listed.map(b => b.id)).toEqual(['mine']);
+  });
+
+  it.each([[undefined], ['other-account-root']])('fails the upload and creates nothing when the lookup by name does not answer (pin %j)', async (pinned) => {
+    folder('own', { ownedByMe: true, isAppAuthorized: true });
+    const real = mockGoogleFetch.getMockImplementation()!;
+    mockGoogleFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (new URL(url).searchParams.get('q')?.startsWith("name = 'lynox-backups'")) return respond(503);
+      return real(url, init);
+    });
+    try {
+      const pin = memPin(pinned ?? null);
+      const before = drive.size;
+      const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
+      expect(out.success).toBe(false);
+      expect(drive.size).toBe(before);
+      expect(pin.value).toBe(pinned ?? null);
+    } finally {
+      mockGoogleFetch.mockImplementation(real);
+    }
   });
 
   it('lists nothing and creates nothing when the pinned root is no longer this instance\'s', async () => {

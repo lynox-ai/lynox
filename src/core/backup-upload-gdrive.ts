@@ -400,7 +400,9 @@ export class GDriveBackupUploader {
       if (pageToken) params.set('pageToken', pageToken);
 
       const response = await driveFetch(this.auth, `${DRIVE_BASE}/files?${params.toString()}`);
-      if (!response.ok) return null;
+      // An error, not "no root": a root created and pinned on a passing failure would stand in
+      // for the existing one from then on.
+      if (!response.ok) throw new Error(`Could not look up the ${BACKUP_FOLDER_NAME} folder: ${String(response.status)}`);
 
       const data = await response.json() as {
         nextPageToken?: string | undefined;
