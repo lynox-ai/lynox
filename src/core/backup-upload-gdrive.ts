@@ -372,7 +372,7 @@ export class GDriveBackupUploader {
 
     const folder = await response.json() as DriveFile;
     if (typeof folder.id !== 'string' || !DRIVE_ID.test(folder.id)) {
-      throw new Error(`Drive did not return an id for the new ${BACKUP_FOLDER_NAME} folder.`);
+      throw new Error(`Drive did not return a usable id for the new ${BACKUP_FOLDER_NAME} folder; it may be left in Drive.`);
     }
     try {
       this.rootPin.write(folder.id);

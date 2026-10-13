@@ -128,8 +128,10 @@ included, as described under [Removing the copies in Drive](#removing-the-copies
 
 If lynox cannot write the `gdrive-backup-root` file, the upload fails and the log says so, in a
 line starting with `[lynox:backup] Google Drive upload failed`. The folder it created for that
-upload is deleted again; if that fails too, the line says so and names the folder. The local
-backup is not affected.
+upload is deleted again; if that fails too, the line says so and names the folder. If lynox
+cannot read the file (other than because it does not exist yet), the upload fails the same way
+before anything is created, and the remembered folder stays remembered. The local backup is not
+affected.
 
 ### Turning it off again
 

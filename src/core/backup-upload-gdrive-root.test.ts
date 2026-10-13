@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -158,6 +158,9 @@ function memPin(value: string | null = null): RootFolderPin & { value: string | 
 }
 
 const NAME_LOOKUP = "name = 'lynox-backups'";
+/** Every folder or file the uploader asked Drive to create. */
+const creates = () => mockGoogleFetch.mock.calls
+  .filter(([url, init]) => init?.method === 'POST' && new URL(url).pathname.endsWith('/drive/v3/files'));
 const nameLookups = (from = 0) => mockGoogleFetch.mock.calls.slice(from)
   .filter(([url]) => new URL(url).searchParams.get('q')?.startsWith(NAME_LOOKUP));
 
@@ -362,7 +365,7 @@ describe('once a root is pinned, the uploader keeps it', () => {
       const pin = memPin();
       const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
       expect(out.success).toBe(false);
-      expect(out.error).toMatch(/did not return an id/);
+      expect(out.error).toMatch(/did not return a usable id for the new lynox-backups folder; it may be left in Drive/);
       expect(pin.value).toBeNull();
     } finally {
       mockGoogleFetch.mockImplementation(real);
@@ -421,7 +424,21 @@ describe('fileRootPin', () => {
     expect(fileRootPin(join(dir, 'absent')).read()).toBeNull();
     const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
     expect(out.success).toBe(false);
-    expect(drive.size).toBe(0);
+    expect(creates(), 'no folder is created, not even one deleted again').toEqual([]);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('keeps a pin it cannot read rather than writing a new one over it', async () => {
+    mkdirSync(join(dir, 'data'));
+    const file = join(dir, 'data', 'gdrive-backup-root');
+    writeFileSync(file, 'good-id\n', { mode: 0o000 });
+    try {
+      const out = await upload(new GDriveBackupUploader(auth, { rootPin: fileRootPin(join(dir, 'data')) }));
+      expect(out.success).toBe(false);
+      expect(creates()).toEqual([]);
+    } finally {
+      chmodSync(file, 0o600);
+    }
+    expect(readFileSync(file, 'utf8')).toBe('good-id\n');
   });
 });
 
