@@ -16661,6 +16661,34 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
   });
 
+  it('the control plane\'s revoke alias refuses to delete Drive backups, and revokes nothing then', async () => {
+    await withEnv(MANAGED, async () => {
+      for (const flag of [true, 'true', 1, null]) {
+        mockGoogleRevoke.mockClear();
+        mockDeleteUploadedBackups.mockClear();
+        const refused = await as(ADMIN, '/api/admin/google/revoke', { method: 'POST', body: JSON.stringify({ delete_drive_backups: flag }) });
+        // What the refusal is for comes first: nothing deleted, nothing revoked.
+        expect(mockDeleteUploadedBackups).not.toHaveBeenCalled();
+        expect(mockGoogleRevoke).not.toHaveBeenCalled();
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as { code?: string }).code).toBe('drive_deletion_owner_only');
+      }
+      // `false` asks for no deletion, so the alias passes it on and the revoke runs.
+      mockGoogleRevoke.mockClear();
+      const plain = await as(ADMIN, '/api/admin/google/revoke', { method: 'POST', body: JSON.stringify({ delete_drive_backups: false }) });
+      expect(plain.status).toBe(200);
+      expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+      // The same body at the owner's route still deletes: the refusal is the alias's, not the handler's.
+      mockDeleteUploadedBackups.mockClear();
+      const owner = await as(TEST_SECRET, '/api/google/revoke', { method: 'POST', body: JSON.stringify({ delete_drive_backups: true }) });
+      expect(owner.status).toBe(200);
+      expect(mockDeleteUploadedBackups).toHaveBeenCalledTimes(1);
+      // Six requests more in this file's one per-IP window, paid back so no later test meets a 429.
+      const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+      for (const entry of window.values()) entry.count = Math.max(0, entry.count - 6);
+    });
+  });
+
   describe('POST /api/admin/mandates/revoke', () => {
     let dir: string;
     let edb: EngineDb;
