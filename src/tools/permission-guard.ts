@@ -726,7 +726,7 @@ export function withListQuery(contract: CapabilityContract, constraints: ListQue
   return copy;
 }
 
-/** The longest query a list read sends; the engine's own page addresses stay far below it. */
+/** The longest query a list read sends. A list whose longest page address would pass it is refused when it is planned (`parseListSource`). */
 export const LIST_QUERY_MAX = 512;
 const LIST_QUERY_NAME = /^[a-z][a-z0-9_]{0,31}$/;
 const LIST_QUERY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;

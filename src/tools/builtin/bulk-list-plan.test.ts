@@ -80,7 +80,7 @@ describe('bulk_plan with source_list', () => {
     expect(ledger.listRuns()).toEqual([]);
   });
 
-  it('takes an argument set to null as not given, as the other sources do', async () => {
+  it('takes source_filter, source_format or target_collection set to null as not given', async () => {
     expect(await plan({ source_filter: null, source_format: null, target_collection: null })).toContain('List dry run recorded');
   });
 
