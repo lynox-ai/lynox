@@ -25,6 +25,7 @@ import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { writeFormOf } from './bulk-write-forms.js';
 
 /** Local target systems a run can plan and write. An external run's system is
  *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
@@ -132,6 +133,11 @@ export interface BulkRunStatus {
   /** An external run may be approved for more than one target (a probe is confirmed for
    *  its host and verb, or it is local). */
   probeConfirmed: boolean;
+  /** An external run's write form ({@link writeFormOf}): `unmeasured` when any target is a form
+   *  nobody has measured; approving it then takes an explicit confirmation, and it writes one
+   *  target first in every run. Null for a local run. For the owner's surfaces only: the
+   *  text the model reads (`formatStatus` in the bulk tools) does not print it. */
+  writeForm: 'measured' | 'unmeasured' | null;
   /** `keyed`: the approval checksum is an HMAC under the vault key, so only the engine can
    *  produce one that matches. `unkeyed` (no vault key): plain SHA-256 — it still detects
    *  a run that changed by accident, but whoever can write the engine database can change
@@ -955,6 +961,7 @@ export class BulkLedger {
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
+      writeForm: this.writeFormOfRun(row),
       checksumBinding: this.engineDb.hashIsKeyed ? 'keyed' : 'unkeyed',
       haltReason: row.halt_reason,
       list: this.listStatus(row),
@@ -1046,16 +1053,33 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
+    if (this.writeFormOfRun(run) === 'unmeasured') {
+      // An undo takes back only targets its source wrote, and an unmeasured source wrote more
+      // than one only after its own probe was confirmed. An undo cannot be a probe itself.
+      if (run.kind === 'undo') return true;
+      // Nobody knows whether a second run of an unmeasured form acts like the first, so a
+      // probe holds only for the run that wrote it — for every kind of resource it writes.
+      const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
+      return kinds.every((kind) => own.get(host, method, kind, run.id) !== undefined);
+    }
     // Every kind of resource the run writes needs its own probe.
     const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     return kinds.every((kind) => probed.get(host, method, kind) !== undefined);
   }
 
+  /** {@link writeFormOf} over the run's stored contract; null for a local run. */
+  private writeFormOfRun(run: RunRow): 'measured' | 'unmeasured' | null {
+    const host = externalHostOf(run.target_system);
+    if (host === null) return null;
+    return writeFormOf(host, parseContractPaths(run.contract_json), parseContractMethods(run.contract_json));
+  }
+
   /**
    * The owner confirms a probe: an external apply run wrote exactly one target with its
    * verb, and the owner checked on the provider's side that the target kept the fields the
-   * write did not send. From then on runs to that host with that verb, over targets of that
-   * kind ({@link resourceKindOf}), may be approved or resumed for more than one target. A
+   * write did not send. From then on runs of a measured form ({@link writeFormOf}) to that host
+   * with that verb, over targets of that kind ({@link resourceKindOf}), may be approved or
+   * resumed for more than one target. A run of an unmeasured form needs its own probe. A
    * target found already holding its value was not written and proves nothing, so it does
    * not count.
    */
@@ -1113,14 +1137,20 @@ export class BulkLedger {
     checksum: string;
     approvedBy?: string | undefined;
     maxTargets?: number | undefined;
+    /** The approver's explicit confirmation that the run writes an unmeasured form. */
+    unmeasuredConfirmed?: boolean | undefined;
     now?: number | undefined;
   }): { ok: true; status: BulkRunStatus; triggerId: string }
-    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'mail_api' | UndoRefusal } {
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'checksum' | 'nothing_to_apply' | 'bad_max_targets' | 'probe_required' | 'unmeasured_unconfirmed' | 'mail_api' | UndoRefusal } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'previewed' || run.list_state === 'pending') return { ok: false, reason: 'wrong_phase' };
     if (contractWritesMail(run.target_system, run.contract_json)) return { ok: false, reason: 'mail_api' };
     if (params.checksum !== this.computeChecksum(runId)) return { ok: false, reason: 'checksum' };
+    // An undo restores what its source wrote; the source's approver already confirmed the form.
+    if (run.kind === 'apply' && this.writeFormOfRun(run) === 'unmeasured' && params.unmeasuredConfirmed !== true) {
+      return { ok: false, reason: 'unmeasured_unconfirmed' };
+    }
     const writing = this.countWriting(runId);
     if (writing === 0) return { ok: false, reason: 'nothing_to_apply' };
     const maxTargets = params.maxTargets ?? writing;

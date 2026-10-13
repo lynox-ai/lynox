@@ -316,7 +316,8 @@ describe('the preview effect', () => {
       expect(out.summary).not.toContain(MARK);
       // Reviewable and approvable; approving sends nothing — the write effect does.
       const sent = s.requests.length;
-      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+      // The fixture shop's path is not a measured form, so the approval carries the confirmation.
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, unmeasuredConfirmed: true }).ok).toBe(true);
       expect(s.requests.length).toBe(sent);
     } finally {
       restore();

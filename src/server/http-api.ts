@@ -101,6 +101,7 @@ import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
+import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -8052,6 +8053,7 @@ export class LynoxHTTPApi {
       mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Mail leaves this instance only once it is confirmed in the chat: send it from the chat, and change a mail setting at the provider itself.'],
       probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
+      unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
       undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo already took it back, nothing is left for this one to undo.'],
@@ -8110,6 +8112,11 @@ export class LynoxHTTPApi {
         listFirstPage: listRun ? listPageUrl(listRun.host, listRun.source, 1) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
         listNote: status.list ? BULK_LIST_NOTE : null,
+        // An unmeasured apply run writes one target first and is approved only with this
+        // confirmation. An undo is neither: it restores what its source wrote, under the
+        // source's confirmation, so the note's promise of one target first would not hold.
+        writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_NOTE : null,
+        writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
       });
     }, READS));
 
@@ -8141,8 +8148,11 @@ export class LynoxHTTPApi {
       const reach = await bulkExternalReach(params['id']!, ledger);
       if (reach !== null) { errorResponse(res, 409, reach); return; }
       if (refuseEndedPlanner(res, ledger, params['id']!)) return;
+      // Only the literal `true` confirms; the approval records that it was given.
+      const unmeasuredConfirmed = (body as Record<string, unknown>)['unmeasuredConfirmed'] === true;
       const out = ledger.approve(params['id']!, {
-        checksum, maxTargets, approvedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown' }),
+        checksum, maxTargets, unmeasuredConfirmed,
+        approvedBy: JSON.stringify({ auth: this._authOrigin.get(req) ?? 'unknown', ...(unmeasuredConfirmed ? { unmeasuredConfirmed: true } : {}) }),
       });
       if (!out.ok) { refuse(res, out.reason); return; }
       jsonResponse(res, 200, withBinding(out.status));

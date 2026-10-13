@@ -5,6 +5,21 @@ vi.mock('node:dns/promises', () => ({
   default: { lookup: vi.fn() },
 }));
 
+// The writes here go to a fixture shop whose `/products/<id>` nobody has measured. These tests
+// are about the write mechanics, under the probe a MEASURED form has (one confirmed probe per
+// host, verb and kind); `bulk-write-forms.test.ts` covers the table and the unmeasured path.
+// The describe 'an unmeasured write form' turns the stand-in off and gets the real table.
+const formFixture = vi.hoisted(() => ({ measured: true }));
+vi.mock('./bulk-write-forms.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./bulk-write-forms.js')>();
+  return {
+    ...real,
+    writeFormOf: (host: string, paths: readonly string[], method: string | null) =>
+      formFixture.measured && host === 'shop.example.com' && method !== null && paths.length > 0
+        ? 'measured' : real.writeFormOf(host, paths, method),
+  };
+});
+
 import dns from 'node:dns/promises';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1070,6 +1085,99 @@ describe('the write verb and the one-target probe', () => {
       await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: putWriter });
       expect(ledger.getStatus(undo.status.id)!.applied).toBe(1);
       expect(ledger.confirmProbe(undo.status.id)).toEqual({ ok: false, reason: 'not_a_probe' });
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('an unmeasured write form', () => {
+  beforeEach(() => { formFixture.measured = false; });
+  afterEach(() => { formFixture.measured = true; });
+
+  const agent = (): IAgent => ({ toolContext: { bulkLedger: ledger } }) as unknown as IAgent;
+
+  it('is marked in the status, kept out of the model\'s text, and approved only with the literal confirmation', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await previewedRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '15' } })));
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.getStatus(runId)).toMatchObject({ writeForm: 'unmeasured', probeConfirmed: false });
+      const text = await bulkStatusTool.handler({ run_id: runId }, agent());
+      expect(text).not.toMatch(/unmeasured|not checked/i);
+      expect(ledger.approve(runId, { checksum, maxTargets: 1 })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: false })).toEqual({ ok: false, reason: 'unmeasured_unconfirmed' });
+      // Confirmed, it is still one target first: no probe of its own yet.
+      expect(ledger.approve(runId, { checksum, maxTargets: 3, unmeasuredConfirmed: true })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('needs its own probe in every run: neither a probe on record nor an earlier run\'s probe widens it', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const first = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const firstSum = ledger.computeChecksum(first)!;
+      expect(ledger.approve(first, { checksum: firstSum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      expect((await runBulkEffect(first, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('halted');
+      expect(ledger.confirmProbe(first)).toEqual({ ok: true });
+      expect(ledger.getStatus(first)!.probeConfirmed).toBe(true);
+      expect(ledger.resume(first, { checksum: firstSum, maxTargets: 2 }).ok).toBe(true);
+      expect((await runBulkEffect(first, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+
+      // The same host, verb and kind of resource, in a second run: the first run's probe
+      // is on record for them, and still the second run writes one target first.
+      const second = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
+      expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
+        .get(HOST, 'PATCH', '/products/')).toEqual({ run_id: first });
+      expect(ledger.getStatus(second)!.probeConfirmed).toBe(false);
+      expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
+        .toEqual({ ok: false, reason: 'probe_required' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a measured form keeps the old rule: one probe on record widens any later run', async () => {
+    formFixture.measured = true;
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })));
+      seedProbe();
+      expect(ledger.getStatus(runId)).toMatchObject({ writeForm: 'measured', probeConfirmed: true });
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('takes an undo back in full, without a confirmation or a probe of its own', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const runId = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(undo.status).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', probeConfirmed: true });
+      // Every target at once, with no confirmation: the source's approver gave it.
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect(s.items.get('/products/0')!['price']).toBe('12.00');
+      expect(s.items.get('/products/1')!['price']).toBe('12.00');
     } finally {
       restore();
     }
