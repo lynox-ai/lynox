@@ -2,12 +2,13 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import { LocalProvider } from './embedding.js';
 import { EngineDb, UndecryptableTextError } from './engine-db.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
-import { SubjectStore } from './subject-store.js';
+import { SelfSubjectErasureError, SubjectStore } from './subject-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
 import { DATA_DIR_INVENTORY } from './data-dir-inventory.js';
 import {
@@ -300,6 +301,53 @@ describe('person erasure', () => {
     expect(erased(erasePerson(f.deps, { subjectId: f.anna, plan: again.plan, entryIds: [], memoryIds: [] })).erased).toBe(true);
     expect(subjectExists(f, f.anna)).toBe(false);
   });
+
+  it('refuses when a duplicate was merged in after the preview, even one that brings nothing', async () => {
+    const f = await seed();
+    const p = preview(f, f.anna);
+    const dup = f.subjects.createSubject({ kind: 'person', name: 'A. Wiesental' });
+    expect(f.subjects.mergeSubjects(dup, f.anna).ok).toBe(true);
+    expect(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] })).toEqual({ refused: 'plan_changed' });
+    expect(subjectExists(f, f.anna)).toBe(true);
+  });
+
+  it('masks the memory texts it shows', async () => {
+    const f = await seed();
+    const p = preview({ deps: { ...f.deps, mask: t => `[masked] ${t}` } }, f.anna);
+    expect(p.memories.map(m => m.text)).toEqual(p.memories.map(() => expect.stringMatching(/^\[masked\] /)));
+    expect(p.memories.length).toBe(2);
+  });
+
+  it('throws the same for a conversation wording or a memory block it cannot decrypt', async () => {
+    const f = await seed();
+    const foreign = new EngineDb(join(dirs[0]!, 'foreign.db'), 'another-vault-key');
+    engines.push(foreign);
+    f.raw.prepare('INSERT INTO entry_sources (entry_id, thread_id, text) VALUES (?, ?, ?)').run(f.unrelated, 'thread-x', foreign.enc('Invoices go out on the first'));
+    expect(() => previewPersonErasure(f.deps, f.anna)).toThrow(UndecryptableTextError);
+    f.raw.prepare('DELETE FROM entry_sources WHERE thread_id = ?').run('thread-x');
+    expect(() => previewPersonErasure(f.deps, f.anna)).not.toThrow();
+    f.knowledge.setBlockContent('playbook', 'Ship on Fridays.');
+    f.raw.prepare('UPDATE memory_blocks SET content = ? WHERE id = ?').run(foreign.enc('Ship on Fridays.'), 'playbook');
+    expect(() => previewPersonErasure(f.deps, f.anna)).toThrow(UndecryptableTextError);
+  });
+
+  it('refuses to erase the owner\'s own subject at the store, and deletes nothing', async () => {
+    const f = await setup();
+    const self = f.subjects.createSubject({ kind: 'person', name: 'Owner Selbst', isSelf: true });
+    expect(() => f.subjects.eraseSubject(self)).toThrow(SelfSubjectErasureError);
+    expect(subjectExists(f, self)).toBe(true);
+  });
+
+  it('finds a memory whose wording names the person in either store, and shows the one that does', async () => {
+    const f = await seed();
+    const legacyOnly = f.layer.getDb().createMemory({ text: 'Lunch with Anni on Monday', namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] });
+    f.stubs.upsertStub({ id: legacyOnly, text: 'Lunch on Monday', namespace: 'knowledge', scopeType: 'global', scopeId: '' });
+    const stubOnly = f.layer.getDb().createMemory({ text: 'Call about the tender', namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] });
+    f.stubs.upsertStub({ id: stubOnly, text: 'Call Anni about the tender', namespace: 'knowledge', scopeType: 'global', scopeId: '' });
+    const p = preview(f, f.anna);
+    expect(p.memories.find(m => m.id === legacyOnly)).toMatchObject({ matchedBy: 'mention', text: 'Lunch with Anni on Monday' });
+    expect(p.memories.find(m => m.id === stubOnly)).toMatchObject({ matchedBy: 'mention', text: 'Call Anni about the tender' });
+  });
 });
 
 describe('person erasure, legacy store and scrub', () => {
@@ -474,6 +522,63 @@ describe('person erasure, legacy store and scrub', () => {
     f.subjects.setPersonDetail(f.anna, { email: 'anna@wiesental.invalid' });
     f.engine.getDb().prepare('UPDATE people SET email = ? WHERE subject_id = ?').run(foreign.enc('anna@wiesental.invalid'), f.anna);
     expect(() => previewPersonErasure(f.deps, f.anna)).toThrow(UndecryptableTextError);
+  });
+
+  it('erases a selected legacy entity that no memory mentions', async () => {
+    const f = await setup();
+    const lone = f.legacy.createEntity({ canonicalName: 'Anna Wiesental', entityType: 'person', description: 'Met at the fair', scopeType: 'global', scopeId: '' });
+    const p = plan(f.deps, f.anna);
+    expect(p.legacyEntities.find(n => n.id === lone)).toMatchObject({ memoryIds: [] });
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [], entityIds: [lone] }));
+    expect(r.counts.legacyEntities).toBe(1);
+    expect(f.legacy.getEntity(lone)).toBeNull();
+    expect(f.legacy.getEntity(f.entity)).not.toBeNull();
+  });
+
+  it('offers no legacy entity under an alias too short to search, and no organization under her name', async () => {
+    const f = await setup();
+    f.engine.getDb().prepare('UPDATE subjects SET aliases = ? WHERE id = ?').run(JSON.stringify(['Anna Wiesental', 'Anni', 'An']), f.anna);
+    const short = f.legacy.createEntity({ canonicalName: 'An', entityType: 'person', scopeType: 'global', scopeId: '' });
+    const org = f.legacy.createEntity({ canonicalName: 'Anni', entityType: 'organization', scopeType: 'global', scopeId: '' });
+    const ids = plan(f.deps, f.anna).legacyEntities.map(n => n.id);
+    expect(ids).toEqual([f.entity]);
+    expect(ids).not.toContain(short);
+    expect(ids).not.toContain(org);
+  });
+
+  it('refuses when a memory came to mention the legacy entity after the preview', async () => {
+    const f = await setup();
+    const p = plan(f.deps, f.anna);
+    const late = f.legacy.createMemory({ text: 'She signed the order', namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] });
+    f.legacy.createMention(late, f.entity);
+    expect(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [], entityIds: [f.entity] })).toEqual({ refused: 'plan_changed' });
+    expect(f.legacy.getEntity(f.entity)).not.toBeNull();
+  });
+
+  it('masks the legacy entity name and description it shows', async () => {
+    const f = await setup();
+    const p = plan({ ...f.deps, mask: t => `[masked] ${t}` }, f.anna);
+    expect(p.legacyEntities[0]).toMatchObject({ name: '[masked] anni', description: '[masked] Head of purchasing' });
+  });
+
+  it('reports a log as not folded in while a reader holds it, in both stores', async () => {
+    const f = await setup();
+    const legacyRaw = (f.legacy as unknown as { db: Database.Database }).db;
+    for (const [db, store] of [[f.engine.getDb(), f.engine], [legacyRaw, f.legacy]] as const) {
+      const reader = new BetterSqlite3(db.name, { readonly: true });
+      try {
+        db.pragma('busy_timeout = 0');
+        reader.prepare('BEGIN').run();
+        reader.prepare('SELECT COUNT(*) FROM sqlite_master').get();
+        db.prepare('CREATE TABLE IF NOT EXISTS scrub_probe (x)').run();
+        db.prepare('INSERT INTO scrub_probe VALUES (1)').run();
+        expect(store.checkpointTruncate()).toBe(false);
+        reader.prepare('COMMIT').run();
+        expect(store.checkpointTruncate()).toBe(true);
+      } finally {
+        reader.close();
+      }
+    }
   });
 
   it('says so when the log could not be folded in, and still reports the erasure', async () => {

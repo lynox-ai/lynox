@@ -1322,11 +1322,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     for (const stub of this.memoryGraphStore?.stubsForErasure(subjectIds) ?? []) {
       seen.add(stub.id);
       if (stub.text === null) throw new UndecryptableTextError('memories');
-      const text = legacy.get(stub.id) ?? stub.text;
+      // The two stores can hold different wordings; either one naming the person counts, and
+      // the one that does is shown.
+      const legacyText = legacy.get(stub.id);
+      const named = [legacyText, stub.text].find(t => t !== undefined && matches(t));
+      const text = named ?? legacyText ?? stub.text;
       if (stub.linked) out.push({ id: stub.id, text, matchedBy: 'subject' });
       else {
         unlinkedStubs.push(stub.id);
-        if (matches(text)) out.push({ id: stub.id, text, matchedBy: 'mention' });
+        if (named !== undefined) out.push({ id: stub.id, text, matchedBy: 'mention' });
       }
     }
     for (const [id, text] of legacy) {

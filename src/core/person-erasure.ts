@@ -181,11 +181,8 @@ function resolve(deps: PersonErasureDeps, subjectId: string): Resolved | PersonE
   if (row.is_self === 1) return { refused: 'is_self' };
   if (row.kind !== 'person') return { refused: 'not_a_person' };
   const shells = deps.subjects.mergedShellIds(canonical);
+  // A merge already folds the shell's name and aliases into the canonical row.
   const aliases = new Set(parseAliases(row.aliases));
-  for (const id of shells) {
-    const shell = deps.subjects.getSubject(id);
-    if (shell) { aliases.add(shell.name); for (const a of parseAliases(shell.aliases)) aliases.add(a); }
-  }
   aliases.delete(row.name);
   const email = deps.subjects.personEmailForErasure(canonical);
   const forms = [row.name, ...aliases, ...(email ? [email] : [])];
@@ -305,7 +302,8 @@ export function erasePerson(
 
   const steps: Array<[PersonErasureStep, () => void]> = [
     ['durable_knowledge', () => {
-      let n = deps.knowledge.deleteBySubject(canonical);
+      // `entryIds` holds every bound entry (canonical and shells) and the selected matches.
+      let n = 0;
       for (const id of entryIds) if (deps.knowledge.deleteEntry(id)) n++;
       result.counts.entries = n;
     }],

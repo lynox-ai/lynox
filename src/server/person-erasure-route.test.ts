@@ -174,6 +174,22 @@ describe('person erasure routes (real engine)', () => {
     expect(auditRows(p.subjectId)).toEqual([]);
   });
 
+  it('refuses while another erasure runs, and erases nothing', async () => {
+    const p = seedPerson();
+    const { body: pv } = await preview(p.subjectId);
+    const flag = api as unknown as { erasureInProgress: boolean };
+    flag.erasureInProgress = true;
+    try {
+      const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
+      expect(r.status).toBe(409);
+      expect(r.body['code']).toBe('erasure_in_progress');
+    } finally {
+      flag.erasureInProgress = false;
+    }
+    expect(subjectExists(p.subjectId)).toBe(true);
+    expect(auditRows(p.subjectId)).toEqual([]);
+  });
+
   it('refuses without the confirmation word, on a changed set and on an id it did not find', async () => {
     const p = seedPerson();
     const { body: pv } = await preview(p.subjectId);
