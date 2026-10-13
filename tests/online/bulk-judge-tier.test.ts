@@ -21,6 +21,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { callForStructuredJson, extractionSpendOf } from '../../src/core/llm-helper.js';
 import { clientForTierSnapshot, createLLMClient } from '../../src/core/llm-client.js';
+import { FIREWORKS_API_BASE } from '../../src/core/tier-presets.js';
 import { modelCapability } from '../../src/types/models.js';
 import type { ProviderKey } from '../../src/types/provider-registry.js';
 import {
@@ -34,12 +35,33 @@ const MAX_OUTPUT_TOKENS = 400;
 const REPS = 3;
 const MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
 
-const MODELS: ReadonlyArray<{ provider: ProviderKey; modelId: string }> = [
-  { provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001' },
-  { provider: 'mistral', modelId: 'ministral-8b-2512' },
-  { provider: 'mistral', modelId: 'mistral-medium-2604' },
-  { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
+type Family = 'anthropic' | 'mistral' | 'fireworks';
+interface Candidate { family: Family; modelId: string }
+
+/** Every model the eval knows. `LYNOX_E2_MODELS` (comma list) picks from it; unset → the first four. */
+const CANDIDATES: readonly Candidate[] = [
+  { family: 'anthropic', modelId: 'claude-haiku-4-5-20251001' },
+  { family: 'mistral', modelId: 'ministral-8b-2512' },
+  { family: 'mistral', modelId: 'mistral-medium-2604' },
+  { family: 'anthropic', modelId: 'claude-sonnet-4-6' },
+  { family: 'mistral', modelId: 'mistral-small-2603' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/minimax-m3' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/gpt-oss-120b' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/glm-5p3' },
 ];
+const picked = process.env['LYNOX_E2_MODELS']?.split(',').map((x) => x.trim()).filter(Boolean);
+const MODELS: readonly Candidate[] = picked ? CANDIDATES.filter((c) => picked.includes(c.modelId)) : CANDIDATES.slice(0, 4);
+
+/**
+ * Output budget per call. A model the provider will not let stop thinking needs room above its
+ * measured silent bound, or the adapter refuses the call; its thinking is billed as output and
+ * so shows in the measured cost. Everyone else gets the judge's own small budget.
+ */
+function maxOutputFor(modelId: string): number {
+  const silent = modelCapability(modelId)?.thinkingOnly?.emptyAtOrBelow;
+  return silent === undefined ? MAX_OUTPUT_TOKENS : silent + 1024;
+}
 
 function configKey(field: string): string | undefined {
   try {
@@ -50,9 +72,12 @@ function configKey(field: string): string | undefined {
 }
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'] ?? configKey('anthropic_api_key');
 const MISTRAL_KEY = process.env['MISTRAL_API_KEY'] ?? configKey('mistral_api_key');
+const FIREWORKS_KEY = process.env['FIREWORKS_API_KEY'] ?? configKey('fireworks_api_key');
+const KEYS: Record<Family, string | undefined> = { anthropic: ANTHROPIC_KEY, mistral: MISTRAL_KEY, fireworks: FIREWORKS_KEY };
 
 const asked = MODE === 'smoke' || MODE === 'full';
-const describeE2 = asked && ANTHROPIC_KEY && MISTRAL_KEY ? describe : describe.skip;
+// Every picked model needs its key; a typo in LYNOX_E2_MODELS picks nothing and the test fails.
+const describeE2 = asked && ANTHROPIC_KEY && MODELS.every((m) => KEYS[m.family]) ? describe : describe.skip;
 
 function outDir(): string {
   const dir = process.env['LYNOX_E2_OUT'] ?? join(tmpdir(), `bulk-judge-e2-${new Date().toISOString().slice(0, 10)}`, MODE ?? 'none');
@@ -65,12 +90,13 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 describeE2('E2 bulk_judge model tier (spends money)', () => {
   it(`runs ${MODE ?? ''} under a hard limit of ${String(LIMIT_USD)} USD`, async () => {
     const ambient = createLLMClient({ provider: 'anthropic', apiKey: ANTHROPIC_KEY });
-    const clientFor = (m: { provider: ProviderKey; modelId: string }) => clientForTierSnapshot(
-      m.provider === 'mistral'
-        ? { provider: 'mistral', modelId: m.modelId, apiKey: MISTRAL_KEY, apiBaseURL: MISTRAL_BASE_URL }
-        : { provider: m.provider, modelId: m.modelId },
-      ambient, 'anthropic',
-    );
+    // Mistral and Fireworks both ride the openai wire, as the tier presets route them.
+    const snapshot = (m: Candidate): { provider: ProviderKey; modelId: string; apiKey?: string | undefined; apiBaseURL?: string | undefined } => {
+      if (m.family === 'mistral') return { provider: 'mistral', modelId: m.modelId, apiKey: MISTRAL_KEY, apiBaseURL: MISTRAL_BASE_URL };
+      if (m.family === 'fireworks') return { provider: 'openai', modelId: m.modelId, apiKey: FIREWORKS_KEY, apiBaseURL: FIREWORKS_API_BASE };
+      return { provider: 'anthropic', modelId: m.modelId };
+    };
+    const clientFor = (m: Candidate) => clientForTierSnapshot(snapshot(m), ambient, 'anthropic');
 
     const smokeModel = process.env['LYNOX_E2_SMOKE_MODEL'] ?? MODELS[0]!.modelId;
     const models = MODE === 'smoke' ? MODELS.filter((m) => m.modelId === smokeModel) : MODELS;
@@ -97,7 +123,8 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
             const user = userMessage(rule, f);
             // Worst case for the next call: two characters per token in, the full output cap out.
             const price = modelCapability(m.modelId)!.pricing;
-            const worst = (Math.ceil((JUDGE_SYSTEM.length + user.length) / 2) * price.input + MAX_OUTPUT_TOKENS * price.output) / 1_000_000;
+            const maxOut = maxOutputFor(m.modelId);
+            const worst = (Math.ceil((JUDGE_SYSTEM.length + user.length) / 2) * price.input + maxOut * price.output) / 1_000_000;
             if (spent + worst > LIMIT_USD) { aborted = `limit: spent ${spent.toFixed(4)} + next worst ${worst.toFixed(4)} > ${String(LIMIT_USD)}`; break; }
             let o: CallOutcome | null = null;
             for (let attempt = 0; attempt < 3 && o === null; attempt++) {
@@ -106,7 +133,7 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
               try {
                 const r = await callForStructuredJson<Record<string, unknown>>({
                   client, model: m.modelId, system: JUDGE_SYSTEM, user, schema: rule.schema,
-                  maxOutputTokens: MAX_OUTPUT_TOKENS, budgetUsd: 0.05,
+                  maxOutputTokens: maxOut, budgetUsd: 0.05,
                 });
                 o = { fixture: f.id, rule: ruleId, model: m.modelId, rep, data: r.data, error: null, costUsd: r.costUsd, inputTokens: r.inputTokens, outputTokens: r.outputTokens, ms: Date.now() - t0 };
               } catch (err) {
