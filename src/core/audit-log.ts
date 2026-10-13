@@ -103,22 +103,37 @@ export function httpTarget(method: string, url: string): string {
 }
 
 /**
- * Characters that would let a target pose as something it is not: the query and fragment marks,
- * and every control, format and line or paragraph separator (bidi overrides among them). `%` is
- * escaped too, except where it starts the `%2F` a path keeps.
+ * Characters that would let a target pose as something it is not, escaped wherever the actor's
+ * text is written into a row: the escape sign itself, the query and fragment marks, `&` and `=`,
+ * and every control, format and line or paragraph separator (bidi overrides among them). A `/`
+ * is never escaped: the row's own slashes are written between parts, and in a value it is a
+ * slash.
  */
-const ROW_SHAPING = /[?#\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|%(?!2F)/giu;
+const ROW_SHAPING = /[%?#&=\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const escapeForRow = (s: string): string => s.replace(ROW_SHAPING, (c) => encodeURIComponent(c));
 
-/** Every escape undone except `%2F`, which in a path is a slash inside a segment, not between two. */
-function decodedKeepingSlash(raw: string): string {
-  return raw.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => run.split(/(%2F)/i).map((part) => {
-    if (/^%2F$/i.test(part) || part === '') return part;
-    try { return decodeURIComponent(part); } catch {
-      // Not UTF-8 as a whole: undo the ASCII escapes one by one, so a key does not hide behind
-      // one bad byte, and leave the rest as sent.
-      return part.replace(/%([0-7][0-9A-Fa-f])/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+/** A run of the actor's text, undone from its escapes, or an escaped byte that is not UTF-8. */
+type Piece = { readonly text: string } | { readonly raw: string };
+
+/** Undo every escape. A byte that does not start valid UTF-8 stays a `raw` piece, as sent. */
+function decodePieces(s: string): Piece[] {
+  const out: Piece[] = [];
+  let at = 0;
+  for (const m of s.matchAll(/(?:%[0-9A-Fa-f]{2})+/g)) {
+    if (m.index > at) out.push({ text: s.slice(at, m.index) });
+    const bytes = m[0].match(/%[0-9A-Fa-f]{2}/g)!;
+    for (let b = 0; b < bytes.length;) {
+      let n = 4;
+      for (; n > 0; n--) {
+        if (b + n > bytes.length) continue;
+        try { out.push({ text: decodeURIComponent(bytes.slice(b, b + n).join('')) }); break; } catch { /* shorter */ }
+      }
+      if (n === 0) { out.push({ raw: bytes[b]! }); b += 1; } else b += n;
     }
-  }).join(''));
+    at = m.index + m[0].length;
+  }
+  if (at < s.length) out.push({ text: s.slice(at) });
+  return out;
 }
 
 /**
@@ -128,17 +143,25 @@ function decodedKeepingSlash(raw: string): string {
  * which thread, file or contact was asked for is what the row is for, and these are the
  * instance's own names, not a third party's keys.
  *
- * The row is written by the actor it records, so the order is: undo the escapes, mask the known
- * secret shapes where they are visible, then escape what could change the row's shape (a `?`, a
- * control or bidi character, and in a value `&` and `=`). A key cannot hide behind an escape, and
- * a value cannot add a pair of its own. A double-encoded key (`%2573…`) is undone once only.
+ * The row is written by the actor it records, so the text is read twice:
+ * - to FIND a secret: every escape undone, an encoded slash as a slash, a byte that is not UTF-8
+ *   as U+FFFD (a boundary, so a key behind it is still a key). When a known secret shape is
+ *   there, the row is that text, masked, then escaped; it no longer tells an encoded slash from
+ *   a plain one, which matters less than the key;
+ * - to WRITE the row otherwise: every escape undone, then re-escaped where it could shape the
+ *   row, so a path cannot pose as a query, a value cannot add a pair, `%2F` and `%252F` stay
+ *   apart, and an escaped byte that is not UTF-8 is written as sent.
+ * A double-encoded key (`%2573…`) is undone once only, as the handler undoes it.
  */
 export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<readonly [string, string]> = []): string {
-  const escape = (s: string, extra: RegExp): string =>
-    s.replace(ROW_SHAPING, (c) => encodeURIComponent(c)).replace(extra, (c) => encodeURIComponent(c));
   const mask = (s: string): string => maskSecretPatterns(s, { includeGeneric: true });
-  const path = escape(mask(decodedKeepingSlash(pathname)), /(?!)/g);
-  const query = identifiers.map(([name, value]) => `${name}=${escape(mask(value), /[&=]/g)}`).join('&');
+  const parts = pathname.split('/').map((segment) => segment.split(/%2F/i).map(decodePieces));
+  const found = parts.map((sub) => sub.map((pieces) => pieces.map((p) => ('text' in p ? p.text : '\uFFFD')).join('')).join('/')).join('/');
+  const masked = mask(found);
+  const path = masked !== found
+    ? masked.split('/').map(escapeForRow).join('/')
+    : parts.map((sub) => sub.map((pieces) => pieces.map((p) => ('text' in p ? escapeForRow(p.text) : p.raw)).join('')).join('%2F')).join('/');
+  const query = identifiers.map(([name, value]) => `${name}=${escapeForRow(mask(value))}`).join('&');
   return query === '' ? path : `${path}?${query}`;
 }
 

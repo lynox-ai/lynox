@@ -169,7 +169,7 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     }
     expect(newReadRows().map((r) => r.target)).toEqual([
       '/api/files/read?path=a%26hidden%3D1',
-      '/api/threads/t1%3Fpath=notes%2Fx.txt',
+      '/api/threads/t1%3Fpath%3Dnotes%2Fx.txt',
       '/api/threads/a%E2%80%AEb',
       '/api/history/runs?sessionId=&thread_id=t-9',
     ]);

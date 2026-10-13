@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, httpTarget } from './audit-log.js';
+import { AuditLog, httpTarget, requestPathTarget } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { ToolEntry } from '../types/index.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
@@ -138,3 +138,75 @@ describe('which tool calls write outside the instance (ToolEntry.outwardWrite)',
     expect(label('http_request', { url: 'https://a.example.invalid/', method: 'GET', headers: { 'X-HTTP-Method-Override': 'BREW' } }), 'an override that is not a method counts as a write').toBe('OVERRIDE');
   });
 });
+
+describe('requestPathTarget: no secret shape survives into a read row', () => {
+  // Every shape is built at RUNTIME: this repo is public, and the commit-time scan looks for
+  // key-shaped literals. `tell` is a run of the secret that masking must not leave behind.
+  const body = (n: number): string => Array.from({ length: n }, (_, i) => 'Q7x9Kp2Lm4Nz8Rt6'[i % 16]).join('');
+  const SAMPLES: ReadonlyArray<{ shape: string; secret: string; tell: string }> = [
+    { shape: 'Anthropic', secret: `sk-ant-${body(24)}`, tell: body(24).slice(4, 14) },
+    { shape: 'Anthropic, no early digit', secret: `sk-ant-abcdefghij${body(14)}`, tell: 'abcdefghij' },
+    { shape: 'OpenAI project', secret: `sk-proj-${body(24)}`, tell: body(24).slice(4, 14) },
+    { shape: 'OpenAI-style', secret: `sk-${body(24)}`, tell: body(24).slice(4, 14) },
+    { shape: 'Stripe', secret: `sk_live_${body(20)}`, tell: body(20).slice(4, 14) },
+    { shape: 'GitHub', secret: `ghp_${body(36)}`, tell: body(36).slice(4, 14) },
+    { shape: 'AWS', secret: `AKIA${body(16).toUpperCase()}`, tell: body(16).toUpperCase().slice(2, 12) },
+    { shape: 'Google API', secret: `AIza${body(35)}`, tell: body(35).slice(4, 14) },
+    { shape: 'Slack', secret: `${['xo', 'xb-'].join('')}${body(20)}`, tell: body(20).slice(4, 14) },
+    { shape: 'Google OAuth', secret: `ya29.${body(24)}`, tell: body(24).slice(4, 14) },
+    { shape: 'JWT', secret: `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.${body(24)}`, tell: 'eyJzdWIiOiIxMjM0' },
+    { shape: 'Bearer', secret: `Bearer ${body(26)}`, tell: body(26).slice(4, 14) },
+    { shape: 'credential in URL', secret: `postgres://admin:${body(16)}@db`, tell: body(16).slice(2, 12) },
+    { shape: 'long token', secret: `${body(44)}`, tell: body(44).slice(4, 14) },
+  ];
+  const escapeAll = (s: string): string => [...new TextEncoder().encode(s)].map((b) => `%${b.toString(16).toUpperCase().padStart(2, '0')}`).join('');
+  /** How a path may carry the secret: as the URL parser hands the path to the dispatcher. */
+  const WRAPS: ReadonlyArray<[string, (s: string) => string]> = [
+    ['as typed', (s) => `/api/files/x/${encodeURI(s)}`],
+    ['every byte escaped', (s) => `/api/files/${escapeAll(s)}`],
+    ['separators escaped', (s) => `/api/files/${encodeURIComponent(s)}`],
+    ['behind an encoded slash', (s) => `/api/files/inbox%2F${encodeURIComponent(s)}`],
+    ['behind a lowercase encoded slash', (s) => `/api/files/inbox%2f${encodeURIComponent(s)}`],
+    ['behind a byte that is not UTF-8', (s) => `/api/files/x%FF${encodeURIComponent(s)}`],
+    ['behind an escaped question mark', (s) => `/api/files/x%3F${encodeURIComponent(s)}`],
+    ['behind an escaped space', (s) => `/api/files/x%20${encodeURIComponent(s)}`],
+  ];
+  const asParsed = (path: string): string => new URL(`http://h${path}`).pathname;
+
+  for (const { shape, secret, tell } of SAMPLES) {
+    it(`masks ${shape} in every way a path or a value carries it`, () => {
+      const leaked: string[] = [];
+      for (const [how, wrap] of WRAPS) {
+        const out = requestPathTarget(asParsed(wrap(secret)));
+        if (out.includes(tell)) leaked.push(`${how}: ${out}`);
+      }
+      for (const value of [secret, `x/${secret}`, `x?${secret}`, `x&${secret}`]) {
+        const out = requestPathTarget('/api/files/read', [['path', value]]);
+        if (out.includes(tell)) leaked.push(`value ${JSON.stringify(value)}: ${out}`);
+      }
+      expect(leaked).toEqual([]);
+    });
+  }
+
+  it('keeps apart what the handler tells apart, when no secret is there', () => {
+    const t = (p: string): string => requestPathTarget(asParsed(p));
+    expect(t('/api/files/a%2Fb')).toBe('/api/files/a%2Fb');
+    expect(t('/api/files/a%252Fb')).toBe('/api/files/a%252Fb');
+    expect(t('/api/files/%FF')).toBe('/api/files/%FF');
+    expect(t('/api/files/%25FF')).toBe('/api/files/%25FF');
+    expect(t('/api/files/a/b')).toBe('/api/files/a/b');
+  });
+
+  it('writes a path that cannot pose as a query and a value that cannot add a pair', () => {
+    const t = (p: string, ids: Array<[string, string]> = []): string => requestPathTarget(asParsed(p), ids);
+    expect(t('/api/files/x%3Fpath%3D%2Fetc%26threadId%3D1')).toBe('/api/files/x%3Fpath%3D%2Fetc%26threadId%3D1');
+    expect(t('/api/files/a%E2%80%AEb')).toBe('/api/files/a%E2%80%AEb');
+    expect(t('/api/files/read', [['path', 'a&hidden=1\n']])).toBe('/api/files/read?path=a%26hidden%3D1%0A');
+  });
+
+  it('keeps an id readable', () => {
+    expect(requestPathTarget(new URL('http://h/api/files/M%C3%A4rz%20Bericht.pdf').pathname)).toBe('/api/files/März Bericht.pdf');
+    expect(requestPathTarget('/api/files/read', [['path', 'notes/März Bericht.pdf']])).toBe('/api/files/read?path=notes/März Bericht.pdf');
+  });
+});
+
