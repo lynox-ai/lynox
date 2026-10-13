@@ -350,6 +350,16 @@ let _hydratedLocal: ChatMessage[] | null = null;
 /** Threads whose saved copy was dropped in this session: nothing writes them back. */
 const _droppedThreads = new Set<string>();
 
+/** Threads the server answered 410 for: deleted, so no save of what is on screen writes them
+ *  back, not even the turn-start that clears `_droppedThreads`. Deleted stays deleted. */
+const _deletedOnServer = new Set<string>();
+
+/** The server said this thread is deleted: drop its saved copy and never write it again. */
+function forgetDeletedThread(threadId: string): void {
+	_deletedOnServer.add(threadId);
+	dropPersistedThread(threadId);
+}
+
 /** A thread in use again (a turn starts in it, or it was unarchived): its saved copy may be
  *  written again. */
 export function forgetDroppedThread(threadId: string): void {
@@ -387,6 +397,11 @@ function persistChatNow(): void {
 	}
 	if (typeof localStorage === 'undefined') return;
 	const root = readPersistedRoot();
+	// A thread the server deleted is not written back while it is still on screen.
+	if (sessionId !== null && _deletedOnServer.has(sessionId)) {
+		if (root.sessionId === sessionId) { root.sessionId = null; writePersistedRoot(root); }
+		return;
+	}
 	root.sessionId = sessionId;
 	if (sessionId) {
 		root.threads[sessionId] = messages;
@@ -1112,7 +1127,7 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	}
 	if (!sameThread) {
 		// Deleted: its saved copy goes, rather than keep a conversation the server no longer has.
-		if (threadDeleted && turn.sid !== null) { dropPersistedThread(turn.sid); return; }
+		if (threadDeleted && turn.sid !== null) { forgetDeletedThread(turn.sid); return; }
 		// The user is in another thread now. Keep the turn in its own thread's saved copy, failed,
 		// so going back shows it, can send it again, and is not replaced by the server's shorter
 		// transcript (which never got it). Not when the turn's thread is the one on screen: what
@@ -1138,7 +1153,7 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 			if (m) { m.queued = false; m.failed = true; }
 		}
 		messageQueue = [];
-		if (turn.sid !== null) dropPersistedThread(turn.sid);
+		if (turn.sid !== null) forgetDeletedThread(turn.sid);
 		return;
 	}
 	persistChat();
@@ -3595,7 +3610,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 		if (res.status === 410) {
 			// Deleted, here or elsewhere: open a new chat instead, say why, and drop the saved copy.
 			newChat();
-			dropPersistedThread(threadId);
+			forgetDeletedThread(threadId);
 			chatError = t('chat.error_thread_deleted');
 			return;
 		}

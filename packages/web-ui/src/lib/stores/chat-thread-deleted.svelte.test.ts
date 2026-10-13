@@ -25,6 +25,7 @@ const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)
 let store: Store;
 let deletedText: string;
 let calls: Array<{ url: string; body: unknown }>;
+let listeners: Record<string, () => void>;
 
 function serve(route: (url: string, n: number) => Response | Promise<Response> | undefined): void {
 	const seen: Record<string, number> = {};
@@ -45,7 +46,8 @@ const runPosts = (): number => calls.filter((c) => c.url.endsWith('/run')).lengt
 
 beforeEach(async () => {
 	vi.stubGlobal('navigator', { onLine: true });
-	vi.stubGlobal('window', { addEventListener: () => {} });
+	listeners = {};
+	vi.stubGlobal('window', { addEventListener: (type: string, fn: () => void) => { listeners[type] = fn; } });
 	vi.resetModules();
 	store = await import('./chat.svelte.js');
 	deletedText = (await import('../i18n.svelte.js')).t('chat.error_thread_deleted');
@@ -125,6 +127,25 @@ describe('a conversation deleted elsewhere', () => {
 		await new Promise((r) => setTimeout(r, 600));
 
 		expect(localStorage.getItem('lynox-chat') ?? '').not.toContain('old text');
+	});
+
+	it('a message sent into it stays on screen, but no later save writes the deleted chat back', async () => {
+		// What is on screen stays, to be copied. A reload must not bring the deleted chat back:
+		// the next save (here the tab closing) leaves it out of storage.
+		serve((url, n) => {
+			if (url.endsWith('/run')) return json({ error: 'no session' }, 404);
+			if (url.endsWith('/sessions') && n >= 2) return gone();
+			return undefined;
+		});
+		await store.sendMessage('hello');
+		expect(store.getMessages().some((m) => m.content === 'hello'), 'still on screen').toBe(true);
+
+		listeners['beforeunload']!();
+		await wait(600);
+
+		const saved = JSON.parse(localStorage.getItem('lynox-chat') ?? '{}') as { sessionId?: string | null; threads?: Record<string, unknown> };
+		expect(saved.threads?.['t1'], 'no saved copy of the deleted chat').toBeUndefined();
+		expect(saved.sessionId ?? null, 'a reload does not reopen it').toBeNull();
 	});
 
 	it('a send that learns of the deletion after the user moved on drops that chat\'s saved copy', async () => {
