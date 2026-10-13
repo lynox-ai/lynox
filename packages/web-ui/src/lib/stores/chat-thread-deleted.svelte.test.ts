@@ -26,14 +26,14 @@ let store: Store;
 let deletedText: string;
 let calls: Array<{ url: string; body: unknown }>;
 
-function serve(route: (url: string, n: number) => Response | undefined): void {
+function serve(route: (url: string, n: number) => Response | Promise<Response> | undefined): void {
 	const seen: Record<string, number> = {};
 	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
 		const url = String(input);
 		calls.push({ url, body: typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined });
 		const key = url.replace(/^.*\/api/, '');
 		seen[key] = (seen[key] ?? 0) + 1;
-		const r = route(url, seen[key]!);
+		const r = await route(url, seen[key]!);
 		if (r) return r;
 		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
 		if (url.endsWith('/runs/active')) return json({ runs: [] });
@@ -125,6 +125,28 @@ describe('a conversation deleted elsewhere', () => {
 		await new Promise((r) => setTimeout(r, 600));
 
 		expect(localStorage.getItem('lynox-chat') ?? '').not.toContain('old text');
+	});
+
+	it('a send that learns of the deletion after the user moved on drops that chat\'s saved copy', async () => {
+		// The user is in another chat by then: nothing is shown, and the deleted chat is not
+		// written back to storage with the failed message in it.
+		let answerRun!: (r: Response) => void;
+		serve((url, n) => {
+			if (url.endsWith('/run')) return new Promise<Response>((res) => { answerRun = res; });
+			if (url.endsWith('/sessions') && n >= 2) return gone();
+			return undefined;
+		});
+		void store.sendMessage('go');
+		await settle();
+		store.newChat();
+		answerRun(json({ error: 'no session' }, 404));
+		await settle();
+		await wait(600);
+
+		const saved = JSON.parse(localStorage.getItem('lynox-chat') ?? '{}') as { threads?: Record<string, unknown> };
+		expect(saved.threads?.['t1'], 'no saved copy of the deleted chat').toBeUndefined();
+		expect(store.getChatError()).toBeFalsy();
+		expect(store.getMessages()).toEqual([]);
 	});
 
 	it('the two texts exist in German and English', async () => {
