@@ -151,7 +151,9 @@ export const COMPARATORS: readonly Candidate[] = [
   // `model: ministral-8b-2512` (measured 2026-10-10). A comparator that is silently
   // another model scores that model under Nemo's name, so the row was removed rather
   // than kept as a mislabelled control.
-  // The cheapest gen-3 — could it serve an even cheaper fast slot than 8B?
+  // The cheapest gen-3 — could it serve an even cheaper fast slot than 8B? Since its registry
+  // window is 131 072 (the provider's figure, 2026-10-13) it fails MIN_CONTEXT_WINDOW and is
+  // context-gated on every tier; the row stays so the grid shows that, not a silent absence.
   { id: 'ministral-3b-2512', label: 'Ministral 3B', provider: 'openai', apiBaseURL: MISTRAL_BASE, tierHint: null,
     prefilter: 'cheapest gen-3 Mistral; candidate for a cheaper fast slot' },
   // GLM (Fireworks) — a cheaper Opus REPLACEMENT for deep (rafael 2026-07-19).

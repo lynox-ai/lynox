@@ -250,11 +250,11 @@ describe('bootstrapInbox — wiring', () => {
     const eu = bootstrapInbox({ mailStateDb: mail, anthropicClient: client, llmRegion: 'eu', mistralApiKey: 'eu-key' });
     try {
       // Same 1M-in + 1M-out usage priced at each region's provider rate. The EU
-      // path used to bill Mistral spend at the Haiku constants (~7.5× here).
+      // path used to bill Mistral spend at the Haiku constants (8× here).
       us.budget.recordUsage(1_000_000, 1_000_000);
       eu.budget.recordUsage(1_000_000, 1_000_000);
       expect(us.budget.snapshot().spentUSD).toBeCloseTo(6.0, 6); // Haiku $1 + $5
-      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.8, 6); // Mistral $0.20 + $0.60
+      expect(eu.budget.snapshot().spentUSD).toBeCloseTo(0.75, 6); // Mistral Small 4 $0.15 + $0.60
     } finally {
       await us.shutdown();
       await eu.shutdown();

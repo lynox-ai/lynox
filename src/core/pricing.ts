@@ -175,9 +175,11 @@ export function hasKnownPricing(model: string): boolean {
  * sets give very different answers and an earlier version of this comment counted
  * neither. The admission floors were FLAT at $0.05. Over the three TIER DEFAULTS
  * (`MODEL_MAP`) a cold first turn costs $0.052288 / $0.192 / $0.44 — a spread of 8.41x,
- * and the flat figure is nearly exact for the cheapest. Over all 39 ids in
- * `MODEL_CAPABILITIES` the range is $0.000898 (`ministral-3b-2410`) to $0.88
- * (`claude-fable-5`): 17.60x too low at the top, and 55.66x too HIGH at the bottom.
+ * and the flat figure is nearly exact for the cheapest. Over all 40 ids in
+ * `MODEL_CAPABILITIES` (counted 2026-10-13) the range is $0.00224576 (`ministral-3b-2512`) to
+ * $0.88 (`claude-fable-5`): 17.60x too low at the top, and 22.26x too HIGH at the bottom.
+ * (The first count said 39 ids from $0.000898 — `ministral-3b-2410` priced at a retired
+ * model's rate, which Mistral no longer serves under that id; see `MISTRAL_SERVED_AS`.)
  *
  * ⚠ SO IT WAS WRONG IN BOTH DIRECTIONS, and the first version of this comment told only
  * the tightening half. At the cheap end the flat figure refused batches whose shares

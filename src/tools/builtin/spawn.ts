@@ -48,8 +48,9 @@ const SPAWN_TIMEOUT = 10 * 60 * 1000;
  *
  * ⛔ DERIVED PER MODEL AND PER CAP, and every figure names the SET it is counted over — a
  * child's model is not restricted to the tier defaults, and because an earlier version of
- * this comment counted a set it had not measured. Over all **39** ids in
- * `MODEL_CAPABILITIES` a cold first turn runs from **$0.000898** (`ministral-3b-2410`) to
+ * this comment counted a set it had not measured. Over all **40** ids in
+ * `MODEL_CAPABILITIES` (counted 2026-10-13) a cold first turn runs from **$0.00224576**
+ * (`ministral-3b-2512`) to
  * **$0.88** (`claude-fable-5`: 20k prefix at $20/Mtok plus 9 600 output tokens at
  * $50/Mtok); over the three tier defaults it is $0.052288 / $0.192 / $0.44, a spread of
  * 8.41x. So the flat $0.05 this replaces was nearly exact for the fast tier and **17.60x
@@ -127,7 +128,7 @@ function usdLabel(amount: number): string {
  * ⛔ MEASURED. `usdLabel` is a DISPLAY helper: `toFixed(2)` rounds to nearest, so a $0.192
  * floor printed as "$0.19" and the advice "raise max_budget_usd to at least $0.19", followed
  * literally, produced the byte-identical refusal — a non-terminating loop on the default
- * tier. 15 of the 39 priced ids round down that way. A figure the reader is told to TYPE has
+ * tier. 19 of the 40 priced ids (2026-10-13) round down that way. A figure the reader is told to TYPE has
  * to work when typed; a figure the reader only READS does not, which is why the two helpers
  * are separate and why the refusal below uses `usdLabel` throughout.
  *
@@ -406,7 +407,7 @@ export function floorRemedies(opts: {
 
 /**
  * ⛔ TWO AMOUNTS THAT ROUND ALIKE ARE NEVER PUT IN APPOSITION. `usdLabel` rounds to nearest and
- * 15 of the 39 priced ids round down, so an ask of $0.19 against a $0.192 floor printed "it may
+ * 19 of the 40 priced ids (2026-10-13) round down, so an ask of $0.19 against a $0.192 floor printed "it may
  * spend $0.19 and one turn on its model costs about $0.19" — two identical figures with one
  * declared insufficient against the other, next to an instruction to raise it. A sweep found 73
  * of 2 717 refusals saying "X is below X".
@@ -588,7 +589,7 @@ function floorRefusal(opts: {
       : 'Nothing in this call can change that; a later run gets its own ceiling.';
 
   // ── (a0) THE RUN IS SPENT. Nothing about the batch changes it, and no model is cheap enough
-  // — the cheapest priced floor in the registry is $0.000898, not $0.
+  // — the cheapest priced floor in the registry is $0.0022, not $0.
   if (!(remainingRunUSD > 0)) {
     return `This run has ${ceiling}, so there is nothing to divide: ${share}. ${remedy}${nothing}`;
   }

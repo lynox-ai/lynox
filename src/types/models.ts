@@ -69,13 +69,15 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * Pinned to specific snapshots so behaviour stays reproducible across model
  * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
  * and behaviour-drift in managed-EU tenants.
- *   fast     → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
+ *   fast     → ministral-8b-2512      (gen 3 edge model; took the fast slot from mistral-small-2603)
  *   balanced → mistral-medium-2604    (WS2: the 14B main fell below the R1/R3 floor)
  *   deep     → mistral-medium-2604    (Medium 3.5 — the stronger Mistral deep; Large 3 → legacy)
  * (Keep this block in sync with MISTRAL_MODEL_MAP below — the values are
  *  pinned by tests/doc-drift.test.ts.)
  *
  * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
+ * (2026-10-13: mistral-small-2603 still answers under its own id and is Small 4 — not
+ *  retired; see the SERVED-AS note at the legacy roster below.)
  * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
 // Refreshed 2026-07-21: `deep` moves to mistral-medium-2604 (Mistral Medium
@@ -655,6 +657,21 @@ export const CACHE_TTL_WRITE_MULTIPLIER: Record<string, number> = { '5m': 1.25, 
 /** Anthropic cache-READ price as a multiple of base input price (TTL-independent). */
 export const CACHE_READ_MULTIPLIER = 0.1;
 
+/**
+ * Legacy Mistral ids the API answers with ANOTHER model, mapped to the registry entry of
+ * the model that answers (measured 2026-10-13: the response's `model` field, and the
+ * alias lists of `GET /v1/models`). The legacy entry carries that model's pricing and
+ * context window, so the cost cap counts what Mistral bills.
+ */
+export const MISTRAL_SERVED_AS: Readonly<Record<string, string>> = Object.freeze({
+  'mistral-medium-2508': 'mistral-medium-2604',
+  'mistral-medium-latest': 'mistral-medium-2604',
+  'ministral-8b-2410': 'ministral-8b-2512',
+  'open-mistral-nemo': 'ministral-8b-2512',
+  'ministral-3b-2410': 'ministral-3b-2512',
+  'magistral-small-latest': 'mistral-small-2603',
+});
+
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // Claude Opus 5.5 — candidate for the deep slot (not wired to any preset or tier
   // here; this is the entry the switch needs so it is priced and shaped, not the
@@ -955,7 +972,11 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     id: 'ministral-3b-2512',
     provider: 'openai',
     tier: 'fast',
-    contextWindow: 262_144,
+    // 131 072, not 262 144: `GET /v1/models` reports max_context_length 131072 for this
+    // id and its alias ministral-3b-latest (2026-10-13); the same listing gives the 8B
+    // 262 144. Too large a window moves the 0.85 compaction trigger past
+    // what the provider accepts, so a long thread gets a 400 instead of a compaction.
+    contextWindow: 131_072,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
@@ -1015,87 +1036,85 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     // exists covers preset slots only (tier-presets.test.ts).
     provenance: 'EU',
   },
-  // DEPRECATED by Mistral — magistral-medium-2509 retires 2026-07-31. No longer
-  // tier-routed (tier:null); kept for cost-guard + back-compat of legacy configs
-  // that pinned it via openai_model_id. Set-Bench v4: never beat mistral-large-2512.
-  'magistral-medium-2509': {
-    id: 'magistral-medium-2509',
-    provider: 'openai',
-    tier: null,
-    contextWindow: 131_072,
-    defaultMaxOutput: 32_000,
-    maxContinuations: 20,
-    betaHeaders: [],
-    features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 2, output: 5, cacheWrite: 2, cacheRead: 0.20 },
-    uiLabel: 'Magistral Medium 1.2',
-  },
+
   // === Mistral bench-only / legacy roster (cost tracking; no tier routing) ===
   // contextWindow values from Mistral docs (2026-05). These models aren't
   // wired into MISTRAL_MODEL_MAP — they're only referenced by set-bench and
   // cost-guard so the user can opt-in via openai_model_id.
   //
-  // Note: ministral-3b/8b-2410 + mistral-small-2603 retired by Mistral 2025-12.
-  // Kept here for backwards-compat of legacy configs + cost-guard. New code
-  // should use the gen-3 ministral-3b/8b-2512 entries above (tier:'fast').
+  // ⚠ SERVED-AS (measured live 2026-10-13):
+  // Mistral does not refuse a retired id, it answers it with a successor and names that
+  // successor in the response's `model` field. A legacy config that pins one of these ids
+  // therefore runs on — and is billed for — another model. Each such entry carries the
+  // pricing and context window of the model that actually answers (`MISTRAL_SERVED_AS`,
+  // checked offline in models.test.ts and on the wire in tests/online/mistral-served-as).
+  // Features are deliberately NOT mirrored: legacy Mistral ids stay `vision:false` by
+  // decision (rafael 2026-07-18), and a false-NO only yields the clear pre-flight error.
+  // magistral-medium-2509 / magistral-small-2509 are removed: Mistral answers them
+  // `400 Invalid model`, so no spend can reach their rows.
+  //
+  // mistral-small-2603 is NOT retired: it answers under its own id, /v1/models gives it
+  // 262 144 context, and its model card (docs.mistral.ai/models/model-cards/
+  // mistral-small-4-0-26-03, raw 2026-10-13) prices it $0.15 / $0.6 per 1M. The card
+  // publishes no cached rate, so cacheRead = input (counts more, never less).
   'mistral-small-2603': {
     id: 'mistral-small-2603',
     provider: 'openai',
     tier: null,
-    contextWindow: 32_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.20, output: 0.60, cacheWrite: 0.20, cacheRead: 0.20 },
-    uiLabel: 'Mistral Small (deprecated)',
+    pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.15 },
+    uiLabel: 'Mistral Small 4',
   },
   'ministral-8b-2410': {
     id: 'ministral-8b-2410',
     provider: 'openai',
     tier: null,
-    contextWindow: 32_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.10 },
+    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
     uiLabel: 'Ministral 8B',
   },
   'ministral-3b-2410': {
     id: 'ministral-3b-2410',
     provider: 'openai',
     tier: null,
-    contextWindow: 32_000,
+    contextWindow: 131_072,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.04, output: 0.04, cacheWrite: 0.04, cacheRead: 0.04 },
+    pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 },
     uiLabel: 'Ministral 3B',
   },
   'open-mistral-nemo': {
     id: 'open-mistral-nemo',
     provider: 'openai',
     tier: null,
-    contextWindow: 128_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.15 },
+    pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
     uiLabel: 'Mistral Nemo',
   },
   'mistral-medium-2508': {
     id: 'mistral-medium-2508',
     provider: 'openai',
     tier: null,
-    contextWindow: 128_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 0.40, output: 2, cacheWrite: 0.40, cacheRead: 0.40 },
+    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
     uiLabel: 'Mistral Medium 3.1',
   },
   // Mistral Medium 3.5 (2604) — model-presets candidate (Mistral standard-deep /
@@ -1126,12 +1145,12 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     id: 'mistral-medium-latest',
     provider: 'openai',
     tier: null,
-    contextWindow: 128_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
     features: MISTRAL_FEATURES_LARGE,
-    pricing: { input: 0.40, output: 2, cacheWrite: 0.40, cacheRead: 0.40 },
+    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
     uiLabel: 'Mistral Medium (latest)',
   },
   'codestral-2508': {
@@ -1158,28 +1177,17 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.30, output: 0.90, cacheWrite: 0.30, cacheRead: 0.30 },
     uiLabel: 'Codestral (latest)',
   },
-  'magistral-small-2509': {
-    id: 'magistral-small-2509',
-    provider: 'openai',
-    tier: null,
-    contextWindow: 40_000,
-    defaultMaxOutput: 8_192,
-    maxContinuations: 5,
-    betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
-    uiLabel: 'Magistral Small',
-  },
+
   'magistral-small-latest': {
     id: 'magistral-small-latest',
     provider: 'openai',
     tier: null,
-    contextWindow: 40_000,
+    contextWindow: 262_144,
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
     features: MISTRAL_FEATURES_SMALL,
-    pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
+    pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.15 },
     uiLabel: 'Magistral Small (latest)',
   },
   // === Fireworks-hosted (openai-compat) — preset slots + picker candidates ===
