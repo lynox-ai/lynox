@@ -149,6 +149,31 @@ describe('E2 scoring sees a broken answer as broken (positive controls)', () => 
     expect(looksGerman('Die Kaffeemühle mit dem Mahlwerk aus Keramik für den Alltag')).toBe(true);
     expect(looksGerman('The grinder with a ceramic burr for the kitchen')).toBe(false);
   });
+
+  // The first full run read these terse German answers (shapes as models gave them) as English:
+  // `in` sat on the English list, and they carry almost no other function word.
+  it('reads terse German meta descriptions as German', () => {
+    const name = 'Haldquorv Wool Blanket';
+    expect(looksGerman(`${name} – aus naturbelassener Merinowolle, 130 x 180 cm. Nachhaltig verpackt, in Portugal gefertigt.`, name)).toBe(true);
+    expect(looksGerman('Cobaquorv Hand Cream - unparfümierte Handcreme mit Sheabutter in recyceltem Aluminium.', 'Cobaquorv Hand Cream')).toBe(true);
+    expect(looksGerman('Quilquorv Fountain Pen – Edelstahlfeder, recyceltes Aluminium, inkl. Konverter & Tasche.', 'Quilquorv Fountain Pen')).toBe(true);
+    // No function word at all: the umlaut is the only evidence.
+    expect(looksGerman('Teekanne Mirequorv – Gusseisen, 1,2 Liter, hält Tee lange warm.', 'Teekanne Mirequorv')).toBe(true);
+  });
+
+  it('does not let umlauts in the product name make English text German', () => {
+    expect(looksGerman('Kräuterkissen Fußwärmer – spelt husks, made in Portugal.', 'Kräuterkissen Fußwärmer')).toBe(false);
+    const f = byId('c08'); // Kräuterkissen Solvquorv
+    const s = scoreCall(call('c08', 'R-a', { meta_description: `${f.name} – spelt husks, lavender, cotton cover.` }), f);
+    expect(s.notes).toContain('not-german');
+    expect(s.rule).toBe(false);
+  });
+
+  it('still reads terse English as not German, and does not count the product name', () => {
+    expect(looksGerman('Haldquorv Wool Blanket – undyed merino, 130 x 180 cm, made in Portugal.', 'Haldquorv Wool Blanket')).toBe(false);
+    expect(looksGerman('Kräuterkissen Solvquorv – a pillow of spelt husks and lavender, made in Portugal.', 'Kräuterkissen Solvquorv')).toBe(false);
+    expect(looksGerman('Cobaquorv Hand Cream – unscented cream, shea butter, recycled aluminium.', 'Cobaquorv Hand Cream')).toBe(false);
+  });
 });
 
 describe('E2 summary', () => {

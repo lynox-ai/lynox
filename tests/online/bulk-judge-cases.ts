@@ -236,13 +236,20 @@ export interface Score {
   notes: string[];
 }
 
-const DE_WORDS = ['der', 'die', 'das', 'und', 'mit', 'für', 'aus', 'ist', 'ein', 'eine', 'den', 'dem', 'im', 'von', 'zu', 'auf'];
-const EN_WORDS = ['the', 'and', 'with', 'for', 'from', 'is', 'a', 'an', 'of', 'to', 'in', 'on', 'your'];
+// Words that occur in only one of the two languages. Shared ones (`in`, `bin` …) count for neither:
+// a terse German meta description ("… in Portugal gefertigt") carries few stop words, and a shared
+// word on the English list made such texts read as English (measured on the first full run).
+const DE_WORDS = ['der', 'die', 'das', 'und', 'mit', 'für', 'aus', 'ist', 'ein', 'eine', 'den', 'dem', 'im', 'von', 'zu', 'auf', 'inkl', 'jetzt', 'nur', 'oder', 'vor', 'bei'];
+const EN_WORDS = ['the', 'and', 'with', 'for', 'from', 'is', 'an', 'of', 'to', 'on', 'your', 'made', 'only', 'now', 'by', 'at'];
 
-/** A HEURISTIC, named as one: German if German stop words outnumber English ones. */
-export function looksGerman(text: string): boolean {
-  const words = text.toLowerCase().match(/[a-zäöüß]+/g) ?? [];
-  const de = words.filter((w) => DE_WORDS.includes(w)).length;
+/**
+ * A HEURISTIC, named as one: German when German-only words and umlauts outnumber English-only
+ * words. Product names are left out of the count; they are invented and in either language.
+ */
+export function looksGerman(text: string, ignore = ''): boolean {
+  const skip = new Set(ignore.toLowerCase().match(/[a-zäöüß]+/g) ?? []);
+  const words = (text.toLowerCase().match(/[a-zäöüß]+/g) ?? []).filter((w) => !skip.has(w));
+  const de = words.filter((w) => DE_WORDS.includes(w)).length + words.filter((w) => /[äöüß]/.test(w)).length;
   const en = words.filter((w) => EN_WORDS.includes(w)).length;
   return de > en;
 }
@@ -285,7 +292,7 @@ export function scoreCall(o: CallOutcome, f: Fixture): Score {
     else {
       const len = [...m].length;
       const named = m.toLowerCase().includes(f.ruleName.toLowerCase());
-      const german = looksGerman(m);
+      const german = looksGerman(m, f.name);
       ruleOk = len <= 155 && named && german;
       if (len > 155) notes.push(`len:${len}`);
       if (!named) notes.push('name-missing');
