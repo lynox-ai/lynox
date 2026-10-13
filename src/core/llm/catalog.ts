@@ -330,7 +330,7 @@ const MISTRAL_MODELS: ReadonlyArray<CatalogModel> = [
     id: 'ministral-3b-2512',
     tier: 'fast',
     label: 'Ministral 3B',
-    context_window: 262_144,
+    context_window: 131_072,
     pricing: { input: 0.10, output: 0.10 },
     capabilities: ['vision', 'tool_use'],
     residency: 'EU-Paris (Mistral SAS)',

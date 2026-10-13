@@ -2673,10 +2673,10 @@ describe('spawn_agent tool', () => {
     });
 
     it('a sub-cent floor is REACHED by the solo figure, not rounded under it', () => {
-      // $0.000898304 is the cheapest priced id in this registry. Flooring it to four decimals
-      // gives $0.0008 — under the floor, so a caller typing the printed figure is refused
+      // $0.00224576 is the cheapest priced id in this registry. Flooring it to four decimals
+      // gives $0.0022 — under the floor, so a caller typing the printed figure is refused
       // again. The figure has to be ceiled because it is a figure to REACH.
-      const cheapest = 0.000898304;
+      const cheapest = 0.00224576;
       const r = floorRemedies({
         requested: [1, 1], floors: [cheapest, 0.1], named: 0,
         remainingRunUSD: 10, maxAsk: MAX_SPAWN_BUDGET_USD,
@@ -2785,7 +2785,7 @@ describe('spawn_agent tool', () => {
       //   R === need, no siblings   → an ask of exactly the floor is admitted
       //   R === need, with siblings → `x·R/(x+S) >= R` needs `S <= 0`; ABSENT
       //   R > need                  → the solve, at least the floor, never past the ceiling
-      const floorsToTry = [0.000898304, 0.0400015, 0.052288, 0.12225, 0.192, 0.44];
+      const floorsToTry = [0.00224576, 0.0400015, 0.052288, 0.12225, 0.192, 0.44];
       const siblingSets = [0, 0.0001, 0.01, 1, 5, 49];
       const seen = { below: 0, tieAlone: 0, tieSiblings: 0, above: 0 };
       for (const need of floorsToTry) {
@@ -2857,13 +2857,15 @@ describe('spawn_agent tool', () => {
     it('trap 4 — ROUNDING HAS A DIRECTION: a figure to reach is ceiled', async () => {
       // A figure the reader must REACH is rounded UP, or typing it as printed lands short. The
       // sub-cent arm is where the direction is visible at all.
-      const cheapest = 0.000898304;
+      const cheapest = 0.00224576;
       const solo = floorRemedies({
         requested: [1, 1], floors: [cheapest, 0.1], named: 0,
         remainingRunUSD: 10, maxAsk: MAX_SPAWN_BUDGET_USD,
       });
       expect(solo.soloAskTo!, 'the solo figure reaches its floor').toBeGreaterThanOrEqual(cheapest);
-      expect(solo.soloAskTo!, 'and does not overshoot a whole cent to get there').toBeLessThan(0.001);
+      // Ceiled at four decimals: at most one step of that precision above the floor (the bound
+      // was the literal 0.001 while the cheapest floor was $0.000898; it is now relative).
+      expect(solo.soloAskTo!, 'and overshoots by at most one printed step').toBeLessThanOrEqual(cheapest + 0.0001);
       const { balanced } = await floors();
       const raise = floorRemedies({
         requested: [0], floors: [balanced], named: 0,
@@ -2927,7 +2929,7 @@ describe('spawn_agent tool', () => {
 
     it('two amounts that round alike are not put in apposition', async () => {
       // ⛔ THE ORIGINAL DEFECT, RE-ENTERED THROUGH THE DESCRIPTION. `usdLabel` rounds to nearest
-      // and 15 of the 39 priced ids round down, so an ask of $0.19 against a $0.192 floor read
+      // and 19 of the 40 priced ids (2026-10-13) round down, so an ask of $0.19 against a $0.192 floor read
       // "it may spend $0.19 and one turn on its model costs about $0.19" — two identical figures
       // with one declared insufficient against the other. A sweep found 73 of 2 717 refusals
       // saying "X is below X".
@@ -3014,7 +3016,7 @@ describe('spawn_agent tool', () => {
 
     it('(a) at a spent ceiling quotes no price and promises no cheaper model', async () => {
       // ⛔ At $0 left NO model is cheap enough — the cheapest priced floor in the registry is
-      // $0.000898, not $0 — so a cheaper-model remedy would be false. This branch says so.
+      // $0.0022, not $0 — so a cheaper-model remedy would be false. This branch says so.
       const msg = await refusalFor(0, [{ name: 'one', task: 'A' }]);
       expect(msg, 'nothing to divide').toContain('there is nothing to divide');
       expect(msg, 'nothing in this call can change it').toContain('Nothing in this call can change that');

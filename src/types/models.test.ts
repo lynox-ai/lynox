@@ -272,20 +272,17 @@ describe('Mistral tier-set', () => {
   });
 
   it('Mistral context-windows + max-tokens + max-continuations registered', () => {
-    // mistral-small-2603 deprecated 2025-12; kept in registry for cost-guard legacy
-    expect(getContextWindow('mistral-small-2603')).toBe(32_000);
+    // mistral-small-2603 is Small 4 and active: /v1/models gives 262 144 (2026-10-13)
+    expect(getContextWindow('mistral-small-2603')).toBe(262_144);
     // Mistral Large 3 (Dec 2025) has 256k ctx (was 131k as Large 2)
     expect(getContextWindow('mistral-large-2512')).toBe(256_000);
-    expect(getContextWindow('magistral-medium-2509')).toBe(131_072);
-    // Gen-3 ministrals replace -2410: 256k context
-    expect(getContextWindow('ministral-3b-2512')).toBe(262_144);
+    // Gen-3 ministrals replace -2410. /v1/models (2026-10-13): 8B 262 144, 3B only 131 072.
+    expect(getContextWindow('ministral-3b-2512')).toBe(131_072);
     expect(getContextWindow('ministral-8b-2512')).toBe(262_144);
     expect(getDefaultMaxTokens('mistral-small-2603')).toBe(8_192);
     expect(getDefaultMaxTokens('mistral-large-2512')).toBe(16_000);
-    expect(getDefaultMaxTokens('magistral-medium-2509')).toBe(32_000);
     expect(getMaxContinuations('mistral-small-2603')).toBe(5);
     expect(getMaxContinuations('mistral-large-2512')).toBe(10);
-    expect(getMaxContinuations('magistral-medium-2509')).toBe(20);
   });
 });
 
@@ -531,10 +528,10 @@ describe('ModelCapability registry', () => {
       expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('anthropic');
     }
     expect(MODEL_CAPABILITIES['claude-haiku-4-5']!.provider).toBe('vertex');
-    for (const id of ['mistral-small-2603', 'mistral-large-2512', 'magistral-medium-2509',
+    for (const id of ['mistral-small-2603', 'mistral-large-2512',
                       'ministral-3b-2512', 'ministral-8b-2512', 'ministral-14b-2512',
                       'ministral-8b-2410', 'ministral-3b-2410', 'open-mistral-nemo',
-                      'mistral-medium-2508', 'codestral-2508', 'magistral-small-2509']) {
+                      'mistral-medium-2508', 'codestral-2508']) {
       expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('openai');
     }
   });
@@ -562,10 +559,13 @@ describe('ModelCapability registry', () => {
       expect(MODEL_CAPABILITIES[id]!.features.vision, id).toBe(true);
     }
     // Legacy / opt-in Mistral stays vision:false by decision (rafael 2026-07-18) —
-    // codestral + nemo genuinely reject images; magistral/older ids aren't routed.
+    // these ids aren't tier-routed. (open-mistral-nemo is answered by ministral-8b-2512
+    // since 2026-10-13, which is vision-capable — the false here is the decision, not a
+    // property of the model that answers.)
     // A false-NO only yields the clear pre-flight error, never a silent unseen image.
-    for (const id of ['codestral-2508', 'open-mistral-nemo', 'magistral-medium-2509',
-                      'magistral-small-2509', 'ministral-8b-2410']) {
+    // Unchanged by MISTRAL_SERVED_AS, which mirrors price and context window only.
+    for (const id of ['codestral-2508', 'open-mistral-nemo', 'ministral-8b-2410',
+                      'ministral-3b-2410', 'mistral-medium-2508']) {
       expect(MODEL_CAPABILITIES[id]!.features.vision, id).toBe(false);
     }
   });
@@ -580,10 +580,9 @@ describe('ModelCapability registry', () => {
       'ministral-8b-2410', 'ministral-3b-2410', 'open-mistral-nemo',
       'mistral-medium-2508', 'mistral-medium-latest',
       'codestral-2508', 'codestral-latest',
-      'magistral-small-2509', 'magistral-small-latest',
-      // Demoted from the `deep` slot 2026-05-29 (deprecated by Mistral, retires
-      // 2026-07-31) — now tier:null, cost-guard / legacy-config only.
-      'magistral-medium-2509',
+      'magistral-small-latest',
+      // magistral-medium-2509 / magistral-small-2509 were removed 2026-10-13: Mistral
+      // answers them `400 Invalid model`, so no spend can reach a row for them.
     ];
     for (const id of benchOnlyIds) {
       const cap = MODEL_CAPABILITIES[id];
@@ -784,3 +783,28 @@ describe('a model id that names a prototype member', () => {
     expect(modelCapability('claude-sonnet-4-6')?.contextWindow).toBe(MODEL_CAPABILITIES['claude-sonnet-4-6']!.contextWindow);
   });
 });
+
+describe('MISTRAL_SERVED_AS — a remapped legacy id bills as the model that answers it', () => {
+  it('each mapped id carries its target\'s pricing and context window, and stays untiered', async () => {
+    const { MODEL_CAPABILITIES, MISTRAL_SERVED_AS } = await import('./models.js');
+    const pairs = Object.entries(MISTRAL_SERVED_AS);
+    expect(pairs.length, 'the map is not empty').toBeGreaterThan(0);
+    for (const [legacy, target] of pairs) {
+      const l = MODEL_CAPABILITIES[legacy];
+      const t = MODEL_CAPABILITIES[target];
+      expect(l, `${legacy} is registered`).toBeDefined();
+      expect(t, `${target} is registered`).toBeDefined();
+      expect(l!.pricing, `${legacy} prices as ${target}`).toEqual(t!.pricing);
+      expect(l!.contextWindow, `${legacy} has ${target}'s context window`).toBe(t!.contextWindow);
+      expect(l!.tier, `${legacy} is never tier-routed`).toBeNull();
+      expect(MISTRAL_SERVED_AS[target], `${target} is not itself remapped`).toBeUndefined();
+    }
+  });
+
+  it('the two ids Mistral answers 400 are not registered', async () => {
+    const { MODEL_CAPABILITIES } = await import('./models.js');
+    expect(MODEL_CAPABILITIES['magistral-medium-2509']).toBeUndefined();
+    expect(MODEL_CAPABILITIES['magistral-small-2509']).toBeUndefined();
+  });
+});
+

@@ -434,13 +434,16 @@ describe('Pricing', () => {
     // sovereign tenant — observed live on staging mistral-demo 2026-05-16
     // (12 870/17 tokens billed at $0.039 instead of the correct ~$0.026).
     it('returns pinned Mistral pricing', () => {
-      expect(getPricing('mistral-small-2603').input).toBe(0.20);
+      // Small 4 model card, raw 2026-10-13: $0.15 / $0.6 (the old 0.20 was a retired Small's).
+      expect(getPricing('mistral-small-2603').input).toBe(0.15);
       expect(getPricing('mistral-small-2603').output).toBe(0.60);
       // Mistral Large 3 (Dec 2025): 75% price cut vs Large 2.
       expect(getPricing('mistral-large-2512').input).toBe(0.50);
       expect(getPricing('mistral-large-2512').output).toBe(1.50);
-      expect(getPricing('magistral-medium-2509').input).toBe(2);
-      expect(getPricing('magistral-medium-2509').output).toBe(5);
+      // magistral-medium-2509 is gone from the registry: Mistral answers it 400.
+      expect(hasKnownPricing('magistral-medium-2509')).toBe(false);
+      // A remapped legacy id bills at the model that answers it (MISTRAL_SERVED_AS).
+      expect(getPricing('mistral-medium-2508').output).toBe(7.50);
       // Gen-3 ministrals (2026-05-24): replaced retired -2410 in tier-map.
       expect(getPricing('ministral-3b-2512').input).toBe(0.10);
       expect(getPricing('ministral-8b-2512').input).toBe(0.15);
