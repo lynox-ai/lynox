@@ -1391,6 +1391,25 @@ function profileOAuthRedirectUri(): string {
   }
 }
 
+/**
+ * The query parameters that name what a GET route reads, by route as registered (D15, PRD
+ * customer-granted-operator-access §3.6). A mandate's read row carries their values; every other
+ * query value stays out of it (search text, filters, OAuth codes). A test reads every GET route's
+ * handler and holds this table to it in both directions: a route that reads one of these names
+ * declares it, and a declared route reads it.
+ */
+export const READ_IDENTIFIERS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['GET /api/files', ['path']],
+  ['GET /api/files/read', ['path']],
+  ['GET /api/files/download', ['path']],
+  ['GET /api/knowledge/queue', ['threadId']],
+  ['GET /api/knowledge/queue/count', ['thread']],
+  ['GET /api/history/runs', ['sessionId', 'thread_id']],
+  ['GET /api/inbox/items', ['tenantId']],
+  ['GET /api/inbox/counts', ['tenantId']],
+  ['GET /api/inbox/rules', ['accountId', 'tenantId']],
+]);
+
 function parseDynamicRoute(scope: RouteScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): DynamicRoute {
   const paramNames: string[] = [];
   const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
@@ -1975,7 +1994,7 @@ export class LynoxHTTPApi {
    * query or the answer. The owner's reads leave no row. `false` when the row cannot be
    * written: the dispatcher has answered 503 and the read is not answered, as a write is not.
    */
-  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string): boolean {
+  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string, query: URLSearchParams): boolean {
     // No scope test: an `admin` route refuses a mandate before dispatch (D6), so every read a
     // mandate reaches here is a `user` route's.
     if (method !== 'GET' && method !== 'HEAD') return true;
@@ -1984,7 +2003,9 @@ export class LynoxHTTPApi {
     try {
       const log = this.engine?.getAuditLog() ?? null;
       if (log === null) throw new Error('no audit log');
-      log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname), phase: 'read', correlationId: newCorrelationId() });
+      const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
+        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
+      log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
     } catch {
       errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');
       return false;
@@ -3127,7 +3148,7 @@ export class LynoxHTTPApi {
       const stance = this.staticRouteStances.get(stanceKey);
       if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
       if (this._refusedByStance(req, res, stance)) return;
-      if (!this._recordedMandateRead(req, res, method, stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname)) return;
+      if (!this._recordedMandateRead(req, res, method, stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname, url.searchParams)) return;
       await staticHandler(req, res, {}, body);
       return;
     }
@@ -3147,7 +3168,7 @@ export class LynoxHTTPApi {
         }
         if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, route.stance)) return;
-        if (!this._recordedMandateRead(req, res, method, route.path, pathname)) return;
+        if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
         await route.handler(req, res, params, body);
         return;
       }

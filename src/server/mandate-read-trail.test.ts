@@ -144,6 +144,31 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     expect(got[0]?.target).toMatch(/^\/api\/threads\/\*\*\*/);
   });
 
+  it('names what a query-addressed read read, and drops every other query value', async () => {
+    const res = await ask('GET', '/api/history/runs?thread_id=t-9&q=private-words&limit=5', mandateCookie);
+    await res.arrayBuffer();
+    const file = await ask('GET', '/api/files/read?path=notes/plan.txt&hidden=1', mandateCookie);
+    await file.arrayBuffer();
+    const got = newReadRows();
+    expect(got.map((r) => r.target)).toEqual(['/api/history/runs?thread_id=t-9', '/api/files/read?path=notes/plan.txt']);
+    expect(JSON.stringify(got)).not.toContain('private-words');
+  });
+
+  it('masks a percent-encoded secret shape in the path as well', async () => {
+    const tail = 'A1b2'.repeat(8);
+    const res = await ask('GET', `/api/threads/%73k-ant-${tail}`, mandateCookie);
+    await res.arrayBuffer();
+    const got = newReadRows();
+    expect(got).toHaveLength(1);
+    expect(got[0]?.target).not.toContain(tail);
+  });
+
+  it('writes no row for a mandate\'s cookie at an OAuth callback, answered before authentication', async () => {
+    const res = await ask('GET', '/api/oauth/callback?state=x&code=y', mandateCookie);
+    await res.arrayBuffer();
+    expect(newReadRows()).toHaveLength(0);
+  });
+
   it('does not answer a mandate\'s read the trail cannot record, and the handler does not run', async () => {
     const routes = inner().staticRoutes;
     const real = routes.get('GET /api/threads');

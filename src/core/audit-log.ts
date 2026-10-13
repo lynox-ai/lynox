@@ -103,13 +103,17 @@ export function httpTarget(method: string, url: string): string {
 }
 
 /**
- * What a read row names as its target: the request's own path on this instance, without the
- * query (`URL.pathname` never carries one). Ids stay readable, unlike in `httpTarget`: which
- * thread or contact was read is what the row is for, and these are the instance's own names,
- * not a third party's keys. Known secret shapes are masked all the same.
+ * What a read row names as its target: the request's own path on this instance, plus the query
+ * parameters the route declares as naming what it reads (`path=`, `threadId=`), and no other
+ * query value. Ids stay readable, unlike in `httpTarget`: which thread, file or contact was read
+ * is what the row is for, and these are the instance's own names, not a third party's keys.
+ * The path is decoded first, so a percent-encoded key is masked like a plain one.
  */
-export function requestPathTarget(pathname: string): string {
-  return maskSecretPatterns(pathname, { includeGeneric: true });
+export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<readonly [string, string]> = []): string {
+  let path = pathname;
+  try { path = decodeURIComponent(pathname); } catch { /* malformed escapes: the raw path */ }
+  const query = identifiers.map(([name, value]) => `${name}=${value}`).join('&');
+  return maskSecretPatterns(query === '' ? path : `${path}?${query}`, { includeGeneric: true });
 }
 
 /** The fixed text a mandate's act gets when its trail cannot be written. */
