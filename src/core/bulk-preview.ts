@@ -20,7 +20,7 @@ import {
   type BulkHostBudget, type ExternalClient, type ExternalRead,
 } from './bulk-external.js';
 import {
-  BULK_LIST_FORMS, isSameListItem, listItemKey, listPageCap, listPageElements, listPageUrl, listQueryParams, maxListPages,
+  BULK_LIST_FORMS, isOfferedListSource, isSameListItem, listItemKey, listPageCap, listPageElements, listPageUrl, listQueryParams, maxListPages,
 } from './bulk-list.js';
 import type { ListQueryConstraints } from '../tools/permission-guard.js';
 import {
@@ -121,6 +121,14 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run is ${run.phase}${run.haltReason !== null ? ' and halted' : ''} — nothing read.`) };
   }
   const list = ledger.getListRun(runId);
+  // A run planned from a list form that has since been narrowed is stopped, not read: neither
+  // its list nor, once listed, its targets. Halted rather than skipped, so it frees its slot
+  // and says why. Before the client is built: building it reads the list's form, and a form
+  // that is no longer offered has no spec to read.
+  if (list !== null && !isOfferedListSource(list.source)) {
+    ledger.halt(runId, BULK_HALT_REASONS.listFormWithdrawn);
+    return { status: 'halted', summary: summarize(ledger, runId, `Bulk preview halted: ${BULK_HALT_REASONS.listFormWithdrawn}.`) };
+  }
   const client = deps.clientFor(run, list?.state === 'pending' ? listQueryParams(list.source) : undefined);
   if (!client) return halt(BULK_HALT_REASONS.unavailable);
   if (list?.state === 'pending') return await readList(list, client);

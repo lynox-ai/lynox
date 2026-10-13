@@ -89,6 +89,9 @@ export type BulkInvalidReason =
   | 'secret_in_target'
   /** The target is a mail provider's API (`isMailProviderTarget`); a bulk run never writes one. */
   | 'mail_api'
+  /** The after-state sets a field whose value sets off an effect at the provider
+   *  (`OUTBOUND_EFFECT_FIELDS`); a bulk run never writes one. */
+  | 'effect_field'
   // Elements of a list source (`bulk-list.ts`):
   /** the list element is not a JSON object */
   | 'list_item_not_object'
@@ -190,6 +193,7 @@ export const BULK_HALT_REASONS = {
   listUnreadable: 'a page of the list could not be read',
   listTooLarge: 'the list is longer, or larger, than a bulk run may hold',
   listNoProgress: 'a full page of the list held no target not seen before',
+  listFormWithdrawn: 'the list\'s path is no longer one a bulk run may read',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 

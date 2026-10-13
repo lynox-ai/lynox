@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, outboundEffectField, pathForQuestion,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -459,5 +459,41 @@ describe('carriesInlineBinary (N12-4)', () => {
     ['QUJD'.repeat(10), false],
   ])('%#', (body, want) => {
     expect(carriesInlineBinary(body)).toBe(want);
+  });
+});
+
+describe('outboundEffectField', () => {
+  const SHOP = 'https://shop.example.com';
+  it.each([
+    [`${SHOP}/wp-json/wc/v3/orders/5`, { status: 'completed' }, 'status', 'third_party_mail'],
+    [`${SHOP}/wp-json/wc/v4/orders/5`, { status: 'completed' }, 'status', 'third_party_mail'],
+    [`${SHOP}/index.php/wp-json/wc/v3/orders/5`, { status: 'completed' }, 'status', 'third_party_mail'],
+    [`${SHOP}/api/wc/v2/orders/5`, { status: 'completed' }, 'status', 'third_party_mail'],
+    [`${SHOP}/wp-json/wc-analytics/orders/5`, { status: 'completed' }, 'status', 'third_party_mail'],
+    [`${SHOP}/WP-JSON/WC/V3/ORDERS/5/`, { Status: 'completed' }, 'status', 'third_party_mail'],
+    [`${SHOP}/wp-json/wc/v3/orders/5`, { set_paid: true }, 'set_paid', 'money'],
+    [`${SHOP}/wp-json/wc/v3/orders/5`, { note: 'x', customer_id: 7 }, 'customer_id', 'data_to_third_party'],
+    [`${SHOP}/wp-json/wc/v3/customers/9`, { password: 'x' }, 'password', 'credential'],
+    [`${SHOP}/wp-json/wc/v3/customers/9`, { email: 'a@example.test' }, 'email', 'credential'],
+    [`${SHOP}/wp-json/wc/v3/webhooks/3`, { name: 'x' }, null, 'data_to_third_party'],
+    ['https://api.bexio.com/4.0/banking/payments/4', { message: 'x' }, null, 'money'],
+    ['https://api.bexio.com/2.0/kb_order/4/repetition', { end: '' }, null, 'money'],
+    ['https://api.bexio.com/4.0/banking/payments/%2534', { message: 'x' }, null, 'money'],
+  ] as const)('%s with %j sets off %s (%s)', (url, body, field, effect) => {
+    expect(outboundEffectField(url, body)).toMatchObject({ field, effect });
+  });
+
+  it.each([
+    [`${SHOP}/wp-json/wc/v3/products/5`, { status: 'draft' }],
+    [`${SHOP}/wp-json/wc/v3/orders/5`, { transaction_id: 'x' }],
+    [`${SHOP}/wp-json/wc/v3/orders`, { status: 'completed' }],
+    [`${SHOP}/wp-json/wc/v3/orders/5/notes`, { status: 'completed' }],
+    [`${SHOP}/wp-json/wc/v3/customers/9`, { first_name: 'x' }],
+    ['https://api.bexio.com/2.0/contact/4', { name_1: 'x' }],
+    ['https://example.com/4.0/banking/payments/4', { message: 'x' }],
+    ['https://api.example.com/v1/orders/5', { status: 'completed' }],
+    [`${SHOP}/wp-json/wcx/v3/orders/5`, { status: 'completed' }],
+  ] as const)('%s with %j sets off nothing', (url, body) => {
+    expect(outboundEffectField(url, body)).toBeNull();
   });
 });

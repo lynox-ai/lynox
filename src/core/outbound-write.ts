@@ -309,6 +309,69 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   return path.split('/').some((segment) => entry.segments.some((s) => segment === s || segment.startsWith(`${s}.`)));
 }
 
+/** What a field of {@link OUTBOUND_EFFECT_FIELDS} sets off at the provider. */
+export type OutboundEffectClass = 'third_party_mail' | 'money' | 'credential' | 'data_to_third_party';
+
+interface OutboundEffectField {
+  /** Bound to a host, or `undefined` for software that runs on the customer's own host. */
+  readonly host?: string;
+  /** Tested against the path as {@link normalizeWritePath} gives it. */
+  readonly path: RegExp;
+  /** The top-level body fields that set it off, lower-case, or `any` for every write. */
+  readonly fields: readonly string[] | 'any';
+  readonly effect: OutboundEffectClass;
+  /** What it does, in the refusal. A fixed text: it reaches the model. */
+  readonly says: string;
+}
+
+// WooCommerce runs on the customer's host and WordPress may serve its REST API under another
+// prefix (`rest_url_prefix`) or behind `/index.php`, so its entries match the route's own
+// segments anywhere in the path: every `wc` namespace, versioned (`wc/v3`; `wc/v4` exists
+// behind a flag) or not (`wc-analytics` inherits the orders controller with its write route).
+// A path WordPress may decode once more than this does, or read up to a trailing newline, does
+// not normalize cleanly; a bulk run never plans one (`externalTargetKey`).
+const WOO = (resource: string): RegExp => new RegExp(`/wc(?:-[a-z0-9]+)?(?:/v\\d+)?/${resource}/\\d+$`);
+
+/**
+ * Fields whose VALUE sets off an effect at the provider that reaches someone else, moves
+ * money or changes access — where the path is an ordinary resource, so
+ * {@link OUTBOUND_EFFECT_PATHS} cannot see it. Read from the providers' sources and
+ * specifications (WooCommerce 11.1.2, bexio OpenAPI 3.0.0), measured where the register row
+ * says so. A bulk run never writes one; there is no one to ask.
+ */
+export const OUTBOUND_EFFECT_FIELDS: readonly OutboundEffectField[] = [
+  { path: WOO('orders'), fields: ['status'], effect: 'third_party_mail', says: 'WooCommerce emails the customer and the shop when an order changes status' },
+  { path: WOO('orders'), fields: ['set_paid'], effect: 'money', says: 'WooCommerce completes the payment, reduces stock and emails the customer' },
+  { path: WOO('orders'), fields: ['customer_id'], effect: 'data_to_third_party', says: 'WooCommerce moves the order, with its addresses, into another customer\'s account' },
+  { path: WOO('customers'), fields: ['password', 'email'], effect: 'credential', says: 'WooCommerce changes how the customer signs in; a changed email address also receives the password reset' },
+  { path: WOO('webhooks'), fields: 'any', effect: 'data_to_third_party', says: 'a WooCommerce webhook decides where the shop sends its order and customer data' },
+  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/\d+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
+  { host: 'api.bexio.com', path: /^\/2\.0\/kb_order\/\d+\/repetition$/, fields: 'any', effect: 'money', says: 'bexio invoices this order again on this schedule' },
+];
+
+/**
+ * What a write of `body` to `url` would set off ({@link OUTBOUND_EFFECT_FIELDS}), or null.
+ * Field names are compared in lower case, and `field` is the table's name for it (null where
+ * every write to the path counts), never the caller's text. A path that does not normalize
+ * cleanly counts as a hit for the entries bound to its host, as in {@link isOutboundEffectWrite}.
+ */
+export function outboundEffectField(url: string, body: unknown): { field: string | null; effect: OutboundEffectClass; says: string } | null {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return null; }
+  const host = normalizeApprovalHost(parsed.hostname);
+  const { path, ambiguous } = normalizeWritePath(parsed.pathname);
+  const keys = body !== null && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : [];
+  for (const entry of OUTBOUND_EFFECT_FIELDS) {
+    if (entry.host !== undefined && entry.host !== host) continue;
+    if (!entry.path.test(path) && !(ambiguous && entry.host !== undefined)) continue;
+    const fields = entry.fields;
+    if (fields === 'any') return { field: null, effect: entry.effect, says: entry.says };
+    const field = fields.find((f) => keys.some((k) => k.toLowerCase() === f));
+    if (field !== undefined) return { field, effect: entry.effect, says: entry.says };
+  }
+  return null;
+}
+
 /** Percent-decode every `%XX` run the way a WHATWG server reads it: the bytes as UTF-8, a byte
  *  that is not valid UTF-8 as U+FFFD, and a malformed `%` (`%zz`) kept as it is. Not
  *  `decodeURIComponent`, which throws on the first invalid byte: a run it gave up on stayed

@@ -17,7 +17,7 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
-import { effectiveWriteMethod, isOutboundEffectWrite } from './outbound-write.js';
+import { effectiveWriteMethod, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -103,6 +103,22 @@ export function externalTargetKey(host: string, raw: string): string | null {
   if (url.search !== '' || url.hash !== '' || raw.includes('?') || raw.includes('#')) return null;
   if (canonicalHost(url.hostname) !== host || url.hostname !== host) return null;
   if (url.pathname.includes('*')) return null;
+  // A path whose route is not known here (an escape left after one decoding, a control or
+  // non-ASCII character, an encoded dot segment) is not planned: a server that decodes once
+  // more, or reads a route up to a trailing newline, would write somewhere no table here saw.
+  if (normalizeWritePath(url.pathname).ambiguous) return null;
+  // After decoding, only unreserved characters, the separator and the sub-delimiters a query
+  // value keeps as they are (Graph's `root:/a.xlsx:` and `users('x')`, Google's `:batchUpdate`).
+  // A server that hands the path to a query parser (WordPress rewrites it into `rest_route=`)
+  // reads `&`, `=`, `+` or `;` as structure, and the route it dispatches is then not the one any
+  // table here matched.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(url.pathname);
+  } catch {
+    return null;
+  }
+  if (!/^[A-Za-z0-9._~\-/:@!$'(),]*$/.test(decoded)) return null;
   return url.toString();
 }
 
@@ -174,6 +190,7 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
     const text = JSON.stringify(after);
     if (Buffer.byteLength(text, 'utf8') > BULK_MAX_TARGET_BYTES) return { key, invalid: 'target_too_large' };
     if (scan(text) !== null) return { key, invalid: 'secret_in_after' };
+    if (outboundEffectField(key, after) !== null) return { key, invalid: 'effect_field' };
     charge(text);
     return { key, after: after as ExternalImage };
   });
@@ -322,6 +339,10 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // A path that sends to a third party or issues something bindingly is asked on its own,
     // every time (`outbound-write.ts`); a bulk run has no one to ask, so no grant covers it.
     if (isOutboundEffectWrite(url, gated)) return { kind: 'not_granted' };
+    // The same for a field whose value sets off such an effect on an ordinary resource path
+    // (`OUTBOUND_EFFECT_FIELDS`). Checked here as well as when the run is planned: this is
+    // the one place every body leaves, whichever source the run was planned from, and an undo's.
+    if (method !== 'GET' && outboundEffectField(url, body) !== null) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);

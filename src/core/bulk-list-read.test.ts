@@ -234,6 +234,46 @@ describe('what stops a list read — each with a fixed reason, nothing of the pr
     }
   }
 
+  // 016: a list planned from a form that was narrowed since (the WooCommerce list form read
+  // orders before it read only products) is stopped, whether its list is still to be read or
+  // already read — never left to run with its targets unchecked.
+  const withdraw = (id: string): void => {
+    const stored = { ...source, path: '/wp-json/wc/v3/orders' };
+    engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(engineDb.enc(JSON.stringify(stored)), id);
+  };
+
+  it('(016) a list whose path is no longer one a run may read, before it is read: nothing is sent', async () => {
+    const s = shop(3);
+    await stopsWith(s, BULK_HALT_REASONS.listFormWithdrawn, withdraw);
+    expect(s.requests).toEqual([]);
+  });
+
+  it('(016) a list whose form is no longer offered at all: stopped for that reason, nothing is sent', async () => {
+    const s = shop(3);
+    await stopsWith(s, BULK_HALT_REASONS.listFormWithdrawn, (id) => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?').run(engineDb.enc(JSON.stringify({ ...source, form: 'gone' })), id);
+    });
+    expect(s.requests).toEqual([]);
+  });
+
+  it('(016) a list whose path is no longer one a run may read, after it is read: no target is read', async () => {
+    const s = shop(3);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      await runBulkPreview(id, deps());
+      withdraw(id);
+      s.requests.length = 0;
+      expect(ledger.resumePreview(id).ok).toBe(true);
+      const out = await runBulkPreview(id, deps());
+      expect(out.status).toBe('halted');
+      expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.listFormWithdrawn);
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it('a page that is not a JSON array', async () => {
     const s = shop(3);
     s.listAnswer = () => new Response(JSON.stringify({ products: [...s.items.values()], note: PROVIDER_TEXT }), { status: 200 });
