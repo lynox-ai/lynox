@@ -16,6 +16,7 @@
 	import { OWN_MARK, resolveOwnAction } from '../utils/markdown-actions.js';
 	import { saveOrShareBlob } from '../utils/save-blob.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
+	import { mermaidConfig } from '../utils/mermaid-config.js';
 
 	interface Props {
 		content: string;
@@ -70,17 +71,7 @@
 		const { default: mermaid } = await import('mermaid');
 		const theme = getResolvedTheme();
 		if (mermaidInitTheme !== theme) {
-			mermaid.initialize({
-				startOnLoad: false,
-				// mermaid 12 changed the default layout and look, which re-lays out and
-				// recolours existing diagrams. Pinned to the mermaid 11 defaults so a
-				// version bump does not also change how diagrams look; moving to the new
-				// look is a separate, deliberate change.
-				layout: 'dagre',
-				look: 'classic',
-				theme: theme === 'light' ? 'default' : 'dark',
-				themeVariables: mermaidVars(theme)
-			});
+			mermaid.initialize(mermaidConfig(theme, mermaidVars(theme)));
 			mermaidInitTheme = theme;
 		}
 		const id = `mermaid-${crypto.randomUUID().slice(0, 8)}`;
