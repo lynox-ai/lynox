@@ -307,6 +307,43 @@ export function readLoginPrincipal(body: unknown): MandateLoginPrincipal | null 
 }
 
 /**
+ * The control plane's list of an account's revoked mandates, sent to each of the account's
+ * instances on the admin route `POST /api/admin/mandates/revoke` (PRD
+ * customer-granted-operator-access §3.5, piece C). The whole list each time, applied
+ * idempotently: a mandate already revoked stays as it is, and an instance restored from an older
+ * backup is healed by the next call. A mandate whose end has passed is ended without a revoke, so
+ * the list needs to carry only those still within their end.
+ */
+export interface MandateRevocationRequest {
+  revoked_mandate_ids: string[];
+}
+
+/** How many of the listed mandates this call revoked; the rest already were. */
+export interface MandateRevocationResponse {
+  newly_revoked: number;
+}
+
+/** The most ids one call may carry. */
+export const MANDATE_REVOCATION_MAX = 1000;
+
+/**
+ * Read the list off a request body: each id as a login principal carries it, at most
+ * {@link MANDATE_REVOCATION_MAX}, duplicates folded. `'invalid'` refuses the whole call: applying
+ * part of a list nobody can read would leave an instance in a state the control plane never sent.
+ */
+export function readMandateRevocation(body: unknown): string[] | 'invalid' {
+  if (body === null || typeof body !== 'object') return 'invalid';
+  const ids = (body as { revoked_mandate_ids?: unknown }).revoked_mandate_ids;
+  if (!Array.isArray(ids) || ids.length > MANDATE_REVOCATION_MAX) return 'invalid';
+  const out = new Set<string>();
+  for (const id of ids) {
+    if (!isSafeText(id, LOGIN_PRINCIPAL_ID_MAX)) return 'invalid';
+    out.add(id);
+  }
+  return [...out];
+}
+
+/**
  * Reasons the control plane can refuse a magic link, as sent on the wire.
  *
  * This is the CLOSED set of `error_code` values `/internal/auth/verify-magic`

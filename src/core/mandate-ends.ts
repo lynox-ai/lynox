@@ -71,10 +71,12 @@ export class MandateEnds {
   /**
    * The mandate was revoked at `atS`. Final: no later `record` revives it. Written first, then
    * every listener is told; a listener that throws is logged and does not undo the revoke or
-   * stop the others, because the row is what every later reader asks.
+   * stop the others, because the row is what every later reader asks. A mandate already revoked
+   * stays as it is, keeps its first time, and tells no one again. Returns whether this call
+   * revoked it.
    */
-  revoke(mandateId: string, atS: number = Math.floor(Date.now() / 1000)): void {
-    this.revokeStmt.run(mandateId, atS, atS);
+  revoke(mandateId: string, atS: number = Math.floor(Date.now() / 1000)): boolean {
+    if (this.revokeStmt.run(mandateId, atS, atS).changes === 0) return false;
     for (const listener of this.revokeListeners) {
       try {
         listener(mandateId);
@@ -82,6 +84,7 @@ export class MandateEnds {
         process.stderr.write(`[lynox] a revoke listener failed for a mandate: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
+    return true;
   }
 
   /** Be told of every later revoke. Returns the call that stops it. */
