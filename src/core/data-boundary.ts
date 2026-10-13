@@ -1,5 +1,5 @@
 import { channels } from './observability.js';
-import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
+import { ALL_PROVENANCE_KINDS, DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
 import { singleLine } from './prompt-value.js';
 import { noteOwnWrapped } from './call-connection.js';
 
@@ -500,8 +500,12 @@ export function renderProvenanceFact(opts: {
   attrs?: Record<string, string | number | null | undefined> | undefined;
 }): string {
   // Defensive: a security-boundary helper must never throw on malformed input.
-  // An un-tiered fact falls back to the conservative default tier.
-  const kind: ProvenanceKind = opts.kind ?? DEFAULT_PROVENANCE_KIND;
+  // An un-tiered fact falls back to the conservative default tier. A tier this
+  // build does not know is shown as the lowest one, the same way `provenanceRank`
+  // ranks it: the value is read back from a TEXT column, and a near-miss of a
+  // known tier (`user_asserted `) must not read as that tier.
+  const given = opts.kind ?? DEFAULT_PROVENANCE_KIND;
+  const kind: ProvenanceKind = ALL_PROVENANCE_KINDS.includes(given) ? given : 'external_unverified';
   const parts: string[] = [`kind="${escapeXml(kind)}"`];
   if (opts.tool) {
     parts.push(`tool="${escapeXml(opts.tool)}"`);
