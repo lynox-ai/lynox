@@ -8401,6 +8401,13 @@ describe('LynoxHTTPApi', () => {
     let bulkDir: string;
     let bulkDb: EngineDb;
     let bulkLedger: BulkLedger;
+    // This file shares ONE per-IP rate window; the requests below are paid back so a test
+    // thousands of lines away does not tip into a 429 (same snapshot/restore as elsewhere).
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
     const planRun = (): string => bulkLedger.recordDryRun({
       createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
       targets: [
