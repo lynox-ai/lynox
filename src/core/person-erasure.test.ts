@@ -196,6 +196,19 @@ describe('person erasure', () => {
     expect(entryExists(f, onDup)).toBe(false);
   });
 
+  it('searches a form a merged shell still carries when the canonical lost it', async () => {
+    // A rollback of an older merge into the same canonical can leave this state.
+    const f = await setup();
+    const canon = f.subjects.createSubject({ kind: 'person', name: 'Clara Bergli' });
+    const dup = f.subjects.createSubject({ kind: 'person', name: 'C. Bergli', aliases: ['C. Bergli', 'Clärli'] });
+    expect(f.subjects.mergeSubjects(dup, canon).ok).toBe(true);
+    f.raw.prepare('UPDATE subjects SET aliases = ? WHERE id = ?').run(JSON.stringify(['Clara Bergli']), canon);
+    const named = f.knowledge.write({ text: 'Clärli approves the samples', subjectName: 'Bob Talgrund', subjectKind: 'person', sourceChannel: 'user', sourceUntrusted: false }).id;
+    const p = preview(f, canon);
+    expect(p.subject.aliases).toEqual(expect.arrayContaining(['C. Bergli', 'Clärli']));
+    expect(p.entries.find(e => e.id === named)?.matchedBy).toBe('mention');
+  });
+
   it('shows an unresolved hint as a name match, not as bound', async () => {
     const f = await seed();
     const hinted = f.raw.prepare('SELECT id FROM knowledge_entries WHERE id = ?').get(f.unrelated) as { id: string };

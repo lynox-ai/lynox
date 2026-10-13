@@ -181,8 +181,14 @@ function resolve(deps: PersonErasureDeps, subjectId: string): Resolved | PersonE
   if (row.is_self === 1) return { refused: 'is_self' };
   if (row.kind !== 'person') return { refused: 'not_a_person' };
   const shells = deps.subjects.mergedShellIds(canonical);
-  // A merge already folds the shell's name and aliases into the canonical row.
+  // A merge folds the shell's name and aliases into the canonical row, but rolling back an
+  // older merge into the same canonical can take a form out again that a remaining shell still
+  // carries (`SubjectStore.rollbackMerge`), so the shells are read too.
   const aliases = new Set(parseAliases(row.aliases));
+  for (const id of shells) {
+    const shell = deps.subjects.getSubject(id);
+    if (shell) { aliases.add(shell.name); for (const a of parseAliases(shell.aliases)) aliases.add(a); }
+  }
   aliases.delete(row.name);
   const email = deps.subjects.personEmailForErasure(canonical);
   const forms = [row.name, ...aliases, ...(email ? [email] : [])];

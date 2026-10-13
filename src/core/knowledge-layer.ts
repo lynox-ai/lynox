@@ -1304,8 +1304,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * when engine.db attaches them to one of `subjectIds`, otherwise shown when their text
    * `matches` (`mention`). Also the legacy person entities under one of `names`, with the
    * memories that mention them: a name match in the legacy store's own graph, offered for
-   * selection, never taken on its own. The legacy text is shown where it exists (plaintext),
-   * else the stub's. A text this key cannot decrypt throws {@link UndecryptableTextError}, so an
+   * selection, never taken on its own. Either store's wording can name the person; the one that
+   * does is shown, the legacy one first, and with no match the legacy text where it exists. A text this key cannot decrypt throws {@link UndecryptableTextError}, so an
    * unreadable store never reads as "nothing found".
    */
   erasureMemoryCandidates(subjectIds: ReadonlySet<string>, names: readonly string[], matches: (text: string) => boolean): {
