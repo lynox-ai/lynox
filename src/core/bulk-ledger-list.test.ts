@@ -164,7 +164,9 @@ describe('recordListPage', () => {
     expect(ledger.recordListPage(id, { page: 1, items: many.slice(0, BULK_MAX_TARGETS), bytes: 1 }).ok).toBe(true);
   });
 
-  it('refuses a page whose after-states would pass the run\'s byte cap', () => {
+  // ~31 MB of after-states are encrypted on the way in: about 2 s on an idle box, past the
+  // default 5 s on a loaded one.
+  it('refuses a page whose after-states would pass the run\'s byte cap', { timeout: 30_000 }, () => {
     const big = { ...source, after: { description: 'x'.repeat(1024 * 1024 - 32) } };
     const id = plan(big);
     start(id);
