@@ -10268,11 +10268,27 @@ export class LynoxHTTPApi {
             state: refreshToken !== null ? 'connected' : 'no-refresh',
             written: [...recordedWrites(fresh).filter((w) => !rewritten.has(w.name)), ...written],
             // Whose consent this is, from the signed start. A new consent replaces the old
-            // record whole: the owner connecting again is the owner's grant from now on.
+            // one: the owner connecting again is the owner's grant from now on.
             connected_by: by.tag,
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
           else delete grantNext.connected_mandate_id;
+          // The record is NOT replaced whole: it starts from the previous one, and
+          // `written` is merged on purpose (above). So every field that describes
+          // the previous grant is set or removed here, by name. The mint stamp is
+          // one: left standing it would name the client of a grant this consent
+          // replaced. `stampApplies` keeps that stamp from being read today (it
+          // speaks only for the token it names, and this exchange stores another
+          // or none), but the record should not carry it for the next reader.
+          // This exchange's client and refresh token are the stamp, the same one
+          // `fetch_token` writes after a good exchange.
+          if (refreshToken !== null) {
+            grantNext.minted_by = tokenFingerprint(clientId);
+            grantNext.minted_for = tokenFingerprint(refreshToken);
+          } else {
+            delete grantNext.minted_by;
+            delete grantNext.minted_for;
+          }
           // A revocation verdict is about a grant this authorization just
           // replaced. Leaving it would let `hasRevokedGrant` keep reporting a
           // connection the user has just re-established as revoked — and the

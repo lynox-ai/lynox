@@ -15203,6 +15203,34 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(grant?.revoked_fp, 'the verdict on a replaced grant was left on the profile').toBeUndefined();
     expect(grant?.revoked_at).toBeUndefined();
   });
+
+  /**
+   * The mint stamp describes the grant this authorization replaced. The record is
+   * built from the previous one, so a stamp the callback does not set by name
+   * survives: `minted_by` would name the client of a grant that no longer exists.
+   * The callback stamps this exchange instead, the same way `fetch_token` does
+   * after a good exchange, and an exchange with no refresh token leaves no stamp.
+   */
+  it.each([
+    { label: 'stamps this exchange', tokenBody: undefined, by: 'id-1', fpFor: 'rt-1' },
+    { label: 'leaves no stamp when no refresh token came back', tokenBody: JSON.stringify({ access_token: 'at-2' }), by: null, fpFor: null },
+  ])('replaces the mint stamp of the grant a new consent replaced: $label', async ({ tokenBody, by, fpFor }) => {
+    const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+    const { cookie, store } = await arrange({
+      grant: { origin: 'callback', state: 'connected', minted_by: 'old-client-fp', minted_for: 'old-token-fp' },
+      ...(tokenBody === undefined ? {} : { tokenBody }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+
+    const grant = store.get(PROFILE)?.oauth_grant;
+    expect(grant?.minted_by, 'the mint stamp of the replaced grant was left on the profile')
+      .toBe(by === null ? undefined : tokenFingerprint(by));
+    expect(grant?.minted_for).toBe(fpFor === null ? undefined : tokenFingerprint(fpFor));
+  });
 });
 
 // PRD customer-granted-operator-access §3.12, §3.13 (piece H1a). Until the recipient's
