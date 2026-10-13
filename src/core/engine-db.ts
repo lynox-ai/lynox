@@ -1089,6 +1089,22 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_runs ADD COLUMN list_page INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE bulk_runs ADD COLUMN list_calls INTEGER NOT NULL DEFAULT 0;
    ALTER TABLE bulk_runs ADD COLUMN list_bytes INTEGER NOT NULL DEFAULT 0;`,
+
+  // v33: the grant ledger (PRD connection-attribution A1). One row per grant an `api`
+  // connection was given: on its creation, on a new consent, on a change of the credentials
+  // it is configured with, and on the boot backfill. Deliberately no foreign key to
+  // `connections`: a grant outlives its connection row, so that whatever was stamped with it
+  // still names the connection after a reconnect or a delete. `reason` says which of those
+  // minted it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (33);
+   CREATE TABLE IF NOT EXISTS connection_grants (
+     grant_id      TEXT PRIMARY KEY,
+     connection_id TEXT NOT NULL,
+     kind          TEXT NOT NULL,
+     reason        TEXT NOT NULL,
+     minted_at     TEXT NOT NULL DEFAULT (datetime('now'))
+   );
+   CREATE INDEX IF NOT EXISTS idx_connection_grants_connection ON connection_grants(connection_id);`,
 ];
 
 /**

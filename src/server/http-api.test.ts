@@ -14940,11 +14940,14 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     const { cookie, store } = await arrange({
       tokenBody: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),
     });
+    const saveSpy = vi.spyOn(store, 'save');
 
     const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
       redirect: 'manual', headers: { cookie },
     });
     expect(res.status).toBe(200);
+    // The save carries the consent, so the store starts a new grant (PRD connection-attribution A2(2)).
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true });
 
     const saved = store.get(PROFILE);
     expect(saved?.auth?.oauth?.grant_type, 'the callback stored a refresh token and said nothing about how to use it').toBe('refresh_token');

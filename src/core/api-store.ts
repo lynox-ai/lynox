@@ -15,6 +15,7 @@ import { compose, engineText, wrapUntrustedData, renderFence } from './data-boun
 import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
+import type { GrantLedger } from './grant-ledger.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
@@ -396,6 +397,15 @@ export interface OAuthGrantRecord {
    * address is another grant and does not revive it.
    */
   connected_mandate_id?: string | undefined;
+  /**
+   * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
+   * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —
+   * every `api` profile carries one once the ledger is wired, an API-key profile included.
+   * Only {@link ApiStore} assigns it (a save that creates the profile, carries a new consent
+   * or changes the configured credentials, and the boot backfill); every other save keeps
+   * the stored one, whatever the caller passed.
+   */
+  grant_id?: string | undefined;
 }
 
 /** One entry of {@link OAuthGrantRecord.written}. */
@@ -846,6 +856,50 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
  */
 export type RegisterMode = 'save' | 'load';
 
+/**
+ * What a profile is configured to authenticate with (PRD connection-attribution A2): the auth
+ * type, the OAuth grant type, and each vault name the profile configures together with the
+ * role it is sent in. A save that changes this starts a new grant. Built from the configured
+ * names only — never from `written`, which a token exchange extends on its own, and never
+ * from the derived token names, which depend on the id alone — so a renewal leaves it as it is.
+ */
+export function credentialTuple(profile: ApiProfile): string {
+  const auth = profile.auth;
+  const vaultKeys: unknown = auth?.vault_keys;
+  return JSON.stringify([
+    auth?.type ?? null,
+    auth?.oauth?.grant_type ?? null,
+    auth?.oauth?.client_id_key ?? null,
+    auth?.oauth?.client_secret_key ?? null,
+    auth?.oauth?.refresh_token_key ?? null,
+    auth?.basic_format ?? null,
+    auth?.username_key ?? null,
+    auth?.password_key ?? null,
+    auth?.header_name ?? null,
+    auth?.query_param ?? null,
+    Array.isArray(vaultKeys) ? vaultKeys.filter((k): k is string => typeof k === 'string') : null,
+  ]);
+}
+
+/** A save's own reason to start a new grant, beyond what `save` detects by itself. */
+export interface SaveOptions {
+  /** The save carries a new consent (the OAuth callback). */
+  newConsent?: boolean | undefined;
+}
+
+class SaveRefused extends Error {
+  constructor(readonly reason: string) { super(reason); }
+}
+
+function withGrantId(profile: ApiProfile, grantId: string | undefined): ApiProfile {
+  if (grantId === undefined) {
+    if (profile.oauth_grant?.grant_id === undefined) return profile;
+    const { grant_id: _dropped, ...rest } = profile.oauth_grant;
+    return { ...profile, oauth_grant: rest };
+  }
+  return { ...profile, oauth_grant: { ...profile.oauth_grant, grant_id: grantId } };
+}
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
   /**
@@ -869,6 +923,55 @@ export class ApiStore {
   /** Wire the engine.db backing store so future `save`/`remove` persist there. */
   setConnectionStore(store: ConnectionStore): void {
     this.connStore = store;
+  }
+
+  /**
+   * The grant ledger (PRD connection-attribution A1). Wired beside the ConnectionStore; while
+   * it is null — the degraded no-engine.db path — no grant is minted and a save keeps
+   * whatever grant the stored profile had.
+   */
+  private grantLedger: GrantLedger | null = null;
+
+  setGrantLedger(ledger: GrantLedger): void {
+    this.grantLedger = ledger;
+  }
+
+  /**
+   * The boot backfill (PRD connection-attribution A2(6)). Gives a fresh grant to every
+   * profile whose grant is absent or unknown to the ledger — a profile from before the
+   * ledger, or a flat-JSON file copied from another engine with its record — and splits two
+   * profiles that share one: the profile the ledger row names keeps it, the other gets a
+   * fresh one, and when the ledger names neither, both do. Runs at every boot and is
+   * idempotent: a second run finds nothing to do. Returns how many grants it minted.
+   */
+  backfillGrants(): number {
+    const ledger = this.grantLedger;
+    if (!ledger) return 0;
+    const holders = new Map<string, string[]>();
+    for (const p of this.profiles.values()) {
+      const g = p.oauth_grant?.grant_id;
+      if (typeof g === 'string' && g !== '') holders.set(g, [...(holders.get(g) ?? []), p.id]);
+    }
+    let minted = 0;
+    const reissue = (id: string, reason: 'backfill' | 'split'): void => {
+      const current = this.profiles.get(id);
+      if (!current) return;
+      ledger.transaction(() => {
+        const next = withGrantId(current, ledger.mint(id, 'api', reason));
+        this.profiles.set(id, next);
+        this.connStore?.upsert(profileToConnectionRow(next));
+      });
+      minted++;
+    };
+    for (const p of [...this.profiles.values()]) {
+      const g = p.oauth_grant?.grant_id;
+      if (typeof g !== 'string' || g === '') { reissue(p.id, 'backfill'); continue; }
+      const row = ledger.get(g);
+      const sharers = holders.get(g) ?? [p.id];
+      if (row === undefined) { reissue(p.id, 'backfill'); continue; }
+      if (sharers.length > 1 && row.connection_id !== p.id) reissue(p.id, 'split');
+    }
+    return minted;
   }
 
   /** Load all profiles from a directory. Files must be *.json. */
@@ -1249,8 +1352,35 @@ export class ApiStore {
    * a malformed id that `validateProfile` had already rejected. The slot guard
    * makes it reachable, so it has to be a value the caller can see.
    */
-  save(profile: ApiProfile, apisDir?: string): { ok: true; isNew: boolean } | { ok: false; reason: string } {
-    const isNew = !this.profiles.has(profile.id);
+  save(profile: ApiProfile, apisDir?: string, options?: SaveOptions): { ok: true; isNew: boolean } | { ok: false; reason: string } {
+    const prev = this.profiles.get(profile.id);
+    const isNew = prev === undefined;
+    const ledger = this.grantLedger;
+    // The grant is the engine's, never the caller's: a save mints when it creates the
+    // profile, carries a new consent or changes the configured credentials, and otherwise
+    // keeps the stored grant — whatever the passed profile says.
+    const mintReason = ledger === null ? null
+      : isNew ? 'new' as const
+      : options?.newConsent === true ? 'consent' as const
+      : credentialTuple(prev) !== credentialTuple(profile) ? 'credentials' as const
+      : null;
+    const keptGrant = withGrantId(profile, prev?.oauth_grant?.grant_id);
+    if (mintReason === null || ledger === null) return this._persist(keptGrant, apisDir, isNew);
+    try {
+      return ledger.transaction(() => {
+        const result = this._persist(withGrantId(profile, ledger.mint(profile.id, 'api', mintReason)), apisDir, isNew);
+        // A refused save must not leave a ledger row behind for a grant nothing carries:
+        // throwing rolls the mint back with it.
+        if (!result.ok) throw new SaveRefused(result.reason);
+        return result;
+      });
+    } catch (err: unknown) {
+      if (err instanceof SaveRefused) return { ok: false, reason: err.reason };
+      throw err;
+    }
+  }
+
+  private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const refusal = this._admit(profile, 'save');
     if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {

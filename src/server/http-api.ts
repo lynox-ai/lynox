@@ -10240,9 +10240,12 @@ export class LynoxHTTPApi {
           // `apisDir` for the same reason `api_setup` passes it: an engine
           // without an `engine.db` has no ConnectionStore, and `save` then
           // persists only when it is told where to. Resolved above the re-read.
+          // A new consent starts a new grant (PRD connection-attribution A2(2)): what is
+          // stored from here on came from this authorization, not the one before it.
           const saved = apiStore.save(
             { ...fresh, auth: { ...fresh.auth, oauth: oauthNext }, oauth_grant: grantNext } as typeof fresh,
             join(getLynoxDir(), 'apis'),
+            { newConsent: true },
           );
           // The result is READ. `save` does not throw when `_admit` refuses — it
           // returns `{ok:false}` — so ignoring it meant the tokens were stored,
