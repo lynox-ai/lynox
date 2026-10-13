@@ -54,17 +54,9 @@ export function selectFiles(paths) {
   ));
 }
 
-/**
- * git runs from a hook, and git exports its own location into a hook's environment (`GIT_DIR`, in a
- * linked worktree `GIT_INDEX_FILE` too). Inherited, they would point the temporary worktree below at
- * the pusher's index. `-C <root>` finds the repository by itself.
- */
-const GIT_ENV = Object.fromEntries(Object.entries(process.env)
-  .filter(([k]) => !['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX', 'GIT_COMMON_DIR'].includes(k)));
-
 function git(root, args) {
   try {
-    return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, env: GIT_ENV });
+    return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   } catch (e) {
     throw new CannotCheck(`git ${args.join(' ')} failed: ${String(e.stderr ?? e.message).split('\n')[0]}`);
   }
