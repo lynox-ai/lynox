@@ -16,12 +16,11 @@ export const RETIRED_ANTHROPIC_ID = 'claude-3-5-sonnet-20241022';
 
 /**
  * Every direct-API Anthropic id in `MODEL_CAPABILITIES`: today's tier models, the opt-ins
- * and the candidates for the next switch. The `[1m]` entries are left out; this guard
- * checks base ids, and those are in the list.
+ * and the candidates for the next switch.
  */
 export function anthropicDirectIds(): string[] {
   return Object.values(MODEL_CAPABILITIES)
-    .filter(c => c.provider === 'anthropic' && !c.id.includes('['))
+    .filter(c => c.provider === 'anthropic')
     .map(c => c.id);
 }
 

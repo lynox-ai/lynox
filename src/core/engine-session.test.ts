@@ -2361,7 +2361,7 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(session.getModelTier()).toBe('balanced');
     });
 
-    it('getContextUsagePercent honours agent.model — [1m] suffix unlocks 1M window', async () => {
+    it('getContextUsagePercent honours agent.model, and reads a [1m] id as its base model', async () => {
       const { session } = await createEngineAndSession();
       const agentMock = (session as unknown as {
         agent: { model: string; getEstimatedOccupancyTokens: () => number };
@@ -2371,8 +2371,12 @@ describe('Engine + Session (Orchestrator)', () => {
       agentMock.model = 'claude-sonnet-4-6';
       expect(session.getContextUsagePercent()).toBe(50);
 
-      agentMock.model = 'claude-sonnet-4-6[1m]';
+      agentMock.model = 'claude-sonnet-5';
       expect(session.getContextUsagePercent()).toBe(10);
+
+      // A `[1m]` spelling gets its base model's window: 200K for Sonnet 4.6, 1M for Opus 4.6.
+      agentMock.model = 'claude-sonnet-4-6[1m]';
+      expect(session.getContextUsagePercent()).toBe(50);
 
       agentMock.model = 'claude-opus-4-6[1m]';
       expect(session.getContextUsagePercent()).toBe(10);
@@ -3355,7 +3359,7 @@ describe('Engine + Session (Orchestrator)', () => {
       const agentMock = (session as unknown as {
         agent: { model: string; getEstimatedOccupancyTokens: () => number };
       }).agent;
-      agentMock.model = 'claude-sonnet-4-6[1m]'; // 1M native window
+      agentMock.model = 'claude-sonnet-5'; // 1M native window
       const cup = () => (session as unknown as AutoCompact)._compactionUsagePercent();
 
       // 150K carried tokens on a 1M window: the honest UI meter shows ~15%, but
@@ -3381,7 +3385,7 @@ describe('Engine + Session (Orchestrator)', () => {
       const agentMock = (session as unknown as {
         agent: { model: string; getEstimatedOccupancyTokens: () => number };
       }).agent;
-      agentMock.model = 'claude-sonnet-4-6[1m]';
+      agentMock.model = 'claude-sonnet-5';
       agentMock.getEstimatedOccupancyTokens = () => 150_000;
       // budget 300K → ceiling 375K → 150K/375K = 40% — below the offer; no trim.
       expect((session as unknown as AutoCompact)._compactionUsagePercent()).toBe(40);
@@ -3397,7 +3401,7 @@ describe('Engine + Session (Orchestrator)', () => {
       const events: Array<Record<string, unknown>> = [];
       session.onStream = (e) => { events.push(e as Record<string, unknown>); return Promise.resolve(); };
       const agentMock = (session as unknown as { agent: AgentOnStream }).agent;
-      agentMock.model = 'claude-sonnet-4-6[1m]'; // 1M native window
+      agentMock.model = 'claude-sonnet-5'; // 1M native window
       // 150K carried tokens: honest window meter ~15%, but the cost-aware
       // budget ceiling (150K / 0.8 = 187.5K) puts the trigger figure at 80% —
       // the same divergence the L1 tests above exercise on _compactionUsagePercent.

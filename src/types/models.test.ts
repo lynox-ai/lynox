@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   clampTier,
   modelCapability,
+  oneMVariantBase,
   ownEntry,
   FALLBACK_CAPABILITY,
   modelIdExceedsMaxTier,
@@ -363,38 +364,38 @@ describe('getModelId for openai provider', () => {
   });
 });
 
-// Regression-pin: pre-2026-05-18 the `[1m]`-suffix variants Anthropic uses
-// for the context-1m-2025-08-07 beta path were absent from CONTEXT_WINDOW /
-// DEFAULT_MAX_TOKENS / MAX_CONTINUATIONS. The lookup fell through to the
-// 200k default — engine treated a 1M-beta session as 200k for trim and
-// percentage calc, producing the staging "Kontext: 423%" mismatch. Explicit
-// variant entries now in place; this suite locks them down so silent
-// removal during a future cleanup regresses loudly.
-describe('1M-context variant lookups', () => {
-  it('getContextWindow resolves Sonnet 1M variant to 1_000_000', () => {
-    expect(getContextWindow('claude-sonnet-4-6[1m]')).toBe(1_000_000);
+// A `[1m]`-suffixed id (a client-side spelling for a 1M-context variant) has no row of its own:
+// every lookup reads its base model. A lookup that fell through to the 200k default instead
+// would misjudge an Opus window (staging once showed "Kontext: 423%" that way).
+describe('`[1m]` ids read their base model', () => {
+  const BASES = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7'];
+
+  it.each(BASES)('%s[1m] has the context window, output and continuations of %s', (base) => {
+    const id = `${base}[1m]`;
+    expect(getContextWindow(id)).toBe(getContextWindow(base));
+    expect(getDefaultMaxTokens(id)).toBe(getDefaultMaxTokens(base));
+    expect(getMaxContinuations(id)).toBe(getMaxContinuations(base));
+    expect(modelCapability(id)?.id).toBe(base);
   });
 
-  it('getContextWindow resolves Opus 1M variants to 1_000_000', () => {
+  it('Sonnet 4.6 keeps its own 200k window; the Opus bases are 1M', () => {
+    expect(getContextWindow('claude-sonnet-4-6[1m]')).toBe(200_000);
     expect(getContextWindow('claude-opus-4-6[1m]')).toBe(1_000_000);
     expect(getContextWindow('claude-opus-4-7[1m]')).toBe(1_000_000);
-    expect(getContextWindow('claude-opus-4-7')).toBe(1_000_000);
   });
 
-  it('getDefaultMaxTokens for 1M variants mirrors base model', () => {
-    expect(getDefaultMaxTokens('claude-sonnet-4-6[1m]')).toBe(getDefaultMaxTokens('claude-sonnet-4-6'));
-    expect(getDefaultMaxTokens('claude-opus-4-6[1m]')).toBe(getDefaultMaxTokens('claude-opus-4-6'));
-    expect(getDefaultMaxTokens('claude-opus-4-7[1m]')).toBe(getDefaultMaxTokens('claude-opus-4-7'));
+  it('has no rows of its own', () => {
+    expect(Object.keys(MODEL_CAPABILITIES).filter(id => id.includes('['))).toEqual([]);
   });
 
-  it('getMaxContinuations for 1M variants mirrors base model', () => {
-    expect(getMaxContinuations('claude-sonnet-4-6[1m]')).toBe(getMaxContinuations('claude-sonnet-4-6'));
-    expect(getMaxContinuations('claude-opus-4-6[1m]')).toBe(getMaxContinuations('claude-opus-4-6'));
+  it('oneMVariantBase strips only a trailing [1m]', () => {
+    expect(oneMVariantBase('claude-sonnet-4-6[1m]')).toBe('claude-sonnet-4-6');
+    expect(oneMVariantBase('claude-sonnet-4-6')).toBeUndefined();
+    expect(oneMVariantBase('claude-sonnet-4-6[1m]x')).toBeUndefined();
   });
 
   it('unknown bracket-suffix variants still fall through to 200k default', () => {
-    // `normalizeModelId` strips @YYYYMMDD but NOT bracket suffixes; an
-    // unknown bracketed id has no explicit entry → default. Guards against
+    // Only `[1m]` is stripped; an unknown bracketed id has no entry → default. Guards against
     // silently treating an unrecognised variant as 1M.
     expect(getContextWindow('claude-future-9-9[whatever]')).toBe(200_000);
   });
@@ -418,10 +419,9 @@ describe('effectiveContextWindow', () => {
     expect(effectiveContextWindow('claude-sonnet-4-6', 500_000)).toBe(200_000);
   });
 
-  it('respects user cap on the 1M-beta Sonnet variant', () => {
-    // Same user cap, different model variant — picking the [1m] variant
-    // unlocks 1M native, so a 500k cap actually applies.
-    expect(effectiveContextWindow('claude-sonnet-4-6[1m]', 500_000)).toBe(500_000);
+  it('caps a [1m] spelling at its base model\'s window', () => {
+    expect(effectiveContextWindow('claude-sonnet-4-6[1m]', 500_000)).toBe(200_000);
+    expect(effectiveContextWindow('claude-opus-4-6[1m]', 500_000)).toBe(500_000);
   });
 
   it('treats zero / negative cap as "no cap"', () => {
@@ -494,7 +494,6 @@ describe('ModelCapability registry', () => {
     const routedIds = [
       'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-5',
       'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
-      'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]',
       // 2026-05-29 tier refresh: deep=mistral-large-2512, balanced=ministral-14b-2512,
       // fast=ministral-8b-2512 (magistral-medium-2509 dropped to bench-only/tier:null).
       'mistral-large-2512', 'ministral-14b-2512',
@@ -523,8 +522,7 @@ describe('ModelCapability registry', () => {
     // a silent flip of a mistral entry to provider:'anthropic' (or vice versa)
     // would mis-route LLM calls. Lock the families.
     const { MODEL_CAPABILITIES } = await import('./models.js');
-    for (const id of ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-haiku-4-5-20251001',
-                      'claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]']) {
+    for (const id of ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-haiku-4-5-20251001']) {
       expect(MODEL_CAPABILITIES[id]!.provider, id).toBe('anthropic');
     }
     expect(MODEL_CAPABILITIES['claude-haiku-4-5']!.provider).toBe('vertex');
@@ -593,22 +591,13 @@ describe('ModelCapability registry', () => {
     }
   });
 
-  it('tags 1M-beta variants with the context-1m-2025-08-07 header', async () => {
-    const { MODEL_CAPABILITIES } = await import('./models.js');
-    for (const id of ['claude-opus-4-7[1m]', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]']) {
-      expect(MODEL_CAPABILITIES[id]!.betaHeaders).toContain('context-1m-2025-08-07');
-    }
-    // Base (non-1M) variants stay header-free.
-    expect(MODEL_CAPABILITIES['claude-sonnet-4-6']!.betaHeaders).toEqual([]);
-  });
-
   it('registers claude-sonnet-5 as native-1M, at its standard price, no beta header', async () => {
     const { MODEL_CAPABILITIES } = await import('./models.js');
     const cap = MODEL_CAPABILITIES['claude-sonnet-5'];
     expect(cap).toBeDefined();
     expect(cap!.provider).toBe('anthropic');
     expect(cap!.tier).toBe('balanced');
-    // 1M NATIVELY — no context-1m beta header (unlike the 4.6[1m] variant).
+    // 1M NATIVELY — no context-1m beta header.
     expect(cap!.contextWindow).toBe(1_000_000);
     expect(cap!.betaHeaders).toEqual([]);
     // $2/$10 — Anthropic kept the launch rate as the standard price instead of the
