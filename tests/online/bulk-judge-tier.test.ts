@@ -99,15 +99,16 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
             const price = modelCapability(m.modelId)!.pricing;
             const worst = (Math.ceil((JUDGE_SYSTEM.length + user.length) / 2) * price.input + MAX_OUTPUT_TOKENS * price.output) / 1_000_000;
             if (spent + worst > LIMIT_USD) { aborted = `limit: spent ${spent.toFixed(4)} + next worst ${worst.toFixed(4)} > ${String(LIMIT_USD)}`; break; }
-            const t0 = Date.now();
             let o: CallOutcome | null = null;
             for (let attempt = 0; attempt < 3 && o === null; attempt++) {
+              // Latency of the attempt that answered, without the backoff before it.
+              const t0 = Date.now();
               try {
                 const r = await callForStructuredJson<Record<string, unknown>>({
                   client, model: m.modelId, system: JUDGE_SYSTEM, user, schema: rule.schema,
                   maxOutputTokens: MAX_OUTPUT_TOKENS, budgetUsd: 0.05,
                 });
-                o = { fixture: f.id, rule: ruleId, model: m.modelId, rep, data: r.data, error: null, costUsd: r.costUsd, ms: Date.now() - t0 };
+                o = { fixture: f.id, rule: ruleId, model: m.modelId, rep, data: r.data, error: null, costUsd: r.costUsd, inputTokens: r.inputTokens, outputTokens: r.outputTokens, ms: Date.now() - t0 };
               } catch (err) {
                 const name = err instanceof Error ? err.name : 'unknown';
                 const spend = extractionSpendOf(err);
@@ -137,6 +138,8 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
     console.log(`[E2] ${MODE} → ${dir}: ${String(outcomes.length)} calls, ${spent.toFixed(4)} USD${aborted ? `, ABORTED (${aborted})` : ''}`);
 
     expect(aborted).toBeNull();
+    // Transport errors leave a fixture's denominator; a run that lost answers is not a clean run.
+    for (const c of cells) expect(c.transportErrors, `${c.model} ${c.rule}`).toBe(0);
     expect(spent).toBeLessThanOrEqual(LIMIT_USD);
     if (MODE === 'smoke') {
       expect(outcomes).toHaveLength(1);
