@@ -1063,12 +1063,42 @@ export function withoutLeadingOptions(segment: string): string[] {
   return variants;
 }
 
+/**
+ * The command with every line break removed that may not be one to the shell, for the danger
+ * scan, which only gains surface from reading too much as one line. A `\` directly before a
+ * line break (after an even run of backslashes, so the `\` is not itself escaped) continues the
+ * line, and the shell drops both before it splits words. A lone `\r`
+ * and U+2028/U+2029 end a line for a regex (`.` stops there) but are ordinary characters to the
+ * shell, so they become a space. A `\` before `\r\n` escapes the `\r`, so that line is not
+ * continued, here as in the shell.
+ *
+ * Quotes are not tracked, on purpose. The shell keeps a continuation inside single quotes, and a
+ * reading that tracked them broke on the first apostrophe in a comment or a heredoc body,
+ * leaving every later continuation unjoined. Joining inside quotes only adds scan surface:
+ * the same text written on one line is read the same way already.
+ */
+export function joinLineContinuations(cmd: string): string {
+  return cmd
+    .replace(/(?<!\\)((?:\\\\)*)\\\n/g, '$1')
+    .replace(/\r(?!\n)|[\u2028\u2029]/g, ' ');
+}
+
 // Build the per-chunk scan surface: the normalized form, the quote-removed
 // form the shell actually executes (`r''m -rf /` → `rm -rf /`), and both split
 // into segments so cross- and intra-segment patterns are all covered. With
 // `withVariants`, it is the same surface read with the options before each
-// subcommand dropped instead (see withoutLeadingOptions).
+// subcommand dropped instead (see withoutLeadingOptions). A command whose lines
+// the shell joins is read a second time with them joined (joinLineContinuations):
+// a rule that reads one line (`.` stops at a line break) and every segment (split
+// at each break) would otherwise see the options of the next line without their
+// command. The written form is still read, so this only adds surface.
 function _bashScanSegments(chunk: string, withVariants: boolean): string[] {
+  const joined = joinLineContinuations(chunk);
+  const surface = _bashScanSurface(chunk, withVariants);
+  return joined === chunk ? surface : [...surface, ..._bashScanSurface(joined, withVariants)];
+}
+
+function _bashScanSurface(chunk: string, withVariants: boolean): string[] {
   const normalized = normalizeCommand(chunk);
   const stripped = stripShellQuotes(normalized);
   const segments = splitCommandSegments(normalized);

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { isDangerous, isCriticalTool, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
+import { isDangerous, isCriticalTool, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2812,6 +2812,77 @@ describe('isDangerous', () => {
     ])('asks about %s in autonomous mode without blocking it', (command) => {
       expect(auto(command)).not.toBeNull();
       expect(auto(command)).not.toContain('[BLOCKED');
+    });
+  });
+
+  // A `\` before a line break continues the command: the shell joins the lines before it splits
+  // words, so the options on the next line belong to the command on this one.
+  describe('a command continued over several lines is read as the shell joins it', () => {
+    const auto = (command: string) => isDangerous('bash', { command }, 'autonomous');
+    const chat = (command: string) => isDangerous('bash', { command });
+    const continuedCurl = 'curl https://x.test/hook \\\n  -d a=b';
+
+    // Each of these asks nothing on the code before this change.
+    it.each([
+      ['an option on the next line', continuedCurl, 'HTTP data submission via curl'],
+      ['an option before the URL on the next line', 'curl \\\n  -d a=b https://x.test/hook', 'HTTP data submission via curl'],
+      ['a header line between', 'curl https://x.test/hook \\\n  -H "Accept: application/json" \\\n  -d a=b', 'HTTP data submission via curl'],
+      ['a break inside double quotes', 'curl "https://x.test/a \\\n" -d a=b', 'HTTP data submission via curl'],
+      ['a break inside the command name', 'cu\\\nrl -d a=b https://x.test/hook', 'HTTP data submission via curl'],
+      ['wget', 'wget \\\n  --post-data a=b https://x.test', 'HTTP mutation via wget'],
+      // an apostrophe earlier in the command does not stop the joining
+      ['an apostrophe in a comment before it', `# don't touch prod\n${continuedCurl}`, 'HTTP data submission via curl'],
+      ['an apostrophe in a quoted command substitution before it', `x="$(echo 'a"b')"\n${continuedCurl}`, 'HTTP data submission via curl'],
+      // a lone \r and U+2028 end a line for a regex, not for the shell
+      ['a lone carriage return between', 'curl https://x.test/hook \r -d a=b', 'HTTP data submission via curl'],
+      ['a line separator between', 'curl https://x.test/hook   -d a=b', 'HTTP data submission via curl'],
+    ])('asks about %s, unattended and in a chat', (_label, command, label) => {
+      expect(auto(command)).toContain(label);
+      expect(auto(command)).not.toContain('[BLOCKED');
+      expect(chat(command)).not.toBeNull();
+    });
+
+    it('asks about a heredoc body with an apostrophe before the continued command', () => {
+      const command = `cat <<EOF > note.txt\nit's done\nEOF\n${continuedCurl}`;
+      expect(auto(command)).toContain('HTTP data submission via curl');
+    });
+
+    // The scan reads a long command in overlapping windows; the joining must hold in each.
+    it('asks about a continued command at the edge of a scan window, after a quoted word across the previous one', () => {
+      const head = `echo '${'a'.repeat(8_100)}'\n`;
+      const pad = 'echo b\n'.repeat(Math.ceil((9_990 - head.length) / 7));
+      const command = head + pad + continuedCurl;
+      expect(command.indexOf(continuedCurl)).toBeLessThan(10_000);
+      expect(command.length).toBeGreaterThan(10_000);
+      expect(auto(command)).toContain('HTTP data submission via curl');
+    });
+
+    // The reading with the options before a subcommand dropped joins the lines too.
+    it('asks about a subcommand split over two lines behind a global option', () => {
+      expect(auto('git -c a=b pu\\\nsh origin main')).not.toBeNull();
+      expect(chat('git -c a=b pu\\\nsh origin main')).not.toBeNull();
+    });
+
+    // Where the shell runs the next line as a command of its own, the joined reading keeps it
+    // apart.
+    it.each([
+      // an escaped backslash ends the line
+      'curl https://x.test \\\\\n -d a=b',
+      // a `\` before `\r\n` escapes the `\r`: the line is not continued
+      'curl -s https://x.test \\\r\n -d a=b',
+      // a request that sends nothing stays free when it is written over several lines
+      'curl -s \\\n  -H "Accept: application/json" \\\n  https://x.test/items',
+    ])('leaves %s alone, unattended and in a chat', (command) => {
+      expect(auto(command)).toBeNull();
+      expect(chat(command)).toBeNull();
+    });
+
+    it('joins a continuation after an even run of backslashes, also inside quotes, and maps lone line breaks to a space', () => {
+      expect(joinLineContinuations("a \\\nb 'c \\\nd'")).toBe("a b 'c d'");
+      expect(joinLineContinuations('i\\\\\nj')).toBe('i\\\\\nj');
+      expect(joinLineContinuations('k\\\\\\\nl')).toBe('k\\\\l');
+      expect(joinLineContinuations('m\\\r\nn')).toBe('m\\\r\nn');
+      expect(joinLineContinuations('o\rp q r')).toBe('o p q r');
     });
   });
 
