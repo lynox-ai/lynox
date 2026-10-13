@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type Database from 'better-sqlite3';
 import { readDurableKnowledgeForDebug } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { SubjectStore } from '../core/subject-store.js';
@@ -36,6 +37,12 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     ks.reviewEntry(queued[0]!.id, 'reject');
     const retired = ks.write({ text: 'retired fact', sourceChannel: 'ui', sourceUntrusted: false });
     ks.retireEntry(retired.id, 'user_asserted');
+    // Every row above was written in the same second; spread two active rows apart so the
+    // range has two distinct ends to get wrong.
+    const db = (ks as unknown as { db: Database.Database }).db;
+    const activeIds = (db.prepare("SELECT id FROM knowledge_entries WHERE status = 'active' ORDER BY rowid LIMIT 2").all() as Array<{ id: string }>).map(r => r.id);
+    db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2026-01-02 03:04:05', activeIds[0]);
+    db.prepare('UPDATE knowledge_entries SET created_at = ? WHERE id = ?').run('2027-06-07 08:09:10', activeIds[1]);
 
     const block = readDurableKnowledgeForDebug(engineOf(ks), 'this-thread');
 
@@ -47,9 +54,8 @@ describe('debug export: durable-knowledge status counts (real store)', () => {
     expect(c.pending_review.count).toBe(2);
     expect(c.rejected.count).toBe(1);
     expect(c.superseded.count).toBe(1);
-    // The range is real: both ends present, in order, for a status with rows.
-    expect(c.active.first_created_at).not.toBeNull();
-    expect(c.active.first_created_at! <= c.active.last_created_at!).toBe(true);
+    expect(c.active.first_created_at).toBe('2026-01-02 03:04:05');
+    expect(c.active.last_created_at).toBe('2027-06-07 08:09:10');
     expect(block.error).toBeUndefined();
   });
 
