@@ -15,6 +15,7 @@ import { REMOTE_PRESETS, LOOPBACK_DEFAULT_MODEL, MODEL_ENV, PRESETS_UNDER_TEST }
 import { FIREWORKS_HOST, pinnedSlots } from './online/preset-slots.js';
 import { fitnessRosterIds } from './online/fitness-roster.js';
 import { WITHDRAWN_FIREWORKS_IDS, pickerModels } from './online/picker-models.js';
+import { RETIRED_ANTHROPIC_ID, anthropicDirectIds } from './online/anthropic-models.js';
 import { modelCapability } from '../src/types/models.js';
 import { ALL_CANDIDATES } from '../scripts/model-fitness/models.js';
 import { CANDIDATES as REPLAY_CANDIDATES } from '../scripts/model-fitness/replay.js';
@@ -75,6 +76,23 @@ describe('picker models coverage', () => {
   });
   it('a withdrawn id keeps its capability row, so the engine still prices a config that names one', () => {
     expect(WITHDRAWN_FIREWORKS_IDS.filter(id => modelCapability(id)?.pricing === undefined)).toEqual([]);
+  });
+});
+
+describe('Anthropic models coverage', () => {
+  // The online check would pass an empty list; the switch candidates are named so that
+  // losing their rows is a failure here, not a silently shorter list there.
+  const ids = anthropicDirectIds();
+  it('reaches today\'s tier models and the 5.5 switch candidates', () => {
+    for (const id of ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']) {
+      expect(ids, id).toContain(id);
+    }
+  });
+  it('lists neither Vertex ids nor the [1m] spellings, which the probe cannot call', () => {
+    expect(ids.filter(id => id.includes('[') || modelCapability(id)?.provider !== 'anthropic')).toEqual([]);
+  });
+  it('does not price the retired control id', () => {
+    expect(ids).not.toContain(RETIRED_ANTHROPIC_ID);
   });
 });
 
