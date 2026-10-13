@@ -11436,13 +11436,15 @@ describe('LynoxHTTPApi', () => {
         drive_backups: { status: 'skipped', deleted: 0, folders_kept: 0, problems: [] },
       });
 
-      // The same body WITHOUT a content type: the parser reads it as JSON, but it
-      // is a request a foreign page can send without a CORS preflight. Revoke only.
+      // The same body WITHOUT a content type is a request a foreign page can send
+      // without a CORS preflight. The dispatcher refuses it before the route runs:
+      // no revoke, no deletion.
       const typeless = await fetch(`${baseUrl}/api/google/revoke`, {
         method: 'POST', headers: authHeaders(),
         body: new Blob([JSON.stringify({ delete_drive_backups: true })]),
       });
-      expect((await typeless.json() as { drive_backups: { status: string } }).drive_backups.status).toBe('skipped');
+      expect(typeless.status).toBe(415);
+      expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
       expect(mockDeleteUploadedBackups).not.toHaveBeenCalled();
 
       // Confirmed, and asked for: so a route that always reports `false`, or
@@ -16574,5 +16576,236 @@ describe('a server WITH LYNOX_HTTP_SECRET: the bearer decides, not the browser h
     });
     expect(res).not.toBe(403);
     expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+// A credential the browser attaches on its own lets another site make the browser use it: no
+// secret at all, or the session cookie (`SameSite=Lax`, so it travels on a navigation from another
+// site, and on every request from a sibling host under the same registrable domain). Refused for
+// it: a GET or HEAD whose route declares an effect, and with the cookie every write. The routes
+// come from the table the server really builds, so a route added tomorrow is in the set.
+describe('a credential the browser attaches on its own: requests another site sent', () => {
+  let open: LynoxHTTPApi;
+  let guarded: LynoxHTTPApi;
+  let untrusting: LynoxHTTPApi;
+  const before: Record<string, string | undefined> = {};
+  const REFUSAL = 'the browser says another site sent this request';
+  beforeAll(async () => {
+    for (const k of ['LYNOX_HTTP_SECRET', 'LYNOX_HTTP_ADMIN_SECRET']) { before[k] = process.env[k]; delete process.env[k]; }
+    open = new LynoxHTTPApi();
+    await open.init();
+    await open.start(0);
+    process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+    guarded = new LynoxHTTPApi();
+    await guarded.init();
+    await guarded.start(0);
+    // Behind a TLS proxy it is not told to trust: `start()` reads LYNOX_TRUST_PROXY once.
+    const trust = process.env['LYNOX_TRUST_PROXY'];
+    process.env['LYNOX_TRUST_PROXY'] = 'false';
+    try {
+      untrusting = new LynoxHTTPApi();
+      await untrusting.init();
+      await untrusting.start(0);
+    } finally {
+      if (trust === undefined) delete process.env['LYNOX_TRUST_PROXY']; else process.env['LYNOX_TRUST_PROXY'] = trust;
+    }
+  });
+  afterAll(async () => {
+    for (const [k, v] of Object.entries(before)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    await open?.shutdown();
+    await guarded?.shutdown();
+    await untrusting?.shutdown();
+  });
+
+  function send(server: LynoxHTTPApi, method: string, path: string, headers: Record<string, string>, body?: Buffer): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port: portOf(server), path, method, headers }, (res) => {
+        let text = '';
+        res.on('data', (c: Buffer) => { text += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+  const cookie = () => `lynox_session=${mintSessionToken(TEST_SECRET, Math.floor(Date.now() / 1000))}`;
+  const concrete = (path: string): string => path.replace(/:[^/]+/g, 'stance-probe');
+  const gets = (server: LynoxHTTPApi) => server.routeStancesForTesting().filter(r => r.method === 'GET');
+  // A GET to the two OAuth callbacks is answered before the dispatcher (a provider redirects there
+  // from its own site); their HEAD reaches the dispatcher and is checked like any other.
+  const BEFORE_DISPATCH = new Set(['/api/google/callback', '/api/oauth/callback']);
+  const effectGets = (server: LynoxHTTPApi) => gets(server).filter(r => r.stance?.kind !== 'reads' && !BEFORE_DISPATCH.has(r.path));
+
+  it('the set is the real one: GET routes with an effect, admin routes among them', () => {
+    const all = effectGets(open);
+    expect(all.length).toBeGreaterThanOrEqual(12);
+    expect(all.some(r => r.scope === 'admin')).toBe(true);
+    expect(gets(open).filter(r => r.stance?.kind === 'reads').length).toBeGreaterThan(70);
+  });
+
+  it('without a secret: refuses every GET with an effect from another site and from a sibling host', async () => {
+    for (const r of effectGets(open)) {
+      for (const site of ['cross-site', 'same-site']) {
+        const res = await send(open, 'GET', concrete(r.path), { 'Sec-Fetch-Site': site });
+        expect(res.status, `${r.path} ${site}`).toBe(403);
+        expect(res.body, `${r.path} ${site}`).toContain(REFUSAL);
+      }
+    }
+  });
+
+  it('without a secret: lets the same GETs through from its own page, and refuses a HEAD from another site', async () => {
+    for (const r of effectGets(open)) {
+      const res = await send(open, 'GET', concrete(r.path), { 'Sec-Fetch-Site': 'same-origin' });
+      expect(res.body, r.path).not.toContain(REFUSAL);
+    }
+    for (const path of ['/api/files', '/api/google/callback']) {
+      const head = await send(open, 'HEAD', path, { 'Sec-Fetch-Site': 'cross-site' });
+      expect(head.status, path).toBe(403);
+    }
+  });
+
+  it('without a secret: does not refuse a GET or HEAD that only reads, from anywhere', async () => {
+    for (const r of gets(open).filter(x => x.stance?.kind === 'reads')) {
+      const res = await send(open, 'GET', concrete(r.path), { 'Sec-Fetch-Site': 'cross-site' });
+      expect(res.body, r.path).not.toContain(REFUSAL);
+      // HEAD carries no body to read the refusal from: it must answer what the GET answered.
+      const head = await send(open, 'HEAD', concrete(r.path), { 'Sec-Fetch-Site': 'cross-site' });
+      expect(head.status, `HEAD ${r.path}`).toBe(res.status);
+    }
+  });
+
+  it('with the session cookie: refuses every GET with an effect from another site; the bearer is not judged', async () => {
+    for (const r of effectGets(guarded)) {
+      const path = concrete(r.path);
+      const byCookie = await send(guarded, 'GET', path, { Cookie: cookie(), 'Sec-Fetch-Site': 'cross-site' });
+      expect(byCookie.status, path).toBe(403);
+      expect(byCookie.body, path).toContain(REFUSAL);
+      const ownPage = await send(guarded, 'GET', path, { Cookie: cookie(), 'Sec-Fetch-Site': 'same-origin' });
+      expect(ownPage.body, path).not.toContain(REFUSAL);
+      const byBearer = await send(guarded, 'GET', path, { Authorization: `Bearer ${TEST_SECRET}`, 'Sec-Fetch-Site': 'cross-site' });
+      expect(byBearer.body, path).not.toContain(REFUSAL);
+    }
+  });
+
+  it('with the session cookie: refuses a write from a sibling host, and takes it from its own origin', async () => {
+    const port = String(portOf(guarded));
+    const host = `tenant.example.org:${port}`;
+    mockGoogleRevoke.mockClear();
+    const sibling = await send(guarded, 'POST', '/api/google/revoke', {
+      Host: host, Cookie: cookie(), 'Sec-Fetch-Site': 'same-site', Origin: 'https://other.example.org',
+    });
+    expect(sibling.status).toBe(403);
+    expect(sibling.body).toContain(REFUSAL);
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+
+    // A typeless body from the sibling: refused too. The 415 answers first, so either refusal counts.
+    const typeless = await send(guarded, 'POST', '/api/google/revoke', {
+      Host: host, Cookie: cookie(), 'Sec-Fetch-Site': 'same-site', Origin: 'https://other.example.org',
+    }, Buffer.from(JSON.stringify({ delete_drive_backups: true })));
+    expect([403, 415]).toContain(typeless.status);
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+
+    // Its own origin: as a browser sends it (same-origin), and with `same-site` as well.
+    for (const site of ['same-origin', 'same-site']) {
+      const own = await send(guarded, 'POST', '/api/google/revoke', {
+        Host: host, Cookie: cookie(), 'Sec-Fetch-Site': site, Origin: `http://${host}`,
+      });
+      expect(own.body, site).not.toContain(REFUSAL);
+    }
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('with the session cookie: its own origin by name has the scheme the request came over, when the server knows it', async () => {
+    // This server trusts its proxy (LYNOX_TRUST_PROXY, stubbed for the file). Told `https`, only
+    // `https://` of its own name is its own origin.
+    const host = `tenant.example.org:${String(portOf(guarded))}`;
+    const write = (origin: string, proto?: string) => send(guarded, 'POST', '/api/google/revoke', {
+      Host: host, Cookie: cookie(), 'Sec-Fetch-Site': 'same-site', Origin: origin,
+      ...(proto === undefined ? {} : { 'X-Forwarded-Proto': proto }),
+    });
+    mockGoogleRevoke.mockClear();
+    expect((await write(`https://${host}`, 'https')).body).not.toContain(REFUSAL);
+    const plainOnTls = await write(`http://${host}`, 'https');
+    expect(plainOnTls.status).toBe(403);
+    expect(plainOnTls.body).toContain(REFUSAL);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+    // Not told: it sees plain HTTP and cannot tell what the browser shows, so both schemes count.
+    expect((await write(`https://${host}`)).body).not.toContain(REFUSAL);
+    expect((await write(`http://${host}`)).body).not.toContain(REFUSAL);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(3);
+
+    // A server that does not trust its proxy ignores `x-forwarded-proto: https`: it cannot tell the
+    // scheme, so both count, and its own pages behind a TLS proxy are not refused.
+    const behind = `tenant.example.org:${String(portOf(untrusting))}`;
+    for (const origin of [`https://${behind}`, `http://${behind}`]) {
+      const res = await send(untrusting, 'POST', '/api/google/revoke', {
+        Host: behind, Cookie: cookie(), 'Sec-Fetch-Site': 'same-site', Origin: origin, 'X-Forwarded-Proto': 'https',
+      });
+      expect(res.body, origin).not.toContain(REFUSAL);
+    }
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(5);
+  });
+
+  it('without a secret, its own name on a scheme the operator did not list is not its own origin', async () => {
+    // Only the cookie gives the check the server's own origins by name. Without a secret a name gets
+    // through `hostRefusal` when its HOST is listed, whatever scheme or port the entry names, so own
+    // origins there would let `http://` of a name listed only as `https://` in. LYNOX_ALLOWED_ORIGINS
+    // is read once at module load, hence a fresh copy of the module.
+    const saved = { origins: process.env['LYNOX_ALLOWED_ORIGINS'], secret: process.env['LYNOX_HTTP_SECRET'] };
+    process.env['LYNOX_ALLOWED_ORIGINS'] = 'https://lynox.example';
+    delete process.env['LYNOX_HTTP_SECRET'];
+    let listed: LynoxHTTPApi | undefined;
+    try {
+      vi.resetModules();
+      const { LynoxHTTPApi: Fresh } = await import('./http-api.js');
+      listed = new Fresh();
+      await listed.init();
+      await listed.start(0);
+    } finally {
+      if (saved.origins === undefined) delete process.env['LYNOX_ALLOWED_ORIGINS']; else process.env['LYNOX_ALLOWED_ORIGINS'] = saved.origins;
+      if (saved.secret === undefined) delete process.env['LYNOX_HTTP_SECRET']; else process.env['LYNOX_HTTP_SECRET'] = saved.secret;
+    }
+    try {
+      const host = `lynox.example:${String(portOf(listed))}`;
+      // Control: the listed origin passes, so the list was read and the name got through `hostRefusal`.
+      const fromListed = await send(listed, 'GET', '/api/files', { Host: host, 'Sec-Fetch-Site': 'cross-site', Origin: 'https://lynox.example' });
+      expect(fromListed.body).not.toContain(REFUSAL);
+      expect(fromListed.body).not.toContain('answers only to localhost');
+      const plain = await send(listed, 'GET', '/api/files', { Host: host, 'Sec-Fetch-Site': 'cross-site', Origin: `http://${host}` });
+      expect(plain.status).toBe(403);
+      expect(plain.body).toContain(REFUSAL);
+    } finally {
+      await listed.shutdown();
+    }
+  });
+
+  it('a body without a Content-Type is refused with 415; a body-less write still runs', async () => {
+    mockGoogleRevoke.mockClear();
+    const typeless = await send(guarded, 'POST', '/api/google/revoke', { Authorization: `Bearer ${TEST_SECRET}` }, Buffer.from('{}'));
+    expect(typeless.status).toBe(415);
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+    const empty = await send(guarded, 'POST', '/api/google/revoke', { Authorization: `Bearer ${TEST_SECRET}` });
+    expect(empty.status).not.toBe(415);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('the OAuth callbacks stay reachable from another site: the provider redirects there', async () => {
+    // With the cookie, which the Lax cookie is on the provider's redirect: an effect route reached
+    // through the dispatcher would answer 403, a route behind auth without the pre-dispatch branch
+    // 401. The callback answers its own refusal of the missing state instead.
+    for (const path of ['/api/google/callback', '/api/oauth/callback']) {
+      const res = await send(guarded, 'GET', path, { Cookie: cookie(), 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document' });
+      expect(res.body, path).not.toContain(REFUSAL);
+      expect([401, 403], path).not.toContain(res.status);
+    }
+  });
+
+  it('a refused navigation reads as a sentence on the page, not as JSON', async () => {
+    const res = await send(guarded, 'GET', '/api/files', { Cookie: cookie(), 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document' });
+    expect(res.status).toBe(403);
+    expect(res.body.startsWith('Refused: the browser says another site sent this request')).toBe(true);
+    const api = await send(guarded, 'GET', '/api/files', { Cookie: cookie(), 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'empty' });
+    expect(api.status).toBe(403);
+    expect(api.body.startsWith('{')).toBe(true);
   });
 });

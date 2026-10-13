@@ -37,7 +37,7 @@ import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
-import { crossSiteWriteRefusal, hostRefusal, normalizeAllowedOrigins, LOCALHOST_ORIGIN } from './cross-site-write.js';
+import { ambientCrossSiteRefusal, crossSiteWriteRefusal, hostRefusal, normalizeAllowedOrigins, LOCALHOST_ORIGIN } from './cross-site-write.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
@@ -968,6 +968,15 @@ function refuseClosedPrompt(res: ServerResponse, row: Pick<PendingPromptRow, 'cl
   errorResponse(res, 410, 'Prompt expired');
 }
 
+/** Whether the request reached this server over TLS: its own socket, or a trusted proxy's `x-forwarded-proto`. */
+function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
+  if (req.socket && 'encrypted' in req.socket && req.socket.encrypted === true) return true;
+  if (!trustProxy) return false;
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  return proto === 'https';
+}
+
 function errorResponse(
   res: ServerResponse,
   status: number,
@@ -1605,6 +1614,54 @@ export class LynoxHTTPApi {
   }
 
   /**
+   * Refuses a request another site made the browser send with a credential the browser attaches
+   * on its own; true when it answered. `ambient` is that credential: no secret, or the session
+   * cookie. Checked are a GET or HEAD whose route declares an effect (any stance but `reads`; an
+   * admin route declares none and is checked), and every write. Without a secret a write meets
+   * `crossSiteWriteRefusal` before auth already, which refuses everything this check would; it is
+   * not exempted here, because an exemption that changes nothing is one more case to get wrong.
+   * The rule is `ambientCrossSiteRefusal`.
+   */
+  private _refusedAsAmbientCrossSite(
+    req: IncomingMessage,
+    res: ServerResponse,
+    method: string,
+    stance: MandateStance | undefined,
+    ambient: 'none' | 'no-secret' | 'cookie',
+    trustProxy: boolean,
+  ): boolean {
+    if (ambient === 'none') return false;
+    const safe = method === 'GET' || method === 'HEAD';
+    if (safe && stance?.kind === 'reads') return false;
+    const host = singleHeader(req.headers['host']);
+    const refusal = ambientCrossSiteRefusal({
+      origin: singleHeader(req.headers['origin']),
+      fetchSite: singleHeader(req.headers['sec-fetch-site']),
+      host,
+      allowedOrigins: ALLOWED_ORIGINS,
+      // With the cookie, the server's own origin by name, scheme included. When the request is
+      // known to have come over TLS (its own socket, or a trusted proxy's `x-forwarded-proto`),
+      // only `https://` is it, so `http://` of the same name does not pass for an HTTPS server.
+      // Otherwise the server cannot tell: behind a TLS proxy it is not told to trust, it sees
+      // plain HTTP while the browser shows `https://`. Both schemes count then, or every write
+      // from its own pages would be refused in a browser that sends no `Sec-Fetch-Site`.
+      ownOrigins: ambient !== 'cookie' || host === undefined || host === ''
+        ? []
+        : requestIsTls(req, trustProxy) ? [`https://${host}`] : [`https://${host}`, `http://${host}`],
+    });
+    if (refusal === null) return false;
+    // A refused navigation is a person looking at a browser tab (a link clicked in a web mail or
+    // web chat): they get the sentence as a page, not a JSON object.
+    if (singleHeader(req.headers['sec-fetch-dest']) === 'document') {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(refusal);
+      return true;
+    }
+    errorResponse(res, 403, refusal);
+    return true;
+  }
+
+  /**
    * Look up the matched route's scope. Returns `null` if no route matches —
    * the dispatcher uses this to decide whether to 404 or 403.
    *
@@ -2177,14 +2234,7 @@ export class LynoxHTTPApi {
     const hmac = createHmac('sha256', key).update(payload).digest('hex');
     const token = `${payload}.${hmac}`;
 
-    let isTls = false;
-    if (req.socket && 'encrypted' in req.socket && req.socket.encrypted === true) {
-      isTls = true;
-    } else if (trustProxy) {
-      const forwardedProto = req.headers['x-forwarded-proto'];
-      const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-      if (proto === 'https') isTls = true;
-    }
+    const isTls = requestIsTls(req, trustProxy);
 
     const attrs = [
       `${LynoxHTTPApi.SESSION_COOKIE_NAME}=${token}`,
@@ -2196,8 +2246,11 @@ export class LynoxHTTPApi {
       // paint, and the user only got bounced to /app after submitting the OTP
       // form (looked like a bypass even though the cookie was genuine). Lax
       // sends cookie on safe-method cross-site nav; CSRF on POST/PUT/DELETE
-      // is still blocked because Lax doesn't attach the cookie to cross-site
-      // form submissions. Rolling-refresh path must mirror the original
+      // from another site is still blocked because Lax doesn't attach the
+      // cookie to cross-site form submissions. It does attach it to every
+      // request from a sibling host under the same registrable domain, and to
+      // a navigation from another site: the dispatcher refuses both where they
+      // write (`_refusedAsAmbientCrossSite`). Rolling-refresh path must mirror the original
       // login mint or each /api/* call would re-stamp Strict.
       'SameSite=Lax',
       `Max-Age=${LynoxHTTPApi.SESSION_MAX_AGE_S}`,
@@ -2988,6 +3041,11 @@ export class LynoxHTTPApi {
     // it the guard could never be satisfied and the route was unreachable. A
     // body-less DELETE parses to null (no Content-Type ⇒ no 415), so existing
     // DELETE routes are unaffected.
+    //
+    // A body WITHOUT a Content-Type is refused after parsing. A browser sends a
+    // typeless body (a Blob without a type) as a "simple" request, without the
+    // CORS preflight that `application/json` forces, so accepting it let another
+    // page's write through on the strength of the body parser alone.
     let body: unknown = null;
     if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
       const ct = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
@@ -3009,7 +3067,16 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, 'Invalid request body');
         return;
       }
+      if (ct === '' && body !== null) {
+        errorResponse(res, 415, 'Content-Type must be application/json');
+        return;
+      }
     }
+
+    // What the browser attached on its own, for `_refusedAsAmbientCrossSite`.
+    const ambient: 'none' | 'no-secret' | 'cookie' = !secret
+      ? 'no-secret'
+      : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
 
     // Route dispatch — also try GET handler for HEAD requests (RFC 9110 §9.3.2)
     const routeKey = `${method} ${pathname}`;
@@ -3017,7 +3084,9 @@ export class LynoxHTTPApi {
       ?? (method === 'HEAD' ? this.staticRoutes.get(`GET ${pathname}`) : undefined);
     if (staticHandler) {
       const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
-      if (this._refusedByStance(req, res, this.staticRouteStances.get(stanceKey))) return;
+      const stance = this.staticRouteStances.get(stanceKey);
+      if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
+      if (this._refusedByStance(req, res, stance)) return;
       await staticHandler(req, res, {}, body);
       return;
     }
@@ -3035,6 +3104,7 @@ export class LynoxHTTPApi {
             params[name] = value;
           }
         }
+        if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, route.stance)) return;
         await route.handler(req, res, params, body);
         return;
@@ -9211,11 +9281,12 @@ export class LynoxHTTPApi {
       // before it deleted anything, and a caller written against that contract
       // must not start destroying files without knowing.
       //
-      // And only with an explicit `Content-Type: application/json`. The body
-      // parser reads JSON from a request with NO content type too, and that is
-      // a "simple" request a foreign page can send without a CORS preflight
-      // (a typeless Blob body). The header is what forces the preflight, which
-      // a foreign origin does not pass — so it is required here, not assumed.
+      // And only with an explicit `Content-Type: application/json`. A request
+      // with NO content type is a "simple" request a foreign page can send
+      // without a CORS preflight (a typeless Blob body). The dispatcher now
+      // refuses such a body with 415 before any route runs; this check is kept
+      // as a second one at the route that deletes, so the deletion does not
+      // rest on the dispatcher alone.
       const contentType = (req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase();
       const wantsDeletion = contentType === 'application/json'
         && typeof body === 'object' && body !== null
