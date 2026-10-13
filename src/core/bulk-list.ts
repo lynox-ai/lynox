@@ -36,6 +36,10 @@ export interface BulkListFormSpec {
   readonly perPage: number;
   /** Fixed parameters that make paging stable: without an order, a page boundary moves. */
   readonly order: readonly (readonly [string, string])[];
+  /** The parameter that narrows each element to its id field where the server honours it:
+   *  what the list is read for is which targets exist, and the read-back of each target is a
+   *  GET of its own. */
+  readonly fieldsParam: string;
 }
 
 /**
@@ -54,6 +58,9 @@ export const BULK_LIST_FORMS = {
     perPageParam: 'per_page',
     perPage: 50,
     order: [['orderby', 'id'], ['order', 'asc']],
+    // WordPress's REST `_fields`: a host that ignores it sends whole records, and the page and
+    // byte caps still bound what is read.
+    fieldsParam: '_fields',
   },
 } as const satisfies Record<string, BulkListFormSpec>;
 export type BulkListForm = keyof typeof BULK_LIST_FORMS;
@@ -168,6 +175,8 @@ export function listPageUrl(host: string, source: BulkListSource, page: number):
   const spec: BulkListFormSpec = BULK_LIST_FORMS[source.form];
   const pairs: [string, string][] = Object.keys(source.filters).sort().map((n) => [n, source.filters[n]!]);
   pairs.push(...spec.order.map(([n, v]): [string, string] => [n, v]));
+  const fields = listFieldsValue(source);
+  if (fields !== null) pairs.push([spec.fieldsParam, fields]);
   pairs.push([spec.perPageParam, String(spec.perPage)], [spec.pageParam, String(page)]);
   return `https://${host}${source.path}?${pairs.map(([n, v]) => `${n}=${v}`).join('&')}`;
 }
@@ -190,10 +199,26 @@ export function listQueryParams(source: BulkListSource): Record<string, { enum?:
   const out: Record<string, { enum?: string[]; regex?: string }> = {};
   for (const [n, v] of Object.entries(source.filters)) out[n] = { enum: [v] };
   for (const [n, v] of spec.order) out[n] = { enum: [v] };
+  const fields = listFieldsValue(source);
+  if (fields !== null) out[spec.fieldsParam] = { enum: [fields] };
   out[spec.perPageParam] = { enum: [String(spec.perPage)] };
   // Exactly the pages the engine may ask for: a pattern over the digits would grant more.
   out[spec.pageParam] = { enum: Array.from({ length: maxListPages(source.form) }, (_, i) => String(i + 1)) };
   return out;
+}
+
+/** A field name the fields parameter may carry: a plain lower-case name. One starting with `_`
+ *  is a server's own (`_links`, `_embedded`), and naming it there can make the server add
+ *  linked records to the page — the opposite of what the parameter is for. */
+const FIELDS_VALUE_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+/**
+ * The value of the form's fields parameter for this list, or null when the id field is not a
+ * plain name: then no fields parameter is sent, and whole records come back, bounded by the
+ * page and byte caps. One answer for both the page address and its grant.
+ */
+export function listFieldsValue(source: BulkListSource): string | null {
+  return FIELDS_VALUE_RE.test(source.idField) ? source.idField : null;
 }
 
 /** A page as read: its elements, or `null` when it is not a JSON array. */

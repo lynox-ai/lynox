@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   BULK_LIST_PAGE_BYTES, isSameListItem, isUnderList, listItemId, listItemKey, listPageCap, listPageElements,
-  listPageUrl, listQueryParams, maxListPages, parseListSource, type BulkListSource,
+  listFieldsValue, listPageUrl, listQueryParams, maxListPages, parseListSource, type BulkListSource,
 } from './bulk-list.js';
 import { BULK_MAX_SOURCE_BYTES } from './bulk-plan.js';
 
@@ -96,7 +96,7 @@ describe('listPageUrl', () => {
 
   it('builds the address in a fixed order: filters by name, order, page size, page', () => {
     expect(listPageUrl(HOST, s, 3)).toBe(
-      'https://shop.example.com/wp-json/wc/v3/products?category=12&status=publish&orderby=id&order=asc&per_page=50&page=3',
+      'https://shop.example.com/wp-json/wc/v3/products?category=12&status=publish&orderby=id&order=asc&_fields=id&per_page=50&page=3',
     );
   });
 
@@ -118,7 +118,7 @@ describe('listQueryParams', () => {
     const q = listQueryParams(s);
     const pages = Array.from({ length: maxListPages('woocommerce') }, (_, i) => String(i + 1));
     expect(q).toEqual({
-      category: { enum: ['12'] }, orderby: { enum: ['id'] }, order: { enum: ['asc'] },
+      category: { enum: ['12'] }, orderby: { enum: ['id'] }, order: { enum: ['asc'] }, _fields: { enum: ['id'] },
       per_page: { enum: ['50'] }, page: { enum: pages },
     });
     expect(pages.at(-1)).toBe('101');
@@ -126,6 +126,29 @@ describe('listQueryParams', () => {
     // Every name the page address carries is one the grant names.
     const names = new URL(listPageUrl(HOST, s, 1)).searchParams;
     for (const n of names.keys()) expect(Object.hasOwn(q, n)).toBe(true);
+  });
+});
+
+describe('listFieldsValue', () => {
+  it('narrows to a plain lower-case id field', () => {
+    const s = parse({ ...base, id_field: 'id' });
+    expect(listFieldsValue(s)).toBe('id');
+    expect(listQueryParams(s)['_fields']).toEqual({ enum: ['id'] });
+    expect(listPageUrl(HOST, s, 1)).toContain('&_fields=id&');
+  });
+
+  it.each([['_embedded'], ['_links'], ['ID'], ['productId']])(
+    'sends no fields parameter for the id field %j — a server name could pull linked records in',
+    (idField) => {
+      const s = parse({ ...base, id_field: idField });
+      expect(listFieldsValue(s)).toBeNull();
+      expect(Object.hasOwn(listQueryParams(s), '_fields')).toBe(false);
+      expect(listPageUrl(HOST, s, 1)).not.toContain('_fields');
+    },
+  );
+
+  it('is never the planner\'s: a filter named `_fields` is refused', () => {
+    expect(() => parse({ ...base, filters: { _fields: 'id' } })).toThrow(/source_list\.filters may only use/);
   });
 });
 

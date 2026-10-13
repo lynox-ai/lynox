@@ -148,3 +148,21 @@ describe('reviewableQuery', () => {
     },
   );
 });
+
+describe('the fixed names outside the name alphabet', () => {
+  it('admits `_fields` where the constraints name it, with one plain field', () => {
+    expect(reviewableQuery('_fields=id', { _fields: { enum: ['id'] } })).toBe(true);
+    expect(reviewableQuery('_fields=id,name', { _fields: { enum: ['id,name'] } })).toBe(false);
+  });
+
+  it('refuses `_fields` the constraints do not name', () => {
+    expect(reviewableQuery('_fields=id', { page: { enum: ['1'] } })).toBe(false);
+  });
+
+  it.each([['_method'], ['_envelope'], ['_jsonp'], ['_embed'], ['_fieldsx'], ['_Fields'], ['__fields']])(
+    'refuses %j even where the constraints name it — only whole fixed names pass',
+    (name) => {
+      expect(reviewableQuery(`${name}=id`, { [name]: { enum: ['id'] } })).toBe(false);
+    },
+  );
+});

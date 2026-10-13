@@ -8282,7 +8282,7 @@ describe('LynoxHTTPApi', () => {
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
-      expect(shown['listFirstPage']).toBe(`https://${host}/wp-json/wc/v3/products?category=12&orderby=id&order=asc&per_page=50&page=1`);
+      expect(shown['listFirstPage']).toBe(`https://${host}/wp-json/wc/v3/products?category=12&orderby=id&order=asc&_fields=id&per_page=50&page=1`);
       expect(shown['listStartChecksum']).toBe(bulkLedger.listStartChecksum(id));
       expect(shown['list']).toMatchObject({ state: 'pending', filters: { category: '12' }, idField: 'id', method: 'PUT', after: { status: 'draft' } });
       expect(shown['listNote']).toBe(BULK_LIST_NOTE);

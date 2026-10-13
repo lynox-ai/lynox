@@ -730,6 +730,10 @@ export function withListQuery(contract: CapabilityContract, constraints: ListQue
 const LIST_QUERY_MAX = 512;
 const LIST_QUERY_NAME = /^[a-z][a-z0-9_]{0,31}$/;
 const LIST_QUERY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
+/** Names outside that alphabet a list read may still carry — each one a list form sets itself,
+ *  never a planner (it is admitted only where the constraints name it, as any other). WordPress's
+ *  `_fields` narrows each element to the field named, where the server honours it. */
+const LIST_QUERY_FIXED_NAMES: ReadonlySet<string> = new Set(['_fields']);
 
 /**
  * Whether `raw` — the text after `?` — is a query a list read may send. Checked on the raw
@@ -750,12 +754,12 @@ export function reviewableQuery(raw: string, constraints: ListQueryConstraints):
     if (eq <= 0) return false;
     const name = segment.slice(0, eq);
     const value = segment.slice(eq + 1);
-    if (!LIST_QUERY_NAME.test(name) || !LIST_QUERY_VALUE.test(value)) return false;
+    if (!(LIST_QUERY_NAME.test(name) || LIST_QUERY_FIXED_NAMES.has(name)) || !LIST_QUERY_VALUE.test(value)) return false;
     if (seen.has(name)) return false;
     seen.add(name);
     // The alphabet above already leaves out every spelling a server folds into another name
     // (PHP turns `.`, ` ` and `[` into `_`; header names are written with `-`; `_method`
-    // starts with `_`), so the name a server reads is this one.
+    // starts with `_`; the fixed names are spelled out whole), so the name a server reads is this one.
     if (name.includes('method')) return false;
     if (!Object.hasOwn(constraints, name)) return false;
     const c = constraints[name]!;

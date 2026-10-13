@@ -42,6 +42,8 @@ interface Shop {
   itemIdOverride?: Map<number, unknown>;
   /** The bytes of every list page body served from `items`. */
   listBytes: number;
+  /** Narrow each listed element to the `_fields` named, as WordPress does where it honours it. */
+  honorFields?: boolean;
 }
 
 function shop(n: number): Shop {
@@ -61,7 +63,9 @@ function serve(s: Shop): () => void {
       if (special) return special;
       const per = Number(u.searchParams.get('per_page'));
       const all = [...s.items.values()].sort((a, b) => (a['id'] as number) - (b['id'] as number));
-      const body = JSON.stringify(all.slice((page - 1) * per, page * per));
+      const fields = u.searchParams.get('_fields');
+      const slice = all.slice((page - 1) * per, page * per);
+      const body = JSON.stringify(s.honorFields === true && fields !== null ? slice.map((e) => ({ [fields]: e[fields] })) : slice);
       s.listBytes += Buffer.byteLength(body, 'utf8');
       return new Response(body, { status: 200 });
     }
@@ -135,7 +139,7 @@ describe('reading a list', () => {
       expect(ledger.getStatus(id)).toMatchObject({ phase: 'planned', total: 120, haltReason: BULK_HALT_REASONS.listed });
       // Three pages, each address as the engine builds it, and nothing else sent.
       expect(s.requests).toEqual([1, 2, 3].map((p) => ({
-        method: 'GET', path: PATH, search: `?category=12&orderby=id&order=asc&per_page=50&page=${String(p)}`,
+        method: 'GET', path: PATH, search: `?category=12&orderby=id&order=asc&_fields=id&per_page=50&page=${String(p)}`,
       })));
       // The write contract now names exactly the listed targets, with the run's verb.
       const contract = parseBulkContract(ledger.getListRun(id)!.contractJson)!;
@@ -352,6 +356,42 @@ describe('what a list read keeps count of', () => {
       const out = await runBulkPreview(id, deps({ now: () => t }));
       expect(out.status).toBe('halted');
       expect(s.requests).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('records the list does not need', () => {
+  /** A shop whose records are large: 120 of them hold about 24 MB of description. */
+  function bulky(honorFields: boolean): Shop {
+    const s = shop(120);
+    for (const item of s.items.values()) item['description'] = 'd'.repeat(200 * 1024);
+    s.honorFields = honorFields;
+    return s;
+  }
+
+  it('are left at the host where it honours the fields parameter: the list is read whole', async () => {
+    const s = bulky(true);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      expect((await runBulkPreview(id, deps())).status).toBe('done');
+      expect(ledger.getStatus(id)).toMatchObject({ total: 120, haltReason: BULK_HALT_REASONS.listed });
+      expect(ledger.getListRun(id)!.bytes).toBeLessThan(10_000);
+    } finally {
+      restore();
+    }
+  });
+
+  it('stop the list where the host ignores it — halted, never listed half', async () => {
+    const s = bulky(false);
+    const restore = serve(s);
+    try {
+      const id = startedList();
+      expect((await runBulkPreview(id, deps())).status).toBe('halted');
+      expect(ledger.getStatus(id)).toMatchObject({ phase: 'planned', haltReason: BULK_HALT_REASONS.listTooLarge });
+      expect(ledger.getListRun(id)!.state).toBe('pending');
     } finally {
       restore();
     }
