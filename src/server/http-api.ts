@@ -3701,8 +3701,8 @@ export class LynoxHTTPApi {
                 // to the review queue instead of landing active and pinnable.
                 content.push(bigDoc !== null
                   ? { type: 'text', text: wrapUntrustedData(
-                      `[File: ${safeName}] — extracted text, ${String(safeBody.length)} chars, too large to inline into the message. `
-                      + (docCut !== null ? `${docCut} The saved file holds only the included part. ` : '')
+                      `[File: ${safeName}] — extracted text, ${String(docCut !== null ? MAX_EXTRACTED_CHARS : safeBody.length)} chars, too large to inline into the message. `
+                      + (docCut !== null ? `${docCut} The saved file holds only the included part, followed by a cut marker. ` : '')
                       + `Saved to the files area as \`${bigDoc.rel}\`. `
                       + `Work on it there: read_file('${bigDoc.abs}'), or bash/python on '${bigDoc.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
                       + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${safeBody.slice(0, INLINE_FILE_PREVIEW_CHARS)}`,

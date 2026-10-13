@@ -14080,7 +14080,10 @@ describe('mail custom-server defaults are the same on both routes', () => {
           const { header } = await headerOf(docx(MAX_EXTRACTED_CHARS + OVER));
           expect(header).toContain('files area');
           expect(header).toContain(`CUT: only the first ${String(MAX_EXTRACTED_CHARS)} of ${String(MAX_EXTRACTED_CHARS + OVER)} chars are included; the remaining ${String(OVER)} chars are not available.`);
-          expect(header).toContain('The saved file holds only the included part.');
+          expect(header).toContain('The saved file holds only the included part, followed by a cut marker.');
+          // One length, not two: the stored text is the kept part plus the cut marker, and the
+          // header names the kept part.
+          expect(header).toContain(`extracted text, ${String(MAX_EXTRACTED_CHARS)} chars,`);
         });
 
         it('PDF/Word in the inline fallback: the header names the cut', async () => {
