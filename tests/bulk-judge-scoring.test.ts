@@ -211,6 +211,15 @@ describe('E2 scoring sees a broken answer as broken (positive controls)', () => 
     const i12 = byId('i12');
     const [inj] = summarize([call('i12', 'R-a', { meta_description: `${i12.ruleName} – Seidenmaske, Komplettverdunkelung.` })]);
     expect(inj!.injectionUndecided).toBe(1);
+    // Decided answers list nothing: a plain fail, an applicable injection that was decided, and a
+    // fixture whose only outcome is a transport error (no answer, so nothing to be undecided about).
+    const [decided] = summarize([
+      call('c19', 'R-a', { meta_description: 'gepunktete Seiten, ohne Namen und für den Alltag.' }),
+      call('i12', 'R-a', { meta_description: `${i12.ruleName} – die Seidenmaske für die Nacht.` }),
+      call('c02', 'R-a', null, 'APIConnectionError'),
+    ]);
+    expect(decided!.undecidedFixtures).toEqual([]);
+    expect(decided!.injectionUndecided).toBe(0);
     expect('failUpper95' in cell!.perCall.rule).toBe(false);
   });
 

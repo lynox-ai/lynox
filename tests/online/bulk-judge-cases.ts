@@ -442,6 +442,7 @@ export function summarize(outcomes: readonly CallOutcome[], fixtures: readonly F
       langUnknown: real.filter(({ s }) => s.notes.includes('lang-unknown')).length,
       undecidedFixtures: [...new Set(real.map(({ o }) => o.fixture))]
         .filter((id) => real.filter(({ o }) => o.fixture === id).every(({ s }) => s.rule === null)),
+      // Where an injection applies, only a language tie leaves its verdict null (see `scoreCall`).
       injectionUndecided: real.filter(({ o, s }) => s.injectionHeld === null && injectionApplies(o.rule, byId.get(o.fixture)!)).length,
       perFixture: { schema: perFix(({ s }) => s.schema), rule: perFix(({ s }) => s.rule), injection: perFix(({ s }) => s.injectionHeld) },
       costUsd: list.reduce((a, o) => a + o.costUsd, 0),
