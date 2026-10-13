@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 
 /**
  * Which `lynox-backups` folder the uploader writes into and lists from, against an in-memory
- * Drive. The uploader finds its root only through its pin; a folder of that name it did not
- * create is never taken. Under the full `drive` scope a listing by name also returns folders
- * other accounts shared with the user, which is what the deletion on disconnect walks. The fake returns every folder regardless of the granted scope, the
- * strict case, and in insertion order, so a folder inserted first is the first a listing sees.
+ * Drive. The uploader finds its root only through its pin. A listing by name, which the deletion
+ * on disconnect uses, also returns folders other accounts shared with the user under the full
+ * `drive` scope. The fake returns every folder regardless of the granted scope, the strict case,
+ * and in insertion order, so a folder inserted first is the first a listing sees.
  *
  * It answers with the fields a request names and no others, and honours `'me' in owners` only
  * when the query carries it: an implementation that forgot to request `isAppAuthorized`, or to
@@ -217,8 +217,8 @@ describe('the uploader never takes a root by its name', () => {
 
 describe('once a root is pinned, the uploader keeps it', () => {
   it('takes the pinned root over a folder of the same name that a listing returns first', async () => {
-    // A folder the user owns and this app is authorized for: what a transfer of ownership from
-    // another user of the same app leaves behind. Inserted first, so a lookup by name finds it.
+    // A folder of the same name the user owns and this app is authorized for, inserted first,
+    // so a lookup by name would find it.
     folder('transferred', { ownedByMe: true, isAppAuthorized: true });
     folder('own', { ownedByMe: true, isAppAuthorized: true });
     const out = await upload(new GDriveBackupUploader(auth, { rootPin: memPin('own') }));
@@ -343,6 +343,32 @@ describe('once a root is pinned, the uploader keeps it', () => {
     expect(deletes, 'only the folder this call created, by its id').toEqual(['/drive/v3/files/new-1']);
   });
 
+  it('creates nothing more on a second upload after the pin could not be written', async () => {
+    const pin: RootFolderPin = { read: () => null, write: () => { throw new Error('disk full'); } };
+    const u = new GDriveBackupUploader(auth, { rootPin: pin });
+    expect((await upload(u)).success).toBe(false);
+    const out = await upload(u);
+    expect(out.success).toBe(false);
+    expect(drive.size).toBe(0);
+  });
+
+  it('fails the upload, and pins nothing, when Drive answers the new folder without an id', async () => {
+    const real = mockGoogleFetch.getMockImplementation()!;
+    mockGoogleFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && new URL(url).pathname === '/drive/v3/files') return respond(200, {});
+      return real(url, init);
+    });
+    try {
+      const pin = memPin();
+      const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
+      expect(out.success).toBe(false);
+      expect(out.error).toMatch(/did not return an id/);
+      expect(pin.value).toBeNull();
+    } finally {
+      mockGoogleFetch.mockImplementation(real);
+    }
+  });
+
   it('names both failures when the root it just created cannot be deleted either', async () => {
     const real = mockGoogleFetch.getMockImplementation()!;
     mockGoogleFetch.mockImplementation(async (url: string, init?: RequestInit) => {
@@ -385,6 +411,17 @@ describe('fileRootPin', () => {
     mkdirSync(join(dir, 'data'));
     writeFileSync(join(dir, 'data', 'gdrive-backup-root'), "x' or name = 'y\n");
     expect(fileRootPin(join(dir, 'data')).read()).toBeNull();
+  });
+
+  it('fails, rather than reading no pin, when the pin cannot be read; an upload then creates nothing', async () => {
+    // A path that exists but cannot be read as a file (EISDIR), standing in for EACCES or EIO.
+    mkdirSync(join(dir, 'data', 'gdrive-backup-root'), { recursive: true });
+    const pin = fileRootPin(join(dir, 'data'));
+    expect(() => pin.read()).toThrow();
+    expect(fileRootPin(join(dir, 'absent')).read()).toBeNull();
+    const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
+    expect(out.success).toBe(false);
+    expect(drive.size).toBe(0);
   });
 });
 

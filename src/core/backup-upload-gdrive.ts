@@ -95,8 +95,11 @@ export function fileRootPin(dir: string): RootFolderPin {
       let text: string;
       try {
         text = readFileSync(path, 'utf8').trim();
-      } catch {
-        return null;
+      } catch (err: unknown) {
+        // Only a missing file is "no pin". Any other failure to read it is an error: taken as no
+        // pin, it would create a new root and overwrite the pin of the existing one.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw err;
       }
       return DRIVE_ID.test(text) ? text : null;
     },
@@ -368,6 +371,9 @@ export class GDriveBackupUploader {
     }
 
     const folder = await response.json() as DriveFile;
+    if (typeof folder.id !== 'string' || !DRIVE_ID.test(folder.id)) {
+      throw new Error(`Drive did not return an id for the new ${BACKUP_FOLDER_NAME} folder.`);
+    }
     try {
       this.rootPin.write(folder.id);
     } catch (err: unknown) {
@@ -398,10 +404,8 @@ export class GDriveBackupUploader {
    * it was deleted, or the instance is now connected to another Google account), or when it sees
    * it but it no longer is all of that, the answer is null and the caller creates a new root.
    *
-   * There is no lookup by name. A folder of that name is not necessarily one this instance
-   * created: under the full `drive` scope a listing also returns folders shared with the user,
-   * and a folder not created by this instance can be owned by the user and authorized for this
-   * app all the same. Never adopting one costs a second root once, on the first start after an
+   * There is no lookup by name: a folder of that name is not necessarily one this instance
+   * created, so the name is not used to find the root. Never adopting one costs a second root once, on the first start after an
    * update and after a change of Google account; the backups in the earlier root stay where they
    * are, and `deleteUploadedBackups` still finds them by name when Google is disconnected.
    *
