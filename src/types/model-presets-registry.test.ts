@@ -63,14 +63,14 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('EU');
   });
 
-  it('DeepSeek v4.1 Flash (Fireworks) — verified $0.22/$0.66, 1M ctx, CN', () => {
+  it('DeepSeek v4.1 Flash (Fireworks) — Standard $0.30/$1.20, cached 0.006, 1M ctx, CN', () => {
     // The FAST slot of BOTH efficient and balanced since 2026-09-30. Pinned here
-    // because it is MORE expensive than the withdrawn -0731 it replaces — 1.6x the
-    // input and 2.4x the output — so a later edit that "restores" the old numbers
+    // because it is MORE expensive than the withdrawn -0731 it replaces — 2.14x the
+    // input and 4.29x the output — so a later edit that "restores" the old numbers
     // out of familiarity would under-bill every fast-tier call on two presets.
     const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4p1-flash']!;
     expect(m.provider).toBe('openai');
-    expect(m.pricing).toEqual({ input: 0.22, output: 0.66, cacheWrite: 0.22, cacheRead: 0.007 });
+    expect(m.pricing).toEqual({ input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.006 });
     expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
     expect(m.provenance).toBe('CN');
     // The suppression is what keeps this slot from answering "" below the bound.

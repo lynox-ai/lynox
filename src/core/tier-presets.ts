@@ -128,7 +128,11 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   //           bench belongs to deepseek-v4-flash-0731, WITHDRAWN by the provider on or
   //           before 2026-09-30 (404 measured live). The successor inherits the SLOT,
   //           not the result: operator decision on availability plus behaviour, at MORE
-  //           money ($0.22/$0.66 against $0.14/$0.28), no bench. The old result:
+  //           money ($0.30/$1.20 against $0.14/$0.28 — the Standard row read 2026-10-13; the
+  //           2026-09-30 figure $0.22/$0.66 was too low), no bench. ⚠ At $1.20 output it now
+  //           costs as much as efficient's main (minimax-m3, $0.30/$1.20): efficient's fast
+  //           band saves nothing until the Fitness grid decides the slot
+  //           (the ladder test names the exception). The old result:
   //           HOLD at 89.1% literal recall against a
   //           90.4% haiku-4.5 reference, with the BEST judge score of the field
   //           (7.83 vs 7.13), at $0.14/$0.28 instead of haiku's $1/$5. This is the
