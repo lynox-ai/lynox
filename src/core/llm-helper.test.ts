@@ -249,6 +249,7 @@ describe('validateAgainstSchema', () => {
       try { validateAgainstSchema({ status: 'draft', approved_by_SENTINEL: 'admin' }, CLOSED); } catch (e) { err = e; }
       expect(err).toBeInstanceOf(ExtractShapeError);
       expect((err as Error).message).toBe('1 field(s) at "<root>" not in the schema; allowed: [status, reason]');
+      expect(() => validateAgainstSchema({ status: 'draft', a: 1, b: 2 }, CLOSED)).toThrow(/^2 field\(s\) at "<root>"/);
     });
 
     it('refuses a field named like an Object.prototype member', () => {
