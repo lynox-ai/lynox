@@ -159,25 +159,23 @@ describe('a workflow run whose thread was deleted while it ran', () => {
     expect(prompts.getById(parked)).toMatchObject({ status: 'pending', closed_reason: null });
   });
 
-  it('asks again without re-creating the thread; the question still reaches the owner', async () => {
+  it('a question asked after the thread was deleted ends the run with that reason, and re-creates nothing', async () => {
+    // Deleting the thread withdrew what was waiting then. A question the run asks afterwards had
+    // nowhere to be answered and waited out its TTL; now it ends the run the same way at once.
     const { history, threads } = freshHistory();
     const prompts = new PromptStore(history.getDb());
     const notified: unknown[] = [];
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    // A run's thread is created with its first question. Here it is the run's second
-    // question, after the owner deleted what the first one opened.
+    const member = { abort: vi.fn() };
     threads.createThread(RUN_ID, { title: 'Weekly offer' });
     threads.deleteThread(RUN_ID);
-    const q = channel(history, threads, prompts, notified);
+    const q = channel(history, threads, prompts, notified, member);
 
-    const answer = q.ask('Which list, A or B?', ['A', 'B']);
-    await vi.waitFor(() => { expect(prompts.getPending(RUN_ID)).toBeDefined(); });
+    await expect(q.ask('Which list, A or B?', ['A', 'B'])).resolves.toBe('__dismissed__');
 
+    expect(q.unansweredBecause).toBe('thread_deleted');
+    expect(member.abort, 'no later step runs').toHaveBeenCalled();
+    expect(prompts.getPending(RUN_ID), 'no question left that nobody can answer').toBeUndefined();
+    expect(notified, 'nobody is asked').toHaveLength(0);
     expect(threads.getThread(RUN_ID), 'the deleted thread stays deleted').toBeUndefined();
-    expect(notified, 'the question still reached the owner').toHaveLength(1);
-    const written = stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('writing a workflow question to its thread failed'));
-    expect(written, 'said once, not retried').toHaveLength(1);
-    prompts.answerUser(prompts.getPending(RUN_ID)!.id, 'B');
-    await expect(answer).resolves.toBe('B');
   });
 });

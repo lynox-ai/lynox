@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type Database from 'better-sqlite3';
 import { LynoxHTTPApi } from './http-api.js';
+import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { reloadConfig } from '../core/config.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
@@ -231,6 +232,30 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(ts.getThread(id), 'no empty thread under the old id').toBeUndefined();
     // Positive control on the same route: a chat that was not deleted still opens.
     expect((await openChat(live)).status).toBe(201);
+  });
+
+  it('a mandate is refused a deleted owner chat the same way as one that never existed', async () => {
+    // 410 only after the ownership check: a mandate must not learn which of the owner's chats
+    // existed and were deleted.
+    const { ts } = stores();
+    const deleted = randomUUID();
+    ts.createThread(deleted, { title: 'the owner\'s' });
+    expect((await deleteChat(deleted)).status).toBe(200);
+    const token = webUiLoginSession(SECRET, {
+      kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+      mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    })!.token;
+    const asMandate = async (threadId: string): Promise<number> => (await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId }),
+    })).status;
+
+    const onDeleted = await asMandate(deleted);
+    const onNeverExisted = await asMandate(randomUUID());
+
+    expect(onDeleted).toBe(403);
+    expect(onDeleted, 'same answer either way').toBe(onNeverExisted);
   });
 
   it('an escalation thread the owner deleted is refused the same way', async () => {

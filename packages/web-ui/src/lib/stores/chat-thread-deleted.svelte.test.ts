@@ -110,6 +110,21 @@ describe('a conversation deleted elsewhere', () => {
 		expect(store.getMessages().find((m) => m.content === 'two')?.failed).toBe(true);
 		expect(store.getChatError()).toBe(deletedText);
 		expect(runPosts(), '"three" was not sent').toBe(2);
+		const three = store.getMessages().find((m) => m.content === 'three');
+		expect(three?.queued, '"three" does not stay waiting for a send that never comes').toBeFalsy();
+		expect(three?.failed).toBe(true);
+		expect(store.getQueueLength()).toBe(0);
+	});
+
+	it('the deleted chat\'s saved copy is dropped when the server says it is gone', async () => {
+		// A conversation the server deleted does not stay in this browser's storage.
+		serve((url) => (url.endsWith('/sessions') ? gone() : undefined));
+		localStorage.setItem('lynox-chat', JSON.stringify({ sessionId: null, threads: { 't-gone': [{ role: 'user', content: 'old text' }] } }));
+
+		await store.resumeThread('t-gone');
+		await new Promise((r) => setTimeout(r, 600));
+
+		expect(localStorage.getItem('lynox-chat') ?? '').not.toContain('old text');
 	});
 
 	it('the two texts exist in German and English', async () => {

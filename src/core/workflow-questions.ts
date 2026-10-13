@@ -119,6 +119,10 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
     const store = deps.promptStore();
     // No store, no question: the run stops rather than let the step go on without its answer.
     if (!store) return this.#endUnanswered('not_asked');
+    // The owner deleted the run's thread, the only place to answer a question. Deleting it
+    // withdrew what was waiting then (`withdrawForDeletedThread`); a question asked after that
+    // ends the run the same way, instead of waiting out a TTL nobody can answer within.
+    if (this.#threadDeleted()) return this.#endUnanswered('thread_deleted');
 
     const question = flattenPrompt(rawQuestion);
     const segments = promptSegments(rawQuestion);
@@ -170,6 +174,11 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       this.#waitingSince = undefined;
       deps.onPending(undefined);
     }
+  }
+
+  /** Whether the run's thread was deleted. A store that cannot answer says no: the question is then asked as before. */
+  #threadDeleted(): boolean {
+    try { return this.#deps.threadStore()?.isDeleted(this.#deps.runId) === true; } catch { return false; }
   }
 
   /** The run goes on no further: no later step runs, and every step in flight ends (§4.5). */

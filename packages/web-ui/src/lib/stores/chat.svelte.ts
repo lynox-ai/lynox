@@ -1111,6 +1111,8 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 		retryStatus = null;
 	}
 	if (!sameThread) {
+		// Deleted: its saved copy goes, rather than keep a conversation the server no longer has.
+		if (threadDeleted && turn.sid !== null) { dropPersistedThread(turn.sid); return; }
 		// The user is in another thread now. Keep the turn in its own thread's saved copy, failed,
 		// so going back shows it, can send it again, and is not replaced by the server's shorter
 		// transcript (which never got it). Not when the turn's thread is the one on screen: what
@@ -1128,8 +1130,18 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 	// message stays on screen, failed, to be copied into a new chat.
 	chatError = threadDeleted ? t('chat.error_thread_deleted') : t('chat.error_connection');
 	chatErrorDetail = null;
+	if (threadDeleted) {
+		// The turns queued behind it are failed too, not left showing a send that never comes,
+		// and the thread's saved copy and queue go. What is on screen stays, to be copied.
+		for (const q of messageQueue) {
+			const m = messages.find((x) => x.role === 'user' && x.queueId === q.id);
+			if (m) { m.queued = false; m.failed = true; }
+		}
+		messageQueue = [];
+		if (turn.sid !== null) dropPersistedThread(turn.sid);
+		return;
+	}
 	persistChat();
-	if (threadDeleted) return;
 	// The turns queued behind this one still get their go, once there is a connection to try:
 	// a turn started offline returns without sending and would be dropped from the queue.
 	const online = typeof navigator === 'undefined' || navigator.onLine;
@@ -3581,8 +3593,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
 		if (res.status === 410) {
-			// Deleted, here or elsewhere: open a new chat instead, and say why.
+			// Deleted, here or elsewhere: open a new chat instead, say why, and drop the saved copy.
 			newChat();
+			dropPersistedThread(threadId);
 			chatError = t('chat.error_thread_deleted');
 			return;
 		}
