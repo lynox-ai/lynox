@@ -14,6 +14,7 @@ const RESULT: PersonErasureResult = {
 	erased: true,
 	done: ['durable_knowledge', 'memories_legacy', 'memories_engine', 'subject'],
 	failed: null,
+	scrubbed: true,
 	counts: { entries: 1, legacyMemories: 1, memoryStubs: 1, subjects: 1 },
 	left: { entries: 0, memories: 0, blocks: [] },
 	notCovered: [...PERSON_ERASURE_NOT_COVERED],
