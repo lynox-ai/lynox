@@ -174,7 +174,7 @@ describe('person erasure routes (real engine)', () => {
     expect(auditRows(p.subjectId)).toEqual([]);
   });
 
-  it('refuses while another erasure runs, and erases nothing', async () => {
+  it('refuses while an erasure is marked as running, and erases nothing', async () => {
     const p = seedPerson();
     const { body: pv } = await preview(p.subjectId);
     const flag = api as unknown as { erasureInProgress: boolean };
