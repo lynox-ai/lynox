@@ -44,14 +44,30 @@ const KNOWN_METHODS = new Set([
 const NOT_A_METHOD = '\0';
 
 /**
- * A form key as a server's parser may read it: PHP drops leading spaces from a name and turns
- * every other `.` and space into `_` (so `.method` reaches Laravel as `_method`), and PHP and
- * Express's `qs` read `_method[]` or `_method[0]` as a `_method` field. A key whose brackets
- * follow another name, such as `data[_method]`, is that other field.
+ * Whether a form, query or multipart name (after its `%XX` escapes) may reach some server as a
+ * method override. Parsers disagree, so this reads the name every way a common one does and
+ * counts it when any reading names the override. That reads more names than any one parser,
+ * never fewer:
+ * - it ends at a NUL (PHP `parse_str`, measured on PHP 8.3);
+ * - leading brackets and whitespace are dropped (Rack 2's nested-query parser, Express's `qs`
+ *   for `[_method]`; PHP drops leading spaces);
+ * - it ends at the first bracket (`_method[]`, `_method[0]`, `_method[x]y` in PHP and `qs`;
+ *   `_method]` in Rack 2; `_method[` on purpose, though no parser named here reads it so), so
+ *   a name whose brackets follow another one, such as `data[_method]`, stays that other field;
+ * - `.` and whitespace read as `_` (PHP: `.method` reaches Laravel as `_method`); a name that
+ *   starts with a dot is read once more with its leading dots dropped and cut at the next dot
+ *   (`qs` with `allowDots` reads `._method` and `._method.` as `_method`);
+ * - the case is dropped, and the override header names count as field names too (ASP.NET MVC
+ *   reads `X-HTTP-Method-Override` from the form and the query).
  */
-function formFieldName(key: string): string {
-  const base = /^([^[]+)\[.*\]$/.exec(key)?.[1] ?? key;
-  return base.trimStart().replace(/[. ]/g, '_').toLowerCase();
+function isOverrideFieldName(key: string): boolean {
+  const name = key.split('\0', 1)[0]!.replace(/^[\s[\]]+/, '');
+  const base = name.split(/[[\]]/, 1)[0]!;
+  const dotted = base.startsWith('.') ? [base.replace(/^\.+/, '').split('.', 1)[0]!] : [];
+  return [base, ...dotted].some((reading) => {
+    const read = reading.replace(/[.\s]/g, '_').toLowerCase();
+    return read === '_method' || OVERRIDE_HEADERS.has(read);
+  });
 }
 
 /** `text` with its `%XX` escapes read, the way a form or multipart parser reads a name. */
@@ -89,7 +105,7 @@ function multipartNamesMethod(body: string): boolean {
       else pieces.push([Number(match[2]), value]);
     }
     if (pieces.length > 0) names.push(pieces.sort(([a], [b]) => a - b).map(([, piece]) => piece).join(''));
-    if (names.some((name) => formFieldName(name) === '_method')) return true;
+    if (names.some(isOverrideFieldName)) return true;
   }
   return false;
 }
@@ -129,7 +145,7 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
   const formDeclared = contentType.includes('application/x-www-form-urlencoded');
   const form = jsonDeclared && !formDeclared && json !== null
     ? []
-    : [...new URLSearchParams(body)].filter(([name]) => formFieldName(name) === '_method').map(([, value]) => value);
+    : [...new URLSearchParams(body)].filter(([name]) => isOverrideFieldName(name)).map(([, value]) => value);
   const looksJson = jsonDeclared || /^\s*[[{"]/.test(body);
   return {
     declared: [...(jsonDeclared ? json ?? [] : []), ...(formDeclared ? form : [])],
@@ -170,8 +186,9 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
 }
 
 /**
- * Every override value the request carries, raw: the three header names, then `?_method=`,
- * then the body's (see `bodyOverrides`) unless the sent method is one that sends no body.
+ * Every override value the request carries, raw: the three header names, then each query
+ * parameter a server may read as an override (`isOverrideFieldName`), then the body's (see
+ * `bodyOverrides`) unless the sent method is one that sends no body.
  */
 function overrideCandidates(method: string, headers: Record<string, string>, url: string, body?: string): string[] {
   const candidates: string[] = [];
@@ -180,7 +197,7 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   }
   try {
     for (const [name, value] of new URL(url).searchParams) {
-      if (name.toLowerCase() === '_method') candidates.push(value);
+      if (isOverrideFieldName(name)) candidates.push(value);
     }
   } catch { /* an unparsable URL is refused before it is sent */ }
   // A GET or HEAD sends no body, so nothing in one can override it.
