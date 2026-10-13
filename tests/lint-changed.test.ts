@@ -195,6 +195,21 @@ describe('end to end — a clone of this repository, the real eslint config', ()
     expect(git('worktree', 'list').split('\n')).toHaveLength(1);
   }, SLOW);
 
+  it('a checkout that fails AFTER it is registered is exit 2, and is unregistered again', () => {
+    // A commit that carries a file named node_modules: `worktree add` succeeds, the link does not.
+    git('checkout', '-q', '--detach', bad);
+    writeFileSync(join(tmp, 'blocker'), 'x\n');
+    const blob = git('hash-object', '-w', join(tmp, 'blocker'));
+    git('update-index', '--add', '--cacheinfo', `100644,${blob},node_modules`);
+    const tree = git('write-tree');
+    git('reset', '-q');
+    const blocked = git('commit-tree', tree, '-p', bad, '-m', 'node_modules as a file');
+    const r = spawnSync(process.execPath, [SCRIPT, base, blocked], { cwd: clone, encoding: 'utf8', env: GIT_ENV });
+    expect(r.stderr).toContain('the temporary checkout could not be created');
+    expect(r.status).toBe(2);
+    expect(git('worktree', 'list').split('\n')).toHaveLength(1);
+  }, SLOW);
+
   it('a push that only deletes a ref lints nothing and passes', () => {
     const r = spawnSync('bash', [HOOK, 'origin', 'x'], {
       cwd: clone, encoding: 'utf8', env: GIT_ENV, input: `(delete) ${'0'.repeat(40)} refs/heads/probe ${base}\n`,
