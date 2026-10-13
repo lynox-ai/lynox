@@ -6180,6 +6180,52 @@ describe('write approvals per method and host (270)', () => {
     expect(question(prompt, 0)).toContain('DELETE to h.example');
   });
 
+  // The tool repairs a JSON body with a stray close tag before sending it. Unrepaired, the body
+  // is unreadable and gated as a DELETE; repaired, it names its override plainly. Both count.
+  it('(390) a contract that grants POST and DELETE does not send a body that names PUT once repaired', async () => {
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST', 'DELETE'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const json = { 'Content-Type': 'application/json' };
+    const refused = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{"_method":"PUT"}</parameter>', headers: json }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(refused).toContain('Not granted for an unattended run');
+    // The same repair to a method the contract grants goes out, repaired.
+    await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{"_method":"DELETE"}</parameter>', headers: json }, makeAgent({ capabilityContract: contract }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(lastPinnedInputs[0]?.body)).toBe('{"_method":"DELETE"}');
+  });
+
+  it('(390) a body that names PUT once repaired is still asked as the DELETE its unreadable form reads as', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{"_method":"PUT"}</parameter>', headers: { 'Content-Type': 'application/json' } }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+    // The repaired body is what goes out, and the PUT it names is shown with the question.
+    expect(question(prompt, 0)).toContain('also names DELETE, PUT');
+  });
+
+  it('(390) a body whose repaired form names an override that is not a method is refused, not asked', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible({ url: 'https://h.example/a', method: 'POST', body: '{"_method":"nope"}</parameter>', headers: { 'Content-Type': 'application/json' } }, agent);
+    expect(out).toContain('is not an HTTP method');
+    expect(prompt).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('(390) labels an outward write by the body as sent too', () => {
+    const outward = httpRequestTool.outwardWrite!;
+    const json = { 'Content-Type': 'application/json' };
+    expect(outward({ url: 'https://h.example/a', method: 'POST', headers: json, body: '{"_method":"nope"}</parameter>' } as never)).toBe('OVERRIDE');
+    expect(outward({ url: 'https://h.example/a', method: 'POST', headers: json, body: '{"_method":"PUT"}</parameter>' } as never)).toBe('DELETE');
+    expect(outward({ url: 'https://h.example/a', method: 'GET' } as never)).toBeNull();
+  });
+
   it('(13h) a write that sets its own Host header is refused before anything is sent', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);

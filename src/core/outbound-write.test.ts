@@ -166,6 +166,23 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
   });
 });
 
+describe('the body read as given and as sent', () => {
+  const JSON_CT = { 'content-type': 'application/json' };
+  it('counts an override that only the repaired reading names', () => {
+    const readings = ['{"_method":"PUT"}</parameter>', '{"_method":"PUT"}'];
+    expect(writeMethodsNamed('POST', JSON_CT, U, readings[0])).toEqual(['DELETE', 'POST']);
+    expect(writeMethodsNamed('POST', JSON_CT, U, readings)).toEqual(['DELETE', 'POST', 'PUT']);
+    expect(effectiveWriteMethod('POST', JSON_CT, U, readings)).toBe('DELETE');
+    expect(effectiveWriteMethod('POST', JSON_CT, U, ['{"_method":"PATCH"', '{"_method":"PATCH"}'])).toBe('DELETE');
+    expect(effectiveWriteMethod('POST', JSON_CT, U, ['{"a":1}', '{"_method":"PATCH"}'])).toBe('PATCH');
+  });
+
+  it('refuses when any reading names a value that is not a method, and reads no body on a GET', () => {
+    expect(effectiveWriteMethod('POST', JSON_CT, U, ['{"a":1}', '{"_method":"nope"}'])).toBeNull();
+    expect(writeMethodsNamed('GET', JSON_CT, U, ['{"_method":"DELETE"}', '{"_method":"PUT"}'])).toEqual([]);
+  });
+});
+
 describe('retargetingHeader', () => {
   it('finds each header a server or proxy routes on, whatever its case, and no other', () => {
     for (const name of ['HoSt', 'X-Host', 'x-forwarded-host', 'Forwarded', 'X-Original-URL', 'x-rewrite-url']) {

@@ -38,7 +38,7 @@ import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -1869,6 +1869,18 @@ function safeToken(value: string | undefined): string | undefined {
 }
 
 /**
+ * The body as the method gates read it: as given, and as sent when `repairStrayCloseTag` will
+ * rewrite it before sending. The repaired body names its override plainly, and that one is a
+ * write a server may run. The body as given is kept on purpose, though it is not what goes out:
+ * when it names `_method`, it reads as an unknown override (a DELETE), and that fails closed.
+ */
+function gateBodyReadings(body: unknown, headers: Readonly<Record<string, string>>): BodyReadings | undefined {
+  if (typeof body !== 'string') return undefined;
+  const repaired = repairStrayCloseTag(body, headers);
+  return repaired === null ? body : [body, repaired.body];
+}
+
+/**
  * Did the MODEL already put the profile's credential where this auth shape wants it?
  *
  * Read off the outgoing request, never predicted: `headers` here is the agent's own
@@ -2130,7 +2142,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   undo: (input) => undoClassFor(input.method ?? 'GET'),
   // The effective method, overrides included; one that is not a method counts as a write.
   outwardWrite: (input) => {
-    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, typeof input.body === 'string' ? input.body : undefined) ?? 'OVERRIDE';
+    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
     return method === 'GET' || method === 'HEAD' ? null : method;
   },
   definition: {
@@ -2235,7 +2247,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // The method this call is gated as: the strongest of the method and any override form the
     // request carries (`outbound-write.ts`). It is what is sent that stays `method`; every gate
     // below that asks "is this a write, and which one" reads `gatedMethod`.
-    const effective = effectiveWriteMethod(method, headers, input.url, typeof input.body === 'string' ? input.body : undefined);
+    const effective = effectiveWriteMethod(method, headers, input.url, gateBodyReadings(input.body, headers));
     if (effective === null) {
       // The value is not repeated: it is whatever the request put there.
       blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
@@ -2574,7 +2586,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // one, and a denial in a batch stands for each of them. (The outbound-effect table reads only
     // whether a method writes, so one check covers them all.)
     const sentMethod = method.trim().toUpperCase();
-    const named = writeMethodsNamed(method, headers, input.url, typeof input.body === 'string' ? input.body : undefined);
+    const named = writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers));
     const keyedMethod = named.join('+');
     const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
@@ -2749,7 +2761,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // on a hop that keeps its method (307/308); for a hop turned into a GET none is read.
             // As for the request itself, the contract must grant every write the hop names, not
             // only the one it is gated as: a server may run any of them.
-            const hopBody = typeof input.body === 'string' ? input.body : undefined;
+            const hopBody = gateBodyReadings(input.body, headers);
             const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, hopBody);
             return hop !== null &&
               contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
@@ -2758,7 +2770,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
-              const hopBody = typeof input.body === 'string' ? input.body : undefined;
+              const hopBody = gateBodyReadings(input.body, headers);
               const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, hopBody);
               if (hop === null) return 'consent';
               if (!isWriteMethod(hop)) return true;
