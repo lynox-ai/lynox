@@ -94,6 +94,7 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
     },
     rateLimit: () => opts.rateLimit ?? null,
     scan: detectSecretInContent,
+    connectedAccount: () => false,
   });
 }
 

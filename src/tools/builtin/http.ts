@@ -180,8 +180,11 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
  * and a profile found under any of them counts.
  */
 function presetProfilesOnHost(url: string, toolContext: ToolContext | undefined): ApiProfile[] {
-  const apiStore = toolContext?.apiStore;
-  if (!apiStore) return [];
+  return toolContext?.apiStore ? connectedAccountProfiles(url, toolContext.apiStore) : [];
+}
+
+/** {@link presetProfilesOnHost} against a store: the profiles that make `url`'s host a connected account. */
+export function connectedAccountProfiles(url: string, apiStore: NonNullable<ToolContext['apiStore']>): ApiProfile[] {
   const raw = new URL(url).hostname;
   const bare = raw.replace(/\.+$/, '');
   const ids = new Set<string>();

@@ -1725,7 +1725,7 @@ export class WorkerLoop {
   private async bulkClientFactory(): Promise<(contractJson: string | null, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { withListQuery } = await import('../tools/permission-guard.js');
-    const { attachStoredCredential, detectSecretInContent } = await import('../tools/builtin/http.js');
+    const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
@@ -1751,6 +1751,7 @@ export class WorkerLoop {
         attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases }),
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
+        connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,
       });
     };
   }

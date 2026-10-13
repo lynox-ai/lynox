@@ -18,6 +18,7 @@
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
 import { effectiveWriteMethod, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
+import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -303,6 +304,13 @@ export interface ExternalClientDeps {
    * scan still reads, address included, before it is sent.
    */
   scan: (text: string) => string | null;
+  /**
+   * Whether `url`'s host is an account connected through a built-in provider (a profile with
+   * `preset_id`). A run writes there only in a measured form (`bulk-write-forms.ts`): one scope
+   * of such a provider can cover cancelling a document or booking a payment, which an unmeasured
+   * form may set off. Required, so no caller can build a client that skips the check.
+   */
+  connectedAccount: (url: string) => boolean;
   now?: () => number;
 }
 
@@ -344,6 +352,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // the one place every body leaves, whichever source the run was planned from, and an undo's.
     if (method !== 'GET' && outboundEffectField(url, body) !== null) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
+    // On a connected account a run writes only in a measured form; any other write is not
+    // granted, whatever the run's approval said.
+    if (method !== 'GET' && deps.connectedAccount(url) && !isMeasuredWriteForm(hostname, new URL(url).pathname, gated)) {
+      return { kind: 'not_granted' };
+    }
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
     } catch {

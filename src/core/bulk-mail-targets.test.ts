@@ -171,6 +171,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     attach: async (_u, headers) => { headers['authorization'] = 'Bearer fixture'; return true; },
     rateLimit: () => null,
     scan: detectSecretInContent,
+    connectedAccount: () => false,
   });
 
   it('plans a mail API target as invalid, and a target on another host as a target', () => {
