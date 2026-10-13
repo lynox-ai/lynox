@@ -77,7 +77,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
@@ -200,6 +200,20 @@ const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
  * access §3.13 E7): the owner always, a mandate only a run it started itself. The predicate
  * behind a delete that also stops the run; pure so a test can hold both directions.
  */
+/**
+ * Whether a request leaves the mandate's actor trail (`_beginRequestTrail`, `_recordedMandateRead`),
+ * whose rows refuse the act when they cannot be written. A mandate does; the owner and the control
+ * plane's admin bearer (`cp-admin`) do not.
+ */
+export function writesMandateTrail(principal: RequestPrincipal): boolean {
+  switch (principal.kind) {
+    case 'mandate': return true;
+    case 'owner': return false;
+    case 'cp-admin': return false;
+    default: return unhandledPrincipal(principal);
+  }
+}
+
 export function mayStopRun(principal: RequestPrincipal, starterTag: string): boolean {
   return isOwnerPrincipal(principal) || ownedBy({ created_by: starterTag }, principal);
 }
@@ -267,7 +281,8 @@ const PKG_VERSION: string = (() => {
 // Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, admin-scoped routes
 // require the admin token; user-scoped routes accept either, except on an
 // instance the control plane provisioned, where the admin token is the control
-// plane's and reaches admin routes only (`cp-admin`). When only
+// plane's (`cp-admin`) and reaches only the admin routes registered for it with
+// `addCpAdminRoute` (PRD cp-admin-line §3.1). When only
 // LYNOX_HTTP_SECRET is set (single-token mode), it grants admin implicitly.
 //
 // Each route declares its scope at registration via `addStatic` /
@@ -281,7 +296,8 @@ type RouteScope = 'admin' | 'user';
 /**
  * What a request is allowed, beside the route's scope (PRD customer-granted-operator-access §3.4,
  * D6). `cp-admin` is the control plane's admin bearer on an instance it provisioned: it reaches the
- * admin routes and nothing else. Kept out of `RouteScope`, so no route can be registered under it.
+ * admin routes registered with `addCpAdminRoute` and nothing else (PRD cp-admin-line §3.1, a
+ * positive list). Kept out of `RouteScope`, so no route can be registered under it.
  */
 type RequestScope = RouteScope | 'cp-admin';
 /** What a verified session cookie carries beside its time: a mandate always names its grant. */
@@ -1579,6 +1595,8 @@ export class LynoxHTTPApi {
   private readonly staticRouteScopes = new Map<string, RouteScope>();
   /** What a mandate may do at each static route that declares it; see `MandateStance`. */
   private readonly staticRouteStances = new Map<string, MandateStance>();
+  /** The routes the control plane's admin bearer reaches (`addCpAdminRoute`), as `METHOD /path`. */
+  private readonly cpAdminRoutes = new Set<string>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   // `identityKey` rides along with the cached status: `getProvidersStatus` seeds
@@ -1624,9 +1642,27 @@ export class LynoxHTTPApi {
 
   /** Register a fixed-path route. Scope MUST be set per route. */
   private addStatic(scope: RouteScope, key: string, handler: RouteHandler, stance?: MandateStance): void {
+    // A second registration would replace the handler and keep the first one's scope, stance and
+    // control-plane reach. Fail the boot instead.
+    if (this.staticRoutes.has(key)) throw new Error(`The route ${key} is registered twice.`);
     this.staticRoutes.set(key, handler);
     this.staticRouteScopes.set(key, scope);
     if (stance !== undefined) this.staticRouteStances.set(key, stance);
+  }
+
+  /**
+   * Register an admin route the control plane's admin bearer (`cp-admin`) may reach (PRD
+   * cp-admin-line §3.1). The list is positive: a route not registered here refuses `cp-admin`,
+   * a new admin route included. Exact `METHOD /path` only — no HEAD for a GET, no trailing slash.
+   */
+  private addCpAdminRoute(key: string, handler: RouteHandler): void {
+    this.addStatic('admin', key, handler);
+    this.cpAdminRoutes.add(key);
+  }
+
+  /** Whether the control plane's admin bearer may reach this request's route. */
+  private _reachableByCpAdmin(method: string, pathname: string): boolean {
+    return this.cpAdminRoutes.has(`${method} ${pathname}`);
   }
 
   /** Register a parameterised route (`/api/x/:id`). Scope MUST be set per route. */
@@ -1638,13 +1674,13 @@ export class LynoxHTTPApi {
    * The route table as the detector reads it: every registered route with its scope and its
    * mandate stance. Test seam, not reachable over HTTP.
    */
-  routeStancesForTesting(): Array<{ method: string; path: string; scope: RouteScope; stance: MandateStance | undefined }> {
-    const out: Array<{ method: string; path: string; scope: RouteScope; stance: MandateStance | undefined }> = [];
+  routeStancesForTesting(): Array<{ method: string; path: string; scope: RouteScope; stance: MandateStance | undefined; cpAdmin: boolean }> {
+    const out: Array<{ method: string; path: string; scope: RouteScope; stance: MandateStance | undefined; cpAdmin: boolean }> = [];
     for (const [key, scope] of this.staticRouteScopes) {
       const space = key.indexOf(' ');
-      out.push({ method: key.slice(0, space), path: key.slice(space + 1), scope, stance: this.staticRouteStances.get(key) });
+      out.push({ method: key.slice(0, space), path: key.slice(space + 1), scope, stance: this.staticRouteStances.get(key), cpAdmin: this.cpAdminRoutes.has(key) });
     }
-    for (const r of this.dynamicRoutes) out.push({ method: r.method, path: r.path, scope: r.scope, stance: r.stance });
+    for (const r of this.dynamicRoutes) out.push({ method: r.method, path: r.path, scope: r.scope, stance: r.stance, cpAdmin: false });
     return out;
   }
 
@@ -1908,16 +1944,20 @@ export class LynoxHTTPApi {
   /** The principal a request's session cookie carried, set by the auth block. */
   private readonly _sessionPrincipal = new WeakMap<IncomingMessage, RequestPrincipal>();
 
+  /** The requests the auth block admitted as the control plane's admin bearer (`cp-admin`). */
+  private readonly _cpAdminRequests = new WeakSet<IncomingMessage>();
+
   /**
    * Who a request acts as (request-principal.ts): the mandate its session cookie
-   * carries, and the owner for everything else — a cookie without a principal, a
-   * bearer, no secret at all. Only a mandate login mints a cookie with a principal,
-   * and the control plane admits one only when its switch is on. The rules that read
-   * this: only the owner stamps or approves, and a schedule a mandate created or
-   * changed waits for the owner (PRD customer-granted-operator-access §3.12, §3.13).
+   * carries, the control plane for its admin bearer on an instance it provisioned
+   * (`cp-admin`), and the owner for everything else — a cookie without a principal,
+   * another bearer, no secret at all. Only a mandate login mints a cookie with a
+   * principal, and the control plane admits one only when its switch is on. The rules
+   * that read this: only the owner stamps or approves, and a schedule a mandate created
+   * or changed waits for the owner (PRD customer-granted-operator-access §3.12, §3.13).
    */
   private _principalResolver: (req: IncomingMessage) => RequestPrincipal =
-    (req) => this._sessionPrincipal.get(req) ?? OWNER_PRINCIPAL;
+    (req) => this._sessionPrincipal.get(req) ?? (this._cpAdminRequests.has(req) ? CP_ADMIN_PRINCIPAL : OWNER_PRINCIPAL);
 
   /**
    * The minter of each worker loop's one-time hand-run door (hand-run-door.ts), claimed in
@@ -1979,7 +2019,7 @@ export class LynoxHTTPApi {
    */
   private _beginRequestTrail(req: IncomingMessage, res: ServerResponse, action: string, target: string): AuditEntry | null | false {
     const principal = this._principalOf(req);
-    if (isOwnerPrincipal(principal)) return null;
+    if (!writesMandateTrail(principal)) return null;
     const log = this.engine?.getAuditLog() ?? null;
     const entry: AuditEntry = { principal, action, target, phase: 'attempt', correlationId: newCorrelationId() };
     try {
@@ -2004,7 +2044,7 @@ export class LynoxHTTPApi {
     // mandate reaches here is a `user` route's.
     if (method !== 'GET' && method !== 'HEAD') return true;
     const principal = this._principalOf(req);
-    if (isOwnerPrincipal(principal)) return true;
+    if (!writesMandateTrail(principal)) return true;
     try {
       const log = this.engine?.getAuditLog() ?? null;
       if (log === null) throw new Error('no audit log');
@@ -3023,6 +3063,8 @@ export class LynoxHTTPApi {
           const { verifyMigrationToken } = await import('../core/migration-crypto.js');
           if (verifyMigrationToken(migrationToken, storedToken)) {
             authScope = 'admin';
+            // Its own origin, so nothing that reads the origin takes it for a local request.
+            this._authOrigin.set(req, 'migration');
           } else {
             errorResponse(res, 403, 'Invalid migration token');
             return;
@@ -3056,6 +3098,7 @@ export class LynoxHTTPApi {
             // partial env narrows the bearer. A self-hosted instance with two secrets keeps `admin`,
             // which includes `user`.
             authScope = isProvisionedInstance() ? 'cp-admin' : 'admin';
+            if (authScope === 'cp-admin') this._cpAdminRequests.add(req);
             this._authOrigin.set(req, 'bearer:admin');
           } else if (isUser) {
             authScope = 'user';
@@ -3110,12 +3153,12 @@ export class LynoxHTTPApi {
     // behaviour where requiresAdmin returned false for unknown paths).
     {
       const routeScope = this._lookupRouteScope(method, pathname);
-      // `cp-admin` is let in where the route is an admin route, and refused everywhere else,
-      // unmatched paths included: allowed by naming what it may reach, not by a list of what it
-      // may not.
+      // `cp-admin` is let in only where the route was registered for it (`addCpAdminRoute`), and
+      // refused everywhere else, other admin routes and unmatched paths included: allowed by naming
+      // what it may reach, not by a list of what it may not (PRD cp-admin-line §3.1).
       if (authScope === 'cp-admin') {
-        if (routeScope !== 'admin') {
-          errorResponse(res, 403, 'The control plane reaches admin routes only');
+        if (routeScope !== 'admin' || !this._reachableByCpAdmin(method, pathname)) {
+          errorResponse(res, 403, 'The control plane reaches only the routes registered for it');
           return;
         }
       } else if (routeScope === 'admin' && authScope !== 'admin') {
@@ -9515,7 +9558,7 @@ export class LynoxHTTPApi {
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
       }
-    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names, and that cookie is set only by POST /api/google/auth, which is owner-only'));
+    }, free('a GET is answered before the dispatcher, where no stance applies; a HEAD reaches the dispatcher and this stance. Either way it completes only the connect its signed state cookie names. This server sets that cookie only from POST /api/google/auth, which is owner-only; the cookie is HMAC-signed with the instance secret'));
 
     this.addStatic('user', 'POST /api/google/revoke', async (req, res, _params, body) => {
       const google = engine.getGoogleAuth();
@@ -9579,9 +9622,10 @@ export class LynoxHTTPApi {
       }
     }, ownerOnly('revoke the Google connection'));
 
-    // The control plane asks these two with its admin bearer, which reaches admin routes only on an
-    // instance it provisioned (§3.4): the same handlers, registered once more as admin routes.
-    // A user route that moves fails the boot here, instead of leaving an alias that answers 404.
+    // The control plane asks these two with its admin bearer, which reaches only the admin routes
+    // registered for it on an instance it provisioned (PRD cp-admin-line §3.1): the user routes'
+    // handlers, registered once more as admin routes. A user route that moves fails the boot here,
+    // instead of leaving an alias that answers 404.
     //
     // The control plane disconnects Google; it never deletes the tenant's Drive backups. That is
     // the owner's choice, made in the instance, so the revoke alias refuses the flag before the
@@ -9601,13 +9645,13 @@ export class LynoxHTTPApi {
     ] as const) {
       const handler = this.staticRoutes.get(from);
       if (!handler) throw new Error(`The admin alias ${to} has no route ${from} to stand for.`);
-      this.addStatic('admin', to, wrap ? wrap(handler) : handler);
+      this.addCpAdminRoute(to, wrap ? wrap(handler) : handler);
     }
 
     // The control plane's list of the account's revoked mandates (§3.5, piece C): the whole list
     // each call, applied idempotently, so a call after a restore heals what the restore undid.
     // A revoke that is new is told to the `onRevoke` listeners, once.
-    this.addStatic('admin', 'POST /api/admin/mandates/revoke', async (_req, res, _params, body) => {
+    this.addCpAdminRoute('POST /api/admin/mandates/revoke', async (_req, res, _params, body) => {
       const ids = readMandateRevocation(body);
       if (ids === 'invalid') {
         errorResponse(res, 400, `Expected { revoked_mandate_ids: string[] } with at most ${String(MANDATE_REVOCATION_MAX)} ids.`, 'invalid_revocation');
@@ -11159,7 +11203,7 @@ export class LynoxHTTPApi {
     // ── GDPR Data Export & Erasure ─────────────────────────────────
 
     // GET /api/export — GDPR Art. 15 (Right of Access) + Art. 20 (Data Portability)
-    this.addStatic('admin', 'GET /api/export', async (_req, res) => {
+    this.addCpAdminRoute('GET /api/export', async (_req, res) => {
       const exportData: Record<string, unknown> = {
         exported_at: new Date().toISOString(),
         version: PKG_VERSION,

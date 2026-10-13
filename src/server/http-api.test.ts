@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
-import { principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
+import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import { request as httpRequest, type Server } from 'node:http';
@@ -18,7 +18,7 @@ import { loadConfig } from '../core/config.js';
 import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
 import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
-import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun } from './http-api.js';
+import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun, writesMandateTrail } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { MandateEnds } from '../core/mandate-ends.js';
 import { secretsForProfile } from '../core/profile-secret-view.js';
@@ -16542,7 +16542,10 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
 // bearer, a single secret, and the session cookie.
 describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   const ADMIN = 'TEST-ADMIN-SECRET-cp-admin';
+  // An admin route the control plane does not reach, and one it does (PRD cp-admin-line §3.1).
   const ADMIN_ROUTE = '/api/security/events/aggregate';
+  const CP_ROUTE = '/api/admin/google/status';
+  const CP_REFUSAL = 'The control plane reaches only the routes registered for it';
   const USER_ROUTE = '/api/secrets';
   const rateCounts = (): Map<string, { count: number }> =>
     (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
@@ -16566,12 +16569,15 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   const as = (token: string, path: string, init: RequestInit = {}, base = baseUrl): Promise<Response> =>
     fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
 
-  it.each([['by its tier', MANAGED], ['by its instance id alone', INSTANCE_ONLY], ['by a tier this engine does not know', UNKNOWN_TIER]] as const)('on a managed instance (%s), the admin bearer reaches the admin routes and nothing else', async (_how, env) => {
+  it.each([['by its tier', MANAGED], ['by its instance id alone', INSTANCE_ONLY], ['by a tier this engine does not know', UNKNOWN_TIER]] as const)('on a managed instance (%s), the admin bearer reaches the routes registered for it and nothing else', async (_how, env) => {
     await withEnv(env, async () => {
-      expect((await as(ADMIN, ADMIN_ROUTE)).status).toBe(200);
-      const refused = await as(ADMIN, USER_ROUTE);
-      expect(refused.status).toBe(403);
-      expect(((await refused.json()) as { error: string }).error).toBe('The control plane reaches admin routes only');
+      expect((await as(ADMIN, CP_ROUTE)).status).toBe(200);
+      // An admin route not registered for it, and a user route: the same refusal.
+      for (const path of [ADMIN_ROUTE, USER_ROUTE]) {
+        const refused = await as(ADMIN, path);
+        expect(refused.status).toBe(403);
+        expect(((await refused.json()) as { error: string }).error).toBe(CP_REFUSAL);
+      }
       // The streaming routes, and a path no route matches.
       expect((await as(ADMIN, '/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) })).status).toBe(403);
       expect((await as(ADMIN, '/api/runs/some-run/stream')).status).toBe(403);
@@ -16741,6 +16747,161 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         const res = await revoke(['TEST-M-1']);
         expect(res.status).toBe(503);
       });
+    });
+  });
+
+  // PRD cp-admin-line §3.1: the positive list, drawn from the route table.
+  describe('the positive list (PRD cp-admin-line §3.1)', () => {
+    type Row = { method: string; path: string; scope: 'admin' | 'user'; stance: unknown; cpAdmin: boolean };
+    const table = (): Row[] => (api as unknown as { routeStancesForTesting: () => Row[] }).routeStancesForTesting();
+    // The four calls the control plane makes with its admin bearer.
+    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke'];
+
+    it('names exactly the four routes the control plane calls, all admin routes without a stance', () => {
+      const marked = table().filter((r) => r.cpAdmin);
+      expect(marked.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...CP_ROUTES].sort());
+      for (const r of marked) expect([r.path, r.scope, r.stance]).toEqual([r.path, 'admin', undefined]);
+    });
+
+    it('refuses the control plane on every other admin route in the table', async () => {
+      const others = table().filter((r) => r.scope === 'admin' && !r.cpAdmin);
+      // A table this guard could not read would pass on nothing.
+      expect(others.length).toBeGreaterThan(10);
+      await withEnv(MANAGED, async () => {
+        for (const r of others) {
+          const path = r.path.replace(/:[A-Za-z_]+/g, 'TEST-ID');
+          const init: RequestInit = r.method === 'GET' || r.method === 'HEAD' ? { method: r.method } : { method: r.method, body: '{}' };
+          const res = await as(ADMIN, path, init);
+          expect(`${r.method} ${r.path} → ${String(res.status)}`).toBe(`${r.method} ${r.path} → 403`);
+          if (r.method !== 'HEAD') expect(((await res.json()) as { error: string }).error).toBe(CP_REFUSAL);
+        }
+      });
+    });
+
+    it('closes the five migration routes that do not read the migration token, and kg cleanup', async () => {
+      await withEnv(MANAGED, async () => {
+        for (const [method, path] of [
+          ['POST', '/api/migration/handshake'], ['POST', '/api/migration/manifest'], ['POST', '/api/migration/chunk'],
+          ['POST', '/api/migration/restore'], ['DELETE', '/api/migration'], ['POST', '/api/kg/cleanup'],
+        ] as const) {
+          const res = await as(ADMIN, path, { method, body: '{}' });
+          expect(`${method} ${path} → ${String(res.status)}`).toBe(`${method} ${path} → 403`);
+          expect(((await res.json()) as { error: string }).error).toBe(CP_REFUSAL);
+        }
+      });
+    });
+
+    it('is exact: no HEAD for the export\'s GET, no trailing slash', async () => {
+      await withEnv(MANAGED, async () => {
+        expect((await as(ADMIN, '/api/export', { method: 'HEAD' })).status).toBe(403);
+        expect((await as(ADMIN, `${CP_ROUTE}/`)).status).toBe(403);
+        // Control: the same bearer reaches the route itself.
+        expect((await as(ADMIN, CP_ROUTE)).status).toBe(200);
+      });
+    });
+
+    it('without a provisioned marker the admin secret stays admin, an unlisted route included', async () => {
+      await withEnv(SELF_HOSTED, async () => {
+        expect((await as(ADMIN, ADMIN_ROUTE)).status).toBe(200);
+      });
+    });
+
+    it('refuses the control plane as a principal at an owner-only stance', async () => {
+      const resolver = (api as unknown as { _principalResolver: (req: unknown) => RequestPrincipal })._principalResolver;
+      api.setPrincipalResolverForTesting(() => CP_ADMIN_PRINCIPAL);
+      try {
+        mockGoogleRevoke.mockClear();
+        const res = await as(TEST_SECRET, '/api/google/revoke', { method: 'POST', body: '{}' });
+        expect(res.status).toBe(403);
+        expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can revoke the Google connection.');
+        expect(mockGoogleRevoke).not.toHaveBeenCalled();
+      } finally { api.setPrincipalResolverForTesting(resolver); }
+    });
+
+    // On an instance of their own: other tests in this file leave the shared instance with a fixed
+    // resolver, so only a fresh one resolves a request the way the server does.
+    describe('on a fresh instance, with the resolver the server uses', () => {
+      let fresh: LynoxHTTPApi;
+      let freshBase = '';
+      beforeAll(async () => {
+        fresh = new LynoxHTTPApi();
+        await fresh.init();
+        await fresh.start(0);
+        freshBase = `http://127.0.0.1:${portOf(fresh)}`;
+        for (let i = 0; i < 20; i++) {
+          try { const r = await fetch(`${freshBase}/health`); if (r.ok) break; } catch { /* not ready */ }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      });
+      afterAll(async () => { await fresh.shutdown(); });
+      const resolverOf = (): ((req: unknown) => RequestPrincipal) =>
+        (fresh as unknown as { _principalResolver: (req: unknown) => RequestPrincipal })._principalResolver;
+
+      it('resolves the control plane\'s admin bearer to the control plane, not to the owner', async () => {
+        const resolver = resolverOf();
+        const seen: RequestPrincipal[] = [];
+        fresh.setPrincipalResolverForTesting((req) => { const p = resolver(req); seen.push(p); return p; });
+        try {
+          await withEnv(MANAGED, async () => {
+            expect((await as(ADMIN, CP_ROUTE, {}, freshBase)).status).toBe(200);
+            expect(seen.at(-1)).toBe(CP_ADMIN_PRINCIPAL);
+          });
+          // Control: the same secret on a self-hosted instance is the owner.
+          await withEnv(SELF_HOSTED, async () => {
+            expect((await as(ADMIN, CP_ROUTE, {}, freshBase)).status).toBe(200);
+            expect(seen.at(-1)).toBe(OWNER_PRINCIPAL);
+          });
+        } finally { fresh.setPrincipalResolverForTesting(resolver); }
+      });
+
+      it('answers the control plane while the instance log cannot be written; a mandate is refused then', async () => {
+        const engine = (fresh as unknown as { engine: Record<string, unknown> }).engine;
+        const resolver = resolverOf();
+        const orig = engine['getAuditLog'];
+        engine['getAuditLog'] = () => null;
+        try {
+          await withEnv(MANAGED, async () => {
+            expect((await as(ADMIN, CP_ROUTE, {}, freshBase)).status).toBe(200);
+            // Control: the same broken log refuses a mandate's read.
+            fresh.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' }));
+            const refused = await as(TEST_SECRET, USER_ROUTE, {}, freshBase);
+            expect(refused.status).toBe(503);
+            expect(((await refused.json()) as { error: string }).error).toBe('This read cannot be recorded in the instance log right now, so it was not answered.');
+          });
+        } finally {
+          engine['getAuditLog'] = orig;
+          fresh.setPrincipalResolverForTesting(resolver);
+        }
+      });
+    });
+
+    it('refuses a second registration of a route, so no handler inherits the control plane\'s reach', () => {
+      const add = (api as unknown as { addStatic: (scope: string, key: string, h: () => void) => void }).addStatic.bind(api);
+      expect(() => add('admin', 'GET /api/export', () => {})).toThrow('The route GET /api/export is registered twice.');
+    });
+
+    it('leaves no mandate trail for the control plane, so no trail can refuse its export', () => {
+      expect(writesMandateTrail(CP_ADMIN_PRINCIPAL)).toBe(false);
+      expect(writesMandateTrail(OWNER_PRINCIPAL)).toBe(false);
+      // Control: a mandate does.
+      expect(writesMandateTrail({ kind: 'mandate', email: 'recipient@example.invalid' })).toBe(true);
+    });
+
+    it('a request through the migration token carries its own origin, not the local one', async () => {
+      const token = randomBytes(32).toString('hex');
+      const seen: string[] = [];
+      const holder = api as unknown as { _authOrigin: WeakMap<object, string> };
+      const original = holder._authOrigin;
+      class Recording extends WeakMap<object, string> {
+        override set(k: object, v: string): this { seen.push(v); return super.set(k, v); }
+      }
+      holder._authOrigin = new Recording();
+      try {
+        await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: undefined }, async () => {
+          await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+        });
+      } finally { holder._authOrigin = original; }
+      expect(seen.at(-1)).toBe('migration');
     });
   });
 });
