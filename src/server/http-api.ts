@@ -7445,7 +7445,14 @@ export class LynoxHTTPApi {
       if (!requireService(res, taskManager, 'Task manager')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
-      const triggers = taskManager.listTriggers(status ? { status } : undefined);
+      // `running` says whether a run of the trigger is in flight NOW, so the view offers a
+      // stop only where there is something to stop. It is a snapshot: a run that ends
+      // between this read and the click is answered by the stop route's `not_running`.
+      // A boolean and nothing more — who started the run (`runningStarterTag`) stays
+      // inside, since a mandate reads this list too.
+      const loop = engine.getWorkerLoop();
+      const triggers = taskManager.listTriggers(status ? { status } : undefined)
+        .map((trigger) => ({ ...trigger, running: loop?.runningEffect(trigger.id) !== undefined }));
       jsonResponse(res, 200, { triggers });
     }, READS);
 
@@ -7730,9 +7737,13 @@ export class LynoxHTTPApi {
     // was five; before that the count read "four" beside a five-item list — a count of
     // test cases written where a count of effects belongs.) That is the whole point: a 200 `{stopped:true}` over a `bulk_apply` that keeps writing its targets
     // is fail-open with ceremony, and the owner's reaction to it is to stop watching.
+    //
+    // Each 409 carries a `code` (`not_running`, `unstoppable`, `ambiguous_id`): the
+    // schedules view calls this route and has to tell the owner which of three different
+    // things happened, and a view cannot read a sentence.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/tasks/:id/stop', async (_req, res, params) => {
       const loop = engine.getWorkerLoop();
-      if (!loop) { errorResponse(res, 409, 'The worker loop is not running, so neither is this task'); return; }
+      if (!loop) { errorResponse(res, 409, 'The worker loop is not running, so neither is this task', 'not_running'); return; }
       // The TRIGGER table, not `getTask` — which reads `tasks` and would always miss,
       // exactly as the `PATCH` route two screens up documents.
       //
@@ -7748,7 +7759,7 @@ export class LynoxHTTPApi {
       // whichever prefix match SQLite reads first, and a stop acting on that would end a
       // task the owner did not name.
       if (history?.isAmbiguousTriggerId(params['id']!) === true) {
-        errorResponse(res, 409, 'That id matches more than one task. Use the full id.');
+        errorResponse(res, 409, 'That id matches more than one task. Use the full id.', 'ambiguous_id');
         return;
       }
       const trigger = history?.getTrigger(params['id']!);
@@ -7765,7 +7776,7 @@ export class LynoxHTTPApi {
         // such task", which is the one answer a caller will not retry.
         if (!requireService(res, history, 'Run history')) return;
         if (!trigger) { errorResponse(res, 404, 'Task not found'); return; }
-        errorResponse(res, 409, 'That task is not running right now');
+        errorResponse(res, 409, 'That task is not running right now', 'not_running');
         return;
       }
       if (outcome.kind === 'unstoppable') {
@@ -7774,7 +7785,7 @@ export class LynoxHTTPApi {
         // route cannot do rather than promising the run will finish. The effect is named
         // because the owner needs to know which run they are being refused; it is not
         // re-capped here, because `errorResponse` already masks secrets and caps the body.
-        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted through this route (effect '${outcome.effect}'). Pause the schedule with PATCH {enabled:false} so it does not start again.`);
+        errorResponse(res, 409, `That task is running, but nothing in its current phase can be interrupted through this route (effect '${outcome.effect}'). Pause the schedule with PATCH {enabled:false} so it does not start again.`, 'unstoppable');
         return;
       }
       jsonResponse(res, 202, {

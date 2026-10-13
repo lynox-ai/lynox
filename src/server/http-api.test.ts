@@ -7832,8 +7832,9 @@ describe('LynoxHTTPApi', () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
         expect(stopTask).not.toHaveBeenCalled();
-        const body = await res.json() as { error: string };
+        const body = await res.json() as { error: string; code?: string };
         expect(body.error).toContain('more than one task');
+        expect(body.code).toBe('ambiguous_id');
       });
     });
 
@@ -7898,7 +7899,10 @@ describe('LynoxHTTPApi', () => {
       }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
-        const err = ((await res.json()) as { error: string }).error;
+        const refusal = (await res.json()) as { error: string; code?: string };
+        // The schedules view tells this refusal apart from "not running" by its code alone.
+        expect(refusal.code).toBe('unstoppable');
+        const err = refusal.error;
         expect(err).toContain('bulk_apply');
         expect(err).toContain('PATCH {enabled:false}');
         expect(err).not.toContain('not running');
@@ -7916,7 +7920,9 @@ describe('LynoxHTTPApi', () => {
       await withEngine({ getWorkerLoop: () => ({ stopTask: () => ({ kind: 'not_running' }) }) }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
-        expect(((await res.json()) as { error: string }).error).toContain('not running');
+        const body = (await res.json()) as { error: string; code?: string };
+        expect(body.error).toContain('not running');
+        expect(body.code).toBe('not_running');
       });
     });
 
@@ -7927,7 +7933,10 @@ describe('LynoxHTTPApi', () => {
       await withEngine({ getWorkerLoop: () => null }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(409);
-        expect(((await res.json()) as { error: string }).error).toContain('worker loop');
+        const body = (await res.json()) as { error: string; code?: string };
+        expect(body.error).toContain('worker loop');
+        // To the view this is the same answer as a run that has ended: nothing to stop.
+        expect(body.code).toBe('not_running');
       });
     });
 
@@ -7971,6 +7980,46 @@ describe('LynoxHTTPApi', () => {
       }, async () => {
         const res = await jsonFetch('/api/tasks/task-1/stop', { method: 'POST' });
         expect(res.status).toBe(503);
+      });
+    });
+
+    // ── `running` on the trigger list: where the view offers a stop ─────────────────────
+    //
+    // The view shows "Stop run" only on a row the list reports as running, so the flag has
+    // to be TRUE for a run in flight and FALSE for one that is not — each direction has its
+    // own case below, because a constant in either direction passes the other.
+    const listed = [{ id: 'trg-busy', title: 'busy' }, { id: 'trg-idle', title: 'idle' }];
+
+    it('GET /api/triggers marks the trigger whose run is in flight as running, and only that one', async () => {
+      await withEngine({
+        getTaskManager: () => ({ listTriggers: () => listed }),
+        getWorkerLoop: () => ({ runningEffect: (id: string) => (id === 'trg-busy' ? 'agent' : undefined) }),
+      }, async () => {
+        const res = await jsonFetch('/api/triggers');
+        expect(res.status).toBe(200);
+        const { triggers } = await res.json() as { triggers: Array<{ id: string; running: unknown }> };
+        expect(triggers.map((t) => [t.id, t.running])).toEqual([['trg-busy', true], ['trg-idle', false]]);
+      });
+    });
+
+    it('GET /api/triggers says running:false for every row when there is no worker loop', async () => {
+      await withEngine({
+        getTaskManager: () => ({ listTriggers: () => listed }),
+        getWorkerLoop: () => null,
+      }, async () => {
+        const { triggers } = await (await jsonFetch('/api/triggers')).json() as { triggers: Array<{ running: unknown }> };
+        expect(triggers.map((t) => t.running)).toEqual([false, false]);
+      });
+    });
+
+    it('GET /api/triggers carries a boolean, not who started the run', async () => {
+      // A mandate reads this list too; the starter stays inside the loop.
+      await withEngine({
+        getTaskManager: () => ({ listTriggers: () => listed }),
+        getWorkerLoop: () => ({ runningEffect: () => 'agent', runningStarterTag: () => 'mandate:m-1' }),
+      }, async () => {
+        const text = await (await jsonFetch('/api/triggers')).text();
+        expect(text).not.toContain('mandate:m-1');
       });
     });
 

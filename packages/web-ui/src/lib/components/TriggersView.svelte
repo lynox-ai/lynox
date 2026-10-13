@@ -38,6 +38,9 @@
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
 		last_escalation_outcome?: string;
+		// Whether a run of this trigger is in flight right now (`GET /api/triggers`). A
+		// snapshot from the last load: the stop route still answers a run that ended since.
+		running?: boolean;
 	}
 
 	let triggers = $state<Trigger[]>([]);
@@ -155,6 +158,38 @@
 		}
 	}
 
+	// Stop = end the run in flight (`POST /api/tasks/:id/stop`). Offered only on a row the
+	// list reported as running. 202 = the stop was REQUESTED, not completed — the run may
+	// still finish the step it is in, and the toast says so. Every refusal gets its own
+	// sentence, told apart by the route's `code`: a run that ended since the list loaded,
+	// a phase nothing can interrupt (pausing is what is left), an id that names more than
+	// one task, and a 403 for someone who neither owns the instance nor started the run.
+	async function stopRun(trigger: Trigger): Promise<void> {
+		if (busy[trigger.id]) return;
+		busy[trigger.id] = true;
+		try {
+			const res = await fetch(`${getApiBase()}/tasks/${trigger.id}/stop`, { method: 'POST' });
+			if (res.status === 202) {
+				addToast(t('triggers.stop_requested'), 'success');
+			} else if (res.status === 403) {
+				addToast(t('triggers.stop_forbidden'), 'error');
+			} else if (res.status === 409) {
+				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
+				addToast(t(code === 'unstoppable' ? 'triggers.stop_unstoppable'
+					: code === 'ambiguous_id' ? 'triggers.stop_ambiguous'
+					: code === 'not_running' ? 'triggers.stop_not_running'
+					: 'triggers.stop_failed'), code === 'not_running' ? 'info' : 'error');
+			} else {
+				addToast(t('triggers.stop_failed'), 'error');
+			}
+			await loadTriggers();
+		} catch {
+			addToast(t('triggers.stop_failed'), 'error');
+		} finally {
+			busy[trigger.id] = false;
+		}
+	}
+
 	async function deleteTrigger(trigger: Trigger): Promise<void> {
 		if (busy[trigger.id]) return;
 		if (!window.confirm(t('triggers.delete_confirm'))) return;
@@ -265,6 +300,9 @@
 								{#if awaitsConfirmation(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.awaiting_confirmation')}</span>
 								{/if}
+								{#if trigger.running === true}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-accent/10 px-1.5 py-0.5 text-accent-text" data-trigger-running>{t('triggers.running')}</span>
+								{/if}
 							</div>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
@@ -328,6 +366,9 @@
 						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. -->
+							{#if trigger.running === true}
+								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
+							{/if}
 							{#if !awaitsConfirmation(trigger)}
 								<button onclick={() => runNow(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}
