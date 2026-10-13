@@ -172,7 +172,7 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
  * resolved secret in upper case, which no exact-match mask finds). The caller refuses the
  * request without naming the value.
  */
-export function effectiveWriteMethod(method: string, headers: Record<string, string>, url: string, body?: string): string | null {
+export function effectiveWriteMethod(method: string, headers: Record<string, string>, url: string, body?: BodyReadings): string | null {
   let effective = method.trim().toUpperCase();
   // The schema offers six methods, but nothing below may rely on the model having kept to it.
   if (!KNOWN_METHODS.has(effective)) return null;
@@ -186,11 +186,18 @@ export function effectiveWriteMethod(method: string, headers: Record<string, str
 }
 
 /**
- * Every override value the request carries, raw: the three header names, then each query
- * parameter a server may read as an override (`isOverrideFieldName`), then the body's (see
- * `bodyOverrides`) unless the sent method is one that sends no body.
+ * The body as the gate reads it: one string, or several readings of it. When the sender rewrites
+ * the body after the gate (a repair of malformed JSON), the body as given and the body as sent
+ * are both passed, and each override either names counts.
  */
-function overrideCandidates(method: string, headers: Record<string, string>, url: string, body?: string): string[] {
+export type BodyReadings = string | readonly string[];
+
+/**
+ * Every override value the request carries, raw: the three header names, then each query
+ * parameter a server may read as an override (`isOverrideFieldName`), then each body reading's
+ * (see `bodyOverrides`) unless the sent method is one that sends no body.
+ */
+function overrideCandidates(method: string, headers: Record<string, string>, url: string, body?: BodyReadings): string[] {
   const candidates: string[] = [];
   for (const [name, value] of Object.entries(headers)) {
     if (OVERRIDE_HEADERS.has(name.trim().toLowerCase())) candidates.push(value);
@@ -202,10 +209,12 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
   } catch { /* an unparsable URL is refused before it is sent */ }
   // A GET or HEAD sends no body, so nothing in one can override it.
   if (body !== undefined && !isRead(method.trim().toUpperCase())) {
-    const fromBody = bodyOverrides(body, headers);
-    candidates.push(...fromBody.declared);
-    candidates.push(...fromBody.other.filter((value) => KNOWN_METHODS.has(value.trim().toUpperCase())));
-    if (fromBody.unreadable) candidates.push('DELETE');
+    for (const reading of typeof body === 'string' ? [body] : body) {
+      const fromBody = bodyOverrides(reading, headers);
+      candidates.push(...fromBody.declared);
+      candidates.push(...fromBody.other.filter((value) => KNOWN_METHODS.has(value.trim().toUpperCase())));
+      if (fromBody.unreadable) candidates.push('DELETE');
+    }
   }
   return candidates;
 }
@@ -219,7 +228,7 @@ function overrideCandidates(method: string, headers: Record<string, string>, url
  * request. Call it after `effectiveWriteMethod` has accepted the request: values that are not
  * a method are not repeated here.
  */
-export function writeMethodsNamed(method: string, headers: Record<string, string>, url: string, body?: string): string[] {
+export function writeMethodsNamed(method: string, headers: Record<string, string>, url: string, body?: BodyReadings): string[] {
   const named = new Set<string>();
   for (const raw of [method, ...overrideCandidates(method, headers, url, body)]) {
     const m = raw.trim().toUpperCase();
