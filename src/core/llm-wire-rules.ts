@@ -75,8 +75,9 @@ function appendSystem(system: unknown, text: string): unknown {
   return system;
 }
 
-/** `[1m]` ids already reported by {@link noteOneMVariant} in this process. */
+/** `[1m]` ids already reported by {@link noteOneMVariant} in this process, at most this many. */
 const notedOneMVariants = new Set<string>();
+const MAX_NOTED_ONE_M_VARIANTS = 64;
 
 /**
  * Say once per id and process that a `[1m]` id is sent as its base id, and, when the base
@@ -84,11 +85,13 @@ const notedOneMVariants = new Set<string>();
  * logs and thread metadata; this line is where the difference shows.
  */
 function noteOneMVariant(requested: string, base: string): void {
-  if (notedOneMVariants.has(requested)) return;
+  if (notedOneMVariants.has(requested) || notedOneMVariants.size >= MAX_NOTED_ONE_M_VARIANTS) return;
   notedOneMVariants.add(requested);
   const window = getContextWindow(base);
+  // JSON-quoted: the id comes from configuration or a request body, and a line break in it
+  // must not start a line of its own.
   process.stderr.write(
-    `[lynox:model] "${requested}" is sent as "${base}"`
+    `[lynox:model] ${JSON.stringify(requested)} is sent as ${JSON.stringify(base)}`
     + (window < 1_000_000 ? `; its context window is ${String(window)} tokens, not 1M` : '')
     + '.\n',
   );

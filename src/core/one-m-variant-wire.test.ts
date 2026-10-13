@@ -36,6 +36,8 @@ async function sendWith(model: string): Promise<string> {
 }
 
 describe('a [1m] id goes out as its base id', () => {
+  beforeEach(() => { vi.spyOn(process.stderr, 'write').mockImplementation(() => true); });
+
   it('from a hybrid tier_set slot', async () => {
     const { setTierSetResolver, resolveTierModel } = await import('./tier-resolver.js');
     setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-4-6[1m]' } } });
@@ -83,6 +85,21 @@ describe('the one-time notice', () => {
     shapeRequestForModel({ model: 'claude-opus-4-6[1m]' });
     const lines = write.mock.calls.map(([l]) => String(l)).filter(l => l.startsWith('[lynox:model]'));
     expect(lines).toEqual(['[lynox:model] "claude-opus-4-6[1m]" is sent as "claude-opus-4-6".\n']);
+  });
+
+  it('quotes the id, so a line break in it stays on the notice line', async () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { shapeRequestForModel } = await import('./llm-wire-rules.js');
+    shapeRequestForModel({ model: 'x\n[lynox:forged] y[1m]' });
+    const out = write.mock.calls.map(([l]) => String(l)).join('');
+    expect(out.split('\n').filter(l => l.startsWith('[lynox:forged]'))).toEqual([]);
+  });
+
+  it('stops noting after 64 distinct ids', async () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { shapeRequestForModel } = await import('./llm-wire-rules.js');
+    for (let i = 0; i < 70; i++) shapeRequestForModel({ model: `m-${String(i)}[1m]` });
+    expect(write.mock.calls.filter(([l]) => String(l).startsWith('[lynox:model]'))).toHaveLength(64);
   });
 
   it('says nothing for an id without the suffix', async () => {
