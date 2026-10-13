@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -170,6 +170,20 @@ describe('end to end — a clone of this repository, the real eslint config', ()
       expect(r.status).toBe(1);
       expect(git('worktree', 'list').split('\n')).toHaveLength(1);
     } finally { git('checkout', '-q', '--detach', bad); }
+  }, SLOW);
+
+  it('Ctrl-C mid-lint leaves no temporary worktree registered', async () => {
+    const child = spawn(process.execPath, [SCRIPT, base, bad], { cwd: clone, env: GIT_ENV, stdio: 'ignore' });
+    const exited = new Promise<NodeJS.Signals | null>((res) => child.on('exit', (_c, sig) => res(sig)));
+    // Wait until the checkout exists, so the signal lands while it does.
+    const deadline = Date.now() + 60_000;
+    while (git('worktree', 'list').split('\n').length < 2) {
+      if (Date.now() > deadline) throw new Error('the temporary checkout never appeared');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    child.kill('SIGINT');
+    expect(await exited).toBe('SIGINT');
+    expect(git('worktree', 'list').split('\n')).toHaveLength(1);
   }, SLOW);
 
   it('a push that only deletes a ref lints nothing and passes', () => {

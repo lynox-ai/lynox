@@ -17,8 +17,9 @@
  * `pushed-ranges.sh` derives from git's pre-push lines, so a push of a branch you are not standing
  * on is linted as that branch — under `src/` (`.ts`) and `packages/web-ui/src/` (`.ts`, `.svelte`),
  * minus `*.test.ts`, which the config does not cover. They are linted in a TEMPORARY WORKTREE
- * checked out at `<tip>`: every file the type-aware rules read, the eslint config and the tsconfigs
- * are then exactly the pushed commit. Linting the working tree instead let an uncommitted edit of a
+ * checked out at `<tip>`: every source file the type-aware rules read, the eslint config and the
+ * tsconfigs are then exactly the pushed commit. node_modules is borrowed from this tree, so a push
+ * that changes a dependency is linted against the install you have. Linting the working tree instead let an uncommitted edit of a
  * file the change depends on decide the verdict for a commit that does not contain it.
  *
  * ⚠ WHAT IT DOES NOT SEE. Only CHANGED files are linted. A type-aware rule (`no-floating-promises`)
@@ -101,20 +102,40 @@ const MODULE_DIRS = ['node_modules', 'packages/web-ui/node_modules'];
 
 /** Check `tip` out into a temporary worktree that borrows this tree's node_modules. */
 function checkoutAt(repo, tip) {
-  const dir = mkdtempSync(join(tmpdir(), 'lint-changed-'));
-  const wt = join(dir, 'tree');
-  git(repo, ['worktree', 'add', '--quiet', '--detach', wt, tip]);
-  for (const m of MODULE_DIRS) if (existsSync(join(repo, m))) symlinkSync(join(repo, m), join(wt, m));
+  let dir = null;
+  let wt = null;
+  const remove = () => {
+    // The links first: `worktree remove --force` must never reach through them into the real trees.
+    if (wt !== null) for (const m of MODULE_DIRS) rmSync(join(wt, m), { force: true });
+    if (wt !== null) { try { git(repo, ['worktree', 'remove', '--force', wt]); } catch { /* the prune below still runs */ } }
+    if (dir !== null) rmSync(dir, { recursive: true, force: true });
+    try { git(repo, ['worktree', 'prune']); } catch { /* best effort */ }
+  };
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'lint-changed-'));
+    wt = join(dir, 'tree');
+    git(repo, ['worktree', 'add', '--quiet', '--detach', wt, tip]);
+    // A tip without packages/web-ui has nowhere to put that link, and needs none.
+    for (const m of MODULE_DIRS) {
+      if (existsSync(join(repo, m)) && existsSync(dirname(join(wt, m)))) symlinkSync(join(repo, m), join(wt, m));
+    }
+  } catch (e) {
+    remove();
+    throw e instanceof CannotCheck ? e : new CannotCheck(`the temporary checkout could not be created: ${String(e?.message ?? e).split('\n')[0]}`);
+  }
+  // Ctrl-C reaches node before any `finally`; without this the checkout stays registered.
+  const onSignal = (sig) => { remove(); process.kill(process.pid, sig); };
+  for (const sig of SIGNALS) process.once(sig, onSignal);
   return {
     wt,
     remove() {
-      for (const m of MODULE_DIRS) rmSync(join(wt, m), { force: true });
-      try { git(repo, ['worktree', 'remove', '--force', wt]); } catch { /* the prune below still runs */ }
-      rmSync(dir, { recursive: true, force: true });
-      try { git(repo, ['worktree', 'prune']); } catch { /* best effort */ }
+      for (const sig of SIGNALS) process.removeListener(sig, onSignal);
+      remove();
     },
   };
 }
+
+const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 
 async function loadEslint(repo, cwd) {
   try {
@@ -151,7 +172,8 @@ export async function lintRange(repo, base, tip) {
     const text = (await (await eslint.loadFormatter('stylish')).format(results)).split(`${co.wt}/`).join('');
     if (text.trim() !== '') console.log(text);
     if (errorCount > 0) {
-      console.error(`lint-changed: ${errorCount} eslint error(s) in ${files.length} changed file(s) of ${sha.slice(0, 8)} — the CI lint step fails on these too.`);
+      // stdout, like the listing above, so the two stay in order when lefthook relays them.
+      console.log(`lint-changed: ${errorCount} eslint error(s) in ${files.length} changed file(s) of ${sha.slice(0, 8)} — fix them before the push; the CI lint step runs the same rules.`);
       return 1;
     }
     console.log(`lint-changed: clean ✓ (${files.length} changed file(s) of ${sha.slice(0, 8)}, linted in a checkout of that commit; unchanged files are CI's)`);
