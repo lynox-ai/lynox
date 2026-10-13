@@ -344,7 +344,9 @@ describe('person erasure', () => {
     f.stubs.upsertStub({ id: legacyOnly, text: 'Lunch on Monday', namespace: 'knowledge', scopeType: 'global', scopeId: '' });
     const stubOnly = f.layer.getDb().createMemory({ text: 'Call about the tender', namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] });
     f.stubs.upsertStub({ id: stubOnly, text: 'Call Anni about the tender', namespace: 'knowledge', scopeType: 'global', scopeId: '' });
+    const neither = memory(f, 'Invoices are due monthly', f.bob);
     const p = preview(f, f.anna);
+    expect(p.memories.find(m => m.id === neither)).toBeUndefined();
     expect(p.memories.find(m => m.id === legacyOnly)).toMatchObject({ matchedBy: 'mention', text: 'Lunch with Anni on Monday' });
     expect(p.memories.find(m => m.id === stubOnly)).toMatchObject({ matchedBy: 'mention', text: 'Call Anni about the tender' });
   });
