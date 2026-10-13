@@ -256,7 +256,9 @@ const PKG_VERSION: string = (() => {
 })();
 
 // Two-tier auth: when LYNOX_HTTP_ADMIN_SECRET is set, admin-scoped routes
-// require the admin token; user-scoped routes accept either. When only
+// require the admin token; user-scoped routes accept either, except on an
+// instance the control plane provisioned, where the admin token is the control
+// plane's and reaches admin routes only (`cp-admin`). When only
 // LYNOX_HTTP_SECRET is set (single-token mode), it grants admin implicitly.
 //
 // Each route declares its scope at registration via `addStatic` /
@@ -2051,7 +2053,7 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
+    if (parts.length < 4) return LynoxHTTPApi._provisionedByControlPlane() ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
@@ -2067,11 +2069,12 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Whether an owner cookie must carry the owner's principal: on an instance the control plane
-   * provisioned. An instance id alone also counts — mandate login needs it, so a missing or
-   * unknown tier must not leave a cookie without a principal standing where a mandate can log in.
+   * Whether the control plane provisioned this instance. An instance id alone also counts —
+   * mandate login needs it, so a missing or unknown tier must not leave a cookie without a
+   * principal standing where a mandate can log in. Read for two rules: an owner cookie must carry
+   * the owner's principal, and the admin bearer is the control plane's (`cp-admin`, §3.4).
    */
-  private static _ownerNeedsPrincipal(): boolean {
+  private static _provisionedByControlPlane(): boolean {
     return isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) || Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
   }
 
@@ -2843,9 +2846,10 @@ export class LynoxHTTPApi {
           const isAdmin = constantTimeEqual(tokenBuf, adminBuf);
           const isUser = constantTimeEqual(tokenBuf, secretBuf);
           if (isAdmin) {
-            // On a managed instance the admin secret is the control plane's: admin routes only
-            // (§3.4). A self-hosted instance with two secrets keeps `admin`, which includes `user`.
-            authScope = readEnvAlias('LYNOX_BILLING_TIER') ? 'cp-admin' : 'admin';
+            // On an instance the control plane provisioned the admin secret is the control plane's:
+            // admin routes only (§3.4). A self-hosted instance with two secrets keeps `admin`, which
+            // includes `user`.
+            authScope = LynoxHTTPApi._provisionedByControlPlane() ? 'cp-admin' : 'admin';
             this._authOrigin.set(req, 'bearer:admin');
           } else if (isUser) {
             authScope = 'user';
@@ -9169,12 +9173,19 @@ export class LynoxHTTPApi {
 
     // The control plane asks these two with its admin bearer, which reaches admin routes only on a
     // managed instance (§3.4): the same handlers, registered once more as admin routes.
-    this.addStatic('admin', 'GET /api/admin/google/status', this.staticRoutes.get('GET /api/google/status')!);
-    this.addStatic('admin', 'POST /api/admin/google/revoke', this.staticRoutes.get('POST /api/google/revoke')!);
+    // A user route that moves fails the boot here, instead of leaving an alias that answers 404.
+    for (const [from, to] of [
+      ['GET /api/google/status', 'GET /api/admin/google/status'],
+      ['POST /api/google/revoke', 'POST /api/admin/google/revoke'],
+    ] as const) {
+      const handler = this.staticRoutes.get(from);
+      if (!handler) throw new Error(`The admin alias ${to} has no route ${from} to stand for.`);
+      this.addStatic('admin', to, handler);
+    }
 
     // The control plane's list of the account's revoked mandates (§3.5, piece C): the whole list
     // each call, applied idempotently, so a call after a restore heals what the restore undid.
-    // A revoke that is new ends what the mandate holds at once (the `onRevoke` sweeps).
+    // A revoke that is new is told to the `onRevoke` listeners, once.
     this.addStatic('admin', 'POST /api/admin/mandates/revoke', async (_req, res, _params, body) => {
       const ids = readMandateRevocation(body);
       if (ids === 'invalid') {

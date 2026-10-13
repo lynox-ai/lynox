@@ -16067,11 +16067,14 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     }
   }
   const MANAGED = { LYNOX_HTTP_ADMIN_SECRET: ADMIN, LYNOX_BILLING_TIER: 'managed' };
+  // Provisioned by the control plane, known only by its instance id (no tier).
+  const INSTANCE_ONLY = { LYNOX_HTTP_ADMIN_SECRET: ADMIN, LYNOX_BILLING_TIER: undefined, LYNOX_MANAGED_MODE: undefined, LYNOX_MANAGED_INSTANCE_ID: 'inst-42' };
+  const SELF_HOSTED = { LYNOX_HTTP_ADMIN_SECRET: ADMIN, LYNOX_BILLING_TIER: undefined, LYNOX_MANAGED_MODE: undefined, LYNOX_MANAGED_INSTANCE_ID: undefined };
   const as = (token: string, path: string, init: RequestInit = {}, base = baseUrl): Promise<Response> =>
     fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
 
-  it('on a managed instance, the admin bearer reaches the admin routes and nothing else', async () => {
-    await withEnv(MANAGED, async () => {
+  it.each([['by its tier', MANAGED], ['by its instance id alone', INSTANCE_ONLY]] as const)('on a managed instance (%s), the admin bearer reaches the admin routes and nothing else', async (_how, env) => {
+    await withEnv(env, async () => {
       expect((await as(ADMIN, ADMIN_ROUTE)).status).toBe(200);
       const refused = await as(ADMIN, USER_ROUTE);
       expect(refused.status).toBe(403);
@@ -16087,7 +16090,7 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   });
 
   it('on a self-hosted instance with two secrets, the admin bearer keeps the user routes', async () => {
-    await withEnv({ ...MANAGED, LYNOX_BILLING_TIER: undefined }, async () => {
+    await withEnv(SELF_HOSTED, async () => {
       expect((await as(ADMIN, USER_ROUTE)).status).toBe(200);
       expect((await as(ADMIN, ADMIN_ROUTE)).status).toBe(200);
     });
@@ -16122,8 +16125,9 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     const token = randomBytes(32).toString('hex');
     await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token }, async () => {
       const res = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
-      expect(res.status).not.toBe(401);
-      expect(res.status).not.toBe(403);
+      // Past the door and into the handler: this instance holds no vault key for an import.
+      expect(res.status).toBe(503);
+      expect(((await res.json()) as { error: string }).error).toBe('Migration not available — missing vault key');
     });
   });
 
@@ -16150,7 +16154,9 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       const ownerStatus = await as(TEST_SECRET, '/api/google/status');
       expect(cpStatus.status).toBe(200);
       expect(await cpStatus.json()).toEqual(await ownerStatus.json());
+      mockGoogleRevoke.mockClear();
       const cpRevoke = await as(ADMIN, '/api/admin/google/revoke', { method: 'POST', body: '{}' });
+      expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
       const ownerRevoke = await as(TEST_SECRET, '/api/google/revoke', { method: 'POST', body: '{}' });
       expect(cpRevoke.status).not.toBe(403);
       expect(cpRevoke.status).toBe(ownerRevoke.status);
