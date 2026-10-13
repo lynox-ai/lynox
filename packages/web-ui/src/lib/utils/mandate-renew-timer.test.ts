@@ -175,6 +175,18 @@ describe('startMandateRenewTimer', () => {
 		expect(h.plannedAtS()).toBeNull();
 	});
 
+	it('cancels every ask still on its way, also one a returning tab started beside a planned one', async () => {
+		const h = harness([mandate(T + 900), 'hold', 'hold']);
+		await startMandateRenewTimer(h.deps).ready;
+		await h.fire();
+		h.listeners.get('visibilitychange')!();
+		await flush();
+		expect(h.signals).toHaveLength(3);
+		h.message(LOGOUT_MESSAGE);
+		expect(h.signals[1]!.aborted).toBe(true);
+		expect(h.signals[2]!.aborted).toBe(true);
+	});
+
 	it('stops on a refusal, and never plans past the end', async () => {
 		for (const refusal of [401, 403]) {
 			const h = harness([mandate(T + 900), { status: refusal }]);
@@ -252,13 +264,18 @@ describe('installMandateRenewTimer', () => {
 		return { win, pageListeners };
 	}
 
-	it('installs once while running, and replaces a stopped one, as on a return from the back-forward cache', async () => {
+	it('installs once, keeps a stopped one stopped, and replaces it only on a return from the back-forward cache', async () => {
 		const { win, pageListeners } = stubPage({ kind: 'mandate', exp: Math.floor(Date.now() / 1000) + 900, renewed: false });
 		const first = installMandateRenewTimer()!;
 		await first.ready;
 		expect(installMandateRenewTimer()).toBe(first);
 		pageListeners.get('pagehide')!({});
 		expect(first.stopped).toBe(true);
+		// A remount of the shell does not start it again, and neither does a fresh page show.
+		expect(installMandateRenewTimer()).toBe(first);
+		pageListeners.get('pageshow')!({ persisted: false });
+		expect(win.__lynoxRenewTimer).toBe(first);
+		expect(win.fetch).toHaveBeenCalledTimes(1);
 		pageListeners.get('pageshow')!({ persisted: true });
 		const second = win.__lynoxRenewTimer!;
 		expect(second).not.toBe(first);

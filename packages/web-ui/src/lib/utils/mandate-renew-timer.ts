@@ -46,7 +46,7 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 	let stopped = false;
 	let handle: unknown = null;
 	let knownExp: number | null = null;
-	let inFlight: AbortController | null = null;
+	const inFlight = new Set<AbortController>();
 
 	const plan = (atS: number): void => {
 		if (handle !== null) deps.clearTimer(handle);
@@ -71,7 +71,7 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 		if (stopped) return;
 		let answer: RenewAnswer;
 		const controller = new AbortController();
-		inFlight = controller;
+		inFlight.add(controller);
 		try {
 			const res = await deps.fetchImpl('/auth/renew', { method: 'POST', credentials: 'same-origin', signal: controller.signal });
 			if (res.status === 401 || res.status === 403) { stop(false); return; }
@@ -83,7 +83,7 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 			if (!stopped && knownExp !== null) apply({ kind: 'mandate', exp: knownExp, renewed: false });
 			return;
 		} finally {
-			if (inFlight === controller) inFlight = null;
+			inFlight.delete(controller);
 		}
 		if (!stopped) apply(answer);
 	};
@@ -103,8 +103,9 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 		}
 		if (stopped) return;
 		stopped = true;
-		inFlight?.abort();
-		inFlight = null;
+		// Every ask still on its way, not only the newest: a tab coming back asks beside a planned one.
+		for (const c of inFlight) c.abort();
+		inFlight.clear();
 		if (handle !== null) deps.clearTimer(handle);
 		handle = null;
 		deps.target.removeEventListener('visibilitychange', onVisible);
@@ -123,15 +124,16 @@ declare global {
 
 /**
  * Installs the timer once per page (a `window` sentinel survives HMR, like the fetch
- * interceptor). A stopped one is replaced: a page restored from the back-forward cache was
- * stopped by its `pagehide`, and asks again here.
+ * interceptor). A stopped one stays stopped, except on a page restored from the back-forward
+ * cache: its `pagehide` stopped it, and it asks again (`afterRestore`).
  */
-export function installMandateRenewTimer(): RenewTimer | null {
+export function installMandateRenewTimer(afterRestore = false): RenewTimer | null {
 	if (typeof window === 'undefined') return null;
-	if (window.__lynoxRenewTimer && !window.__lynoxRenewTimer.stopped) return window.__lynoxRenewTimer;
+	const current = window.__lynoxRenewTimer;
+	if (current && !(afterRestore && current.stopped)) return current;
 	if (!window.__lynoxRenewPageShow) {
 		window.__lynoxRenewPageShow = true;
-		window.addEventListener('pageshow', (e) => { if (e.persisted) installMandateRenewTimer(); });
+		window.addEventListener('pageshow', (e) => { if (e.persisted) installMandateRenewTimer(true); });
 	}
 	const timer = startMandateRenewTimer({
 		fetchImpl: window.fetch.bind(window),
