@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
 import iconv from 'iconv-lite';
 import { OAuthGmailProvider, encodeMimeHeader } from './oauth-gmail.js';
+import { previewSendingAccount } from '../send-core.js';
 import { MailError, type MailAccountConfig, type MailEnvelope } from '../provider.js';
 import type { GoogleAuth } from '../../google/google-auth.js';
 
@@ -491,6 +492,13 @@ describe('OAuthGmailProvider — send', () => {
     const decoded = Buffer.from(raw, 'base64').toString('utf-8');
     return { decoded, fromLine: decoded.split(/\r?\n/).find(l => l.startsWith('From:')) ?? '' };
   }
+
+  it('the send preview names the display name the From header carries', async () => {
+    const { fromLine } = await sendWithDisplayName('Office Desk');
+    expect(fromLine).toContain('Office Desk');
+    const provider = new OAuthGmailProvider({ ...makeAccount(), displayName: 'Office Desk' }, makeAuth());
+    expect(previewSendingAccount(provider, 'user@example.org')).toContain('display name "Office Desk"');
+  });
 
   it('SEC: a non-ASCII display name cannot append a recipient of its own', async () => {
     // RFC 2047 §5(3): inside a PHRASE an encoded-word may carry only

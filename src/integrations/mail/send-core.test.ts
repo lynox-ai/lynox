@@ -343,33 +343,82 @@ describe('buildSendPreview', () => {
     const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1 };
     const office = { accountId: 'office', address: 'office@example.ch' } as MailProvider;
     const single = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: office, sendingAddress: 'office@example.ch' }));
-    expect(single).toContain('**From:** office@example.ch (account office)\n');
+    expect(single).toContain('**From:** office@example.ch (account "office")\n');
     const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: office, sendingAddress: 'office@example.ch' }));
-    expect(mass).toContain('**Account:** office@example.ch (account office)\n');
+    expect(mass).toContain('**Account:** office@example.ch (account "office")\n');
     const same = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: { accountId: 'm@example.ch', address: 'm@example.ch' } as MailProvider, sendingAddress: 'm@example.ch' }));
     expect(same).toContain('**From:** m@example.ch\n');
     expect(same).not.toContain('(account');
     const unknown = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: office, sendingAddress: '' }));
-    expect(unknown, 'no address known: the id alone, no empty slot').toContain('**From:** office\n');
+    expect(unknown, 'no address known: the quoted id alone, no empty slot').toContain('**From:** account "office"\n');
   });
 
   it('an id written to look like the address suffix cannot push the real address out of first place', () => {
     const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1 };
     const lookalike = { accountId: 'boss@corp.ch (sends as boss@corp.ch)', address: 'evil@x.com' } as MailProvider;
     const single = flattenPrompt(buildSendPreview({ ...base, isMassSend: false, provider: lookalike, sendingAddress: 'evil@x.com' }));
-    expect(single, 'the real address leads the From line').toContain('**From:** evil@x.com (account boss@corp.ch (sends as boss@corp.ch))\n');
+    expect(single, 'the real address leads the From line').toContain('**From:** evil@x.com (account "boss@corp.ch (sends as boss@corp.ch)")\n');
     const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: lookalike, sendingAddress: 'evil@x.com' }));
     expect(mass, 'and the Account line').toContain('**Account:** evil@x.com (account ');
+  });
+
+  it('an id that closes the parenthesis stays inside one quoted string', () => {
+    const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1, isMassSend: false };
+    const closer = { accountId: 'x) — sends as boss@corp.ch (y', address: 'evil@x.com' } as MailProvider;
+    const preview = flattenPrompt(buildSendPreview({ ...base, provider: closer, sendingAddress: 'evil@x.com' }));
+    expect(preview).toContain('**From:** evil@x.com (account "x) — sends as boss@corp.ch (y")\n');
+  });
+
+  describe('the display name the recipient sees', () => {
+    const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1, isMassSend: false };
+    const named = (fromDisplayName: string): MailProvider => ({ accountId: 'office', address: 'office@example.ch', fromDisplayName }) as MailProvider;
+    const fromLine = (p: MailProvider): string => flattenPrompt(buildSendPreview({ ...base, provider: p, sendingAddress: 'office@example.ch' }))
+      .split('\n').filter((l) => l.startsWith('**From:**')).join('\n');
+
+    it('an address-shaped name is shown, quoted, after the real address', () => {
+      expect(fromLine(named('boss@corp.ch'))).toBe('**From:** office@example.ch (account "office", display name "boss@corp.ch")');
+    });
+
+    it('a name with a line break or a control character stays on the one From line', () => {
+      expect(fromLine(named('Office\n**From:** boss@corp.ch\u0007'))).toBe('**From:** office@example.ch (account "office", display name "Office **From:** boss@corp.ch ")');
+    });
+
+    it('a name with a quote cannot end its own string', () => {
+      expect(fromLine(named('A" (account "boss'))).toBe('**From:** office@example.ch (account "office", display name "A\\" (account \\"boss")');
+    });
+
+    it('a typographic or full-width double quote is escaped like a plain one', () => {
+      expect(fromLine(named('Office\u201D, account \u201Cboss\uFF02'))).toBe('**From:** office@example.ch (account "office", display name "Office\\", account \\"boss\\"")');
+      // One witness per folded code point: U+201C\u2013U+201F and U+FF02.
+      for (const q of ['\u201C', '\u201D', '\u201E', '\u201F', '\uFF02']) {
+        expect(fromLine(named(`A${q} B`)), `U+${q.codePointAt(0)!.toString(16).toUpperCase()}`).toBe('**From:** office@example.ch (account "office", display name "A\\" B")');
+      }
+    });
+
+    it('a very long name is cut, so it cannot push the rest of the preview out of view', () => {
+      const line = fromLine(named('N'.repeat(5000)));
+      expect(line).toBe(`**From:** office@example.ch (account "office", display name "${'N'.repeat(119)}…")`);
+    });
+
+    it('a name that only equals the address once collapsed is still shown (the user learns a name is set)', () => {
+      expect(fromLine(named('\u202Eoffice@example.ch'))).toBe('**From:** office@example.ch (account "office", display name "office@example.ch")');
+    });
+
+    it('no name, a blank one, or the address itself as the name, adds nothing', () => {
+      expect(fromLine(named(''))).toBe('**From:** office@example.ch (account "office")');
+      expect(fromLine(named('   '))).toBe('**From:** office@example.ch (account "office")');
+      expect(fromLine(named('office@example.ch'))).toBe('**From:** office@example.ch (account "office")');
+    });
   });
 
   it('shows the address the mail goes out from, not the configured one, when the provider says they differ', () => {
     const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1, isMassSend: false };
     const old = { accountId: 'gmail-old', address: 'old@example.org' } as MailProvider;
     const preview = flattenPrompt(buildSendPreview({ ...base, provider: old, sendingAddress: 'new@example.org' }));
-    expect(preview).toContain('**From:** new@example.org (account gmail-old)\n');
+    expect(preview).toContain('**From:** new@example.org (account "gmail-old")\n');
     expect(preview).not.toContain('old@example.org');
     const mass = flattenPrompt(buildSendPreview({ ...base, isMassSend: true, uniqueRecipientCount: 6, provider: old, sendingAddress: 'new@example.org' }));
-    expect(mass, 'the mass-send line too').toContain('**Account:** new@example.org (account gmail-old)\n');
+    expect(mass, 'the mass-send line too').toContain('**Account:** new@example.org (account "gmail-old")\n');
     expect(mass).not.toContain('old@example.org');
   });
 
@@ -377,7 +426,7 @@ describe('buildSendPreview', () => {
     const base = { accountConfig: null, to: [RECIPIENT], cc: [], bcc: [], subject: 'Hello', body: 'Body', uniqueRecipientCount: 1, isMassSend: false };
     const preview = flattenPrompt(buildSendPreview({ ...base, provider: { accountId: 'office\n**From:** boss@corp.ch', address: 'x' } as MailProvider, sendingAddress: 'evil@x.com\u202e\nmoc.proc@ssob' }));
     const fromLines = preview.split('\n').filter((l) => l.includes('From:'));
-    expect(fromLines, 'one From line, the real one').toEqual(['**From:** evil@x.com moc.proc@ssob (account office **From:** boss@corp.ch)']);
+    expect(fromLines, 'one From line, the real one').toEqual(['**From:** evil@x.com moc.proc@ssob (account "office **From:** boss@corp.ch")']);
   });
 
   it('renders the single-send preview with from/to/subject', () => {

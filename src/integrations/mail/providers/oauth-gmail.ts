@@ -665,6 +665,11 @@ export class OAuthGmailProvider implements MailProvider {
   private readonly googleAuth: GoogleAuth;
   private readonly account: MailAccountConfig;
 
+  /** What `send` puts in From as the name — the preview reads this same getter. */
+  get fromDisplayName(): string {
+    return this.account.displayName;
+  }
+
   /**
    * Two synced maps — `uidToGmailId` is the read path used by `fetch`,
    * `gmailIdToUid` lets `assignUid` reuse an existing uid in O(1) instead of
@@ -752,7 +757,7 @@ export class OAuthGmailProvider implements MailProvider {
       throw new MailError('unsupported', 'Gmail send requires the gmail.send scope. Grant write access in Settings → Channels → Google.');
     }
     const fromAddress = await this.resolveFromAddress();
-    const raw = base64urlEncode(Buffer.from(buildRfc2822(input, fromAddress, this.account.displayName), 'utf-8'));
+    const raw = base64urlEncode(Buffer.from(buildRfc2822(input, fromAddress, this.fromDisplayName), 'utf-8'));
     try {
       const result = await this.gmailPost<GmailSendResponse>('messages/send', { raw });
       const allRecipients = [

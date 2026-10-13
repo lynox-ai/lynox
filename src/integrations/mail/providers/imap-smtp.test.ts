@@ -86,6 +86,7 @@ vi.mock('nodemailer', () => {
 import { ImapSmtpProvider, type CredentialsResolver } from './imap-smtp.js';
 import type { MailAccountConfig } from '../provider.js';
 import { MailError } from '../provider.js';
+import { previewSendingAccount } from '../send-core.js';
 
 const ACCOUNT: MailAccountConfig = {
   id: 'test-account',
@@ -587,6 +588,8 @@ describe('ImapSmtpProvider — send', () => {
     // displayName from the account config must round-trip through nodemailer
     // so recipients see a friendly sender name, not just the local-part.
     expect(args.from.name).toBe('Test User');
+    // The send preview reads the same getter, so the user is shown the name the recipient gets.
+    expect(previewSendingAccount(provider, args.from.address)).toContain(`display name "${args.from.name}"`);
     // CHANGED 2026-08-17: this asserted the pre-serialized string
     // `'"Bob" <bob@example.com>'`. Recipients now go to nodemailer as STRUCTURED
     // objects, the same shape `from` always used — see the security test below

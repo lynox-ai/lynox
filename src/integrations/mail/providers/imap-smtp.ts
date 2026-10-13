@@ -417,6 +417,11 @@ export class ImapSmtpProvider implements MailProvider {
 
   private readonly account: MailAccountConfig;
   private readonly resolveCredentials: CredentialsResolver;
+
+  /** What `send` puts in From as the name — the preview reads this same getter. */
+  get fromDisplayName(): string {
+    return this.account.displayName;
+  }
   private readonly tlsRejectUnauthorized: boolean;
 
   private client: ImapFlow | null = null;
@@ -782,7 +787,7 @@ export class ImapSmtpProvider implements MailProvider {
 
     try {
       const result = await transport.sendMail({
-        from: { name: this.account.displayName, address: this.account.address },
+        from: { name: this.fromDisplayName, address: this.account.address },
         to: input.to.map(toNodemailerAddress),
         cc: input.cc?.map(toNodemailerAddress),
         bcc: input.bcc?.map(toNodemailerAddress),
@@ -841,7 +846,7 @@ export class ImapSmtpProvider implements MailProvider {
    *  the caller decides fatality (never fatal post-SMTP). */
   private async appendSentCopy(input: MailSendInput, messageId: string): Promise<void> {
     const composer = new MailComposer({
-      from: { name: this.account.displayName, address: this.account.address },
+      from: { name: this.fromDisplayName, address: this.account.address },
       to: input.to.map(toNodemailerAddress),
       cc: input.cc?.map(toNodemailerAddress),
       bcc: input.bcc?.map(toNodemailerAddress),

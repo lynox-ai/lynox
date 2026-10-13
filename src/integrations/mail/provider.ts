@@ -246,6 +246,13 @@ export interface MailProvider {
    */
   fromAddress?(): Promise<string>;
 
+  /**
+   * The display name `send` puts in From, read from the same field `send` reads. Free
+   * text the account was set up with: the recipient sees it next to the address, so the
+   * send preview shows it too (quoted, after the address).
+   */
+  readonly fromDisplayName?: string;
+
   /** Auth/transport flavor of this provider. */
   readonly authType: MailAuthType;
 
