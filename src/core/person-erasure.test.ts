@@ -302,6 +302,136 @@ describe('person erasure', () => {
   });
 });
 
+describe('person erasure, legacy store and scrub', () => {
+  const provider = new LocalProvider();
+  const dirs: string[] = [];
+  const engines: EngineDb[] = [];
+  const layers: KnowledgeLayer[] = [];
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const l of layers) await l.close().catch(() => {});
+    for (const e of engines) { try { e.close(); } catch { /* already closed */ } }
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    layers.length = 0; engines.length = 0; dirs.length = 0;
+  });
+
+  async function setup() {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-person-erasure-legacy-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), 'vault-key-person-erasure');
+    engines.push(engine);
+    const layer = new KnowledgeLayer(join(dir, 'mem.db'), provider, undefined, undefined, engine, true, true);
+    layers.push(layer);
+    await layer.init();
+    const subjects = new SubjectStore(engine);
+    const knowledge = new KnowledgeStore(engine, subjects, null);
+    const deps: PersonErasureDeps = { engineDb: engine, subjects, knowledge, layer, mask: t => t };
+    const legacy = layer.getDb();
+    const anna = subjects.createSubject({ kind: 'person', name: 'Anna Wiesental', aliases: ['Anna Wiesental', 'Anni'] });
+    // The legacy store's own link: a person entity under her alias, and the memories mentioning
+    // it. No engine.db stub and no subject link, as on an instance with the subject graph off.
+    const entity = legacy.createEntity({ canonicalName: 'anni', entityType: 'person', description: 'Head of purchasing', scopeType: 'global', scopeId: '' });
+    const other = legacy.createEntity({ canonicalName: 'Bob Talgrund', entityType: 'person', scopeType: 'global', scopeId: '' });
+    const mem = (text: string): string => legacy.createMemory({ text, namespace: 'knowledge', scopeType: 'global', scopeId: '', embedding: [0.1, 0.2, 0.3] });
+    const bound = mem('She approves orders above 5000');
+    legacy.createMention(bound, entity);
+    legacy.createRelation(entity, other, 'works_with', 'reports to Bob', bound);
+    const kept = mem('Bob and Anni met at the fair');
+    legacy.createMention(kept, entity);
+    legacy.createMention(kept, other);
+    // Bob's own memory, so his entity is held by something that is not about her.
+    legacy.createMention(mem('Bob runs the warehouse'), other);
+    return { deps, engine, layer, legacy, subjects, knowledge, anna, entity, other, bound, kept, stubs: new MemoryGraphStore(engine) };
+  }
+
+  function ok(r: ReturnType<typeof erasePerson>): PersonErasureResult {
+    if ('refused' in r) throw new Error(`refused: ${r.refused}`);
+    return r;
+  }
+  function plan(deps: PersonErasureDeps, id: string): PersonErasurePreview {
+    const p = previewPersonErasure(deps, id);
+    if ('refused' in p) throw new Error(`refused: ${p.refused}`);
+    return p;
+  }
+
+  it('binds a legacy memory through the legacy person entity, with no subject graph behind it', async () => {
+    const f = await setup();
+    const p = plan(f.deps, f.anna);
+    expect(p.memories.find(m => m.id === f.bound)?.matchedBy).toBe('subject');
+    // Every memory linking to her entity is about her, like the engine.db junction.
+    expect(p.memories.find(m => m.id === f.kept)?.matchedBy).toBe('subject');
+  });
+
+  it('erases the bound legacy memories and the person entity with its links, and leaves the other person', async () => {
+    const f = await setup();
+    const p = plan(f.deps, f.anna);
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    expect(r.erased).toBe(true);
+    expect(f.legacy.getMemory(f.bound)).toBeNull();
+    expect(f.legacy.getEntity(f.entity)).toBeNull();
+    expect(f.legacy.getMemory(f.kept)).toBeNull();
+    expect(f.legacy.getEntity(f.other)).not.toBeNull();
+    const raw = (f.legacy as unknown as { db: Database.Database }).db;
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM mentions WHERE entity_id = ?').get(f.entity)).toEqual({ n: 0 });
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM relations WHERE from_entity_id = ? OR to_entity_id = ?').get(f.entity, f.entity)).toEqual({ n: 0 });
+  });
+
+  it('erases the stub of a memory bound only in the legacy store before the legacy row, so a retry still binds it', async () => {
+    const f = await setup();
+    f.stubs.upsertStub({ id: f.bound, text: 'She approves orders above 5000', namespace: 'knowledge', scopeType: 'global', scopeId: '' });
+    const p = plan(f.deps, f.anna);
+    vi.spyOn(f.legacy, 'eraseForPerson').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    expect(r).toMatchObject({ erased: false, failed: 'memories_legacy' });
+    expect(f.stubs.getStub(f.bound)).toBeNull();
+    expect(f.legacy.getMemory(f.bound)).not.toBeNull();
+    const again = plan(f.deps, f.anna);
+    expect(again.memories.find(m => m.id === f.bound)?.matchedBy).toBe('subject');
+    expect(ok(erasePerson(f.deps, { subjectId: f.anna, plan: again.plan, entryIds: [], memoryIds: [] })).erased).toBe(true);
+    expect(f.legacy.getMemory(f.bound)).toBeNull();
+  });
+
+  it('offers an entry whose own conversation wording names the person, showing that wording', async () => {
+    const f = await setup();
+    const bob = f.subjects.createSubject({ kind: 'person', name: 'Bob Talgrund' });
+    const w = f.knowledge.write({ text: 'Approves the budget', subjectName: 'Bob Talgrund', subjectKind: 'person', sourceChannel: 'user', sourceUntrusted: false });
+    expect(w.subjectId).toBe(bob);
+    f.engine.getDb().prepare('INSERT INTO entry_sources (entry_id, thread_id, text) VALUES (?, ?, ?)')
+      .run(w.id, 'thread-x', f.engine.enc('Approves the budget together with Anna Wiesental'));
+    const p = plan(f.deps, f.anna);
+    expect(p.entries.find(e => e.id === w.id)).toMatchObject({ matchedBy: 'mention', text: 'Approves the budget together with Anna Wiesental' });
+  });
+
+  it('runs the steps with secure_delete, restores the setting, and folds the logs in', async () => {
+    const f = await setup();
+    const raw = f.engine.getDb();
+    const legacyRaw = (f.legacy as unknown as { db: Database.Database }).db;
+    raw.pragma('secure_delete = OFF');
+    legacyRaw.pragma('secure_delete = OFF');
+    const seen: number[] = [];
+    const real = f.legacy.eraseForPerson.bind(f.legacy);
+    vi.spyOn(f.legacy, 'eraseForPerson').mockImplementation((ids, ents) => {
+      seen.push(raw.pragma('secure_delete', { simple: true }) as number, legacyRaw.pragma('secure_delete', { simple: true }) as number);
+      return real(ids, ents);
+    });
+    const p = plan(f.deps, f.anna);
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    expect(seen).toEqual([1, 1]);
+    expect(raw.pragma('secure_delete', { simple: true })).toBe(0);
+    expect(legacyRaw.pragma('secure_delete', { simple: true })).toBe(0);
+    expect(r.scrubbed).toBe(true);
+  });
+
+  it('says so when the log could not be folded in, and still reports the erasure', async () => {
+    const f = await setup();
+    vi.spyOn(f.engine, 'checkpointTruncate').mockReturnValueOnce(false);
+    const p = plan(f.deps, f.anna);
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    expect(r).toMatchObject({ erased: true, scrubbed: false });
+  });
+});
+
 describe('personMatcher', () => {
   it('matches whole words, case-insensitive', () => {
     const m = personMatcher(['Anna Wiesental', 'anna@wiesental.invalid']);

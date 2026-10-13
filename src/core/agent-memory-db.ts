@@ -995,6 +995,58 @@ export class AgentMemoryDb {
   }
 
   /**
+   * The person entities this store holds under one of `names` (canonical name or an alias,
+   * case-insensitive after NFKC), and the memories that mention them. This store's own link
+   * between a memory and a person; it exists whether or not the engine.db subject graph is on.
+   */
+  personEntitiesForErasure(names: readonly string[]): { entityIds: string[]; memoryIds: string[] } {
+    const fold = (s: string): string => s.normalize('NFKC').trim().toLowerCase();
+    const wanted = new Set(names.map(fold).filter(n => n.length > 0));
+    const rows = this.db.prepare("SELECT id, canonical_name, aliases FROM entities WHERE entity_type = 'person'")
+      .all() as Array<{ id: string; canonical_name: string; aliases: string }>;
+    const entityIds = rows.filter(r => {
+      let aliases: unknown = [];
+      try { aliases = JSON.parse(r.aliases); } catch { /* a malformed list names nothing */ }
+      const forms = [r.canonical_name, ...(Array.isArray(aliases) ? aliases.filter((a): a is string => typeof a === 'string') : [])];
+      return forms.some(f => wanted.has(fold(f)));
+    }).map(r => r.id);
+    const byEntity = this.db.prepare('SELECT memory_id FROM mentions WHERE entity_id = ?');
+    const memoryIds = new Set<string>();
+    for (const id of entityIds) for (const r of byEntity.all(id) as Array<{ memory_id: string }>) memoryIds.add(r.memory_id);
+    return { entityIds, memoryIds: [...memoryIds] };
+  }
+
+  /**
+   * Erase the given memories and entities in one transaction: {@link purgeMemoriesByIds} for the
+   * memories, then each entity with its mentions, relations and cooccurrences, whether or not a
+   * surviving memory still mentions it (that memory keeps its text; it loses the link).
+   * Returns the number of memories deleted.
+   */
+  eraseForPerson(memoryIds: string[], entityIds: readonly string[]): number {
+    return this.transaction(() => {
+      const deleted = this.purgeMemoriesByIds(memoryIds);
+      for (const id of entityIds) this.deleteEntity(id);
+      return deleted;
+    });
+  }
+
+  /**
+   * Overwrite deleted content in the file (`secure_delete`) while `on`. SQLite otherwise leaves
+   * a deleted row's bytes in free pages until they are reused. Returns the previous setting.
+   */
+  setSecureDelete(on: boolean): boolean {
+    const before = this.db.pragma('secure_delete', { simple: true }) === 1;
+    this.db.pragma(`secure_delete = ${on ? 'ON' : 'OFF'}`);
+    return before;
+  }
+
+  /** Fold the write-ahead log into the file and truncate it. False when a reader kept it from finishing. */
+  checkpointTruncate(): boolean {
+    const r = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
+    return r[0]?.busy === 0;
+  }
+
+  /**
    * All active memories, newest first, across every scope (capped). Part of the debug-export
    * snapshot: it answers "what facts does this tenant's LEGACY memory hold" for diagnosing
    * cross-subject bleed / poisoning, so it is deliberately scope-INDEPENDENT (unlike

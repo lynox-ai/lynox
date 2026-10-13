@@ -8,7 +8,10 @@
  *
  * What it finds, in two groups:
  *  - bound to the person: durable entries and memories attached to the subject or to a shell
- *    merged into it. These always go with the person.
+ *    merged into it, and legacy memories linked to a legacy person entity under the person's
+ *    name or an alias (that store's own link, there whether or not the subject graph is on).
+ *    These always go with the person, and so do those legacy entities.
+ *    The person is found by their subject: someone the legacy store alone knows is not reached.
  *  - name matches: an unresolved `subject_hint`, or the name, an alias or the email in the
  *    text. Shown, never selected on their own: "Anna" can be another Anna. Each goes only when
  *    the owner names it.
@@ -16,7 +19,9 @@
  * The order is what makes a retry finish what a failure left: durable entries, then the legacy
  * memories, then their engine.db stubs (the store the ids are derived from goes last), then the
  * subject itself, whose id is what a retry starts from. A failed step stops the run; the steps
- * after it do not run. Every step is idempotent.
+ * after it do not run. Every step is idempotent. The steps run with `secure_delete` on, and after
+ * the last one the write-ahead logs are folded in and truncated (`scrubbed` says whether that
+ * finished), so the deleted text does not stay behind in free pages or the log.
  *
  * What it does not reach is part of every answer ({@link PERSON_ERASURE_NOT_COVERED}).
  */
@@ -36,11 +41,14 @@ export const PERSON_ERASURE_CONFIRM = 'ERASE_PERSON';
 export const PERSON_ERASURE_NOT_COVERED = [
   'backups',
   'exports',
-  'chat_history',
+  'chat_and_run_history',
+  'agent_questions',
   'mail',
   'crm_records',
   'flat_file_memory',
   'tasks_and_automations',
+  'change_ledger',
+  'other_relationships',
   'files',
   'debug_capture',
   'measurement_logs',
@@ -55,9 +63,9 @@ export type PersonErasureNotCovered = typeof PERSON_ERASURE_NOT_COVERED[number];
  * `DATA_DIR_INVENTORY` fails the test until it is decided here.
  */
 export const PERSON_ERASURE_REACH: Readonly<Record<string, ReadonlyArray<'covered' | PersonErasureNotCovered> | { none: string }>> = {
-  'engine.db': ['covered', 'tasks_and_automations', 'audit_log'],
+  'engine.db': ['covered', 'tasks_and_automations', 'agent_questions', 'change_ledger', 'other_relationships', 'audit_log'],
   'agent-memory.db': ['covered'],
-  'history.db': ['chat_history'],
+  'history.db': ['chat_and_run_history'],
   'datastore.db': ['crm_records'],
   'mail-state.db': ['mail'],
   'memory': ['flat_file_memory'],
@@ -122,6 +130,8 @@ export interface PersonErasureResult {
   /** The failed step's error, unmasked; the route masks it before it leaves. */
   error: string | null;
   counts: { entries: number; legacyMemories: number; memoryStubs: number; subjects: number };
+  /** Whether the write-ahead logs were folded in and truncated after the erasure. */
+  scrubbed: boolean;
   /** Name matches the owner did not select: they stay. */
   left: { entries: number; memories: number; blocks: MemoryBlockId[] };
   notCovered: readonly PersonErasureNotCovered[];
@@ -152,6 +162,7 @@ export function personMatcher(forms: readonly string[]): (text: string) => boole
 }
 
 type Resolved = { canonical: string; shells: string[]; name: string; aliases: string[]; forms: string[] };
+type Collected = { preview: PersonErasurePreview; entityIds: string[]; stubsBeforeLegacy: string[] };
 
 function resolve(deps: PersonErasureDeps, subjectId: string): Resolved | PersonErasureRefusal {
   const canonical = deps.subjects.resolveActiveSubject(subjectId);
@@ -171,14 +182,37 @@ function resolve(deps: PersonErasureDeps, subjectId: string): Resolved | PersonE
   return { canonical, shells, name: row.name, aliases: [...aliases], forms };
 }
 
-function planOf(deps: PersonErasureDeps, r: Resolved, entries: PersonErasureEntry[], memories: PersonErasureMemory[]): string {
+function planOf(deps: PersonErasureDeps, r: Resolved, entries: PersonErasureEntry[], memories: PersonErasureMemory[], entityIds: readonly string[]): string {
   return deps.engineDb.keyedHash([
     'person-erasure:v1',
     r.canonical,
     ...[...r.shells].sort().map(id => `s:${id}`),
     ...entries.map(e => `e:${e.id}:${e.matchedBy}`).sort(),
     ...memories.map(m => `m:${m.id}:${m.matchedBy}`).sort(),
+    ...[...entityIds].sort().map(id => `n:${id}`),
   ]);
+}
+
+function collect(deps: PersonErasureDeps, subjectId: string): Collected | PersonErasureRefusal {
+  const r = resolve(deps, subjectId);
+  if ('refused' in r) return r;
+  const ids = new Set([r.canonical, ...r.shells]);
+  const matches = personMatcher(r.forms);
+  const entries = deps.knowledge.erasureCandidates(ids, matches);
+  const found = deps.layer.erasureMemoryCandidates(ids, [r.name, ...r.aliases], matches);
+  const memories = found.memories.map(m => ({ ...m, text: deps.mask(m.text) }));
+  return {
+    preview: {
+      subject: { id: r.canonical, name: r.name, aliases: r.aliases },
+      entries,
+      memories,
+      blocksMentioning: deps.knowledge.blocksMentioning(matches),
+      plan: planOf(deps, r, entries, memories, found.entityIds),
+      notCovered: PERSON_ERASURE_NOT_COVERED,
+    },
+    entityIds: found.entityIds,
+    stubsBeforeLegacy: found.stubsBeforeLegacy,
+  };
 }
 
 /**
@@ -186,20 +220,8 @@ function planOf(deps: PersonErasureDeps, r: Resolved, entries: PersonErasureEntr
  * cannot be read: a search that cannot read the rows must not answer "nothing found".
  */
 export function previewPersonErasure(deps: PersonErasureDeps, subjectId: string): PersonErasurePreview | PersonErasureRefusal {
-  const r = resolve(deps, subjectId);
-  if ('refused' in r) return r;
-  const ids = new Set([r.canonical, ...r.shells]);
-  const matches = personMatcher(r.forms);
-  const entries = deps.knowledge.erasureCandidates(ids, matches);
-  const memories = deps.layer.erasureMemoryCandidates(ids, matches).map(m => ({ ...m, text: deps.mask(m.text) }));
-  return {
-    subject: { id: r.canonical, name: r.name, aliases: r.aliases },
-    entries,
-    memories,
-    blocksMentioning: deps.knowledge.blocksMentioning(matches),
-    plan: planOf(deps, r, entries, memories),
-    notCovered: PERSON_ERASURE_NOT_COVERED,
-  };
+  const c = collect(deps, subjectId);
+  return 'refused' in c ? c : c.preview;
 }
 
 /**
@@ -216,8 +238,9 @@ export function erasePerson(
     beforeErase?: (counts: { entries: number; memories: number }) => void;
   },
 ): PersonErasureResult | PersonErasureRefusal {
-  const preview = previewPersonErasure(deps, input.subjectId);
-  if ('refused' in preview) return preview;
+  const collected = collect(deps, input.subjectId);
+  if ('refused' in collected) return collected;
+  const { preview } = collected;
   if (preview.plan !== input.plan) return { refused: 'plan_changed' };
 
   const entryCandidates = new Set(preview.entries.map(e => e.id));
@@ -245,6 +268,7 @@ export function erasePerson(
     done: [],
     failed: null,
     error: null,
+    scrubbed: false,
     counts: { entries: 0, legacyMemories: 0, memoryStubs: 0, subjects: 0 },
     left: {
       entries: preview.entries.length - entryIds.length,
@@ -260,7 +284,14 @@ export function erasePerson(
       for (const id of entryIds) if (deps.knowledge.deleteEntry(id)) n++;
       result.counts.entries = n;
     }],
-    ['memories_legacy', () => { result.counts.legacyMemories = deps.layer.purgeLegacyMemoriesForErasure(memoryIds); }],
+    // A memory bound only through the legacy entity link loses that link with its legacy row, so
+    // its stub goes first; the person's legacy entities go with the legacy rows.
+    ['memories_legacy', () => {
+      const selected = new Set(memoryIds);
+      const first = collected.stubsBeforeLegacy.filter(id => selected.has(id));
+      if (first.length > 0) deps.layer.purgeMemoryStubsForErasure(first);
+      result.counts.legacyMemories = deps.layer.purgeLegacyMemoriesForErasure(memoryIds, collected.entityIds);
+    }],
     ['memories_engine', () => { result.counts.memoryStubs = deps.layer.purgeMemoryStubsForErasure(memoryIds); }],
     // Counted as the person's subjects that are gone afterwards: the engine.db step's orphan
     // reap can already have taken one that nothing else held.
@@ -269,16 +300,33 @@ export function erasePerson(
       result.counts.subjects = personSubjects.filter(id => deps.subjects.getSubject(id) === null).length;
     }],
   ];
-  for (const [step, run] of steps) {
-    try {
-      run();
-      result.done.push(step);
-    } catch (err: unknown) {
-      result.failed = step;
-      result.error = err instanceof Error ? err.message : String(err);
-      return result;
+  // While the steps run, SQLite overwrites what they delete instead of leaving it in free pages.
+  const legacyDb = deps.layer.getDb();
+  const engineBefore = deps.engineDb.setSecureDelete(true);
+  const legacyBefore = legacyDb.setSecureDelete(true);
+  try {
+    for (const [step, run] of steps) {
+      try {
+        run();
+        result.done.push(step);
+      } catch (err: unknown) {
+        result.failed = step;
+        result.error = err instanceof Error ? err.message : String(err);
+        return result;
+      }
     }
+  } finally {
+    deps.engineDb.setSecureDelete(engineBefore);
+    legacyDb.setSecureDelete(legacyBefore);
   }
   result.erased = true;
+  // The write-ahead log still holds the pages as they were before the delete; folding it into
+  // the file and truncating it takes those copies out. A reader can keep it from finishing,
+  // which does not undo the erasure and is said in the answer.
+  try {
+    result.scrubbed = deps.engineDb.checkpointTruncate() && legacyDb.checkpointTruncate();
+  } catch {
+    result.scrubbed = false;
+  }
   return result;
 }

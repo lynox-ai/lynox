@@ -1341,7 +1341,8 @@ export class KnowledgeStore {
   /**
    * The entries a person erasure would show, whatever their status: attached to one of
    * `subjectIds` (`subject`), carrying an unresolved `subject_hint` that `matches` (`hint`), or
-   * whose text `matches` (`mention`). Texts are masked for display. Every text is read, so an
+   * whose text, or one conversation's own wording of it (`entry_sources`), `matches`
+   * (`mention`). Texts are masked for display. Every text is read, so an
    * entry this key cannot decrypt throws {@link UndecryptableTextError} rather than counting as
    * no match.
    */
@@ -1352,13 +1353,21 @@ export class KnowledgeStore {
       'SELECT id, status, text, subject_id, subject_hint FROM knowledge_entries ORDER BY created_at, id',
     ).all() as Array<{ id: string; status: KnowledgeStatus; text: string; subject_id: string | null; subject_hint: string | null }>;
     const out: Array<{ id: string; status: KnowledgeStatus; text: string; matchedBy: 'subject' | 'hint' | 'mention' }> = [];
+    // The first matching wording per entry: shown when the entry's own text does not name them.
+    const namedInSource = new Map<string, string>();
+    for (const src of this.db.prepare('SELECT entry_id, text FROM entry_sources').all() as Array<{ entry_id: string; text: string }>) {
+      const text = this.engine.tryDec(src.text);
+      if (text === null) throw new UndecryptableTextError('durable knowledge sources');
+      if (matches(text) && !namedInSource.has(src.entry_id)) namedInSource.set(src.entry_id, text);
+    }
     for (const r of rows) {
       const text = this.engine.tryDec(r.text);
       if (text === null) throw new UndecryptableTextError('durable knowledge');
       const matchedBy = r.subject_id !== null && subjectIds.has(r.subject_id) ? 'subject'
         : r.subject_hint !== null && matches(r.subject_hint) ? 'hint'
-          : matches(text) ? 'mention' : null;
-      if (matchedBy !== null) out.push({ id: r.id, status: r.status, text: this._maskText(text), matchedBy });
+          : matches(text) || namedInSource.has(r.id) ? 'mention' : null;
+      const shown = matchedBy === 'mention' && !matches(text) ? namedInSource.get(r.id) ?? text : text;
+      if (matchedBy !== null) out.push({ id: r.id, status: r.status, text: this._maskText(shown), matchedBy });
     }
     return out;
   }

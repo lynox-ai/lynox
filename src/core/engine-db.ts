@@ -1296,6 +1296,19 @@ export class EngineDb {
     return h.digest('hex');
   }
 
+  /** Same as `AgentMemoryDb.setSecureDelete`, for engine.db. Returns the previous setting. */
+  setSecureDelete(on: boolean): boolean {
+    const before = this.db.pragma('secure_delete', { simple: true }) === 1;
+    this.db.pragma(`secure_delete = ${on ? 'ON' : 'OFF'}`);
+    return before;
+  }
+
+  /** Fold the write-ahead log into the file and truncate it. False when a reader kept it from finishing. */
+  checkpointTruncate(): boolean {
+    const r = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
+    return r[0]?.busy === 0;
+  }
+
   /**
    * Decrypt text from storage, or `null` when it is encrypted and cannot be read (no key, wrong
    * key, corrupted). {@link dec} returns the ciphertext in that case, which a text search reads

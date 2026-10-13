@@ -10,11 +10,14 @@
 export const PERSON_ERASURE_NOT_COVERED = [
 	'backups',
 	'exports',
-	'chat_history',
+	'chat_and_run_history',
+	'agent_questions',
 	'mail',
 	'crm_records',
 	'flat_file_memory',
 	'tasks_and_automations',
+	'change_ledger',
+	'other_relationships',
 	'files',
 	'debug_capture',
 	'measurement_logs',
@@ -50,6 +53,7 @@ export interface PersonErasureResult {
 	erased: boolean;
 	done: PersonErasureStep[];
 	failed: PersonErasureStep | null;
+	scrubbed: boolean;
 	counts: { entries: number; legacyMemories: number; memoryStubs: number; subjects: number };
 	left: { entries: number; memories: number; blocks: Array<'profile' | 'playbook'> };
 	notCovered: PersonErasureNotCovered[];
