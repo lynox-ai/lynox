@@ -11,6 +11,7 @@ import {
   withWireRules,
   isWireShaped,
   isCutOffReply,
+  ForcedToolInBatchError,
 } from './llm-wire-rules.js';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_CAPABILITIES } from '../types/models.js';
@@ -130,6 +131,7 @@ function fakeClient(reply: { content: Array<{ type: string; name?: string; text?
     create: (p: Record<string, unknown>) => { sent.push(p); return Promise.resolve(reply); },
     stream: (p: Record<string, unknown>) => { sent.push(p); return { finalMessage: () => Promise.resolve(reply) }; },
     countTokens: (p: Record<string, unknown>) => { sent.push(p); return Promise.resolve({ input_tokens: 1 }); },
+    batches: { create: (p: Record<string, unknown>) => { sent.push(p); return Promise.resolve({ id: 'batch' }); } },
   });
   const client = { messages: surface(), beta: { messages: surface() } } as unknown as Anthropic;
   return { client, sent };
@@ -191,6 +193,43 @@ describe('withWireRules', () => {
   });
 });
 
+describe('batches', () => {
+  type Batch = { requests: Array<{ custom_id: string; params: Record<string, unknown> }> };
+  const req = (custom_id: string, params: Record<string, unknown>) => ({ custom_id, params });
+
+  it('shapes every request of a batch, on both surfaces, and leaves a model without rules as it was', async () => {
+    const { client, sent } = fakeClient({ content: [] });
+    const c = withWireRules(client) as unknown as { messages: { batches: { create: (p: unknown) => Promise<unknown> } }; beta: { messages: { batches: { create: (p: unknown) => Promise<unknown> } } } };
+    const untouched = { model: 'claude-sonnet-4-6', temperature: 0, max_tokens: 10 };
+    const batch = { requests: [req('a', { model: 'claude-sonnet-5-5', temperature: 0, thinking: { type: 'disabled' } }), req('b', untouched)] };
+    await c.messages.batches.create(batch);
+    await c.beta.messages.batches.create(batch);
+    expect(sent).toHaveLength(2);
+    for (const s of sent as unknown as Batch[]) {
+      expect(s.requests[0]!.params).not.toHaveProperty('temperature');
+      expect(s.requests[0]!.params['thinking']).toEqual({ type: 'between_tools' });
+      expect(s.requests[1]!.params).toBe(untouched);
+    }
+  });
+
+  it('refuses, before sending, a batch request that forces a tool on a model that rejects it', async () => {
+    const { client, sent } = fakeClient({ content: [] });
+    const c = withWireRules(client) as unknown as { messages: { batches: { create: (p: unknown) => unknown } } };
+    const batch = { requests: [req('ok', { model: 'claude-sonnet-4-6', tool_choice: TOOL }), req('forced', { model: 'claude-opus-5-5', tool_choice: TOOL })] };
+    expect(() => c.messages.batches.create(batch)).toThrow(ForcedToolInBatchError);
+    expect(() => c.messages.batches.create(batch)).toThrow(/batch request "forced"/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reaches the batches surface of a real SDK client from createLLMClient', () => {
+    // The fake above has the shape the wrapper looks for; this shows the SDK's own
+    // client has it too. The refusal throws before any network call.
+    const c = createLLMClient({ provider: 'anthropic', apiKey: 'test-key' }) as unknown as { messages: { batches: { create: (p: unknown) => unknown } } };
+    const batch = { requests: [req('forced', { model: 'claude-opus-5-5', max_tokens: 1, messages: [], tool_choice: TOOL })] };
+    expect(() => c.messages.batches.create(batch)).toThrow(ForcedToolInBatchError);
+  });
+});
+
 describe('every Claude-wire client is built shaped', () => {
   it('createLLMClient returns a shaped client on each Anthropic branch', () => {
     expect(isWireShaped(createLLMClient({ provider: 'anthropic', apiKey: 'test-key' }))).toBe(true);
@@ -224,6 +263,39 @@ describe('every Claude-wire client is built shaped', () => {
       expect(s, s).toMatch(/^core\/llm-client\.ts:\d+:/);
       expect(s, `${s} is not routed through withWireRules`).toMatch(/withWireRules\(new /);
     }
+  });
+});
+
+describe('every raw call to the Messages API is shaped', () => {
+  it('the set of places that build a Messages URL outside the SDK is pinned, and each sends a shaped body', () => {
+    // ⛔ A probe that posts to the Messages API with fetch is outside the client boundary,
+    // whatever wrapper it fetches through. The scan keys on the URL, not on the call: any
+    // string in code that ends in `/messages`, or continues with a query or a sub-path (an
+    // Anthropic or custom Anthropic-wire endpoint), must have a body built with
+    // shapeRequestForModel within the next lines. Only a line that builds a URL counts
+    // (`://` or a template `${…}`), so the SDK's own module paths do not; a line quoting a
+    // route path of lynox's own API (`/api/…`) is skipped whole. A URL assembled further
+    // from its body, or ending in a variable, is not seen.
+    const root = join(__dirname, '..');
+    const sites: Array<{ at: string; body: string }> = [];
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) { walk(p); continue; }
+        if (!p.endsWith('.ts') || p.endsWith('.test.ts') || p.endsWith('.d.ts')) continue;
+        const lines = readFileSync(p, 'utf8').split('\n');
+        lines.forEach((line, i) => {
+          if (/^\s*(\/\/|\*)/.test(line)) return;
+          if (!/\/messages(['"`?]|\/)/.test(line) || !/:\/\/|\$\{/.test(line) || /['"`]\/api\//.test(line)) return;
+          const body = lines.slice(i, i + 12).find(l => /\bbody:/.test(l)) ?? '';
+          sites.push({ at: `${relative(root, p)}:${String(i + 1)}`, body: body.trim() });
+        });
+      }
+    };
+    walk(root);
+    // Positive control: the scan finds the known probes at all.
+    expect(sites.map(s => s.at.replace(/:\d+$/, '')).sort()).toEqual(['cli/docker-installer.ts', 'server/http-api.ts', 'server/http-api.ts']);
+    for (const s of sites) expect(s.body, `${s.at} sends a body that is not shaped`).toMatch(/body: JSON\.stringify\(shapeRequestForModel\(/);
   });
 });
 

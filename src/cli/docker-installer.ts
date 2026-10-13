@@ -14,6 +14,7 @@ import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { BOLD, DIM, GREEN, RED, YELLOW, RESET } from './ansi.js';
+import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import { confirm, readSecret, select } from './interactive.js';
 import { renderGradientArt } from './ui.js';
 import { writeFileAtomicSync } from '../core/atomic-write.js';
@@ -113,11 +114,11 @@ export async function validateAnthropicKey(key: string): Promise<KeyValidation> 
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
+      body: JSON.stringify(shapeRequestForModel({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1,
         messages: [{ role: 'user', content: 'hi' }],
-      }),
+      }).params),
       signal: AbortSignal.timeout(10_000),
     });
     if (res.ok) return { state: 'valid' };
