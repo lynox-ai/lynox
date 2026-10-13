@@ -224,7 +224,7 @@ export const PER_TYPE_CRM_DEFAULTS: Record<MailAccountType, PerTypeCrmPolicy> = 
 // gets caught in review.
 
 export interface TaskCreationSafetyPolicy {
-  /** Never auto-create a task without user confirmation OR matching pre-approval. */
+  /** Never auto-create a task without user confirmation. */
   requireConfirmation: boolean;
   /** Hard cap on mail-derived auto-created tasks per 24h window. */
   maxAutoTasksPerDay: number;

@@ -3,7 +3,7 @@ import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/message
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { AbortScope } from '../types/config.js';
 import type { IMemory } from '../types/memory.js';
@@ -787,7 +787,6 @@ export async function spawnViaAgent(
   config: LynoxUserConfig,
   gateAdapter: GateAdapter | undefined,
   runId: string,
-  preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   parentPrompt?: SubAgentPromptHandles | undefined,
   userTimezone?: string | undefined,
@@ -950,7 +949,6 @@ export async function spawnViaAgent(
     gcpProjectId: config.gcp_project_id,
     gcpRegion: config.gcp_region,
     openaiModelId: creds.crossProviderSlot ? creds.openaiModelId : config.openai_model_id,
-    preApproval,
     autonomy,
     capabilityContract,
     // One flag governs the whole run: a step on a DK-on tenant must stand its
@@ -1078,7 +1076,6 @@ export async function spawnInline(
   stepContext: Record<string, unknown>,
   config: LynoxUserConfig,
   parentTools: ToolEntry[],
-  preApproval?: PreApprovalSet | undefined,
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   parentToolContext?: ToolContext | undefined,
   parentPrompt?: SubAgentPromptHandles | undefined,
@@ -1276,7 +1273,6 @@ export async function spawnInline(
     gcpProjectId: config.gcp_project_id,
     gcpRegion: config.gcp_region,
     openaiModelId: creds.crossProviderSlot ? creds.openaiModelId : config.openai_model_id,
-    preApproval,
     autonomy,
     capabilityContract,
     // One flag governs the whole run (mirror of spawn.ts:555): this step shares

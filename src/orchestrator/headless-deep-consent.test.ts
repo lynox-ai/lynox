@@ -215,14 +215,14 @@ describe('composition with resolveRunModel (the ceiling re-application)', () => 
 describe('spawnInline wiring (run_workflow inline steps)', () => {
   it('runs a model:deep step on balanced when the session is autonomous', async () => {
     const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
-    await spawnInline(step, {}, mockConfig, mockParentTools, undefined, 'autonomous');
+    await spawnInline(step, {}, mockConfig, mockParentTools, 'autonomous');
     expect(agentModelOfCall(0)).toBe(getModelId('balanced', PROVIDER));
   });
 
   it('honors a fast max_tier ceiling even when the step asked for deep (no escalation)', async () => {
     const cfg = { api_key: 'test-key', max_tier: 'fast' } as unknown as LynoxUserConfig;
     const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
-    await spawnInline(step, {}, cfg, mockParentTools, undefined, 'autonomous');
+    await spawnInline(step, {}, cfg, mockParentTools, 'autonomous');
     expect(agentModelOfCall(0)).toBe(getModelId('fast', PROVIDER));
   });
 
@@ -235,7 +235,7 @@ describe('spawnInline wiring (run_workflow inline steps)', () => {
   it('refuses a deep-band raw id step when autonomous', async () => {
     const pinned = getModelId('deep', PROVIDER);
     const step = { id: 's1', task: 'do', model: pinned } as unknown as ManifestStep;
-    await expect(spawnInline(step, {}, mockConfig, mockParentTools, undefined, 'autonomous'))
+    await expect(spawnInline(step, {}, mockConfig, mockParentTools, 'autonomous'))
       .rejects.toThrow(/cannot run autonomously without explicit consent/);
     expect(vi.mocked(Agent).mock.calls).toHaveLength(0);
   });
@@ -340,13 +340,13 @@ describe('spawnViaAgent wiring (saved/agent steps)', () => {
 
   it('clamps a deep agent default to balanced when the session is autonomous', async () => {
     const step = { id: 's1', agent: 'worker', task: 'do' } as unknown as ManifestStep;
-    await spawnViaAgent(step, agentDefDeep, {}, mockConfig, undefined, 'run-1', undefined, 'autonomous');
+    await spawnViaAgent(step, agentDefDeep, {}, mockConfig, undefined, 'run-1', 'autonomous');
     expect(agentModelOfCall(0)).toBe(getModelId('balanced', PROVIDER));
   });
 
   it('clamps a deep agent default through an empty model string (the empty-string bypass)', async () => {
     const step = { id: 's1', agent: 'worker', task: 'do', model: '' } as unknown as ManifestStep;
-    await spawnViaAgent(step, agentDefDeep, {}, mockConfig, undefined, 'run-1', undefined, 'autonomous');
+    await spawnViaAgent(step, agentDefDeep, {}, mockConfig, undefined, 'run-1', 'autonomous');
     expect(agentModelOfCall(0)).toBe(getModelId('balanced', PROVIDER));
   });
 

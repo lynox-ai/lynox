@@ -13,9 +13,6 @@ const CHANNEL_GROUPS: Record<string, string> = {
   'lynox:cost:warning':            'cost',
   'lynox:llm:call':                'llm',
   'lynox:goal:update':             'goal',
-  'lynox:preapproval:match':       'preapproval',
-  'lynox:preapproval:exhausted':   'preapproval',
-  'lynox:preapproval:expired':     'preapproval',
   'lynox:dag:notify':              'dag',
 
   'lynox:memory:store':            'memory',
@@ -105,11 +102,6 @@ function formatMessage(channelName: string, msg: unknown): string {
       const goal = data['goal'] as Record<string, unknown> | undefined;
       return `[${ts}] ${padded}  status=${s(goal?.['status'])} completed=${s(goal?.['completedCount'])}/${s(goal?.['totalCount'] ?? '?')} cost=$${s(goal?.['totalCost'])}`;
     }
-
-    case 'lynox:preapproval:match':
-    case 'lynox:preapproval:exhausted':
-    case 'lynox:preapproval:expired':
-      return `[${ts}] ${padded}  tool=${s(data['toolName'])} set=${s(data['setId'])} pattern=${s(data['pattern'] ?? 'n/a')}`;
 
     case 'lynox:dag:notify':
       return `[${ts}] ${padded}  manifest=${s(data['manifestName'])} step=${s(data['stepId'])} error=${trunc(s(data['error']), 200)}`;

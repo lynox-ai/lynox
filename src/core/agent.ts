@@ -13,10 +13,8 @@ import type {
   ProviderConfigSnapshot,
   EffortLevel,
   AutonomyLevel,
-  PreApprovalSet,
   CapabilityContract,
   GoverningContract,
-  PreApproveAuditLike,
   SecretStoreLike,
   ChangesetManagerLike,
   LLMProvider,
@@ -556,8 +554,6 @@ export class Agent implements IAgent {
    */
   private _pendingDowngradeTier: import('../types/models.js').ModelTier | undefined;
   readonly autonomy: AutonomyLevel | undefined;
-  private readonly preApproval: PreApprovalSet | undefined;
-  private readonly audit: PreApproveAuditLike | undefined;
   /**
    * Capability contract authorising this agent's headless outbound writes;
    * `undefined` = the safe autonomous-deny default (PRD §4.2). Private on purpose:
@@ -1296,9 +1292,7 @@ export class Agent implements IAgent {
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.autonomy = config.autonomy;
-    this.preApproval = config.preApproval;
     this.capabilityContract = config.capabilityContract;
-    this.audit = config.audit;
     this.knowledgeContext = config.knowledgeContext;
     this.memoryBlocks = config.memoryBlocks;
     this._durableMemoryEnabled = config.durableMemoryEnabled === true;
@@ -4189,7 +4183,7 @@ export class Agent implements IAgent {
     let downgradeDecision: import('../types/models.js').ModelTier | undefined;
     const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerousDetailed(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.governingContract().contract);
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     if (effectiveSignal) {

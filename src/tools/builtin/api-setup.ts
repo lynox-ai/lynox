@@ -1535,7 +1535,7 @@ const apiSetupEntry: ToolEntry<ApiSetupInput> = {
   // `fetch_token` posts to the provider's token endpoint and may rotate the refresh token there.
   outwardWrite: (input) => (input.action === 'fetch_token' ? 'fetch_token' : null),
   // `delete` removes a profile and the tokens its sign-in stored. Under `autonomous` the guard
-  // raises `[BLOCKED]`, which no pre-approval or contract lifts: refused without a prompt
+  // raises `[BLOCKED]`, which no contract lifts: refused without a prompt
   // channel, a generic question with one. Interactively the handler asks its own question,
   // which names what is lost, so the guard adds none (`null`).
   destructive: {

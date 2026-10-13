@@ -1523,10 +1523,10 @@ describe('(285) delete asks the person before it removes anything', () => {
   });
 
   it('under autonomous the guard blocks a delete; interactively it adds no question of its own', () => {
-    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', undefined, undefined, apiSetupTool as never)).toBe('⚠ api_setup: delete [BLOCKED — destructive data operation needs your OK]');
-    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'guided', undefined, undefined, apiSetupTool as never)).toBeNull();
-    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'supervised', undefined, undefined, apiSetupTool as never)).toBeNull();
-    expect(isDangerous('api_setup', { action: 'view', id: 'crm-api' }, 'autonomous', undefined, undefined, apiSetupTool as never)).toBeNull();
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBe('⚠ api_setup: delete [BLOCKED — destructive data operation needs your OK]');
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'guided', apiSetupTool as never)).toBeNull();
+    expect(isDangerous('api_setup', { action: 'delete', id: 'crm-api' }, 'supervised', apiSetupTool as never)).toBeNull();
+    expect(isDangerous('api_setup', { action: 'view', id: 'crm-api' }, 'autonomous', apiSetupTool as never)).toBeNull();
   });
 });
 

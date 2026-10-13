@@ -675,53 +675,11 @@ describe('RunHistory', () => {
 
   // === v4 Pre-approval audit ===
 
-  it('v4 migration creates pre_approval_sets table', () => {
+  it('keeps the v4 pre-approval tables, which nothing writes any more', () => {
     const h = createHistory();
-    // If table doesn't exist, insertPreApprovalSet would throw
-    h.insertPreApprovalSet({
-      id: 'set-1',
-      taskSummary: 'test',
-      approvedBy: 'operator',
-      patternsJson: '[]',
-      maxUses: 10,
-      ttlMs: 0,
-    });
-    const sets = h.getPreApprovalSets();
-    expect(sets).toHaveLength(1);
-    expect(sets[0]!.id).toBe('set-1');
-    h.close();
-  });
-
-  it('v4 migration creates pre_approval_events table', () => {
-    const h = createHistory();
-    h.insertPreApprovalSet({
-      id: 'set-ev', taskSummary: 'test', approvedBy: 'operator',
-      patternsJson: '[]', maxUses: 10, ttlMs: 0,
-    });
-    h.insertPreApprovalEvent({
-      setId: 'set-ev', patternIdx: 0, toolName: 'bash',
-      matchString: 'npm run build', pattern: 'npm run *', decision: 'approved',
-    });
-    const events = h.getPreApprovalEvents('set-ev');
-    expect(events).toHaveLength(1);
-    expect(events[0]!.tool_name).toBe('bash');
-    h.close();
-  });
-
-  it('insertPreApprovalSet stores correct data', () => {
-    const h = createHistory();
-    // Create a run to satisfy FK
-    const runId = h.insertRun({ taskText: 'Test', modelTier: 'deep', modelId: 'claude-opus-4-6' });
-    h.insertPreApprovalSet({
-      id: 'set-full', taskSummary: 'Deploy',
-      approvedBy: 'operator', patternsJson: '[{"tool":"bash"}]',
-      maxUses: 5, ttlMs: 60000, runId,
-    });
-    const sets = h.getPreApprovalSets();
-    expect(sets[0]!.task_summary).toBe('Deploy');
-    expect(sets[0]!.max_uses).toBe(5);
-    expect(sets[0]!.ttl_ms).toBe(60000);
-    expect(sets[0]!.run_id).toBe(runId);
+    const db = (h as unknown as { db: { prepare(sql: string): { all(): Array<{ name: string }> } } }).db;
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'pre_approval_%' ORDER BY name").all().map(r => r.name);
+    expect(names).toEqual(['pre_approval_events', 'pre_approval_sets']);
     h.close();
   });
 
@@ -834,27 +792,6 @@ describe('RunHistory', () => {
       expect(h2).toBeDefined();
       h2.close();
     });
-  });
-
-  it('getPreApprovalSummary returns totals', () => {
-    const h = createHistory();
-    h.insertPreApprovalSet({
-      id: 'set-sum', taskSummary: 'test', approvedBy: 'operator',
-      patternsJson: '[]', maxUses: 10, ttlMs: 0,
-    });
-    h.insertPreApprovalEvent({
-      setId: 'set-sum', patternIdx: 0, toolName: 'bash',
-      matchString: 'a', pattern: 'x', decision: 'approved',
-    });
-    h.insertPreApprovalEvent({
-      setId: 'set-sum', patternIdx: 0, toolName: 'bash',
-      matchString: 'b', pattern: 'x', decision: 'exhausted',
-    });
-    const summary = h.getPreApprovalSummary('set-sum');
-    expect(summary).toBeDefined();
-    expect(summary!.total_matches).toBe(1);
-    expect(summary!.total_exhausted).toBe(1);
-    h.close();
   });
 
   // === v7 Pipeline runs & step results ===

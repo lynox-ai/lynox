@@ -2,14 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { join } from 'node:path';
-import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
+import type { ModelTier, LynoxUserConfig, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { resolveRunModel, effectiveTierModelId } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
 import type { SessionCounters } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
-import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
@@ -21,7 +20,7 @@ import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, promptBudgetLimit } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
-import { parallelStepCapFor } from './validate.js';
+import { parallelStepCapFor, PRE_APPROVE_REMOVED } from './validate.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -115,7 +114,7 @@ export interface RunManifestOptions {
   /**
    * Capability contract authorising this run's headless outbound writes.
    * RESERVED SEAM (Slice A1): threaded `runManifest` → spawners → `new Agent`
-   * → carried beside `autonomy`/`preApproval` at the `isDangerous` enforcement
+   * → carried beside `autonomy` at the `isDangerous` enforcement
    * point, but A1 attaches no enforcement logic — `undefined`/`null` = the safe
    * autonomous-deny default (PRD §4.2 S7). Slice B fills the shape + enforces.
    */
@@ -480,6 +479,13 @@ export async function runManifest(
       `Manifest "${manifest.name ?? '(unnamed)'}" has no agents — refusing to run. ` +
       `Pass it through validateManifest() before runManifest() to surface schema errors.`,
     );
+  }
+
+  // A manifest that skipped validateManifest() is refused here for the same reason the
+  // schema refuses it: ignoring the field would run the step without what it asked for.
+  const preApproving = manifest.agents.find(step => (step as { pre_approve?: unknown }).pre_approve !== undefined);
+  if (preApproving) {
+    throw new Error(`Invalid manifest: agents.${preApproving.id}.pre_approve: ${PRE_APPROVE_REMOVED}`);
   }
 
   assertGatesEnforceable(manifest, options.gateAdapter !== undefined);
@@ -1026,20 +1032,6 @@ async function executeStep(
 
     let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
 
-    // Build per-step pre-approval set if configured
-    let stepPreApproval: PreApprovalSet | undefined;
-    if (step.pre_approve?.length) {
-      const patterns: PreApprovalPattern[] = step.pre_approve.map(p => ({
-        tool: p.tool,
-        pattern: p.pattern,
-        label: `${p.tool}: ${p.pattern}`,
-        risk: p.risk ?? 'medium',
-      }));
-      stepPreApproval = buildApprovalSet(patterns, {
-        taskSummary: `DAG step: ${step.id}`,
-      });
-    }
-
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
@@ -1069,7 +1061,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.parentActiveScopes, options.abortScope, options.principal, options.chatOrigin);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -1081,7 +1073,7 @@ async function executeStep(
 
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint, options.abortScope, options.principal, options.parentToolContext, options.chatOrigin);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

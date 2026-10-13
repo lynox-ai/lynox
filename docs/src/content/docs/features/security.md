@@ -91,7 +91,7 @@ As an extra safety layer, the chat input detects common API key patterns (Anthro
 When lynox wants to perform a potentially impactful action (writing files, sending emails, executing commands), it asks for your approval first. The permission system ensures:
 
 - **Read operations** are generally allowed without prompting
-- **Write operations** require confirmation unless pre-approved
+- **Write operations** require confirmation; an unattended run refuses them unless a capability contract grants that exact request
 - **Network requests** are validated against SSRF protections
 - **System commands** require explicit approval
 

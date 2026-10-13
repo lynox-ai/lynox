@@ -6054,10 +6054,10 @@ describe('spawn_agent tool', () => {
       // Drives the REAL spawn_agent destructive.check through the REAL isDangerous —
       // not a synthetic toolEntry. A deep spawn in guided mode reaches the GO text;
       // autonomous does not gate (the handler clamps instead).
-      const guided = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', undefined, undefined, spawnAgentTool);
+      const guided = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool);
       expect(guided).not.toBeNull();
       expect(guided).toContain('DEEP');
-      const autonomous = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'autonomous', undefined, undefined, spawnAgentTool);
+      const autonomous = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'autonomous', spawnAgentTool);
       expect(autonomous).toBeNull();
     });
   });
@@ -6157,16 +6157,16 @@ describe('spawn_agent tool', () => {
     });
 
     it('isDangerousDetailed threads the payload (downgradeTo); isDangerous stays a plain string', () => {
-      const signal = isDangerousDetailed('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', undefined, undefined, spawnAgentTool);
+      const signal = isDangerousDetailed('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool);
       expect(signal).not.toBeNull();
       expect(signal!.warning).toContain('DEEP');
       expect(signal!.payload?.downgradeTo).toBe('balanced');
       // Legacy string view unchanged (287 existing assertions depend on it).
-      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', undefined, undefined, spawnAgentTool)).toContain('DEEP');
+      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', spawnAgentTool)).toContain('DEEP');
       // A non-destructive danger (bash) carries NO payload — only the declarative
       // gate produces one. Mutate extractDangerPayload to always read and a bash
       // danger would gain a spurious payload.
-      const bash = isDangerousDetailed('bash', { command: 'rm -rf /tmp/lynox-probe' }, 'guided', undefined, undefined, undefined);
+      const bash = isDangerousDetailed('bash', { command: 'rm -rf /tmp/lynox-probe' }, 'guided', undefined);
       expect(bash).not.toBeNull();
       expect(bash!.payload).toBeUndefined();
     });

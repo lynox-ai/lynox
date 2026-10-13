@@ -132,26 +132,18 @@ describe('validateManifest', () => {
     expect(result.on_failure).toBe('stop');
   });
 
-  it('validates ManifestStep with pre_approve field', () => {
-    const result = validateManifest({
-      ...validManifest,
-      agents: [{
-        id: 'step-1',
-        agent: 'agent-a',
-        runtime: 'mock',
-        pre_approve: [
-          { tool: 'bash', pattern: 'npm run *', risk: 'low' },
-          { tool: 'write_file', pattern: 'dist/**' },
-        ],
-      }],
-    });
-    expect(result.agents[0]!.pre_approve).toHaveLength(2);
-    expect(result.agents[0]!.pre_approve![0]!.tool).toBe('bash');
+  it('refuses a step that carries pre_approve, and says why', () => {
+    for (const pre_approve of [[{ tool: 'bash', pattern: 'npm run *' }], [], null]) {
+      expect(() => validateManifest({
+        ...validManifest,
+        agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock', pre_approve }],
+      })).toThrow(/agents\.0\.pre_approve: pre_approve is no longer supported/);
+    }
   });
 
   it('validates ManifestStep without pre_approve field', () => {
     const result = validateManifest(validManifest);
-    expect(result.agents[0]!.pre_approve).toBeUndefined();
+    expect('pre_approve' in result.agents[0]!).toBe(false);
   });
 });
 

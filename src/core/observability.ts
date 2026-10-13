@@ -25,9 +25,6 @@ export const channels = {
    *   { tier, provider, model_id }
    */
   llmCall:      channel('lynox:llm:call'),
-  preApprovalMatch:     channel('lynox:preapproval:match'),
-  preApprovalExhausted: channel('lynox:preapproval:exhausted'),
-  preApprovalExpired:   channel('lynox:preapproval:expired'),
   dagNotify:            channel('lynox:dag:notify'),
 
   memoryStore:          channel('lynox:memory:store'),

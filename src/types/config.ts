@@ -8,7 +8,7 @@ import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn, ToolCallRecorder } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
-import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
+import type { AutonomyLevel, CostGuardConfig } from './modes.js';
 import type { SecretStoreLike, IsolationConfig, NetworkPolicy } from './security.js';
 import type { CapabilityContract } from './capability-contract.js';
 
@@ -115,12 +115,10 @@ export interface AgentConfig {
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   autonomy?:           AutonomyLevel | undefined;
-  preApproval?:        PreApprovalSet | undefined;
-  audit?:              PreApproveAuditLike | undefined;
   /**
    * Capability contract authorising headless outbound writes. RESERVED SEAM
    * (Slice A1): stored on the Agent + carried to the `isDangerous` enforcement
-   * point beside `autonomy`/`preApproval`, but A1 attaches no logic —
+   * point beside `autonomy`, but A1 attaches no logic —
    * `undefined` = the safe autonomous-deny default (PRD §4.2). Slice B enforces.
    */
   capabilityContract?: CapabilityContract | undefined;
@@ -215,20 +213,6 @@ export interface AgentConfig {
 export interface ChangesetManagerLike {
   readonly active: boolean;
   backupBeforeWrite(filePath: string): void;
-}
-
-/** Minimal interface for PreApproveAudit to avoid circular deps */
-export interface PreApproveAuditLike {
-  recordCheck(event: {
-    setId: string;
-    patternIdx: number;
-    toolName: string;
-    matchString: string;
-    pattern: string;
-    decision: 'approved' | 'exhausted' | 'expired' | 'no_match';
-    autonomyLevel?: string | undefined;
-    runId?: string | undefined;
-  }): void;
 }
 
 // === 4.7 Beta Headers ===

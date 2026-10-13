@@ -2,16 +2,14 @@ import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod } from '../core/outbound-write.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
-import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry, WarningPayload } from '../types/index.js';
+import type { AutonomyLevel, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS } from '../core/workspace.js';
 import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
 import { channels } from '../core/observability.js';
-import { extractMatchString, globToRegex, patternRegex } from '../core/pre-approve.js';
+import { globToRegex } from '../core/glob.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
-
-// ── isCriticalTool — moved from pre-approve.ts ─────────────
 
 // lynox-internal secret files. Specific names, NOT the whole `~/.lynox/` dir — the agent may
 // still read the entries that are not marked secret, `apis/` among them. Prefix is fuzzy
@@ -102,65 +100,6 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
 // LYNOX_SECRET_FILES cannot match it). `~/.lynox/workspace/` is the agent's
 // default working area and stays available.
 const LYNOX_DIR = /\.lynox\/?$|\.lynox\/(?!workspace(\/|$))/i;
-
-/** Representative critical commands — used by isCriticalTool to detect dangerous glob patterns */
-const CRITICAL_COMMAND_SAMPLES = [
-  'rm -rf /',
-  'sudo apt install x',
-  'git push --force main',
-  'mkfs.ext4 /dev/sda',
-  'shutdown -h now',
-  'reboot',
-  'halt',
-  'echo x > /dev/sda1',
-  'printenv',
-  'env',
-  'cat /proc/1/environ',
-  'cat ~/.lynox/vault.db',
-  'cat ~/.lynox/http-secret',
-  'declare -x',
-  'export -p',
-  'set',
-];
-
-/** Critical patterns as regexes — used by isCriticalTool */
-const CRITICAL_REGEXES: RegExp[] = [
-  /\brm\s+-rf\s+\//i,
-  /\bsudo\b/i,
-  /\bgit\s+push\s+(?=.*--force)(?=.*main)/i,
-  /\bmkfs\b/i,
-  /\b(shutdown|reboot|halt)\b/i,
-  />\s*\/dev\/(?!null\b)/i,
-  /\bprintenv\b/i,
-  /^\s*env\s*$|\benv\b\s*[|>]/im,
-  /\/proc\/.*\/environ/i,
-  /\b(declare\s+-x|export\s+-p)\b/i,
-  /^\s*set\s*$|\bset\b\s*[|>]/im,
-  // A pre-approve glob that would suppress the lynox-secret confirm is itself critical.
-  ...LYNOX_SECRET_BASH.map((entry) => entry.pattern),
-];
-
-/**
- * Check if a pattern for a given tool would match any critical operation.
- * Used by `buildApprovalSet` to filter out dangerous patterns.
- */
-export function isCriticalTool(tool: string, pattern: string): boolean {
-  if (tool !== 'bash') return false;
-
-  const regex = globToRegex(pattern);
-
-  // Check against representative critical command samples
-  for (const sample of CRITICAL_COMMAND_SAMPLES) {
-    if (regex.test(sample)) return true;
-  }
-
-  // Also check if the glob text itself matches a critical regex
-  for (const critRegex of CRITICAL_REGEXES) {
-    if (critRegex.test(pattern)) return true;
-  }
-
-  return false;
-}
 
 // ── Permission guard ────────────────────────────────────────
 
@@ -281,15 +220,15 @@ const SENDS_OR_KEEPS_BASH: Array<{ pattern: RegExp; label: string }> = [
  *
  * Most rules match a program's name wherever it stands in the command, so a path or a search term
  * that spells it (`cat terraform/main.tf`) matches too. Under `block` that is a block; under
- * `ask`, a run with no one to ask refuses it unless `pre_approve` or a contract lifts it.
+ * `ask`, a run with no one to ask refuses it unless a contract lifts it.
  *
  * - `block`: every command the rule matches also matches CRITICAL_BASH, so it is `[BLOCKED]`.
- *   A block cannot be lifted by `pre_approve` or a capability contract. Where the run has a
+ *   A block cannot be lifted by a capability contract. Where the run has a
  *   question channel, it is put to a person; without one it is refused.
  * - `ask`: the command talks to another system (a remote host, a cloud account, a cluster, a
  *   database, mail, a payment or messaging service), runs code fetched or decoded on the spot,
  *   reads other processes, or changes the host's services, schedule, firewall or users. A
- *   question, the same consent SENDS_OR_KEEPS_BASH asks for; `pre_approve` or a contract can
+ *   question, the same consent SENDS_OR_KEEPS_BASH asks for; a contract can
  *   lift it. The docker cleanup rule is here because the Docker daemon belongs to the host, not
  *   to the instance. A database CLI is asked about on a local file too: the rule cannot tell a
  *   file from a server.
@@ -497,32 +436,29 @@ function extractDangerPayload(toolName: string, input: unknown, autonomy: Autono
 }
 
 /**
- * The full danger signal with pre-approval / capability-contract overrides and
+ * The full danger signal with the capability-contract override and
  * the observability publish applied — the single place that logic lives.
  * {@link isDangerous} is a thin `?.warning` wrapper over this for the many
  * callers (and the test suite) that only want the warning string; agent.ts calls
  * this directly to also receive `payload`, so the GO can offer a cheaper tier
  * when `payload.downgradeTo` is set.
  */
-export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
-  const signal = _decideDanger(toolName, input, autonomy, preApproval, audit, entry, runId, contract);
-  // Observed against the FINAL decision: a call a pre-approval or a contract lets
+export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
+  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract);
+  // Observed against the FINAL decision: a call a contract lets
   // through runs without a question, and is recorded as one that does.
   observeBashProof(toolName, input, autonomy, signal?.warning ?? null, runId);
   return signal;
 }
 
-function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, preApproval: PreApprovalSet | undefined, audit: PreApproveAuditLike | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined): DangerSignal | null {
+function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined): DangerSignal | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
-  // Pre-approval + capability-contract can override NON-critical dangers only.
+  // A capability contract can override NON-critical dangers only.
   // Critical ops ([BLOCKED]) are never auto-approved — they carry the "[BLOCKED"
   // marker and fall straight through to the audit publish below.
   if (!warning.includes('[BLOCKED')) {
-    if (preApproval && _matchesPreApproval(toolName, input, preApproval, audit)) {
-      return null;
-    }
     // Capability-contract grant (Slice B): a confirmed contract lifts a
     // warn-level autonomous denial for an explicitly declared (tool, method,
     // host, path) tuple — and only that tuple. The grant requires host AND path
@@ -581,8 +517,8 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   });
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
-  return isDangerousDetailed(toolName, input, autonomy, preApproval, audit, entry, runId, contract)?.warning ?? null;
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
+  return isDangerousDetailed(toolName, input, autonomy, entry, runId, contract)?.warning ?? null;
 }
 
 /** A value matches if any glob pattern in the list matches it (empty list = no match). */
@@ -792,58 +728,6 @@ function grantsListRead(input: object, url: string, method: string, constraints:
     return false;
   }
   return isReviewableUrl(parsedBase, base) && reviewableQuery(url.slice(q + 1), constraints);
-}
-
-/**
- * Pre-approval matching using shared utilities from pre-approve.ts.
- * Lighter than full `matchesPreApproval` — no observability channel publishes.
- */
-function _matchesPreApproval(toolName: string, input: unknown, set: PreApprovalSet, audit?: PreApproveAuditLike): boolean {
-  if (set.patterns.length === 0) return false;
-
-  const matchStr = extractMatchString(toolName, input);
-  if (!matchStr) return false;
-
-  // TTL check
-  if (set.ttlMs > 0) {
-    const elapsed = Date.now() - new Date(set.approvedAt).getTime();
-    if (elapsed > set.ttlMs) {
-      for (let i = 0; i < set.patterns.length; i++) {
-        if (set.patterns[i]!.tool === toolName) {
-          audit?.recordCheck({
-            setId: set.id, patternIdx: i, toolName, matchString: matchStr,
-            pattern: set.patterns[i]!.pattern, decision: 'expired',
-          });
-          break;
-        }
-      }
-      return false;
-    }
-  }
-
-  for (let i = 0; i < set.patterns.length; i++) {
-    const pat = set.patterns[i]!;
-    if (pat.tool !== toolName) continue;
-    if (set.maxUses > 0 && (set.usageCounts[i] ?? 0) >= set.maxUses) {
-      audit?.recordCheck({
-        setId: set.id, patternIdx: i, toolName, matchString: matchStr,
-        pattern: pat.pattern, decision: 'exhausted',
-      });
-      continue;
-    }
-
-    const regex = patternRegex(toolName, pat.pattern);
-    if (regex.test(matchStr)) {
-      set.usageCounts[i] = (set.usageCounts[i] ?? 0) + 1;
-      audit?.recordCheck({
-        setId: set.id, patternIdx: i, toolName, matchString: matchStr,
-        pattern: pat.pattern, decision: 'approved',
-      });
-      return true;
-    }
-  }
-
-  return false;
 }
 
 /** Max command length for regex safety checks (prevents ReDoS on adversarial inputs). */
@@ -1318,7 +1202,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       }
     }
     // Block write methods in autonomous mode — can send emails, create invoices, modify records.
-    // No [BLOCKED] marker so operators can pre-approve specific endpoints.
+    // No [BLOCKED] marker, so a person can allow it and a capability contract can grant it.
     //
     // The READS are enumerated here, not the writes, for the reason `undoClassFor` in
     // `tools/builtin/http.ts` spells out: a list of writes leaves a verb nobody listed
@@ -1326,7 +1210,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // make that unreachable. DELETE never arrives here in autonomous mode — the branch
     // above returns for it.
     if (!['GET', 'HEAD'].includes(method) && autonomy === 'autonomous') {
-      return `⚠ ${toolName}: HTTP ${method} — write operation (pre-approve to allow)`;
+      return `⚠ ${toolName}: HTTP ${method} — write operation, needs your OK`;
     }
   }
 
