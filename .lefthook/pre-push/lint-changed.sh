@@ -8,10 +8,13 @@
 if { exec 3<&0; } 2>/dev/null; then exec 3<&-; else
   echo "lint-changed: stdin is closed, so what this push transfers is unknown." >&2; exit 2
 fi
+# The linter is found next to this hook, not in the current tree: in a push both are the same
+# tree, and a test that runs this hook against another clone then still runs THIS script.
+lint="$(cd "$(dirname "$0")/../.." && pwd)/scripts/lint-changed.mjs"
 cd "$(git rev-parse --show-toplevel)" || exit 2
 ranges=$(bash .lefthook/pre-push/pushed-ranges.sh lint-changed) || exit $?
 while read -r base tip; do
   [ -n "$base" ] || continue  # no line at all: the push only deletes refs
-  node scripts/lint-changed.mjs "$base" "$tip" || exit $?
+  node "$lint" "$base" "$tip" || exit $?
 done <<<"$ranges"
 exit 0
