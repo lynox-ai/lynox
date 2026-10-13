@@ -219,4 +219,11 @@ describe('the principal a renewal answers with (readRenewedPrincipal)', () => {
     expect(readRenewedPrincipal({ valid: true, principal: { ...principal, kind: 'owner' } }, expect_)).toBeNull();
     expect(readRenewedPrincipal(null, expect_)).toBeNull();
   });
+
+  it('refuses a principal that does not come with valid: true', () => {
+    for (const valid of [false, undefined, 'true', 1]) {
+      expect(readRenewedPrincipal({ valid, principal }, expect_), String(valid)).toBeNull();
+    }
+    expect(readRenewedPrincipal({ principal }, expect_)).toBeNull();
+  });
 });

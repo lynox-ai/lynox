@@ -9,7 +9,9 @@
 // background.
 //
 // Logout stops it in every tab of this origin: the logout link announces itself on a
-// BroadcastChannel, and a tab being left (`pagehide`) stops too.
+// BroadcastChannel, and a tab being left (`pagehide`) stops too. Stopping also cancels an
+// ask still on its way. A refusal (401, 403) stops it; a server that cannot answer right
+// now (a 5xx, the network) is not a refusal and leaves the one further try standing.
 
 /** The server's renewal window is five minutes; plan inside it. */
 export const RENEW_LEAD_S = 4 * 60;
@@ -34,6 +36,8 @@ export interface RenewTimerDeps {
 export interface RenewTimer {
 	/** Stop asking, here and (when `announce`) in every other tab of this origin. */
 	stop(announce?: boolean): void;
+	/** Whether it has stopped; a stopped timer is replaced on the next install. */
+	readonly stopped: boolean;
 	/** The first ask, made on start; settles when its answer is handled. */
 	ready: Promise<void>;
 }
@@ -42,7 +46,7 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 	let stopped = false;
 	let handle: unknown = null;
 	let knownExp: number | null = null;
-	let retried = false;
+	let inFlight: AbortController | null = null;
 
 	const plan = (atS: number): void => {
 		if (handle !== null) deps.clearTimer(handle);
@@ -56,60 +60,79 @@ export function startMandateRenewTimer(deps: RenewTimerDeps): RenewTimer {
 		// A later end, renewed here or by another tab, starts a fresh round.
 		if (knownExp === null || answer.exp > knownExp) {
 			knownExp = answer.exp;
-			retried = false;
 			if (answer.exp - RENEW_LEAD_S > now) { plan(answer.exp - RENEW_LEAD_S); return; }
 		}
-		if (!retried && answer.exp - RETRY_LEAD_S > now) {
-			retried = true;
-			plan(answer.exp - RETRY_LEAD_S);
-		}
+		// The one further try: there is a single point for it, so asking again before it
+		// (a tab coming back) plans the same point, and after it nothing is left to plan.
+		if (answer.exp - RETRY_LEAD_S > now) plan(answer.exp - RETRY_LEAD_S);
 	};
 
 	const ask = async (): Promise<void> => {
 		if (stopped) return;
 		let answer: RenewAnswer;
+		const controller = new AbortController();
+		inFlight = controller;
 		try {
-			const res = await deps.fetchImpl('/auth/renew', { method: 'POST', credentials: 'same-origin' });
-			if (!res.ok) { stop(false); return; }
+			const res = await deps.fetchImpl('/auth/renew', { method: 'POST', credentials: 'same-origin', signal: controller.signal });
+			if (res.status === 401 || res.status === 403) { stop(false); return; }
+			if (!res.ok) throw new Error(`renew answered ${res.status}`);
 			answer = await res.json() as RenewAnswer;
 		} catch {
 			// Unreachable is not a refusal: the one further try still stands. Before any answer
 			// there is no end to plan for; a tab coming back asks again.
 			if (!stopped && knownExp !== null) apply({ kind: 'mandate', exp: knownExp, renewed: false });
 			return;
+		} finally {
+			if (inFlight === controller) inFlight = null;
 		}
 		if (!stopped) apply(answer);
 	};
 
 	const onVisible = (): void => { if (deps.target.visibilityState === 'visible') void ask(); };
-	const onPageHide = (): void => stop(false);
+	const onPageHide = (): void => {
+		stop(false);
+		deps.pageEvents.removeEventListener('pagehide', onPageHide);
+		deps.channel?.close();
+	};
 
 	const stop = (announce = false): void => {
-		if (announce) deps.channel?.postMessage(LOGOUT_MESSAGE);
+		// The channel stays open until the page is left, so a timer that already stopped
+		// (the owner's, or after a refusal) still tells the other tabs of a logout.
+		if (announce) {
+			try { deps.channel?.postMessage(LOGOUT_MESSAGE); } catch { /* closed: the page is being left */ }
+		}
 		if (stopped) return;
 		stopped = true;
+		inFlight?.abort();
+		inFlight = null;
 		if (handle !== null) deps.clearTimer(handle);
 		handle = null;
 		deps.target.removeEventListener('visibilitychange', onVisible);
-		deps.pageEvents.removeEventListener('pagehide', onPageHide);
-		deps.channel?.close();
 	};
 
 	deps.target.addEventListener('visibilitychange', onVisible);
 	deps.pageEvents.addEventListener('pagehide', onPageHide);
 	deps.channel?.addEventListener('message', (e) => { if (e.data === LOGOUT_MESSAGE) stop(false); });
 
-	return { stop, ready: ask() };
+	return { stop, get stopped() { return stopped; }, ready: ask() };
 }
 
 declare global {
-	interface Window { __lynoxRenewTimer?: RenewTimer }
+	interface Window { __lynoxRenewTimer?: RenewTimer; __lynoxRenewPageShow?: boolean }
 }
 
-/** Installs the timer once per page (a `window` sentinel survives HMR, like the fetch interceptor). */
+/**
+ * Installs the timer once per page (a `window` sentinel survives HMR, like the fetch
+ * interceptor). A stopped one is replaced: a page restored from the back-forward cache was
+ * stopped by its `pagehide`, and asks again here.
+ */
 export function installMandateRenewTimer(): RenewTimer | null {
 	if (typeof window === 'undefined') return null;
-	if (window.__lynoxRenewTimer) return window.__lynoxRenewTimer;
+	if (window.__lynoxRenewTimer && !window.__lynoxRenewTimer.stopped) return window.__lynoxRenewTimer;
+	if (!window.__lynoxRenewPageShow) {
+		window.__lynoxRenewPageShow = true;
+		window.addEventListener('pageshow', (e) => { if (e.persisted) installMandateRenewTimer(); });
+	}
 	const timer = startMandateRenewTimer({
 		fetchImpl: window.fetch.bind(window),
 		nowS: () => Math.floor(Date.now() / 1000),

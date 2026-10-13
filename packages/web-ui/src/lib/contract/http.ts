@@ -323,12 +323,22 @@ export interface MandateRenewRequest {
 }
 
 /**
- * Read the principal off a renewal's success body. Only a principal for the same mandate and
- * the same address renews; everything else is `null`, a refusal. Unlike `readLoginPrincipal`,
- * a body without a principal is a refusal too: there is no owner in a renewal, and reading it
- * as one would hand a mandate session the owner's.
+ * The control plane's yes to a renewal: a login success body whose principal is required.
+ * Every no is a 403.
+ */
+export interface MandateRenewSuccessBody {
+  valid: true;
+  principal: MandateLoginPrincipal;
+}
+
+/**
+ * Read the principal off a renewal's success body. Only `valid: true` with a principal for the
+ * same mandate and the same address renews; everything else is `null`, a refusal. Unlike
+ * `readLoginPrincipal`, a body without a principal is a refusal too: there is no owner in a
+ * renewal, and reading it as one would hand a mandate session the owner's.
  */
 export function readRenewedPrincipal(body: unknown, expect: { mandate_id: string; email: string }): MandateLoginPrincipal | null {
+  if (typeof body !== 'object' || body === null || (body as { valid?: unknown }).valid !== true) return null;
   const principal = readLoginPrincipal(body);
   if (principal === null || principal === 'invalid') return null;
   if (principal.mandate_id !== expect.mandate_id || principal.email !== expect.email) return null;

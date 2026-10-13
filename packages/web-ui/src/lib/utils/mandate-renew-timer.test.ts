@@ -1,9 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
-import { startMandateRenewTimer, LOGOUT_MESSAGE, type RenewTimerDeps } from './mandate-renew-timer.js';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { installMandateRenewTimer, startMandateRenewTimer, LOGOUT_MESSAGE, type RenewTimerDeps } from './mandate-renew-timer.js';
 
 const T = 2_000_000_000;
 
-type Answer = { status: number; body?: unknown } | Error;
+type Answer = { status: number; body?: unknown } | Error | 'hold';
 
 /** A clock, a timer queue, listeners and a channel the test drives by hand. */
 function harness(answers: Answer[]) {
@@ -13,13 +13,25 @@ function harness(answers: Answer[]) {
 	const pageListeners = new Map<string, () => void>();
 	let channelListener: ((e: MessageEvent) => void) | null = null;
 	const target = { visibilityState: 'visible' as DocumentVisibilityState };
-	const fetchImpl = vi.fn(async () => {
+	const signals: AbortSignal[] = [];
+	const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+		signals.push(init.signal!);
 		const a = answers.shift();
+		if (a === 'hold') {
+			// Never answers on its own: settles only when aborted.
+			return new Promise<Response>((_r, reject) => { init.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))); });
+		}
 		if (a === undefined) throw new Error('no answer queued');
 		if (a instanceof Error) throw a;
 		return new Response(JSON.stringify(a.body ?? {}), { status: a.status });
 	});
-	const channel = { postMessage: vi.fn(), addEventListener: (_t: 'message', fn: (e: MessageEvent) => void) => { channelListener = fn; }, close: vi.fn() };
+	let closed = false;
+	// Like a real BroadcastChannel: posting after close throws.
+	const channel = {
+		postMessage: vi.fn(() => { if (closed) throw new DOMException('BroadcastChannel is closed', 'InvalidStateError'); }),
+		addEventListener: (_t: 'message', fn: (e: MessageEvent) => void) => { channelListener = fn; },
+		close: vi.fn(() => { closed = true; }),
+	};
 	const deps: RenewTimerDeps = {
 		fetchImpl: fetchImpl as unknown as typeof fetch,
 		nowS: () => now,
@@ -38,7 +50,7 @@ function harness(answers: Answer[]) {
 	};
 	const pending = () => timers.filter((t): t is NonNullable<typeof t> => t !== null);
 	return {
-		deps, fetchImpl, channel, listeners, pageListeners, target,
+		deps, fetchImpl, channel, listeners, pageListeners, target, signals,
 		/** Unix seconds of the one planned ask, or null. */
 		plannedAtS: () => { const p = pending(); expect(p.length).toBeLessThanOrEqual(1); return p[0] ? p[0].atMs / 1000 : null; },
 		/** Move the clock to the planned ask and run it. */
@@ -64,11 +76,23 @@ describe('startMandateRenewTimer', () => {
 		const timer = startMandateRenewTimer(h.deps);
 		await timer.ready;
 		expect(h.fetchImpl).toHaveBeenCalledTimes(1);
-		expect(h.fetchImpl).toHaveBeenCalledWith('/auth/renew', { method: 'POST', credentials: 'same-origin' });
+		expect(h.fetchImpl).toHaveBeenCalledWith('/auth/renew', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }));
 		expect(h.plannedAtS()).toBeNull();
 		expect(h.listeners.size).toBe(0);
-		expect(h.pageListeners.size).toBe(0);
+		expect(timer.stopped).toBe(true);
+	});
+
+	it('still tells the other tabs of a logout after it stopped, and never throws doing so', async () => {
+		const h = harness([{ status: 200, body: { kind: 'owner' } }]);
+		const timer = startMandateRenewTimer(h.deps);
+		await timer.ready;
+		expect(h.channel.close).not.toHaveBeenCalled();
+		timer.stop(true);
+		expect(h.channel.postMessage).toHaveBeenCalledWith(LOGOUT_MESSAGE);
+		// Once the page is left the channel is closed; a logout then must not throw.
+		h.pageListeners.get('pagehide')!();
 		expect(h.channel.close).toHaveBeenCalled();
+		expect(() => timer.stop(true)).not.toThrow();
 	});
 
 	it('plans the next ask four minutes before the end, and again after each renewal', async () => {
@@ -104,7 +128,7 @@ describe('startMandateRenewTimer', () => {
 	});
 
 	it('starts a fresh round when another tab renewed', async () => {
-		const h = harness([mandate(T + 900), mandate(T + 900), mandate(T + 900 + 660)]);
+		const h = harness([mandate(T + 900), mandate(T + 900), mandate(T + 900 + 660), mandate(T + 900 + 660)]);
 		await startMandateRenewTimer(h.deps).ready;
 		await h.fire(); // not renewed here: the one retry is planned
 		expect(h.plannedAtS()).toBe(T + 900 - 60);
@@ -112,6 +136,9 @@ describe('startMandateRenewTimer', () => {
 		h.listeners.get('visibilitychange')!();
 		await flush();
 		expect(h.plannedAtS()).toBe(T + 900 + 660 - 240);
+		// The fresh round has its own further try.
+		await h.fire();
+		expect(h.plannedAtS()).toBe(T + 900 + 660 - 60);
 	});
 
 	it('asks when the tab comes back to the foreground, not when it leaves it', async () => {
@@ -125,6 +152,27 @@ describe('startMandateRenewTimer', () => {
 		h.listeners.get('visibilitychange')!();
 		await flush();
 		expect(h.fetchImpl).toHaveBeenCalledTimes(2);
+	});
+
+	it('keeps the further try when the server answers with an error of its own', async () => {
+		const h = harness([mandate(T + 900), { status: 502 }]);
+		const timer = startMandateRenewTimer(h.deps);
+		await timer.ready;
+		await h.fire();
+		expect(h.plannedAtS()).toBe(T + 900 - 60);
+		expect(timer.stopped).toBe(false);
+	});
+
+	it('cancels an ask still on its way when it stops', async () => {
+		const h = harness([mandate(T + 900), 'hold']);
+		const timer = startMandateRenewTimer(h.deps);
+		await timer.ready;
+		await h.fire();
+		expect(h.signals[1]!.aborted).toBe(false);
+		h.message(LOGOUT_MESSAGE);
+		expect(h.signals[1]!.aborted).toBe(true);
+		await flush();
+		expect(h.plannedAtS()).toBeNull();
 	});
 
 	it('stops on a refusal, and never plans past the end', async () => {
@@ -178,5 +226,38 @@ describe('startMandateRenewTimer', () => {
 		timer.stop(false);
 		await timer.ready;
 		expect(h.plannedAtS()).toBeNull();
+	});
+});
+
+describe('installMandateRenewTimer', () => {
+	afterEach(() => { vi.unstubAllGlobals(); });
+
+	function stubPage(answer: unknown) {
+		const pageListeners = new Map<string, (e: unknown) => void>();
+		const win = {
+			fetch: vi.fn(async () => new Response(JSON.stringify(answer), { status: 200 })),
+			setTimeout: () => 0,
+			clearTimeout: () => {},
+			addEventListener: (t: string, fn: (e: unknown) => void) => { pageListeners.set(t, fn); },
+			removeEventListener: () => {},
+		} as unknown as Window;
+		vi.stubGlobal('window', win);
+		vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => {}, removeEventListener: () => {} });
+		return { win, pageListeners };
+	}
+
+	it('installs once while running, and replaces a stopped one, as on a return from the back-forward cache', async () => {
+		const { win, pageListeners } = stubPage({ kind: 'mandate', exp: Math.floor(Date.now() / 1000) + 900, renewed: false });
+		const first = installMandateRenewTimer()!;
+		await first.ready;
+		expect(installMandateRenewTimer()).toBe(first);
+		pageListeners.get('pagehide')!({});
+		expect(first.stopped).toBe(true);
+		pageListeners.get('pageshow')!({ persisted: true });
+		const second = win.__lynoxRenewTimer!;
+		expect(second).not.toBe(first);
+		await second.ready;
+		expect(second.stopped).toBe(false);
+		second.stop(false);
 	});
 });

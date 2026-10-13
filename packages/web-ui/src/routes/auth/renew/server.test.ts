@@ -56,7 +56,7 @@ async function renew(opts: { cookie?: string; headers?: Record<string, string> }
 
 describe('POST /auth/renew', () => {
 	it('refuses a request from another site, before reading the session', async () => {
-		const foreign: Array<Record<string, string>> = [{ 'sec-fetch-site': 'same-site' }, { 'sec-fetch-site': 'cross-site' }, { origin: 'https://sibling.example.invalid' }];
+		const foreign: Array<Record<string, string>> = [{ 'sec-fetch-site': 'same-site' }, { 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'none' }, { origin: 'https://sibling.example.invalid' }];
 		for (const headers of foreign) {
 			const r = await renew({ cookie: mandateCookie(), headers });
 			expect(r.status, JSON.stringify(headers)).toBe(403);

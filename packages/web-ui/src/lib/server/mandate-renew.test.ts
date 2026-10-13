@@ -142,12 +142,15 @@ describe('renewMandateSession', () => {
 		expect(d.calls).toHaveLength(2);
 	});
 
-	it('keeps the throttle bounded', async () => {
+	it('keeps the throttle at 1000 mandates, dropping the oldest', async () => {
 		const throttle = new Map<string, number>();
-		for (let i = 0; i < 1001; i++) throttle.set(`m-${i}`, T);
-		await renewMandateSession(deps(() => Promise.resolve(ok()), { throttle }));
-		expect(throttle.size).toBe(1001);
+		const d = deps(() => Promise.resolve(ok()), { throttle });
+		for (let i = 0; i < 1000; i++) await renewMandateSession({ ...d, principal: sessionAt({ mandate_id: `m-${i}` }) });
+		expect(throttle.size).toBe(1000);
+		await renewMandateSession(d);
+		expect(throttle.size).toBe(1000);
 		expect(throttle.has('m-0')).toBe(false);
+		expect(throttle.has('m-1')).toBe(true);
 		expect(throttle.has(REQUEST_FIXTURE.mandate_id)).toBe(true);
 	});
 
@@ -170,6 +173,8 @@ describe('renewMandateSession', () => {
 	it('never turns a mandate session into the owner\'s, whatever the body', async () => {
 		const answers: unknown[] = [
 			{ valid: true },
+			{ valid: false, principal: ANSWER_FIXTURE.principal },
+			{ principal: ANSWER_FIXTURE.principal },
 			{},
 			null,
 			{ valid: true, principal: null },
