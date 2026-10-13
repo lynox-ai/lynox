@@ -75,6 +75,17 @@ export function ownedBy(row: { readonly created_by?: string | null | undefined }
 }
 
 /**
+ * Whether the grant a principal acts under has ended (PRD customer-granted-operator-access
+ * §3.13 B8): never for the owner; for a mandate, when it names no grant or its grant is not
+ * live. A mandate without a grant cannot be told apart from an ended one, so it counts as
+ * ended. `isLive` is `MandateEnds.isLive`.
+ */
+export function principalHasEnded(p: RequestPrincipal, isLive: (mandateId: string) => boolean): boolean {
+  if (p.kind === 'owner') return false;
+  return p.mandateId === undefined || !isLive(p.mandateId);
+}
+
+/**
  * The principal a recorded tag names, for a run that resumes after its request is gone. Only
  * ever narrows: a mandate tag gives the mandate (whose runs carry the tool lock), anything else
  * the owner. Never a proof of a hand: nothing that grants a hand run may read it.

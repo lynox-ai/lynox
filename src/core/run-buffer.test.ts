@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { RunBuffer, RunBufferManager, DEFAULT_RUN_BUFFER_CAP } from './run-buffer.js';
 import type { StreamEvent } from '../types/tools.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 
 function textEvent(text: string): StreamEvent {
   return { type: 'text', text, agent: 'main' };
@@ -134,3 +135,40 @@ describe('RunBufferManager', () => {
     expect(mgr.size).toBe(0);
   });
 });
+
+// PRD customer-granted-operator-access §3.13 B8: a tail ends with its holder's grant.
+describe('closeEndedTails', () => {
+  const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+  it('closes the tail of an ended grant, and leaves the run, the owner\'s tail and a tail with no holder', () => {
+    const mgr = new RunBufferManager();
+    const buf = mgr.create('r1');
+    const eva = { onEvent: vi.fn(), onEnd: vi.fn(), close: vi.fn() };
+    const owner = { onEvent: vi.fn(), onEnd: vi.fn(), close: vi.fn() };
+    const anon = { onEvent: vi.fn(), onEnd: vi.fn() };
+    buf.subscribe(eva.onEvent, eva.onEnd, { principal: EVA, close: eva.close });
+    buf.subscribe(owner.onEvent, owner.onEnd, { principal: OWNER_PRINCIPAL, close: owner.close });
+    buf.subscribe(anon.onEvent, anon.onEnd);
+    expect(mgr.closeEndedTails(() => true)).toBe(0);
+    expect(mgr.closeEndedTails(() => false)).toBe(1);
+    expect(eva.close).toHaveBeenCalledOnce();
+    expect(owner.close).not.toHaveBeenCalled();
+    expect(buf.ended).toBe(false);
+    // The closed tail hears nothing more, not even the run's end; the others do.
+    buf.append(textEvent('after'));
+    mgr.remove('r1');
+    expect(eva.onEvent).not.toHaveBeenCalled();
+    expect(eva.onEnd).not.toHaveBeenCalled();
+    expect(owner.onEvent).toHaveBeenCalledOnce();
+    expect(owner.onEnd).toHaveBeenCalledOnce();
+    expect(anon.onEnd).toHaveBeenCalledOnce();
+  });
+  it('does not close a tail that unsubscribed', () => {
+    const buf = new RunBuffer();
+    const close = vi.fn();
+    const unsub = buf.subscribe(() => {}, () => {}, { principal: EVA, close });
+    unsub();
+    expect(buf.closeEndedTails(() => false)).toBe(0);
+    expect(close).not.toHaveBeenCalled();
+  });
+});
+

@@ -10,7 +10,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { storedUntrustedCause } from './untrusted-signals.js';
-import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalTag } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalHasEnded, principalTag } from './request-principal.js';
 import { principalOfPrompt } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
@@ -650,6 +650,23 @@ export class WorkerLoop {
     }
     active.controller.abort();
     return { kind: 'requested', via };
+  }
+
+  /**
+   * Stop every running task whose starter's grant has ended (PRD customer-granted-operator-access
+   * §3.13 B8; `principalHasEnded`): a mandate's hand run, or a question of a mandate's picked up
+   * after its answer. A run the schedule fired has no starter and is the owner's, so it stays.
+   * Goes through {@link stopTask}, so the run ends as `stopped`, is not retried, and its open
+   * question is drained. Returns the ids a stop was requested for; a task in a phase that reads
+   * no abort is left for the next sweep.
+   */
+  stopEndedStarters(isLive: (mandateId: string) => boolean): string[] {
+    const stopped: string[] = [];
+    for (const [taskId, active] of [...this.activeTasks]) {
+      if (active.starter === undefined || !principalHasEnded(active.starter, isLive)) continue;
+      if (this.stopTask(taskId).kind === 'requested') stopped.push(taskId);
+    }
+    return stopped;
   }
 
   stop(): void {

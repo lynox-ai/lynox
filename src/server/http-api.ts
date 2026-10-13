@@ -4221,7 +4221,7 @@ export class LynoxHTTPApi {
         // INSIDE the try so a throw from runRegistry.start (SQLite busy/disk-full)
         // still hits the finally's release() — otherwise the slot would leak and
         // after `maxConcurrent` such failures every /run would 429 forever.
-        runExecutor?.acquire(runId, sessionId, takeover);
+        runExecutor?.acquire(runId, sessionId, takeover, askStamp.principal);
         // Register the run as live (replaces any prior/interrupted row for this
         // thread). A crash before the finally leaves this row 'running' → the
         // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
@@ -4410,7 +4410,15 @@ export class LynoxHTTPApi {
           res.end();
         }
       };
-      const unsub = buffer.subscribe((e) => write(e.seq, e.event), finish);
+      // Closed from the server when the holder's grant ends (§3.13 B8). No `done`: the run
+      // has not finished, only this tail has.
+      const closeTail = (): void => {
+        if (ended) return;
+        ended = true;
+        clearInterval(keepalive);
+        if (!res.writableEnded) res.end();
+      };
+      const unsub = buffer.subscribe((e) => write(e.seq, e.event), finish, { principal: this._principalOf(req), close: closeTail });
 
       req.on('close', () => {
         clearInterval(keepalive);

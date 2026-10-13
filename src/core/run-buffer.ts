@@ -20,6 +20,7 @@
  */
 
 import type { EmittedStreamEvent } from '../types/tools.js';
+import { principalHasEnded, type RequestPrincipal } from './request-principal.js';
 
 /** One buffered, sequenced event. `seq` is a per-rendered-event counter (NOT
  * the persisted-row counter eager-persist uses — see PRD U9 seq-space note). */
@@ -30,6 +31,14 @@ export interface BufferedEvent {
 
 type EventSubscriber = (e: BufferedEvent) => void;
 type EndSubscriber = () => void;
+
+/** Who holds a live tail, and how to close it from the server (PRD
+ *  customer-granted-operator-access §3.13 B8). */
+export interface TailHolder {
+  readonly principal: RequestPrincipal;
+  /** Ends the tail's response. The subscription itself is dropped by the buffer. */
+  readonly close: () => void;
+}
 
 /** Default ring capacity per run. A long multi-step run rarely renders more
  * than a few hundred events between eager-persist checkpoints; 1000 leaves
@@ -43,6 +52,7 @@ export class RunBuffer {
   private readonly cap: number;
   private readonly eventSubs = new Set<EventSubscriber>();
   private readonly endSubs = new Set<EndSubscriber>();
+  private readonly holders = new Map<EventSubscriber, { holder: TailHolder; onEnd: EndSubscriber | undefined }>();
   private _ended = false;
 
   constructor(cap: number = DEFAULT_RUN_BUFFER_CAP) {
@@ -95,7 +105,7 @@ export class RunBuffer {
    * unsubscribe fn. The endpoint replays first, THEN subscribes, holding a
    * lock-free gap only as wide as one synchronous append (acceptable: the
    * replay+subscribe pair runs to completion before the next event loop tick). */
-  subscribe(onEvent: EventSubscriber, onEnd?: EndSubscriber): () => void {
+  subscribe(onEvent: EventSubscriber, onEnd?: EndSubscriber, holder?: TailHolder): () => void {
     if (this._ended) {
       // Already done — fire onEnd on the next tick so the caller can close.
       if (onEnd) queueMicrotask(onEnd);
@@ -103,10 +113,30 @@ export class RunBuffer {
     }
     this.eventSubs.add(onEvent);
     if (onEnd) this.endSubs.add(onEnd);
+    if (holder) this.holders.set(onEvent, { holder, onEnd });
     return () => {
       this.eventSubs.delete(onEvent);
       if (onEnd) this.endSubs.delete(onEnd);
+      this.holders.delete(onEvent);
     };
+  }
+
+  /**
+   * Close every tail whose holder's grant has ended (`principalHasEnded`): the subscription is
+   * dropped and the holder's response closed. The run itself goes on; an owner's run that a
+   * mandate was following is still the owner's. Returns how many tails were closed.
+   */
+  closeEndedTails(isLive: (mandateId: string) => boolean): number {
+    let closed = 0;
+    for (const [onEvent, { holder, onEnd }] of [...this.holders]) {
+      if (!principalHasEnded(holder.principal, isLive)) continue;
+      this.eventSubs.delete(onEvent);
+      if (onEnd) this.endSubs.delete(onEnd);
+      this.holders.delete(onEvent);
+      try { holder.close(); } catch { /* subscriber-local failure, ignore */ }
+      closed++;
+    }
+    return closed;
   }
 
   /** Mark the run complete: notify end-subscribers (so live tails close) and
@@ -120,6 +150,7 @@ export class RunBuffer {
     }
     this.eventSubs.clear();
     this.endSubs.clear();
+    this.holders.clear();
   }
 
   get ended(): boolean {
@@ -160,5 +191,12 @@ export class RunBufferManager {
 
   get size(): number {
     return this.buffers.size;
+  }
+
+  /** {@link RunBuffer.closeEndedTails} over every live run. Returns how many tails were closed. */
+  closeEndedTails(isLive: (mandateId: string) => boolean): number {
+    let closed = 0;
+    for (const buf of this.buffers.values()) closed += buf.closeEndedTails(isLive);
+    return closed;
   }
 }

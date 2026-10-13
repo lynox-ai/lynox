@@ -8,6 +8,8 @@ import { reloadConfig } from './config.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { MandateEnds } from './mandate-ends.js';
 import { BulkLedger } from './bulk-ledger.js';
+import { RunExecutor } from './run-executor.js';
+import { WorkerLoop } from './worker-loop.js';
 
 /**
  * The engine hands out a store for mandate ends, on its own engine.db.
@@ -104,7 +106,8 @@ describe('Engine boot — mandate ends', () => {
   it('closes, on the 5-minute prompt sweep, a mandate\'s question whose grant ran out', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-mandatesweepboot-'));
     dirs.push(dir);
-    // The engine's one 5-minute interval is the prompt sweep; it is caught, not waited for.
+    // The engine's 5-minute intervals, caught, not waited for: the prompt sweep is the first, the
+    // running-work sweep (§3.13 B8) the second.
     const real = globalThis.setInterval;
     const sweeps: (() => void)[] = [];
     const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
@@ -113,7 +116,7 @@ describe('Engine boot — mandate ends', () => {
     }) as typeof setInterval);
     let engine: Engine;
     try { engine = await boot(dir); } finally { spy.mockRestore(); }
-    expect(sweeps).toHaveLength(1);
+    expect(sweeps).toHaveLength(2);
     const ends = engine.getMandateEnds()!;
     const store = engine.getPromptStore()!;
     const now = Math.floor(Date.now() / 1000);
@@ -220,8 +223,8 @@ describe('Engine boot — mandate ends', () => {
       }) as typeof setInterval);
       let engine: Engine;
       try { engine = await boot(dir, withBulk); } finally { spy.mockRestore(); }
-      // The prompt sweep and the bulk sweep.
-      expect(sweeps).toHaveLength(2);
+      // The prompt sweep, the running-work sweep and the bulk sweep.
+      expect(sweeps).toHaveLength(3);
       const now = Math.floor(Date.now() / 1000);
       engine.getMandateEnds()!.record({ ...GRANT, mandateExp: now + 2 }, now);
       const id = plan(engine, GRANT);
@@ -244,7 +247,8 @@ describe('Engine boot — mandate ends', () => {
       }) as typeof setInterval);
       let engine: Engine;
       try { engine = await boot(dir, withBulk); } finally { spy.mockRestore(); }
-      expect(handles).toHaveLength(2);
+      // The prompt sweep, the running-work sweep (§3.13 B8) and the bulk sweep.
+      expect(handles).toHaveLength(3);
       const clear = vi.spyOn(globalThis, 'clearInterval');
       try {
         await engine.shutdown();
@@ -253,4 +257,75 @@ describe('Engine boot — mandate ends', () => {
       } finally { clear.mockRestore(); }
     });
   });
+
+  describe('running work (§3.13 B8)', () => {
+    const GRANT = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'M-run' };
+    const live = (engine: Engine, exp: number): void => {
+      engine.getMandateEnds()!.record({ ...GRANT, mandateExp: exp }, 100);
+    };
+    function runs(engine: Engine): { mine: ReturnType<typeof vi.fn>; owners: ReturnType<typeof vi.fn>; tail: ReturnType<typeof vi.fn> } {
+      const mine = vi.fn(); const owners = vi.fn(); const tail = vi.fn();
+      const ex = engine.getRunExecutor()!;
+      ex.acquire('r-mine', 't', mine, GRANT);
+      ex.acquire('r-owner', 't', owners, OWNER_PRINCIPAL);
+      engine.getRunBufferManager()!.create('r-owner').subscribe(() => {}, () => {}, { principal: GRANT, close: tail });
+      return { mine, owners, tail };
+    }
+
+    it('ends a mandate\'s chat run, its worker runs and its tails the moment the mandate is revoked, and not the owner\'s run', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-runrevokeboot-'));
+      dirs.push(dir);
+      const engine = await boot(dir);
+      engine.startWorkerLoop(3_600_000);
+      const worker = vi.spyOn(WorkerLoop.prototype, 'stopEndedStarters');
+      try {
+        live(engine, Math.floor(Date.now() / 1000) + 3_600);
+        const { mine, owners, tail } = runs(engine);
+        engine.getMandateEnds()!.revoke('M-run');
+        expect(mine).toHaveBeenCalledOnce();
+        expect(owners).not.toHaveBeenCalled();
+        expect(tail).toHaveBeenCalledOnce();
+        expect(worker).toHaveBeenCalled();
+        expect(worker.mock.calls[0]![0]('M-run')).toBe(false);
+      } finally { worker.mockRestore(); }
+    });
+
+    it('ends, on its 5-minute sweep, a mandate\'s run whose grant ran out', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-runsweepboot-'));
+      dirs.push(dir);
+      const real = globalThis.setInterval;
+      const sweeps: (() => void)[] = [];
+      const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
+        if (ms === 5 * 60_000) sweeps.push(fn);
+        return real(fn, ms);
+      }) as typeof setInterval);
+      let engine: Engine;
+      try { engine = await boot(dir); } finally { spy.mockRestore(); }
+      const now = Math.floor(Date.now() / 1000);
+      live(engine, now + 2);
+      const { mine, owners } = runs(engine);
+      for (const s of sweeps) s();
+      expect(mine).not.toHaveBeenCalled();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue((now + 3) * 1000);
+      try { for (const s of sweeps) s(); } finally { clock.mockRestore(); }
+      expect(mine).toHaveBeenCalled();
+      expect(owners).not.toHaveBeenCalled();
+    });
+
+    it('ends the rest when one part of the sweep fails', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-runsweepfail-'));
+      dirs.push(dir);
+      const engine = await boot(dir);
+      live(engine, Math.floor(Date.now() / 1000) + 3_600);
+      const { tail } = runs(engine);
+      const broken = vi.spyOn(RunExecutor.prototype, 'abortEnded').mockImplementation(() => { throw new Error('boom'); });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        engine.getMandateEnds()!.revoke('M-run');
+        expect(tail).toHaveBeenCalledOnce();
+        expect(stderr.mock.calls.some(([m]) => String(m).includes("chat runs failed: boom"))).toBe(true);
+      } finally { broken.mockRestore(); stderr.mockRestore(); }
+    });
+  });
 });
+

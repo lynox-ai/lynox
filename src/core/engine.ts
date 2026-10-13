@@ -371,6 +371,7 @@ export class Engine {
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
   private _promptCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _bulkSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private _runSweepTimer: ReturnType<typeof setInterval> | null = null;
   /** Hourly debug-capture retention sweep; see `_pruneWireCaptures`. */
   private _wireRetentionTimer: ReturnType<typeof setInterval> | null = null;
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
@@ -1369,6 +1370,14 @@ export class Engine {
       process.stderr.write(`[lynox] RunExecutor init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._runExecutor = null;
     }
+
+    // What a mandate is running ends with its grant (§3.13 B8): its chat runs, the worker runs it
+    // started or whose question it answered, and the run tails it follows. Every 5 minutes for a
+    // grant that ran out, at once when a revoke is recorded. Nothing runs at boot, so there is no
+    // boot sweep. Each part fails on its own and is tried again on the next sweep.
+    this._mandateEnds?.onRevoke(() => this.endEndedMandateRuns());
+    this._runSweepTimer = setInterval(() => this.endEndedMandateRuns(), 5 * 60_000);
+    this._runSweepTimer.unref?.();
 
     // Initialize security audit trail (subscribes to guard/security channels).
     // Started with or without RunHistory: it opens its own connection and creates its
@@ -2387,6 +2396,23 @@ export class Engine {
   getAuditLog(): AuditLog | null { return this._toolContext.auditLog; }
   /** When each mandate ends (mandate-ends.ts), or null when engine.db is unavailable. */
   getMandateEnds(): MandateEnds | null { return this._mandateEnds; }
+
+  /** Ends what mandates whose grant has ended are running (§3.13 B8). See the sweep in `init`. */
+  private endEndedMandateRuns(): void {
+    const isLive = (mandateId: string): boolean => this._mandateEnds?.isLive(mandateId) ?? false;
+    const parts: ReadonlyArray<readonly [string, () => unknown]> = [
+      ['chat runs', () => this._runExecutor?.abortEnded(isLive)],
+      ['worker runs', () => this._workerLoop?.stopEndedStarters(isLive)],
+      ['run tails', () => this._runBufferManager?.closeEndedTails(isLive)],
+    ];
+    for (const [what, end] of parts) {
+      try {
+        end();
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox] ending ended mandates' ${what} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+  }
   /** The owner's releases of vault names to profiles a mandate wrote, or null without engine.db. */
   getSecretReleases(): SecretReleases | null { return this._toolContext.secretReleases; }
   /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
@@ -2859,6 +2885,10 @@ export class Engine {
     if (this._bulkSweepTimer) {
       clearInterval(this._bulkSweepTimer);
       this._bulkSweepTimer = null;
+    }
+    if (this._runSweepTimer) {
+      clearInterval(this._runSweepTimer);
+      this._runSweepTimer = null;
     }
     if (this._promptCleanupTimer) {
       clearInterval(this._promptCleanupTimer);
