@@ -8256,8 +8256,12 @@ export class LynoxHTTPApi {
     // remembers about that person, from both memory stores, and the person's subject. Owner-only
     // and deliberately NOT behind `denyOnManagedInstance`: that guard keeps instance-wide state
     // and exports system-controlled, while this is the controller acting on their own data. No
-    // admin alias either, so the control plane (`cp-admin` reaches admin routes only) cannot
-    // erase a customer's data through it. Preview first, with the text, so the owner decides on
+    // admin alias either, and on an instance the control plane provisioned both routes refuse
+    // every bearer: the control plane holds both of the instance's bearers, and its tools use
+    // them. The owner reaches these routes signed in, through the web app's session. That is
+    // where this stops: the session is signed with the instance secret the control plane also
+    // holds, so this closes the control plane's tool path, it does not make the control plane
+    // unable to act as the owner. Preview first, with the text, so the owner decides on
     // what they read; the erase call must send back the preview's plan. Both answers carry
     // `Cache-Control: no-store` (the preview holds personal text), the subject id travels in the
     // body, never the path, and nothing here writes a text to the log.
@@ -8291,10 +8295,17 @@ export class LynoxHTTPApi {
       const v = (body as Record<string, unknown> | null)?.['subjectId'];
       return typeof v === 'string' && v.length > 0 && v.length <= 200 ? v : null;
     };
+    // On a provisioned instance a bearer is the control plane's, whichever of the two it is.
+    const refuseBearerOnProvisioned = (req: IncomingMessage, res: ServerResponse): boolean => {
+      if (!isProvisionedInstance() || !(this._authOrigin.get(req) ?? '').startsWith('bearer')) return false;
+      noStoreJson(res, 403, { error: 'On a managed instance a person is erased from the web app, signed in as the owner', code: 'session_required' });
+      return true;
+    };
     const readIds = (v: unknown): string[] | null =>
       v === undefined ? [] : Array.isArray(v) && v.length <= 10_000 && v.every(x => typeof x === 'string' && x.length <= 200) ? v as string[] : null;
 
-    this.addStatic('user', 'POST /api/privacy/person-erasure/preview', async (_req, res, _params, body) => {
+    this.addStatic('user', 'POST /api/privacy/person-erasure/preview', async (req, res, _params, body) => {
+      if (refuseBearerOnProvisioned(req, res)) return;
       const subjectId = readSubjectId(body);
       if (subjectId === null) { noStoreJson(res, 400, { error: '"subjectId" is required' }); return; }
       const deps = await personErasureDeps();
@@ -8314,19 +8325,25 @@ export class LynoxHTTPApi {
     }, ownerOnly('erase a person\'s data'));
 
     this.addStatic('user', 'POST /api/privacy/person-erasure', async (req, res, _params, body) => {
+      if (refuseBearerOnProvisioned(req, res)) return;
       const b = body as Record<string, unknown> | null;
       const subjectId = readSubjectId(body);
       const plan = b?.['plan'];
       const entryIds = readIds(b?.['entryIds']);
       const memoryIds = readIds(b?.['memoryIds']);
-      if (subjectId === null || typeof plan !== 'string' || entryIds === null || memoryIds === null) {
-        noStoreJson(res, 400, { error: '"subjectId" and "plan" are required; "entryIds" and "memoryIds" are lists of ids' });
+      const entityIds = readIds(b?.['entityIds']);
+      if (subjectId === null || typeof plan !== 'string' || entryIds === null || memoryIds === null || entityIds === null) {
+        noStoreJson(res, 400, { error: '"subjectId" and "plan" are required; "entryIds", "memoryIds" and "entityIds" are lists of ids' });
         return;
       }
       if (b?.['confirm'] !== PERSON_ERASURE_CONFIRM) {
         noStoreJson(res, 400, { error: `Confirmation required: send { "confirm": "${PERSON_ERASURE_CONFIRM}" }` });
         return;
       }
+      const deps = await personErasureDeps();
+      if (deps === null) { noStoreJson(res, 503, { error: 'The memory stores are not open on this instance', code: 'stores_unavailable' }); return; }
+      // After the last await: from here to the answer the route runs without yielding, so nothing
+      // checked below can change before the erasure has run.
       if (this.erasureInProgress) { noStoreJson(res, 409, { error: 'An erasure is already running', code: 'erasure_in_progress' }); return; }
       // A running chat can write the person again right after the erasure (its extraction runs
       // when the turn ends), and the answer could not say so. Refused instead; stopping the chat
@@ -8335,8 +8352,6 @@ export class LynoxHTTPApi {
         noStoreJson(res, 409, { error: 'A chat is running, so nothing was erased; stop it or let it finish, then try again', code: 'runs_active' });
         return;
       }
-      const deps = await personErasureDeps();
-      if (deps === null) { noStoreJson(res, 503, { error: 'The memory stores are not open on this instance', code: 'stores_unavailable' }); return; }
       // The owner's trail: an attempt row before the first step, an outcome row after it, ids and
       // counts only. A missing outcome row is how a crash mid-erasure shows.
       const log = engine.getAuditLog();
@@ -8344,12 +8359,12 @@ export class LynoxHTTPApi {
       let result: PersonErasureResult | PersonErasureRefusal;
       try {
         result = erasePerson(deps, {
-          subjectId, plan, entryIds, memoryIds,
-          beforeErase: (counts) => {
+          subjectId, plan, entryIds, memoryIds, entityIds,
+          beforeErase: (planned) => {
             if (log === null) throw new Error('no audit log');
             trail.entry = {
               principal: this._principalOf(req), action: 'person-erasure',
-              target: `subject:${subjectId} entries:${String(counts.entries)} memories:${String(counts.memories)}`,
+              target: `subject:${planned.subjectId} entries:${String(planned.entries)} memories:${String(planned.memories)} entities:${String(planned.legacyEntities)}`,
               phase: 'attempt', correlationId: newCorrelationId(),
             };
             log.record(trail.entry);
@@ -8365,9 +8380,11 @@ export class LynoxHTTPApi {
       if ('refused' in result) { personErasureRefusal(res, result); return; }
       const opened = trail.entry;
       if (opened !== null) {
+        // The outcome row carries what went, which after a failed step is less than the attempt planned.
+        const target = `subject:${result.subjectId} entries:${String(result.counts.entries)} memories:${String(result.counts.memories)} entities:${String(result.counts.legacyEntities)}`;
         const closing: AuditEntry = result.erased
-          ? { ...opened, phase: 'done' }
-          : { ...opened, phase: 'failed', action: `person-erasure failed:${result.failed ?? 'unknown'}` };
+          ? { ...opened, phase: 'done', target }
+          : { ...opened, phase: 'failed', target, action: `person-erasure failed:${result.failed ?? 'unknown'}` };
         try { log?.record(closing); } catch { /* the attempt row stands alone, which reads as "did not finish" */ }
       }
       process.stderr.write(`[privacy] person erasure: erased=${String(result.erased)} done=${result.done.join(',')} failed=${result.failed ?? '-'}\n`);

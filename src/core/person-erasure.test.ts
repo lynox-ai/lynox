@@ -113,7 +113,7 @@ describe('person erasure', () => {
     const r = erased(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
     expect(r.erased).toBe(true);
     expect(r.done).toEqual(['durable_knowledge', 'memories_legacy', 'memories_engine', 'subject']);
-    expect(r.counts).toEqual({ entries: 1, legacyMemories: 1, memoryStubs: 1, subjects: 1 });
+    expect(r.counts).toEqual({ entries: 1, memories: 1, legacyEntities: 0, subjects: 1 });
     expect(entryExists(f, f.annaEntry)).toBe(false);
     expect(f.layer.getDb().getMemory(f.annaMemory)).toBeNull();
     expect(f.stubs.getStub(f.annaMemory)).toBeNull();
@@ -128,7 +128,7 @@ describe('person erasure', () => {
     expect(entryExists(f, f.mentionEntry)).toBe(true);
     expect(f.layer.getDb().getMemory(f.mentionMemory)).not.toBeNull();
     expect(f.stubs.getStub(f.mentionMemory)).not.toBeNull();
-    expect(r.left).toEqual({ entries: 1, memories: 1, blocks: [] });
+    expect(r.left).toEqual({ entries: 1, memories: 1, legacyEntities: 0, blocks: [] });
     expect(entryExists(f, f.unrelated)).toBe(true);
     expect(subjectExists(f, f.bob)).toBe(true);
   });
@@ -141,7 +141,7 @@ describe('person erasure', () => {
     expect(entryExists(f, f.mentionEntry)).toBe(false);
     expect(f.layer.getDb().getMemory(f.mentionMemory)).toBeNull();
     expect(f.stubs.getStub(f.mentionMemory)).toBeNull();
-    expect(r.left).toEqual({ entries: 0, memories: 0, blocks: [] });
+    expect(r.left).toEqual({ entries: 0, memories: 0, legacyEntities: 0, blocks: [] });
     expect(entryExists(f, f.unrelated)).toBe(true);
   });
 
@@ -245,9 +245,9 @@ describe('person erasure', () => {
   it('hands the audit hook the counts it will erase', async () => {
     const f = await seed();
     const p = preview(f, f.anna);
-    const seen: Array<{ entries: number; memories: number }> = [];
+    const seen: unknown[] = [];
     erased(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [f.mentionEntry], memoryIds: [], beforeErase: c => { seen.push(c); } }));
-    expect(seen).toEqual([{ entries: 2, memories: 1 }]);
+    expect(seen).toEqual([{ subjectId: f.anna, entries: 2, memories: 1, legacyEntities: 0 }]);
   });
 
   it('stops at a failed legacy step, and a new preview and erase finish it', async () => {
@@ -355,19 +355,33 @@ describe('person erasure, legacy store and scrub', () => {
     return p;
   }
 
-  it('binds a legacy memory through the legacy person entity, with no subject graph behind it', async () => {
+  it('offers a legacy person entity under her name for selection, with its memories, and binds nothing through it', async () => {
     const f = await setup();
     const p = plan(f.deps, f.anna);
-    expect(p.memories.find(m => m.id === f.bound)?.matchedBy).toBe('subject');
-    // Every memory linking to her entity is about her, like the engine.db junction.
-    expect(p.memories.find(m => m.id === f.kept)?.matchedBy).toBe('subject');
+    expect(p.legacyEntities).toEqual([{ id: f.entity, name: 'anni', description: 'Head of purchasing', memoryIds: [f.bound, f.kept].sort() }]);
+    // The memory that names no one stays out of the memory list; the one that names her is a mention.
+    expect(p.memories.find(m => m.id === f.bound)).toBeUndefined();
+    expect(p.memories.find(m => m.id === f.kept)?.matchedBy).toBe('mention');
   });
 
-  it('erases the bound legacy memories and the person entity with its links, and leaves the other person', async () => {
+  it('leaves a legacy entity under her name, and its memories, when the owner does not select it', async () => {
+    // "anni" can be another Anni: a name match is never taken on its own.
     const f = await setup();
     const p = plan(f.deps, f.anna);
     const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
     expect(r.erased).toBe(true);
+    expect(r.left.legacyEntities).toBe(1);
+    expect(f.legacy.getEntity(f.entity)).not.toBeNull();
+    expect(f.legacy.getMemory(f.bound)).not.toBeNull();
+    expect(f.legacy.getMemory(f.kept)).not.toBeNull();
+  });
+
+  it('erases a selected legacy entity with every memory it links, its relations, and leaves the other person', async () => {
+    const f = await setup();
+    const p = plan(f.deps, f.anna);
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [], entityIds: [f.entity] }));
+    expect(r.erased).toBe(true);
+    expect(r.counts).toMatchObject({ memories: 2, legacyEntities: 1 });
     expect(f.legacy.getMemory(f.bound)).toBeNull();
     expect(f.legacy.getEntity(f.entity)).toBeNull();
     expect(f.legacy.getMemory(f.kept)).toBeNull();
@@ -377,18 +391,26 @@ describe('person erasure, legacy store and scrub', () => {
     expect(raw.prepare('SELECT COUNT(*) AS n FROM relations WHERE from_entity_id = ? OR to_entity_id = ?').get(f.entity, f.entity)).toEqual({ n: 0 });
   });
 
-  it('erases the stub of a memory bound only in the legacy store before the legacy row, so a retry still binds it', async () => {
+  it('refuses a legacy entity id that is not among the candidates', async () => {
+    const f = await setup();
+    const p = plan(f.deps, f.anna);
+    expect(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [], entityIds: [f.other] }))
+      .toEqual({ refused: 'unknown_ids', ids: [f.other] });
+    expect(f.legacy.getEntity(f.other)).not.toBeNull();
+  });
+
+  it('erases the stub of a memory reached only through a selected entity before its legacy row, so a retry still offers it', async () => {
     const f = await setup();
     f.stubs.upsertStub({ id: f.bound, text: 'She approves orders above 5000', namespace: 'knowledge', scopeType: 'global', scopeId: '' });
     const p = plan(f.deps, f.anna);
     vi.spyOn(f.legacy, 'eraseForPerson').mockImplementationOnce(() => { throw new Error('disk I/O error'); });
-    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [], entityIds: [f.entity] }));
     expect(r).toMatchObject({ erased: false, failed: 'memories_legacy' });
     expect(f.stubs.getStub(f.bound)).toBeNull();
     expect(f.legacy.getMemory(f.bound)).not.toBeNull();
     const again = plan(f.deps, f.anna);
-    expect(again.memories.find(m => m.id === f.bound)?.matchedBy).toBe('subject');
-    expect(ok(erasePerson(f.deps, { subjectId: f.anna, plan: again.plan, entryIds: [], memoryIds: [] })).erased).toBe(true);
+    expect(again.legacyEntities.map(n => n.id)).toEqual([f.entity]);
+    expect(ok(erasePerson(f.deps, { subjectId: f.anna, plan: again.plan, entryIds: [], memoryIds: [], entityIds: [f.entity] })).erased).toBe(true);
     expect(f.legacy.getMemory(f.bound)).toBeNull();
   });
 
@@ -421,6 +443,37 @@ describe('person erasure, legacy store and scrub', () => {
     expect(raw.pragma('secure_delete', { simple: true })).toBe(0);
     expect(legacyRaw.pragma('secure_delete', { simple: true })).toBe(0);
     expect(r.scrubbed).toBe(true);
+  });
+
+  it('restores secure_delete and still folds the logs in after a failed step', async () => {
+    const f = await setup();
+    const raw = f.engine.getDb();
+    raw.pragma('secure_delete = OFF');
+    vi.spyOn(f.subjects, 'eraseSubject').mockImplementationOnce(() => { throw new Error('constraint failed'); });
+    const checkpoint = vi.spyOn(f.engine, 'checkpointTruncate');
+    const p = plan(f.deps, f.anna);
+    const r = ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    expect(r).toMatchObject({ erased: false, failed: 'subject' });
+    expect(raw.pragma('secure_delete', { simple: true })).toBe(0);
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+  });
+
+  it('folds in the legacy log even when the engine.db one is busy', async () => {
+    const f = await setup();
+    vi.spyOn(f.engine, 'checkpointTruncate').mockReturnValueOnce(false);
+    const legacy = vi.spyOn(f.legacy, 'checkpointTruncate');
+    const p = plan(f.deps, f.anna);
+    ok(erasePerson(f.deps, { subjectId: f.anna, plan: p.plan, entryIds: [], memoryIds: [] }));
+    expect(legacy).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws instead of searching for ciphertext when the email cannot be decrypted', async () => {
+    const f = await setup();
+    const foreign = new EngineDb(join(dirs[0]!, 'foreign.db'), 'another-vault-key');
+    engines.push(foreign);
+    f.subjects.setPersonDetail(f.anna, { email: 'anna@wiesental.invalid' });
+    f.engine.getDb().prepare('UPDATE people SET email = ? WHERE subject_id = ?').run(foreign.enc('anna@wiesental.invalid'), f.anna);
+    expect(() => previewPersonErasure(f.deps, f.anna)).toThrow(UndecryptableTextError);
   });
 
   it('says so when the log could not be folded in, and still reports the erasure', async () => {

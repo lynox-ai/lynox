@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { channels } from './observability.js';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
+import { UndecryptableTextError } from './engine-db.js';
 import type { EntityType } from '../types/index.js';
 
 /**
@@ -1323,6 +1324,19 @@ export class SubjectStore {
       }
     }
     return reaped;
+  }
+
+  /**
+   * The person's email as a search form for an erasure, or null when none is stored. Throws
+   * {@link UndecryptableTextError} when it cannot be decrypted: {@link getPersonDetail} would hand
+   * back the ciphertext, and a search for that finds nothing without saying so.
+   */
+  personEmailForErasure(subjectId: string): string | null {
+    const row = this.db.prepare('SELECT email FROM people WHERE subject_id = ?').get(subjectId) as { email: string | null } | undefined;
+    if (!row?.email) return null;
+    const email = this.engine.tryDec(row.email);
+    if (email === null) throw new UndecryptableTextError('contact details');
+    return email;
   }
 
   /** The archived shells merged (transitively) into `canonicalId`; see {@link eraseSubject}. */

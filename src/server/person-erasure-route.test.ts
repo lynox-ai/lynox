@@ -125,13 +125,14 @@ describe('person erasure routes (real engine)', () => {
     const r = await erase({ subjectId: p.subjectId, plan: pv['plan'] });
     expect(r.status).toBe(200);
     expect(r.cache).toBe('no-store');
-    expect(r.body).toMatchObject({ erased: true, failed: null, counts: { entries: 1, legacyMemories: 1, memoryStubs: 1, subjects: 1 } });
+    expect(r.body).toMatchObject({ erased: true, failed: null, counts: { entries: 1, memories: 1, legacyEntities: 0, subjects: 1 } });
     expect(r.body['notCovered']).toEqual([...PERSON_ERASURE_NOT_COVERED]);
     expect(subjectExists(p.subjectId)).toBe(false);
     const rows = auditRows(p.subjectId);
     expect(rows.map(x => [x.action, x.phase, x.actor_kind])).toEqual([['person-erasure', 'attempt', 'owner'], ['person-erasure', 'done', 'owner']]);
     expect(rows[0]!.correlation_id).toBe(rows[1]!.correlation_id);
-    expect(rows[0]!.target).toBe(`subject:${p.subjectId} entries:1 memories:1`);
+    expect(rows[0]!.target).toBe(`subject:${p.subjectId} entries:1 memories:1 entities:0`);
+    expect(rows[1]!.target).toBe(`subject:${p.subjectId} entries:1 memories:1 entities:0`);
     expect(rows.some(x => x.target.includes('Felsegg'))).toBe(false);
   });
 
@@ -146,6 +147,10 @@ describe('person erasure routes (real engine)', () => {
     expect(subjectExists(p.subjectId)).toBe(true);
     expect(auditRows(p.subjectId).map(x => [x.action, x.phase])).toEqual([
       ['person-erasure', 'attempt'], ['person-erasure failed:memories_legacy', 'failed'],
+    ]);
+    // The outcome row says what went, not what was planned.
+    expect(auditRows(p.subjectId).map(x => x.target)).toEqual([
+      `subject:${p.subjectId} entries:1 memories:1 entities:0`, `subject:${p.subjectId} entries:1 memories:0 entities:0`,
     ]);
     const again = await preview(p.subjectId);
     const done = await erase({ subjectId: p.subjectId, plan: again.body['plan'] });
@@ -219,28 +224,46 @@ describe('person erasure routes (real engine)', () => {
     expect(subjectExists(p.subjectId)).toBe(true);
   });
 
-  it('lynox staff cannot erase: the control plane\'s admin bearer is refused on both routes', async () => {
+  // The control plane holds both of a provisioned instance's bearers (it generates the secrets),
+  // and its tools use them. Neither reaches these routes there; the owner comes in signed in.
+  it('the control plane\'s credentials are refused on a provisioned instance: the admin bearer and the instance bearer', async () => {
     const p = seedPerson();
     const { body: pv } = await preview(p.subjectId);
     vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', ADMIN);
     vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test');
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
-    const asControlPlane = { Authorization: `Bearer ${ADMIN}` };
-    const pr = await preview(p.subjectId, asControlPlane);
+    const asAdminBearer = { Authorization: `Bearer ${ADMIN}` };
+    const pr = await preview(p.subjectId, asAdminBearer);
     expect(pr.status).toBe(403);
     expect(String(pr.body['error'])).toContain('control plane reaches admin routes only');
-    expect((await erase({ subjectId: p.subjectId, plan: pv['plan'] }, asControlPlane)).status).toBe(403);
+    expect((await erase({ subjectId: p.subjectId, plan: pv['plan'] }, asAdminBearer)).status).toBe(403);
+    const asInstanceBearer = { Authorization: `Bearer ${SECRET}` };
+    const ib = await preview(p.subjectId, asInstanceBearer);
+    expect(ib.status).toBe(403);
+    expect(ib.body['code']).toBe('session_required');
+    const ie = await erase({ subjectId: p.subjectId, plan: pv['plan'] }, asInstanceBearer);
+    expect(ie.status).toBe(403);
+    expect(ie.body['code']).toBe('session_required');
     expect(subjectExists(p.subjectId)).toBe(true);
+    expect(auditRows(p.subjectId)).toEqual([]);
   });
 
-  it('lets the owner erase on a managed instance: no managed-instance refusal', async () => {
+  it('lets the signed-in owner erase on a managed instance: no managed-instance refusal', async () => {
     const p = seedPerson();
     vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', ADMIN);
     vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-test');
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+    const asOwner = { cookie: `lynox_session=${webUiLoginSession(SECRET, null)!.token}` };
+    const { status, body: pv } = await preview(p.subjectId, asOwner);
+    expect(status).toBe(200);
+    expect((await erase({ subjectId: p.subjectId, plan: pv['plan'] }, asOwner)).status).toBe(200);
+    expect(subjectExists(p.subjectId)).toBe(false);
+  });
+
+  it('keeps the instance bearer working on a self-hosted instance, where no control plane holds it', async () => {
+    const p = seedPerson();
     const { status, body: pv } = await preview(p.subjectId);
     expect(status).toBe(200);
     expect((await erase({ subjectId: p.subjectId, plan: pv['plan'] })).status).toBe(200);
-    expect(subjectExists(p.subjectId)).toBe(false);
   });
 });

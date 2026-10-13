@@ -1301,47 +1301,46 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /**
    * The memories a person erasure would show, from either store: bound to the person (`subject`)
-   * when engine.db attaches them to one of `subjectIds`, or when the legacy store links them to a
-   * person entity named `names` (its own link, there whether or not the subject graph is on);
-   * otherwise shown when their text `matches` (`mention`). Also the legacy person entities
-   * themselves, which go with the person. The legacy text is shown where it exists (plaintext),
+   * when engine.db attaches them to one of `subjectIds`, otherwise shown when their text
+   * `matches` (`mention`). Also the legacy person entities under one of `names`, with the
+   * memories that mention them: a name match in the legacy store's own graph, offered for
+   * selection, never taken on its own. The legacy text is shown where it exists (plaintext),
    * else the stub's. A text this key cannot decrypt throws {@link UndecryptableTextError}, so an
    * unreadable store never reads as "nothing found".
    */
   erasureMemoryCandidates(subjectIds: ReadonlySet<string>, names: readonly string[], matches: (text: string) => boolean): {
     memories: Array<{ id: string; text: string; matchedBy: 'subject' | 'mention' }>;
-    entityIds: string[];
-    /** Bound only through the legacy link, with a stub: the stub must go before the legacy row. */
-    stubsBeforeLegacy: string[];
+    entities: Array<{ id: string; name: string; description: string; memoryIds: string[] }>;
+    /** Memories with a stub that engine.db does not attach to the person: if one goes because its
+     *  legacy entity was selected, its stub must go before the legacy row (see below). */
+    unlinkedStubs: string[];
   } {
     const legacy = new Map(this.db.listMemoryTextsForErasure().map(r => [r.id, r.text]));
-    const entities = this.db.personEntitiesForErasure(names);
-    const boundInLegacy = new Set(entities.memoryIds);
     const out: Array<{ id: string; text: string; matchedBy: 'subject' | 'mention' }> = [];
     const seen = new Set<string>();
-    const stubsBeforeLegacy: string[] = [];
+    const unlinkedStubs: string[] = [];
     for (const stub of this.memoryGraphStore?.stubsForErasure(subjectIds) ?? []) {
       seen.add(stub.id);
       if (stub.text === null) throw new UndecryptableTextError('memories');
       const text = legacy.get(stub.id) ?? stub.text;
-      if (!stub.linked && boundInLegacy.has(stub.id)) stubsBeforeLegacy.push(stub.id);
-      if (stub.linked || boundInLegacy.has(stub.id)) out.push({ id: stub.id, text, matchedBy: 'subject' });
-      else if (matches(text)) out.push({ id: stub.id, text, matchedBy: 'mention' });
+      if (stub.linked) out.push({ id: stub.id, text, matchedBy: 'subject' });
+      else {
+        unlinkedStubs.push(stub.id);
+        if (matches(text)) out.push({ id: stub.id, text, matchedBy: 'mention' });
+      }
     }
     for (const [id, text] of legacy) {
-      if (seen.has(id)) continue;
-      if (boundInLegacy.has(id)) out.push({ id, text, matchedBy: 'subject' });
-      else if (matches(text)) out.push({ id, text, matchedBy: 'mention' });
+      if (!seen.has(id) && matches(text)) out.push({ id, text, matchedBy: 'mention' });
     }
-    return { memories: out, entityIds: entities.entityIds, stubsBeforeLegacy };
+    return { memories: out, entities: this.db.personEntitiesForErasure(names), unlinkedStubs };
   }
 
   /**
    * A person erasure's memory steps. The rule is {@link eraseByPattern}'s: the store a memory's
    * id is derived from goes last, so a failed step leaves what a retry needs. For most memories
    * that is engine.db (the subject link, the junction, and its text is searched too), so legacy
-   * goes first. A memory bound only through the legacy entity link is the exception: its stub
-   * (`stubsBeforeLegacy`) goes first, inside the legacy step.
+   * goes first. A memory reached only through a selected legacy entity is the exception: the
+   * entity's mentions go with the legacy row, so its stub goes first, inside the legacy step.
    */
   purgeLegacyMemoriesForErasure(ids: string[], entityIds: readonly string[]): number {
     return this.db.eraseForPerson(ids, entityIds);

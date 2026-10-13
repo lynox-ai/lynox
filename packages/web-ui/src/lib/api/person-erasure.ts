@@ -40,10 +40,18 @@ export interface PersonErasureMemory {
 	matchedBy: 'subject' | 'mention';
 }
 
+export interface PersonErasureLegacyEntity {
+	id: string;
+	name: string;
+	description: string;
+	memoryIds: string[];
+}
+
 export interface PersonErasurePreview {
 	subject: { id: string; name: string; aliases: string[] };
 	entries: PersonErasureEntry[];
 	memories: PersonErasureMemory[];
+	legacyEntities: PersonErasureLegacyEntity[];
 	blocksMentioning: Array<'profile' | 'playbook'>;
 	plan: string;
 	notCovered: PersonErasureNotCovered[];
@@ -53,9 +61,10 @@ export interface PersonErasureResult {
 	erased: boolean;
 	done: PersonErasureStep[];
 	failed: PersonErasureStep | null;
+	subjectId: string;
 	scrubbed: boolean;
-	counts: { entries: number; legacyMemories: number; memoryStubs: number; subjects: number };
-	left: { entries: number; memories: number; blocks: Array<'profile' | 'playbook'> };
+	counts: { entries: number; memories: number; legacyEntities: number; subjects: number };
+	left: { entries: number; memories: number; legacyEntities: number; blocks: Array<'profile' | 'playbook'> };
 	notCovered: PersonErasureNotCovered[];
 }
 
@@ -125,7 +134,7 @@ export function erasureOutcome(a: Answer): PersonErasureOutcome {
 
 export async function erasePerson(
 	apiBase: string,
-	input: { subjectId: string; plan: string; entryIds: string[]; memoryIds: string[] },
+	input: { subjectId: string; plan: string; entryIds: string[]; memoryIds: string[]; entityIds: string[] },
 ): Promise<PersonErasureOutcome> {
 	return erasureOutcome(await post(apiBase, '/privacy/person-erasure', { ...input, confirm: 'ERASE_PERSON' }));
 }

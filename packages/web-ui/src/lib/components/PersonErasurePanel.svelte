@@ -32,8 +32,14 @@
 		...preview.memories.filter(m => m.matchedBy === 'subject'),
 	] : []);
 	const mentions = $derived(preview ? [
-		...preview.entries.filter(e => e.matchedBy !== 'subject').map(e => ({ ...e, store: 'entry' as const })),
-		...preview.memories.filter(m => m.matchedBy !== 'subject').map(m => ({ ...m, store: 'memory' as const })),
+		...preview.entries.filter(e => e.matchedBy !== 'subject').map(e => ({ id: e.id, text: e.text, store: 'entry' as const })),
+		...preview.memories.filter(m => m.matchedBy !== 'subject').map(m => ({ id: m.id, text: m.text, store: 'memory' as const })),
+		// A legacy record under the person's name: ticking it erases it and every memory it links.
+		...preview.legacyEntities.map(n => ({
+			id: n.id,
+			text: tf('erasure.legacy_entity', { name: n.name, n: String(n.memoryIds.length) }) + (n.description ? ` — ${n.description}` : ''),
+			store: 'entity' as const,
+		})),
 	] : []);
 
 	async function load(keepNotice = false) {
@@ -61,7 +67,8 @@
 		busy = true;
 		const entryIds = mentions.filter(m => m.store === 'entry' && picked.has(m.id)).map(m => m.id);
 		const memoryIds = mentions.filter(m => m.store === 'memory' && picked.has(m.id)).map(m => m.id);
-		const outcome = await erasePerson(getApiBase(), { subjectId, plan: preview.plan, entryIds, memoryIds });
+		const entityIds = mentions.filter(m => m.store === 'entity' && picked.has(m.id)).map(m => m.id);
+		const outcome = await erasePerson(getApiBase(), { subjectId, plan: preview.plan, entryIds, memoryIds, entityIds });
 		busy = false;
 		notice = outcome.kind;
 		result = outcome.kind === 'erased' || outcome.kind === 'partial' ? outcome.result : null;
@@ -80,10 +87,11 @@
 	</div>
 
 	{#if notice === 'erased' && result}
-		<p class="mt-2" role="status">{tf('erasure.done', { entries: String(result.counts.entries), memories: String(Math.max(result.counts.legacyMemories, result.counts.memoryStubs)) })}</p>
-		{#if result.left.entries + result.left.memories > 0}
-			<p class="mt-1 text-text-muted">{tf('erasure.left', { n: String(result.left.entries + result.left.memories) })}</p>
+		<p class="mt-2" role="status">{tf('erasure.done', { entries: String(result.counts.entries), memories: String(result.counts.memories) })}</p>
+		{#if result.left.entries + result.left.memories + result.left.legacyEntities > 0}
+			<p class="mt-1 text-text-muted">{tf('erasure.left', { n: String(result.left.entries + result.left.memories + result.left.legacyEntities) })}</p>
 		{/if}
+		{#if !result.scrubbed}<p class="mt-1 text-text-muted">{t('erasure.not_scrubbed')}</p>{/if}
 		{#if result.left.blocks.length > 0}<p class="mt-1 text-text-muted">{t('erasure.blocks')}</p>{/if}
 		{@render notCovered(result.notCovered)}
 	{:else}

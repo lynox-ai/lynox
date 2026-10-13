@@ -14,9 +14,10 @@ const RESULT: PersonErasureResult = {
 	erased: true,
 	done: ['durable_knowledge', 'memories_legacy', 'memories_engine', 'subject'],
 	failed: null,
+	subjectId: 's1',
 	scrubbed: true,
-	counts: { entries: 1, legacyMemories: 1, memoryStubs: 1, subjects: 1 },
-	left: { entries: 0, memories: 0, blocks: [] },
+	counts: { entries: 1, memories: 1, legacyEntities: 0, subjects: 1 },
+	left: { entries: 0, memories: 0, legacyEntities: 0, blocks: [] },
 	notCovered: [...PERSON_ERASURE_NOT_COVERED],
 };
 const PARTIAL: PersonErasureResult = { ...RESULT, erased: false, done: ['durable_knowledge'], failed: 'memories_legacy' };
@@ -54,16 +55,16 @@ describe('the fetchers', () => {
 	it('sends the selection with the confirmation word, and asks no cache to keep it', async () => {
 		const fetchMock = vi.fn(async () => jsonResponse(RESULT));
 		vi.stubGlobal('fetch', fetchMock);
-		const out = await erasePerson('/api', { subjectId: 's1', plan: 'p1', entryIds: ['e1'], memoryIds: ['m1'] });
+		const out = await erasePerson('/api', { subjectId: 's1', plan: 'p1', entryIds: ['e1'], memoryIds: ['m1'], entityIds: ['n1'] });
 		expect(out.kind).toBe('erased');
 		const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
 		expect(url).toBe('/api/privacy/person-erasure');
 		expect(init.cache).toBe('no-store');
-		expect(JSON.parse(String(init.body))).toEqual({ subjectId: 's1', plan: 'p1', entryIds: ['e1'], memoryIds: ['m1'], confirm: 'ERASE_PERSON' });
+		expect(JSON.parse(String(init.body))).toEqual({ subjectId: 's1', plan: 'p1', entryIds: ['e1'], memoryIds: ['m1'], entityIds: ['n1'], confirm: 'ERASE_PERSON' });
 	});
 
 	it('returns the preview, or the refusal when there is none', async () => {
-		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ subject: { id: 's1', name: 'N', aliases: [] }, entries: [], memories: [], blocksMentioning: [], plan: 'p', notCovered: [] })));
+		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ subject: { id: 's1', name: 'N', aliases: [] }, entries: [], memories: [], legacyEntities: [], blocksMentioning: [], plan: 'p', notCovered: [] })));
 		expect('preview' in await previewPersonErasure('/api', 's1')).toBe(true);
 		vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ code: 'key_unavailable' }, 503)));
 		expect(await previewPersonErasure('/api', 's1')).toEqual({ refused: { kind: 'unreadable' } });

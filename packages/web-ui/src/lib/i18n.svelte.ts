@@ -563,6 +563,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'erasure.bound': { de: 'Wird gelöscht (an die Person gebunden)', en: 'Will be erased (tied to this person)' },
 	'erasure.bound_none': { de: 'Keine Einträge sind an die Person gebunden.', en: 'No entries are tied to this person.' },
 	'erasure.matches': { de: 'Erwähnungen anderswo: nur Angehakte werden gelöscht', en: 'Mentions elsewhere: only ticked ones are erased' },
+	'erasure.legacy_entity': { de: 'Älterer Gedächtnis-Eintrag „{name}“ mit {n} Erinnerungen', en: 'Older memory record “{name}” with {n} memories' },
+	'erasure.not_scrubbed': { de: 'Gelöscht. Ältere Kopien im Schreibprotokoll der Datenbank konnten gerade nicht entfernt werden.', en: 'Erased. Older copies in the database’s write log could not be removed just now.' },
 	'erasure.blocks': { de: 'Im Profil oder Playbook erwähnt. Eine Zeile, die aus einem gelöschten Eintrag stammt, geht mit; alles andere bleibt, bis du den Block bearbeitest.', en: 'Mentioned in the profile or playbook. A line taken from an erased entry goes with it; the rest stays until you edit the block.' },
 	'erasure.not_covered': { de: 'Nicht erfasst:', en: 'Not covered:' },
 	'erasure.nc.backups': { de: 'Backups', en: 'Backups' },

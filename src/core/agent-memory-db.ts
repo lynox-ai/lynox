@@ -996,24 +996,25 @@ export class AgentMemoryDb {
 
   /**
    * The person entities this store holds under one of `names` (canonical name or an alias,
-   * case-insensitive after NFKC), and the memories that mention them. This store's own link
-   * between a memory and a person; it exists whether or not the engine.db subject graph is on.
+   * case-insensitive after NFKC), each with the memories that mention it. A match on a name, not
+   * a link to the subject: another person can carry the same name, so a caller offers these for
+   * selection rather than taking them.
    */
-  personEntitiesForErasure(names: readonly string[]): { entityIds: string[]; memoryIds: string[] } {
+  personEntitiesForErasure(names: readonly string[]): Array<{ id: string; name: string; description: string; memoryIds: string[] }> {
     const fold = (s: string): string => s.normalize('NFKC').trim().toLowerCase();
     const wanted = new Set(names.map(fold).filter(n => n.length > 0));
-    const rows = this.db.prepare("SELECT id, canonical_name, aliases FROM entities WHERE entity_type = 'person'")
-      .all() as Array<{ id: string; canonical_name: string; aliases: string }>;
-    const entityIds = rows.filter(r => {
+    const rows = this.db.prepare("SELECT id, canonical_name, aliases, description FROM entities WHERE entity_type = 'person' ORDER BY id")
+      .all() as Array<{ id: string; canonical_name: string; aliases: string; description: string }>;
+    const byEntity = this.db.prepare('SELECT memory_id FROM mentions WHERE entity_id = ? ORDER BY memory_id');
+    return rows.filter(r => {
       let aliases: unknown = [];
       try { aliases = JSON.parse(r.aliases); } catch { /* a malformed list names nothing */ }
       const forms = [r.canonical_name, ...(Array.isArray(aliases) ? aliases.filter((a): a is string => typeof a === 'string') : [])];
       return forms.some(f => wanted.has(fold(f)));
-    }).map(r => r.id);
-    const byEntity = this.db.prepare('SELECT memory_id FROM mentions WHERE entity_id = ?');
-    const memoryIds = new Set<string>();
-    for (const id of entityIds) for (const r of byEntity.all(id) as Array<{ memory_id: string }>) memoryIds.add(r.memory_id);
-    return { entityIds, memoryIds: [...memoryIds] };
+    }).map(r => ({
+      id: r.id, name: r.canonical_name, description: r.description,
+      memoryIds: (byEntity.all(r.id) as Array<{ memory_id: string }>).map(m => m.memory_id),
+    }));
   }
 
   /**
