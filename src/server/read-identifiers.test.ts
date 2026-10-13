@@ -22,7 +22,7 @@ const NOT_IDENTIFYING = new Set([
   // Paging, ordering and windows.
   'limit', 'offset', 'since', 'fromSeq', 'days', 'dateFrom', 'dateTo', 'tzOffsetMin', 'window',
   // Filters over a list: what kind, not which one.
-  'status', 'type', 'stage', 'bucket', 'model', 'name', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal',
+  'status', 'type', 'stage', 'bucket', 'model', 'includeArchived', 'snoozedOnly', 'hidden', 'reveal',
   // Free text: content, never logged.
   'q',
   // An OAuth provider's answer: a code and a state are credentials.
@@ -62,6 +62,11 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     // The control: a scan that matched nothing would pass every assertion below.
     expect(routes.size).toBeGreaterThan(80);
     expect(routes.get('GET /api/files/download')?.names.has('path')).toBe(true);
+  });
+
+  it('places a name on one side only', () => {
+    // A name on both sides would pass every check below whichever way it is meant.
+    expect([...IDENTIFYING].filter((n) => NOT_IDENTIFYING.has(n))).toEqual([]);
   });
 
   it('places every query name the file reads', () => {
