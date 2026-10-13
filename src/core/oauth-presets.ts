@@ -117,9 +117,11 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // Read access to business records, and only scopes the discovery document lists. Five
     // write scopes, for contacts, notes, tasks, offers and invoices, and no others: accounting,
     // bank payments and payroll stay out. A scope is asked for only when the profile names it
-    // (`presetScopeRequest`), so a profile that names none stays read-only. Every write to the
-    // account is asked on its own (`http_request`), because one of these scopes covers creating,
-    // changing, deleting, issuing and sending alike.
+    // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
+    // account is asked on its own (`http_request`), and no contract grants one, because one of
+    // these scopes covers creating, changing, cancelling, booking a payment, issuing and sending
+    // alike. The exception is a bulk run in one of its measured forms, which the person approves
+    // as a whole before it starts (`bulk-external.ts`).
     allowedScopes: [
       'email', 'profile',
       'contact_show', 'lead_show', 'note_show', 'task_show', 'project_show', 'article_show',

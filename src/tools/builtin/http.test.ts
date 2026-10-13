@@ -1006,14 +1006,14 @@ describe('httpRequestTool', () => {
           expect(asMandate).toBe(asOwner);
         });
 
-        it('control: the owner\'s same write goes out', async () => {
+        it('control: the owner\'s same write goes out once the owner allows it', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           await handler(
             { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
-            makeAgent({ capabilityContract: contract }),
+            makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }),
           );
           expect(fetchMock).toHaveBeenCalled();
         });
@@ -1043,11 +1043,11 @@ describe('httpRequestTool', () => {
       // A write to an account connected through a built-in provider is asked every time: one
       // scope there can cover creating, changing, deleting, issuing and sending alike.
       describe('the owner writing to an account connected through a preset', () => {
-        async function withProfile(presetId: string | undefined): Promise<void> {
+        async function withProfile(presetId: string | undefined, baseUrl = 'https://example.com/v1'): Promise<void> {
           const { ApiStore } = await import('../../core/api-store.js');
           const store = new ApiStore();
           store.register({
-            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            id: 'shop-api', name: 'Shop', base_url: baseUrl, description: 'Shop API',
             auth: {
               type: 'oauth2',
               vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
@@ -1113,7 +1113,7 @@ describe('httpRequestTool', () => {
           expect(flattenPrompt(promptUser.mock.calls[0]![0])).toContain('is too large to show; its field names are listed.');
         });
 
-        it('refuses a scheduled write without a contract, and nothing is sent', async () => {
+        it('holds: a scheduled write without a contract is refused, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
@@ -1130,6 +1130,56 @@ describe('httpRequestTool', () => {
           await expect(handler({ url: 'https://example.com/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: withDelete })))
             .rejects.toThrow(/requires user consent/);
           expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('grants no write by contract there: a state change by POST is not sent unattended', async () => {
+          // A provider changes a document's state with a POST to a path of its own (cancel, book a
+          // payment). A contract that grants POST on those paths does not open them.
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const invoices: CapabilityContract = { ...contract, pathPatterns: ['/v1/kb_invoice/*/*'] };
+          for (const action of ['cancel', 'payment']) {
+            await expect(handler({ url: `https://example.com/v1/kb_invoice/7/${action}`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: invoices })))
+              .rejects.toThrow(/requires user consent/);
+          }
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: the same contract grants the POST on an account without a preset', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const invoices: CapabilityContract = { ...contract, pathPatterns: ['/v1/kb_invoice/*/*'] };
+          await handler({ url: 'https://example.com/v1/kb_invoice/7/cancel', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: invoices }));
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it.each([
+          ['a base_url that ends in a dot', 'https://example.com./v1', 'https://example.com/v1/report'],
+          ['a request host that ends in a dot', 'https://example.com/v1', 'https://example.com./v1/report'],
+        ])('counts the account as connected with %s', async (_label, baseUrl, url) => {
+          await withProfile('example-shop', baseUrl);
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, url }, makeAgent({ promptUser }));
+          await handler({ ...post, url }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(2);
+        });
+
+        it('does not follow a contract-granted write onto a connected account by redirect', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://example.com/v1/report' } }))
+            .mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const both: CapabilityContract = { ...contract, hostPatterns: ['other.example', 'example.com'] };
+          await handler({ url: 'https://other.example/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
         it('control: the same contract grants the DELETE on an account without a preset', async () => {

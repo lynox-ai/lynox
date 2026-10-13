@@ -174,16 +174,24 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /**
  * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
- * Every profile on the host counts, a host two profiles share included, and the host is read
- * without trailing root dots, which name the same host to DNS and a different key to the
- * profile map.
+ * Every profile on the host counts, a host two profiles share included. Trailing root dots name
+ * the same host to DNS and a different key to the profile map, which keeps a profile's host as
+ * its `base_url` spells it; so the host is looked up as written, without the dots, and with one,
+ * and a profile found under any of them counts.
  */
 function presetProfilesOnHost(url: string, toolContext: ToolContext | undefined): ApiProfile[] {
   const apiStore = toolContext?.apiStore;
   if (!apiStore) return [];
-  const host = new URL(url).hostname.replace(/\.+$/, '');
-  return (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
-    .map((id) => (id === undefined ? undefined : apiStore.get(id)))
+  const raw = new URL(url).hostname;
+  const bare = raw.replace(/\.+$/, '');
+  const ids = new Set<string>();
+  for (const host of new Set([raw, bare, `${bare}.`])) {
+    for (const id of apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id]) {
+      if (id !== undefined) ids.add(id);
+    }
+  }
+  return [...ids]
+    .map((id) => apiStore.get(id))
     .filter((p): p is ApiProfile => p?.auth?.oauth?.preset_id !== undefined);
 }
 
@@ -2617,15 +2625,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const contract = governing?.contract;
     const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
     // A write to an account connected through a built-in provider (a profile with `preset_id`)
-    // is asked every time, and a DELETE there is never granted by a contract: one scope of such
-    // a provider can cover creating, changing, deleting, issuing and sending, so the question is
-    // what separates them. A contract still grants the other writes, which is what lets a
-    // scheduled run that holds one write at all; without one it is refused below.
+    // is asked every time, and no contract grants one: one scope of such a provider can cover
+    // creating, changing, cancelling, booking a payment, issuing and sending, and a provider
+    // changes a document's state with a POST to a path of its own, so neither the method nor a
+    // path list separates them. The question does. A scheduled run therefore does not write
+    // there through this tool; a bulk run writes there in its own forms, after the run is approved
+    // (`bulk-external.ts`).
     const connectedAccount = presetOnHost.length > 0;
     const contractGrantsWrite =
       contract !== undefined &&
       !outboundEffect &&
-      !(connectedAccount && named.includes('DELETE')) &&
+      !connectedAccount &&
       named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
@@ -2801,7 +2811,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             return hop !== null &&
               contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
               writeMethodsNamed(redirectMethod, headers, nextUrl, hopBody).every((m) => contractGrants('http_request', { url: nextUrl, method: m }, contract)) &&
-              !isOutboundEffectWrite(nextUrl, hop);
+              !isOutboundEffectWrite(nextUrl, hop) &&
+              // No contract grants a write to a connected account, on a hop either.
+              (!isWriteMethod(hop) || presetProfilesOnHost(nextUrl, toolContext).length === 0);
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
