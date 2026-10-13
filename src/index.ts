@@ -95,8 +95,8 @@ export { LynoxError, ValidationError, ConfigError, ExecutionError, ToolError, No
 export { BackupManager } from './core/backup.js';
 export type { BackupManifest, BackupResult, RestoreResult, BackupConfig } from './core/backup.js';
 export type { VerifyResult, BackupFileEntry } from './core/backup-verify.js';
-export { GDriveBackupUploader } from './core/backup-upload-gdrive.js';
-export type { RemoteBackupInfo, UploadResult, DownloadResult } from './core/backup-upload-gdrive.js';
+export { GDriveBackupUploader, fileRootPin } from './core/backup-upload-gdrive.js';
+export type { RemoteBackupInfo, UploadResult, DownloadResult, RootFolderPin } from './core/backup-upload-gdrive.js';
 
 // === CRM ===
 export { CRM } from './core/crm.js';

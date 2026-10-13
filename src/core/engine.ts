@@ -2249,7 +2249,7 @@ export class Engine {
         // second `await import` above this block to reach the gate — outside the catch, in an
         // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
         // been fatal to boot on every tier. A gate is not worth a crash.
-        const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn } = await import('./backup-upload-gdrive.js');
+        const { GDriveBackupUploader, driveBackupAllowed, driveUploadOptedIn, fileRootPin } = await import('./backup-upload-gdrive.js');
         // Cache the consent decision so the upload itself can ask it synchronously. This is what
         // makes a revoked opt-in take effect without a restart. Tier is NOT cached: it is asked
         // at the `driveBackupAllowed()` call that guards this block, because the environment
@@ -2279,6 +2279,10 @@ export class Engine {
             // §3.8: the backup upload is a Google call like any other and is
             // subject to `network_policy`. Same live context as the credential.
             hostPolicy: hostPolicyOf(this._toolContext),
+          }, {
+            // The root's id, kept in the data directory: after a restart the uploader takes the
+            // folder it created, not whichever folder of that name a listing returns.
+            rootPin: fileRootPin(getLynoxDir()),
           }));
         }
       } catch {

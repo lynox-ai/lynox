@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
-import type { GDriveBackupUploader, UploadResult } from './backup-upload-gdrive.js';
+import type { GDriveBackupUploader, RootFolderPin, UploadResult } from './backup-upload-gdrive.js';
 import type { LynoxConfig } from '../types/index.js';
 import { SubjectStore } from './subject-store.js';
 import { RunHistory } from './run-history.js';
@@ -249,6 +249,18 @@ describe('Engine boot — the init() data-protection gates are actually wired', 
 
     expect(engine.getBackupManager()).not.toBeNull();
     expect(engine.getBackupManager()!.getGDriveUploader()).not.toBeNull();
+  });
+
+  it('gives the Drive uploader a root pin kept in the data directory', async () => {
+    const dir = freshDataDir('drive-pin');
+    setEnv('GOOGLE_CLIENT_ID', 'test-client-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'test-client-secret');
+    const engine = await boot();
+
+    const uploader = engine.getBackupManager()!.getGDriveUploader() as unknown as { rootPin?: RootFolderPin | undefined };
+    expect(uploader.rootPin, 'without a pin the root is looked up by name after every restart').toBeDefined();
+    uploader.rootPin!.write('root-id');
+    expect(readFileSync(join(dir, 'gdrive-backup-root'), 'utf8').trim()).toBe('root-id');
   });
 
   it('gives the Drive uploader no scope while calls run on a service account', async () => {
