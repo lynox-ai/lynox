@@ -108,6 +108,12 @@ function isListForm(v: unknown): v is BulkListForm {
   return typeof v === 'string' && Object.hasOwn(BULK_LIST_FORMS, v);
 }
 
+/** Whether a stored list source is still one a run may read: its form is still offered and
+ *  its path still that form's. A source planned before a form was narrowed is not. */
+export function isOfferedListSource(source: BulkListSource): boolean {
+  return isListForm(source.form) && BULK_LIST_FORMS[source.form].path.test(source.path);
+}
+
 /**
  * Check a list source as the planner gave it. Throws {@link BulkSourceError} with a fixed
  * message; nothing of the input is echoed, since a refusal text is read by the model.

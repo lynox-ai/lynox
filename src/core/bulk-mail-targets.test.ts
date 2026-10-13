@@ -17,6 +17,7 @@ import { BulkWriterHalt } from './bulk-apply.js';
 import { setPinnedTransportForTests, type PinnedTransportInput } from './network-guard.js';
 import { createToolContext } from './tool-context.js';
 import { detectSecretInContent } from '../tools/builtin/http.js';
+import { normalizeWritePath } from './outbound-write.js';
 
 /**
  * A bulk run never writes to a mail provider's API: the predicate on its own, and each
@@ -197,6 +198,72 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     // The control: the same contract reaches the transport for a path outside the table.
     expect(await c.write(contact, 'PUT', { x: 1 })).toEqual({ kind: 'ok', value: undefined });
     expect(requests).toEqual([{ method: 'PUT', url: contact }]);
+  });
+
+  // 016: on an ordinary resource path the VALUE of a field sets off the effect (an order's status
+  // mails its customer, a payment's amount is paid out); the request is never sent, whichever
+  // source planned it, and an undo writing such a field back is refused the same way.
+  it('(016) sends nothing that sets a field of the outbound-effect field table, even under a contract that grants it', async () => {
+    const order = 'https://shop.example.com/wp-json/wc/v3/orders/5';
+    const payment = 'https://api.bexio.com/4.0/banking/payments/4';
+    const woo = client('shop.example.com', [order], 'PUT');
+    expect(await woo.write(order, 'PUT', { status: 'completed' })).toEqual({ kind: 'not_granted' });
+    const bexio = client('api.bexio.com', [payment], 'PUT');
+    expect(await bexio.write(payment, 'PUT', { amount: '10.00' })).toEqual({ kind: 'not_granted' });
+    expect(requests).toEqual([]);
+    // The controls: a field off the table reaches the transport, and so does reading the target.
+    expect(await woo.write(order, 'PUT', { transaction_id: 'x' })).toEqual({ kind: 'ok', value: undefined });
+    expect(await woo.get(order)).toMatchObject({ kind: 'ok' });
+    expect(await bexio.get(payment), 'reading a payment sets nothing off').toMatchObject({ kind: 'ok' });
+    expect(requests.map((r) => r.method)).toEqual(['PUT', 'GET', 'GET']);
+  });
+
+  it('(016) plans a target whose after-state sets such a field as invalid, and the same field elsewhere as a target', () => {
+    const order = 'https://shop.example.com/wp-json/wc/v3/orders/5';
+    const product = 'https://shop.example.com/wp-json/wc/v3/products/5';
+    expect(planExternal([{ target: order, after: { status: 'completed' } }], 'shop.example.com', detectSecretInContent))
+      .toEqual([{ key: order, invalid: 'effect_field' }]);
+    expect(planExternal([{ target: product, after: { status: 'draft' } }], 'shop.example.com', detectSecretInContent))
+      .toEqual([{ key: product, after: { status: 'draft' } }]);
+  });
+
+  // A server may read a path that does not normalize cleanly as a route no table here saw:
+  // WordPress decodes once more on one rewrite branch, and its route `$` matches before a
+  // trailing newline. Such a target is never planned, so it is never in a run's contract.
+  it.each([
+    'https://shop.example.com/wp-json/wc/v3/orders/5%0A',
+    'https://shop.example.com/wp%2Djson/wc/v3/orders/%2535',
+    'https://shop.example.com/wp-json/wc/v3/orders%252F5',
+    'https://shop.example.com/wp-json/wc/v3/products/%C3%BC',
+  ])('(016) plans %s as a bad address', (target) => {
+    expect(planExternal([{ target, after: { name: 'x' } }], 'shop.example.com', detectSecretInContent))
+      .toEqual([{ key: target, invalid: 'bad_url' }]);
+  });
+
+  // WordPress rewrites the path into `index.php?rest_route=/…` and parses that as a query: an
+  // `&`, `=`, `+` or `;` in the path is structure there, so the route it dispatches is not the
+  // one planned. Only unreserved characters and `/` are planned, decoded or not.
+  it.each([
+    'https://shop.example.com/wp-json/wc/v3/orders/5&x',
+    'https://shop.example.com/wp-json/wc/v3/products/5&rest_route=/wc/v3/orders/5',
+    'https://shop.example.com/wp-json/wc/v3/products/5%26rest_route=/wc/v3/orders/5',
+    'https://shop.example.com/wp-json/wc/v3/products/5+1',
+    'https://shop.example.com/wp-json/wc/v3/products/5=1',
+    'https://shop.example.com/wp-json/wc/v3/products/5;x',
+  ])('(016) plans %s, whose path a query parser splits, as a bad address', (target) => {
+    expect(normalizeWritePath(new URL(target).pathname).ambiguous).toBe(false);
+    expect(planExternal([{ target, after: { name: 'x' } }], 'shop.example.com', detectSecretInContent))
+      .toEqual([{ key: target, invalid: 'bad_url' }]);
+  });
+
+  it.each([
+    ['graph.microsoft.com', 'https://graph.microsoft.com/v1.0/me/drive/root:/a.xlsx:'],
+    ['graph.microsoft.com', "https://graph.microsoft.com/v1.0/users('abc')/drive/items/1"],
+    ['graph.microsoft.com', 'https://graph.microsoft.com/v1.0/users/a@b.example/drive/items/1'],
+    ['sheets.googleapis.com', 'https://sheets.googleapis.com/v4/spreadsheets/s1/values/Sheet1!A1:B2'],
+  ])('(016) still plans a %s path whose sub-delimiters a query parser keeps', (host, target) => {
+    expect(planExternal([{ target, after: { name: 'x' } }], host, detectSecretInContent))
+      .toEqual([{ key: new URL(target).toString(), after: { name: 'x' } }]);
   });
 
   it('(270) sends nothing whose address raises the verb with ?_method= (the minted contract names paths, never a query)', async () => {

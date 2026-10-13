@@ -295,6 +295,22 @@ describe('bulk_plan over data-store rows', () => {
     expect(result).toContain('Targets: 2 — update 1, create 0, unchanged 1, invalid 0');
   });
 
+  // 016: a staging collection is a third source of an external run's after-state; a field
+  // whose value sets off an effect at the provider is refused from it as from a file.
+  it('(016) plans a collection row that sets an order\'s status as invalid, and a product\'s as a target', async () => {
+    seed();
+    store.createCollection({ name: 'staged_http', scope, columns: [{ name: 'target', type: 'string' }, { name: 'status', type: 'string' }] });
+    store.insertRecords({ collection: 'staged_http', records: [
+      { target: 'https://shop.example.com/wp-json/wc/v3/orders/5', status: 'completed' },
+      { target: 'https://shop.example.com/wp-json/wc/v3/products/5', status: 'draft' },
+    ] });
+    const result = await bulkPlanTool.handler(
+      { target_system: 'http', target_host: 'shop.example.com', source_collection: 'staged_http' }, agent(),
+    );
+    expect(result).toContain('Targets: 2 — update 1, create 0, unchanged 0, invalid 1 (effect_field 1).');
+    expect(result).toContain('effect_field: the after-state sets a field whose value sets off an effect at the provider');
+  });
+
   it('pages a staging collection past one query page, and caps it at the target limit', async () => {
     seed();
     store.createCollection({ name: 'staged', scope, columns: [{ name: 'target', type: 'string' }, { name: 'price', type: 'number' }] });

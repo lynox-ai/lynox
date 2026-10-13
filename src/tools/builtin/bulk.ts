@@ -45,6 +45,11 @@ function formatStatus(s: BulkRunStatus): string {
       `unchanged ${String(s.changes.unchanged)}, invalid ${String(s.changes.invalid)}${invalid ? ` (${invalid})` : ''}.`,
     `Undo class if applied: ${s.undo}.`,
   ];
+  if ((s.invalidReasons.effect_field ?? 0) > 0) {
+    lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
+      'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
+      'such a field: leave it out, or make that change in the provider\'s own interface.');
+  }
   if (s.writeMethod !== null) {
     lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);
   }
