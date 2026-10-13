@@ -26,15 +26,17 @@ export interface ExtractSchema {
   type: 'object';
   properties: Record<string, ExtractSchemaProperty>;
   required?: string[];
+  /** `false` refuses a field the schema does not name. Unset, an unknown field passes unchecked. */
+  additionalProperties?: false;
 }
 
 export type ExtractSchemaProperty =
-  | { type: 'string'; enum?: readonly string[]; pattern?: string }
+  | { type: 'string'; enum?: readonly string[]; pattern?: string; minLength?: number; maxLength?: number }
   | { type: 'number'; minimum?: number; maximum?: number }
   | { type: 'integer'; minimum?: number; maximum?: number }
   | { type: 'boolean' }
   | { type: 'array'; items: ExtractSchemaProperty; maxItems?: number }
-  | { type: 'object'; properties: Record<string, ExtractSchemaProperty>; required?: string[] };
+  | { type: 'object'; properties: Record<string, ExtractSchemaProperty>; required?: string[]; additionalProperties?: false };
 
 export interface CallForStructuredJsonOptions {
   /** System prompt — describes the extractor's role. */
@@ -262,6 +264,15 @@ export function validateAgainstSchema(data: unknown, schema: ExtractSchema, path
       }
     }
   }
+  if (schema.additionalProperties === false) {
+    // The unknown names are model output, so the message names only the allowed ones.
+    const unknown = Object.keys(obj).filter((key) => !Object.hasOwn(schema.properties, key)).length;
+    if (unknown > 0) {
+      throw new ExtractShapeError(
+        `${String(unknown)} field(s) at "${path || '<root>'}" not in the schema; allowed: [${Object.keys(schema.properties).join(', ')}]`,
+      );
+    }
+  }
   for (const [key, prop] of Object.entries(schema.properties)) {
     if (!(key in obj)) continue;
     validateProperty(obj[key], prop, path ? `${path}.${key}` : key, depth + 1);
@@ -312,6 +323,18 @@ function validateProperty(value: unknown, prop: ExtractSchemaProperty, path: str
       if (prop.pattern && !new RegExp(prop.pattern).test(value)) {
         const rule = `does not match pattern /${prop.pattern}/`;
         throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+      }
+      if (prop.minLength !== undefined || prop.maxLength !== undefined) {
+        // Characters as JSON Schema counts them: code points, not UTF-16 units (an emoji like 🙂 is one).
+        const length = [...value].length;
+        if (prop.maxLength !== undefined && length > prop.maxLength) {
+          const rule = `longer than ${String(prop.maxLength)} characters`;
+          throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+        }
+        if (prop.minLength !== undefined && length < prop.minLength) {
+          const rule = `shorter than ${String(prop.minLength)} characters`;
+          throw new SchemaValueError(`Value ${shownValue(value)} at "${path}" ${rule}`, path, rule);
+        }
       }
       break;
     case 'number':

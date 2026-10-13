@@ -192,6 +192,82 @@ describe('validateAgainstSchema', () => {
     };
     expect(() => validateAgainstSchema({ outer: 'not-an-object' }, nested)).toThrow(/Expected object at "outer"/);
   });
+
+  describe('string length', () => {
+    const LIMITED: ExtractSchema = { type: 'object', properties: { meta: { type: 'string', minLength: 3, maxLength: 10 } } };
+    const refusal = (value: string): unknown => {
+      try { validateAgainstSchema({ meta: value }, LIMITED); } catch (err) { return err; }
+      return undefined;
+    };
+
+    it('accepts a value at either bound', () => {
+      expect(refusal('a'.repeat(10))).toBeUndefined();
+      expect(refusal('abc')).toBeUndefined();
+    });
+
+    it('refuses one character over maxLength with path and rule', () => {
+      const err = refusal('a'.repeat(11));
+      expect(err).toBeInstanceOf(SchemaValueError);
+      expect(err).toMatchObject({ path: 'meta', rule: 'longer than 10 characters' });
+    });
+
+    it('refuses one character under minLength with path and rule', () => {
+      const err = refusal('ab');
+      expect(err).toBeInstanceOf(SchemaValueError);
+      expect(err).toMatchObject({ path: 'meta', rule: 'shorter than 3 characters' });
+    });
+
+    it('checks a bound that stands alone', () => {
+      const maxOnly: ExtractSchema = { type: 'object', properties: { meta: { type: 'string', maxLength: 2 } } };
+      const minOnly: ExtractSchema = { type: 'object', properties: { meta: { type: 'string', minLength: 2 } } };
+      expect(() => validateAgainstSchema({ meta: 'abc' }, maxOnly)).toThrow(/longer than 2 characters/);
+      expect(() => validateAgainstSchema({ meta: 'a' }, minOnly)).toThrow(/shorter than 2 characters/);
+    });
+
+    it('counts code points, not UTF-16 units', () => {
+      // Ten characters, eleven UTF-16 units: inside the bound.
+      expect(refusal(`${'a'.repeat(9)}🙂`)).toBeUndefined();
+      // Two characters, four UTF-16 units: under the bound.
+      expect(refusal('🙂🙂')).toMatchObject({ rule: 'shorter than 3 characters' });
+    });
+  });
+
+  describe('additionalProperties: false', () => {
+    const CLOSED: ExtractSchema = {
+      type: 'object',
+      properties: { status: { type: 'string' }, reason: { type: 'string' } },
+      additionalProperties: false,
+    };
+
+    it('accepts an object with only named fields', () => {
+      expect(() => validateAgainstSchema({ status: 'draft', reason: 'x' }, CLOSED)).not.toThrow();
+      expect(() => validateAgainstSchema({ status: 'draft' }, CLOSED)).not.toThrow();
+    });
+
+    it('refuses a field the schema does not name, without echoing its name', () => {
+      let err: unknown;
+      try { validateAgainstSchema({ status: 'draft', approved_by_SENTINEL: 'admin' }, CLOSED); } catch (e) { err = e; }
+      expect(err).toBeInstanceOf(ExtractShapeError);
+      expect((err as Error).message).toBe('1 field(s) at "<root>" not in the schema; allowed: [status, reason]');
+    });
+
+    it('refuses a field named like an Object.prototype member', () => {
+      expect(() => validateAgainstSchema({ status: 'draft', constructor: 'x' }, CLOSED)).toThrow(ExtractShapeError);
+    });
+
+    it('applies to a nested object at its own path', () => {
+      const nested: ExtractSchema = {
+        type: 'object',
+        properties: { outer: { type: 'object', properties: { inner: { type: 'string' } }, additionalProperties: false } },
+      };
+      expect(() => validateAgainstSchema({ outer: { inner: 'a', extra: 1 } }, nested)).toThrow(/1 field\(s\) at "outer" not in the schema/);
+    });
+
+    it('leaves an unknown field alone when the schema does not close', () => {
+      const open: ExtractSchema = { type: 'object', properties: { status: { type: 'string' } } };
+      expect(() => validateAgainstSchema({ status: 'draft', extra: 'x' }, open)).not.toThrow();
+    });
+  });
 });
 
 describe('callForStructuredJson', () => {
