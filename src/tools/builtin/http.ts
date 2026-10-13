@@ -2631,9 +2631,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // is asked every time, and no contract grants one: one scope of such a provider can cover
     // creating, changing, cancelling, booking a payment, issuing and sending, and a provider
     // changes a document's state with a POST to a path of its own, so neither the method nor a
-    // path list separates them. The question does. A scheduled run therefore does not write
-    // there through this tool; a bulk run writes there only in a measured form, after the person
-    // approved the run as a whole (`bulk-external.ts`).
+    // path list separates them. The question does. A run that can ask (a worker task, a
+    // workflow with a question channel) writes there after an Allow; a run with no one to ask
+    // does not write there through this tool. A bulk run writes there only in a measured form,
+    // after the person approved the run as a whole (`bulk-external.ts`).
     const connectedAccount = presetOnHost.length > 0;
     const contractGrantsWrite =
       contract !== undefined &&
