@@ -16509,15 +16509,36 @@ describe('a server without LYNOX_HTTP_SECRET: writes from a browser', () => {
 
   it('refuses it without Origin when the browser says cross-site', async () => {
     mockGoogleRevoke.mockClear();
-    expect((await revoke({ 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    const res = await revoke({ 'Sec-Fetch-Site': 'cross-site' });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain('accepts changes from a browser only');
     expect(mockGoogleRevoke).not.toHaveBeenCalled();
   });
 
   it('refuses a name that resolves here when Host and Origin both carry it', async () => {
     mockGoogleRevoke.mockClear();
     const name = `attacker.example:${String(port)}`;
-    expect((await revoke({ Host: name, Origin: `http://${name}` })).status).toBe(403);
+    const res = await revoke({ Host: name, Origin: `http://${name}` });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain('answers only to localhost');
     expect(mockGoogleRevoke).not.toHaveBeenCalled();
+  });
+
+  it('refuses a READ under a name that resolves here, and answers the same read by address', async () => {
+    const read = (hostHeader: string): Promise<{ status: number; body: string }> => new Promise((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: '/api/vault/key?reveal=true', method: 'GET', headers: { Host: hostHeader } }, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const byName = await read(`attacker.example:${String(port)}`);
+    expect(byName.status).toBe(403);
+    expect(byName.body).toContain('answers only to localhost');
+    const byAddress = await read(own());
+    expect(byAddress.status).toBe(200);
   });
 
   it('accepts the same request from localhost and from this server by IP address', async () => {
@@ -16531,6 +16552,25 @@ describe('a server without LYNOX_HTTP_SECRET: writes from a browser', () => {
   it('ALLOWED ON PURPOSE: a write with neither Origin nor Sec-Fetch-Site passes (curl, CLI, MCP)', async () => {
     mockGoogleRevoke.mockClear();
     expect((await revoke({})).status).not.toBe(403);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a server WITH LYNOX_HTTP_SECRET: the bearer decides, not the browser headers', () => {
+  // The two checks above apply only without a secret. With one, the bearer or the session cookie
+  // decides, and a client that sends an Origin or reaches the server by name is not refused.
+  it('a bearer write with a foreign Origin, sent to a host name, still runs', async () => {
+    mockGoogleRevoke.mockClear();
+    const port = Number(new URL(baseUrl).port);
+    const res = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: '/api/google/revoke', method: 'POST', headers: {
+        Host: `lynox.example.org:${String(port)}`, Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site',
+        Authorization: `Bearer ${TEST_SECRET}`,
+      } }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode ?? 0)); });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(res).not.toBe(403);
     expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
   });
 });

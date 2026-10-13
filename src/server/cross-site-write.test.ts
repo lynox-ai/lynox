@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { crossSiteWriteRefusal, CROSS_SITE_WRITE_REFUSAL } from './cross-site-write.js';
+import { crossSiteWriteRefusal, CROSS_SITE_WRITE_REFUSAL, hostRefusal, NO_SECRET_HOST_REFUSAL, normalizeAllowedOrigins } from './cross-site-write.js';
 
 const base = { method: 'POST', origin: undefined, fetchSite: undefined, host: '127.0.0.1:3000', allowedOrigins: [] as string[] };
 const decide = (over: Partial<typeof base> & { origin?: string; fetchSite?: string; host?: string }) =>
@@ -37,6 +37,8 @@ describe('crossSiteWriteRefusal — writes on a server without a secret', () => 
 
   it('refuses an IP origin that is not this server', () => {
     expect(decide({ origin: 'http://192.168.1.21:3000', host: '192.168.1.20:3000' })).toBe(CROSS_SITE_WRITE_REFUSAL);
+    // Same address, another port: another service on this machine, not this server.
+    expect(decide({ origin: 'http://192.168.1.20:9999', host: '192.168.1.20:3000' })).toBe(CROSS_SITE_WRITE_REFUSAL);
     expect(decide({ origin: 'http://192.168.1.20:3000', host: undefined })).toBe(CROSS_SITE_WRITE_REFUSAL);
   });
 
@@ -50,5 +52,38 @@ describe('crossSiteWriteRefusal — writes on a server without a secret', () => 
   it('ALLOWED ON PURPOSE: a write with neither header is not a browser and passes (curl, CLI, MCP)', () => {
     expect(decide({})).toBeNull();
     expect(decide({ origin: '' })).toBeNull();
+  });
+});
+
+describe('hostRefusal — every request on a server without a secret', () => {
+  const host = (h: string | undefined, allowed: string[] = []) => hostRefusal({ host: h, allowedOrigins: allowed });
+
+  it('answers to localhost and to an IP address, any port', () => {
+    for (const h of ['localhost', 'localhost:3000', '127.0.0.1:3000', '[::1]:3000', '192.168.1.20:3000', '[fd00::20]']) {
+      expect(host(h), h).toBeNull();
+    }
+  });
+
+  it('refuses a host NAME, which a page can point at this server', () => {
+    for (const h of ['attacker.example', 'attacker.example:3000', 'lynox.lan:3000', '127.0.0.1.nip.io:3000', 'localhost.attacker.example']) {
+      expect(host(h), h).toBe(NO_SECRET_HOST_REFUSAL);
+    }
+  });
+
+  it('answers to the host of an allowed origin, on any port of it', () => {
+    expect(host('lynox.lan:3000', ['http://lynox.lan:3000'])).toBeNull();
+    expect(host('lynox.lan', ['https://lynox.lan'])).toBeNull();
+    expect(host('other.lan:3000', ['http://lynox.lan:3000'])).toBe(NO_SECRET_HOST_REFUSAL);
+  });
+
+  it('ALLOWED ON PURPOSE: no Host header is not a browser and passes', () => {
+    expect(host(undefined)).toBeNull();
+    expect(host('')).toBeNull();
+  });
+});
+
+describe('normalizeAllowedOrigins', () => {
+  it('trims, drops empties, and reads a trailing slash as the origin', () => {
+    expect(normalizeAllowedOrigins([' https://a.example/', '', 'http://b.example:8080', ' '])).toEqual(['https://a.example', 'http://b.example:8080']);
   });
 });
