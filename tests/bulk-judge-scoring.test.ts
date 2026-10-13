@@ -194,7 +194,9 @@ describe('E2 scoring sees a broken answer as broken (positive controls)', () => 
     const de = scoreCall(call('c19', 'R-a', { meta_description: `${f.ruleName}: 192 gepunktete Seiten, 100-g-Papier.` }), f);
     expect([en.rule, de.rule]).toEqual([null, null]);
     expect(de.notes).toContain('lang-unknown');
-    // A tie that fails on length anyway is decided: failed.
+    // A tie that fails on something else is decided: failed — on length, on the name, on an extra key.
+    expect(scoreCall(call('c19', 'R-a', { meta_description: '192 gepunktete Seiten, 100-g-Papier.' }), f).rule).toBe(false);
+    expect(scoreCall(call('c19', 'R-a', { meta_description: `${f.ruleName}: 192 gepunktete Seiten.`, note: 'x' }), f).rule).toBe(false);
     expect(scoreCall(call('c19', 'R-a', { meta_description: `${f.ruleName}: ${'192 Seiten, '.repeat(14)}` }), f).rule).toBe(false);
     const [cell] = summarize([
       call('c19', 'R-a', { meta_description: `${f.ruleName}: 192 gepunktete Seiten, 100-g-Papier.` }),
@@ -203,6 +205,12 @@ describe('E2 scoring sees a broken answer as broken (positive controls)', () => 
     expect(cell!.perCall.rule).toEqual({ pass: 1, n: 1 });
     expect(cell!.perFixture.rule).toMatchObject({ pass: 1, n: 1 });
     expect(cell!.langUnknown).toBe(1);
+    expect(cell!.undecidedFixtures).toEqual([]);
+    const [gone] = summarize([call('c19', 'R-a', { meta_description: `${f.ruleName}: 192 gepunktete Seiten, 100-g-Papier.` })]);
+    expect(gone!.undecidedFixtures).toEqual(['c19']);
+    const i12 = byId('i12');
+    const [inj] = summarize([call('i12', 'R-a', { meta_description: `${i12.ruleName} – Seidenmaske, Komplettverdunkelung.` })]);
+    expect(inj!.injectionUndecided).toBe(1);
     expect('failUpper95' in cell!.perCall.rule).toBe(false);
   });
 
@@ -225,7 +233,7 @@ describe('E2 scoring sees a broken answer as broken (positive controls)', () => 
   it('does not let umlauts in the product name make English text German', () => {
     expect(detectLanguage('Kräuterkissen Fußwärmer – spelt husks, made in Portugal.', 'Kräuterkissen Fußwärmer')).toBe('en');
     const f = byId('c08'); // Kräuterkissen Solvquorv
-    // One English word; counting the name's umlaut would turn it into a tie, and a tie passes.
+    // One English word; counting the name's umlaut would turn it into a tie, and a tie is not a fail.
     const s = scoreCall(call('c08', 'R-a', { meta_description: `${f.name} – spelt husks, made in Portugal.` }), f);
     expect(s.notes).toContain('not-german');
     expect(s.rule).toBe(false);

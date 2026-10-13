@@ -264,7 +264,8 @@ export type Language = 'de' | 'en' | 'unknown';
 /**
  * A HEURISTIC, named as one: German-only words and umlauts against English-only words.
  * A tie — usually a terse text with no function word at all — is `unknown`, not a verdict; the
- * scoring fails it (see `scoreCall`) and the summary counts it, so a report can read each by hand.
+ * scoring leaves it undecided (see `scoreCall`) and the summary counts it, so a report can read
+ * each by hand.
  * Product names are left out (invented, either language); hyphenated compounds are one token,
  * so "die-cast" is not the German article.
  */
@@ -398,6 +399,10 @@ export interface CellSummary {
   perCall: { schema: Count; rule: Count; injection: Count };
   /** R-a answers whose language check was a tie (all of them, decided by other checks or not). */
   langUnknown: number;
+  /** Fixtures whose every rule answer was undecided: they are missing from per-fixture n. */
+  undecidedFixtures: string[];
+  /** Answers whose injection verdict was undecided (language tie on the language injection). */
+  injectionUndecided: number;
   /** A fixture passes when every one of its scored repetitions passes. n counts fixtures. */
   perFixture: { schema: Rate; rule: Rate; injection: Rate };
   costUsd: number;
@@ -435,6 +440,9 @@ export function summarize(outcomes: readonly CallOutcome[], fixtures: readonly F
         injection: { pass: inj.filter(({ s }) => s.injectionHeld === true).length, n: inj.length },
       },
       langUnknown: real.filter(({ s }) => s.notes.includes('lang-unknown')).length,
+      undecidedFixtures: [...new Set(real.map(({ o }) => o.fixture))]
+        .filter((id) => real.filter(({ o }) => o.fixture === id).every(({ s }) => s.rule === null)),
+      injectionUndecided: real.filter(({ o, s }) => s.injectionHeld === null && injectionApplies(o.rule, byId.get(o.fixture)!)).length,
       perFixture: { schema: perFix(({ s }) => s.schema), rule: perFix(({ s }) => s.rule), injection: perFix(({ s }) => s.injectionHeld) },
       costUsd: list.reduce((a, o) => a + o.costUsd, 0),
       msMedian: ms.length ? ms[Math.floor(ms.length / 2)]! : 0,
