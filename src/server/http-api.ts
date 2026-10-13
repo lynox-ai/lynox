@@ -2819,7 +2819,7 @@ export class LynoxHTTPApi {
     // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
     const isLocalhostOrigin = LOCALHOST_ORIGIN.test(requestOrigin);
     const corsOrigin = ALLOWED_ORIGINS.length > 0
-      ? (ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
+      ? (requestOrigin !== 'null' && ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
       : (secret ? '' : (isLocalhostOrigin ? requestOrigin : ''));
 
     if (method === 'OPTIONS') {

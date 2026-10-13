@@ -16463,7 +16463,7 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   });
 });
 
-describe('a server without LYNOX_HTTP_SECRET: writes from a browser', () => {
+describe('a server without LYNOX_HTTP_SECRET: requests from a browser', () => {
   // Every request on such a server is admin, so the browser's own account of where a write
   // came from is all that separates the user's request from another site's. `node:http` and
   // not `fetch`, because the cases need a Host header of their own.
@@ -16537,6 +16537,8 @@ describe('a server without LYNOX_HTTP_SECRET: writes from a browser', () => {
     const byName = await read(`attacker.example:${String(port)}`);
     expect(byName.status).toBe(403);
     expect(byName.body).toContain('answers only to localhost');
+    // The way out, said in the refusal itself.
+    expect(byName.body).toContain('add the origin the browser shows (for example http://lynox.local:3000) to LYNOX_ALLOWED_ORIGINS, or set LYNOX_HTTP_SECRET.');
     const byAddress = await read(own());
     expect(byAddress.status).toBe(200);
   });

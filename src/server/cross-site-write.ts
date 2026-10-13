@@ -34,21 +34,30 @@ function isIpLiteral(hostname: string): boolean {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
 }
 
-/** An allowed-origins entry as an origin: trimmed, and `https://x/` read as `https://x`. */
+/**
+ * The allowed-origins entries that ARE origins: trimmed, `https://x/` read as `https://x`, and
+ * anything that is not an http(s) origin dropped. Dropped, not kept: `lynox.lan:3000` parses as a
+ * URL whose scheme is `lynox.lan`, and its origin is the string `null` — the very origin a
+ * sandboxed frame sends. Kept, it would let such a frame in.
+ */
 export function normalizeAllowedOrigins(entries: readonly string[]): string[] {
   const out: string[] = [];
   for (const raw of entries) {
     const entry = raw.trim();
     if (entry === '') continue;
-    try { out.push(new URL(entry).origin); } catch { out.push(entry); }
+    let parsed: URL;
+    try { parsed = new URL(entry); } catch { continue; }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    out.push(parsed.origin);
   }
   return out;
 }
 
 export const NO_SECRET_HOST_REFUSAL =
   'Refused: this server runs without LYNOX_HTTP_SECRET and answers only to localhost, an IP '
-  + 'address, or a host in LYNOX_ALLOWED_ORIGINS. Reached by a host name, add that origin to '
-  + 'LYNOX_ALLOWED_ORIGINS, or set LYNOX_HTTP_SECRET.';
+  + 'address, or the host of an origin in LYNOX_ALLOWED_ORIGINS. Reached by a host name, add the '
+  + 'origin the browser shows (for example http://lynox.local:3000) to LYNOX_ALLOWED_ORIGINS, or '
+  + 'set LYNOX_HTTP_SECRET.';
 
 export const CROSS_SITE_WRITE_REFUSAL =
   'Refused: this server runs without LYNOX_HTTP_SECRET and accepts changes from a browser only on '
@@ -79,6 +88,8 @@ export function crossSiteWriteRefusal(input: {
   if (SAFE_METHODS.has(input.method.toUpperCase())) return null;
   const origin = input.origin;
   if (origin !== undefined && origin !== '') {
+    // `null` is what a sandboxed frame or a `file:` page sends; no entry can allow it.
+    if (origin === 'null') return CROSS_SITE_WRITE_REFUSAL;
     if (input.allowedOrigins.includes(origin)) return null;
     if (LOCALHOST_ORIGIN.test(origin)) return null;
     let parsed: URL | null = null;

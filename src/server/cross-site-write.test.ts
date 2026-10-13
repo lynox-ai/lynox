@@ -86,4 +86,15 @@ describe('normalizeAllowedOrigins', () => {
   it('trims, drops empties, and reads a trailing slash as the origin', () => {
     expect(normalizeAllowedOrigins([' https://a.example/', '', 'http://b.example:8080', ' '])).toEqual(['https://a.example', 'http://b.example:8080']);
   });
+
+  it('drops what is not an http(s) origin — a host without scheme would otherwise become `null`', () => {
+    expect(new URL('lynox.lan:3000').origin).toBe('null'); // the trap, measured on the parser
+    expect(normalizeAllowedOrigins(['lynox.lan:3000', 'localhost:3000', 'null', 'file:///x', 'chrome-extension://abc', 'not a url'])).toEqual([]);
+  });
+});
+
+describe('Origin: null', () => {
+  it('is refused even when an entry somehow reads `null`', () => {
+    expect(crossSiteWriteRefusal({ method: 'POST', origin: 'null', fetchSite: 'cross-site', host: '127.0.0.1:3000', allowedOrigins: ['null'] })).toBe(CROSS_SITE_WRITE_REFUSAL);
+  });
 });
