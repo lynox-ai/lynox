@@ -117,12 +117,18 @@ function printNonce(): string {
  * allows inline script. Its own `<meta>` policy is enforced on top of that one, so a script runs
  * only when both allow it: the scaffold's does, and nothing the artifact brings does (a
  * `<script>` element or an event handler attribute), whatever got past the sanitizer. Measured
- * in Chrome: the meta lands in `<head>` even before a `<!DOCTYPE>` or a full document, and with
- * it only the scaffold runs. Forms send nowhere and plugins load nothing either.
+ * in Chrome: the meta lands in `<head>` before a full document or a fragment, and with it only
+ * the scaffold runs. Forms send nowhere and plugins load nothing either.
+ *
+ * After a leading `<!DOCTYPE>`, not before it: anything before the doctype makes the parser drop
+ * it, and the document renders in quirks mode (measured in Chrome: `BackCompat`), which changes
+ * how it prints.
  */
 export function buildPrintDocument(html: string, nonce: string = printNonce()): string {
   const policy = `<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-${nonce}'; object-src 'none'; base-uri 'none'; form-action 'none'">`;
-  return `${policy}${injectPrintScaffold(html, nonce)}`;
+  const doc = injectPrintScaffold(html, nonce);
+  const doctype = /^\s*<!doctype[^>]*>/i.exec(doc)?.[0] ?? '';
+  return `${doctype}${policy}${doc.slice(doctype.length)}`;
 }
 
 /** Open a built print document in a new window. False if the popup was blocked. */

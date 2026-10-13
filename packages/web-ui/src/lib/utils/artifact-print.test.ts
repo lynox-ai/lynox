@@ -230,6 +230,13 @@ describe('buildPrintDocument — the print document runs no script but its own',
 		expect(out).toContain(`<scr` + `ipt nonce="${nonce}">window.addEventListener("load"`);
 	});
 
+	it('keeps a leading doctype first, so the document does not fall into quirks mode', () => {
+		const out = buildPrintDocument('<!DOCTYPE html>\n<html><body><p>x</p></body></html>');
+		expect(out.startsWith('<!DOCTYPE html>')).toBe(true);
+		expect(POLICY.test(out.slice('<!DOCTYPE html>'.length))).toBe(true);
+		expect(out.match(/<!DOCTYPE/gi)).toHaveLength(1);
+	});
+
 	it('uses a new nonce for every document', () => {
 		const a = POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1];
 		const b = POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1];

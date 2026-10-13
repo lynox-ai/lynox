@@ -27,7 +27,7 @@ describe('the print actions open a document with its own script policy', () => {
 		['an HTML artifact', () => printHtmlDocument('<html><body><p>x</p></body></html>')],
 		['a markdown artifact', () => printMarkdownDocument('# Title\n\ntext', 'Title')],
 	])('%s', async (_k, print) => {
-		const doc = await opened(print);
+		const doc = (await opened(print)).replace(/^<!DOCTYPE html>/i, '');
 		expect(doc.startsWith('<meta http-equiv="Content-Security-Policy" content="script-src \'nonce-')).toBe(true);
 		expect(doc).toContain('window.print()');
 	});
