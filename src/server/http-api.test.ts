@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 import { principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
-import type { Server } from 'node:http';
+import { request as httpRequest, type Server } from 'node:http';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
@@ -16460,5 +16460,77 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         expect(res.status).toBe(503);
       });
     });
+  });
+});
+
+describe('a server without LYNOX_HTTP_SECRET: writes from a browser', () => {
+  // Every request on such a server is admin, so the browser's own account of where a write
+  // came from is all that separates the user's request from another site's. `node:http` and
+  // not `fetch`, because the cases need a Host header of their own.
+  let open: LynoxHTTPApi;
+  let port = 0;
+  const before: Record<string, string | undefined> = {};
+  beforeAll(async () => {
+    for (const k of ['LYNOX_HTTP_SECRET', 'LYNOX_HTTP_ADMIN_SECRET']) { before[k] = process.env[k]; delete process.env[k]; }
+    open = new LynoxHTTPApi();
+    await open.init();
+    await open.start(0);
+    port = portOf(open);
+    for (let i = 0; i < 20; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${String(port)}/health`); if (r.ok) break; } catch { /* not ready */ }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  });
+  afterAll(async () => {
+    await open.shutdown();
+    for (const [k, v] of Object.entries(before)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  });
+
+  function revoke(headers: Record<string, string>): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: '/api/google/revoke', method: 'POST', headers }, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+  const own = () => `127.0.0.1:${String(port)}`;
+
+  it('refuses a body-less POST /api/google/revoke from another site, and Google stays connected', async () => {
+    mockGoogleRevoke.mockClear();
+    const res = await revoke({ Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain('LYNOX_ALLOWED_ORIGINS');
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+  });
+
+  it('refuses it without Origin when the browser says cross-site', async () => {
+    mockGoogleRevoke.mockClear();
+    expect((await revoke({ 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+  });
+
+  it('refuses a name that resolves here when Host and Origin both carry it', async () => {
+    mockGoogleRevoke.mockClear();
+    const name = `attacker.example:${String(port)}`;
+    expect((await revoke({ Host: name, Origin: `http://${name}` })).status).toBe(403);
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+  });
+
+  it('accepts the same request from localhost and from this server by IP address', async () => {
+    mockGoogleRevoke.mockClear();
+    expect((await revoke({ Origin: `http://${own()}`, 'Sec-Fetch-Site': 'same-origin' })).status).not.toBe(403);
+    const lan = `192.168.1.20:${String(port)}`;
+    expect((await revoke({ Host: lan, Origin: `http://${lan}` })).status).not.toBe(403);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('ALLOWED ON PURPOSE: a write with neither Origin nor Sec-Fetch-Site passes (curl, CLI, MCP)', async () => {
+    mockGoogleRevoke.mockClear();
+    expect((await revoke({})).status).not.toBe(403);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
   });
 });

@@ -37,6 +37,7 @@ import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
+import { crossSiteWriteRefusal } from './cross-site-write.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
@@ -2824,6 +2825,23 @@ export class LynoxHTTPApi {
 
     if (corsOrigin) {
       res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+    }
+
+    // Without a secret every request below is admin, so a write is accepted from a browser only
+    // where the browser says it came from this server, localhost, or an allowed origin. The rule
+    // and its cases are in `cross-site-write.ts`.
+    if (!secret) {
+      const refusal = crossSiteWriteRefusal({
+        method,
+        origin: singleHeader(req.headers['origin']),
+        fetchSite: singleHeader(req.headers['sec-fetch-site']),
+        host: singleHeader(req.headers['host']),
+        allowedOrigins: ALLOWED_ORIGINS,
+      });
+      if (refusal !== null) {
+        errorResponse(res, 403, refusal);
+        return;
+      }
     }
 
     // Auth — Bearer token, session cookie, or migration token (same-origin Web UI).
