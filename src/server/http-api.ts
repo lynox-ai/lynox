@@ -10875,7 +10875,9 @@ export class LynoxHTTPApi {
       // engine's DataStore), so the DataStore block below meets `contacts` and `deals`
       // again. It reuses the rows walked here instead of reading them a second time:
       // paid twice, a large CRM would spend the budget on copies and leave the user's
-      // own collections out.
+      // own collections out. The budget therefore counts rows READ. Those two
+      // collections still appear twice in the dump, as they always have (under their
+      // own keys and under `datastore`), so it serialises at most twice the budget.
       const RECORD_BUDGET = 250_000;
       let budget = RECORD_BUDGET;
       type Walked = { rows: Array<Record<string, unknown>>; truncated: boolean };

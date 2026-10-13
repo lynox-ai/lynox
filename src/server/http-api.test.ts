@@ -12902,21 +12902,22 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // they spent the budget on copies and pushed the user's own collections out.
       type Body = DsBody & CrmBody;
       type DsBody = { datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean };
-      const dsWith = () => {
+      const dsWith = (names = ['contacts', 'deals', 'user_rows']) => () => {
         const again = rowsUpTo(Number.MAX_SAFE_INTEGER);
         const listRecordsForExport = vi.fn((p: { collection: string; limit: number; afterId?: number }) => {
           if (p.collection === 'contacts' || p.collection === 'deals') return again(p);
           return p.afterId === undefined ? [{ _id: 1 }] : [];
         });
-        return { listCollections: () => [{ name: 'contacts' }, { name: 'deals' }, { name: 'user_rows' }], listRecordsForExport };
+        return { listCollections: () => names.map(name => ({ name })), listRecordsForExport };
       };
-      const full = await exportWith<Body>({ getCRM: () => crmOf(BUDGET - 1, 0), getDataStore: dsWith });
+      const full = await exportWith<Body>({ getCRM: () => crmOf(BUDGET - 1, 0), getDataStore: dsWith() });
       expect(full.datastore['user_rows'], 'the user collection still fits').toHaveLength(1);
       expect(full.datastore_may_be_incomplete).toBe(false);
       expect(full.datastore['contacts'], 'the CRM rows, reused').toHaveLength(BUDGET - 1);
 
-      // And a CRM cut short stays cut short where the DataStore block shows it.
-      const cut = await exportWith<Body>({ getCRM: () => crmOf(BUDGET + 1, 0), getDataStore: dsWith });
+      // And a CRM cut short stays cut short where the DataStore block shows it. No user
+      // collection here, so nothing but the reused walk can set the flag.
+      const cut = await exportWith<Body>({ getCRM: () => crmOf(BUDGET + 1, 0), getDataStore: dsWith(['contacts', 'deals']) });
       expect(cut.contacts_may_be_incomplete).toBe(true);
       expect(cut.datastore_may_be_incomplete).toBe(true);
     });
