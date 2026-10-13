@@ -5,7 +5,7 @@
  * `tests/bulk-judge-scoring.test.ts`.
  *
  * Spends money, so it runs only when asked for twice: `LYNOX_ONLINE=1` (all online tests)
- * AND `LYNOX_E2=smoke|full`. `smoke` is one call on Haiku; `full` is 40 fixtures × 2 rules ×
+ * AND `LYNOX_E2=smoke|full`. `smoke` is one call on Haiku, or on `LYNOX_E2_SMOKE_MODEL` to check a provider's wire first; `full` is 40 fixtures × 2 rules ×
  * 3 repetitions × 4 models = 960 calls. A hard limit of 3 USD actual spend (from each reply's
  * usage) is checked before every call; reaching it stops the run and says so.
  *
@@ -51,7 +51,7 @@ const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'] ?? configKey('anthropic_a
 const MISTRAL_KEY = process.env['MISTRAL_API_KEY'] ?? configKey('mistral_api_key');
 
 const asked = MODE === 'smoke' || MODE === 'full';
-const describeE2 = asked && ANTHROPIC_KEY && (MODE === 'smoke' || MISTRAL_KEY) ? describe : describe.skip;
+const describeE2 = asked && ANTHROPIC_KEY && MISTRAL_KEY ? describe : describe.skip;
 
 function outDir(): string {
   const dir = process.env['LYNOX_E2_OUT'] ?? join(homedir(), 'lynox-plans', `bulk-loop-e2-${new Date().toISOString().slice(0, 10)}`, MODE ?? 'none');
@@ -71,7 +71,9 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
       ambient, 'anthropic',
     );
 
-    const models = MODE === 'smoke' ? MODELS.slice(0, 1) : MODELS;
+    const smokeModel = process.env['LYNOX_E2_SMOKE_MODEL'] ?? MODELS[0]!.modelId;
+    const models = MODE === 'smoke' ? MODELS.filter((m) => m.modelId === smokeModel) : MODELS;
+    expect(models.length).toBeGreaterThan(0);
     const fixtures: readonly Fixture[] = MODE === 'smoke' ? FIXTURES.filter((f) => f.id === 'c01') : FIXTURES;
     const rules: readonly RuleId[] = MODE === 'smoke' ? ['R-b'] : ['R-a', 'R-b'];
     const reps = MODE === 'smoke' ? 1 : REPS;
