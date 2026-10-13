@@ -30,6 +30,7 @@ import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
+import { UndecryptableTextError } from './engine-db.js';
 import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution, makeSubjectExternalRefs } from './subject-store.js';
 import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
@@ -1296,6 +1297,62 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
     }
     return this.db.purgeByThread(threadId);
+  }
+
+  /**
+   * The memories a person erasure would show, from either store: bound to the person (`subject`)
+   * when engine.db attaches them to one of `subjectIds`, otherwise shown when their text
+   * `matches` (`mention`). Also the legacy person entities under one of `names`, with the
+   * memories that mention them: a name match in the legacy store's own graph, offered for
+   * selection, never taken on its own. Either store's wording can name the person; the one that
+   * does is shown, the legacy one first, and with no match the legacy text where it exists. A text this key cannot decrypt throws {@link UndecryptableTextError}, so an
+   * unreadable store never reads as "nothing found".
+   */
+  erasureMemoryCandidates(subjectIds: ReadonlySet<string>, names: readonly string[], matches: (text: string) => boolean): {
+    memories: Array<{ id: string; text: string; matchedBy: 'subject' | 'mention' }>;
+    entities: Array<{ id: string; name: string; description: string; memoryIds: string[] }>;
+    /** Memories with a stub that engine.db does not attach to the person: if one goes because its
+     *  legacy entity was selected, its stub must go before the legacy row (see below). */
+    unlinkedStubs: string[];
+  } {
+    const legacy = new Map(this.db.listMemoryTextsForErasure().map(r => [r.id, r.text]));
+    const out: Array<{ id: string; text: string; matchedBy: 'subject' | 'mention' }> = [];
+    const seen = new Set<string>();
+    const unlinkedStubs: string[] = [];
+    for (const stub of this.memoryGraphStore?.stubsForErasure(subjectIds) ?? []) {
+      seen.add(stub.id);
+      if (stub.text === null) throw new UndecryptableTextError('memories');
+      // The two stores can hold different wordings; either one naming the person counts, and
+      // the one that does is shown.
+      const legacyText = legacy.get(stub.id);
+      const named = [legacyText, stub.text].find(t => t !== undefined && matches(t));
+      const text = named ?? legacyText ?? stub.text;
+      if (stub.linked) out.push({ id: stub.id, text, matchedBy: 'subject' });
+      else {
+        unlinkedStubs.push(stub.id);
+        if (named !== undefined) out.push({ id: stub.id, text, matchedBy: 'mention' });
+      }
+    }
+    for (const [id, text] of legacy) {
+      if (!seen.has(id) && matches(text)) out.push({ id, text, matchedBy: 'mention' });
+    }
+    return { memories: out, entities: this.db.personEntitiesForErasure(names), unlinkedStubs };
+  }
+
+  /**
+   * A person erasure's memory steps. The rule is {@link eraseByPattern}'s: the store a memory's
+   * id is derived from goes last, so a failed step leaves what a retry needs. For most memories
+   * that is engine.db (the subject link, the junction, and its text is searched too), so legacy
+   * goes first. A memory reached only through a selected legacy entity is the exception: the
+   * entity's mentions go with the legacy row, so its stub goes first, inside the legacy step.
+   */
+  purgeLegacyMemoriesForErasure(ids: string[], entityIds: readonly string[]): number {
+    return this.db.eraseForPerson(ids, entityIds);
+  }
+
+  /** See {@link purgeLegacyMemoriesForErasure}. */
+  purgeMemoryStubsForErasure(ids: string[]): number {
+    return this.memoryGraphStore ? this.memoryGraphStore.purgeMemories(ids) : 0;
   }
 
   // === Retrieve ===

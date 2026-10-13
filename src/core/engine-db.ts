@@ -1296,6 +1296,31 @@ export class EngineDb {
     return h.digest('hex');
   }
 
+  /** Same as `AgentMemoryDb.setSecureDelete`, for engine.db. Returns the previous setting. */
+  setSecureDelete(on: boolean): boolean {
+    const before = this.db.pragma('secure_delete', { simple: true }) === 1;
+    this.db.pragma(`secure_delete = ${on ? 'ON' : 'OFF'}`);
+    return before;
+  }
+
+  /** Fold the write-ahead log into the file and truncate it. False when a reader kept it from finishing. */
+  checkpointTruncate(): boolean {
+    const r = this.db.pragma('wal_checkpoint(TRUNCATE)') as Array<{ busy: number }>;
+    return r[0]?.busy === 0;
+  }
+
+  /**
+   * Decrypt text from storage, or `null` when it is encrypted and cannot be read (no key, wrong
+   * key, corrupted). {@link dec} returns the ciphertext in that case, which a text search reads
+   * as "no match": the person erasure would then report nothing found while the rows stay.
+   * @internal — see {@link enc}.
+   */
+  tryDec(text: string): string | null {
+    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
+    const out = this.dec(text);
+    return out === text ? null : out;
+  }
+
   /**
    * Decrypt text from storage. Handles both encrypted and plaintext (mixed mode).
    * @internal — see {@link enc}.
@@ -1324,5 +1349,17 @@ export class EngineDb {
       }
       return text;
     }
+  }
+}
+
+/**
+ * A stored text a search must read could not be decrypted ({@link EngineDb.tryDec}). Thrown
+ * instead of treating the row as "no match", so a search over encrypted rows never reports a
+ * clean result it could not check.
+ */
+export class UndecryptableTextError extends Error {
+  constructor(where: string) {
+    super(`Stored text in ${where} cannot be decrypted with the current key`);
+    this.name = 'UndecryptableTextError';
   }
 }

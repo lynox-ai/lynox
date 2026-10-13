@@ -13,11 +13,13 @@
 		type SubjectFootprint,
 		type SubjectTimelineEntry,
 	} from '../api/subject-footprint.js';
+	import PersonErasurePanel from './PersonErasurePanel.svelte';
 
 	// Record-on-spine R2b — the read-only subject-graph surface. A subjects list
 	// (left) → a footprint detail panel (right): records + threads as an occurrence
 	// timeline, memories + tasks as adjacent sections. Read + ONE chat handoff
-	// ("discuss"); every edit routes through the agent (no inline mutation here).
+	// ("discuss"); every edit routes through the agent. The one exception is erasing a
+	// person (PersonErasurePanel): an erasure is a human act and no agent tool reaches it.
 
 	const PAGE_SIZE = 50;
 
@@ -30,6 +32,8 @@
 	let footprint = $state<SubjectFootprint | null>(null);
 	let footprintLoading = $state(false);
 	let error = $state('');
+	let erasing = $state(false);
+	let erasedIds = $state<Set<string>>(new Set());
 
 	// Kind palette — same theme-agnostic hues KnowledgeGraphView uses for entity types.
 	const kindHues: Record<string, string> = {
@@ -84,6 +88,7 @@
 
 	async function selectSubject(s: SubjectListItem) {
 		selected = s;
+		erasing = false;
 		footprint = null;
 		footprintLoading = true;
 		const fp = await fetchSubjectFootprint(getApiBase(), s.id);
@@ -191,6 +196,20 @@
 			class="mt-3 w-full rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-3 py-2 text-sm text-accent-text hover:bg-accent/10 transition-colors">
 			{t('subjects.discuss')}
 		</button>
+
+		{#if selected!.kind === 'person'}
+			{#if erasing}
+				{#key selected!.id}
+					<PersonErasurePanel subjectId={selected!.id} onclose={() => { erasing = false; }}
+						onerased={(id) => { erasedIds = new Set([...erasedIds, id]); subjects = subjects.filter(x => x.id !== id); }} />
+				{/key}
+			{:else if !erasedIds.has(selected!.id)}
+				<button onclick={() => { erasing = true; }}
+					class="mt-2 w-full rounded-[var(--radius-md)] border border-danger/30 px-3 py-2 text-sm text-danger hover:bg-danger/10 transition-colors">
+					{t('erasure.open')}
+				</button>
+			{/if}
+		{/if}
 
 		{#if footprintLoading}
 			<p class="mt-4 text-text-subtle text-sm">{t('common.loading')}</p>

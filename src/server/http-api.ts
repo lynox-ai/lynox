@@ -78,6 +78,11 @@ import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
+import { UndecryptableTextError } from '../core/engine-db.js';
+import {
+  PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
+  type PersonErasureDeps, type PersonErasurePreview, type PersonErasureRefusal, type PersonErasureResult,
+} from '../core/person-erasure.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
 import type {
@@ -838,6 +843,17 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
     status_counts: statusCounts,
   };
   return failed ? { ...block, error: failed } : block;
+}
+
+/** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
+function noStoreJson(res: ServerResponse, status: number, body: unknown): void {
+  const json = JSON.stringify(body);
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(json),
+    'Cache-Control': 'no-store',
+  });
+  res.end(json);
 }
 
 function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
@@ -8358,6 +8374,157 @@ export class LynoxHTTPApi {
       process.stderr.write('[privacy] account deletion requested via UI stop-gap mailto\n');
       jsonResponse(res, 200, { ok: true, channel: 'mailto', recipient: 'privacy@lynox.ai' });
     }, ownerOnly('request the deletion of data'));
+
+    // ── Privacy & Data — erasing one person ──
+    // The owner, as controller, answering one data subject's request (Art. 17): what the agent
+    // remembers about that person, from both memory stores, and the person's subject. Owner-only
+    // and deliberately NOT behind `denyOnManagedInstance`: that guard keeps instance-wide state
+    // and exports system-controlled, while this is the controller acting on their own data. No
+    // admin alias either, and on an instance the control plane provisioned both routes refuse
+    // every bearer: the control plane holds both of the instance's bearers, and its tools use
+    // them. The owner reaches these routes signed in, through the web app's session. That is
+    // where this stops: the session is signed with the instance secret the control plane also
+    // holds, so this closes the control plane's tool path, it does not make the control plane
+    // unable to act as the owner. Preview first, with the text, so the owner decides on
+    // what they read; the erase call must send back the preview's plan. Both answers carry
+    // `Cache-Control: no-store` (the preview holds personal text), the subject id travels in the
+    // body, never the path, and nothing here writes a text to the log.
+    const personErasureDeps = async (): Promise<PersonErasureDeps | null> => {
+      const engineDb = engine.getEngineDb();
+      const layer = engine.getKnowledgeLayer();
+      if (!engineDb || !layer) return null;
+      const { SubjectStore } = await import('../core/subject-store.js');
+      const { KnowledgeStore } = await import('../core/knowledge-store.js');
+      const subjects = engine.getSubjectStore() ?? new SubjectStore(engineDb);
+      const secretStore = engine.getSecretStore();
+      // Built over engine.db when durable knowledge is switched off: entries written while it was
+      // on are still in the table, and the person's request reaches them too.
+      const knowledge = engine.getKnowledgeStore() ?? new KnowledgeStore(engineDb, subjects, secretStore ?? null);
+      return {
+        engineDb, subjects, knowledge, layer,
+        mask: (t: string) => maskSecretPatterns(secretStore ? secretStore.maskSecrets(t) : t),
+      };
+    };
+    const personErasureRefusal = (res: ServerResponse, r: PersonErasureRefusal): void => {
+      switch (r.refused) {
+        case 'not_found': noStoreJson(res, 404, { error: 'No such subject', code: 'not_found' }); return;
+        case 'not_a_person': noStoreJson(res, 400, { error: 'Only a person can be erased this way', code: 'not_a_person' }); return;
+        case 'is_self': noStoreJson(res, 400, { error: 'This is the owner\'s own subject; it cannot be erased this way', code: 'is_self' }); return;
+        case 'plan_changed': noStoreJson(res, 409, { error: 'What would be erased has changed since the preview, so nothing was erased; preview again', code: 'plan_changed' }); return;
+        case 'unknown_ids': noStoreJson(res, 400, { error: 'Some selected ids are not among what the preview found, so nothing was erased', code: 'unknown_ids', ids: r.ids }); return;
+        case 'audit_unavailable': noStoreJson(res, 503, { error: 'This erasure cannot be recorded in the instance log right now, so nothing was erased.', code: 'audit_unavailable' }); return;
+      }
+    };
+    const readSubjectId = (body: unknown): string | null => {
+      const v = (body as Record<string, unknown> | null)?.['subjectId'];
+      return typeof v === 'string' && v.length > 0 && v.length <= 200 ? v : null;
+    };
+    // On a provisioned instance a bearer is the control plane's, whichever of the two it is.
+    const refuseBearerOnProvisioned = (req: IncomingMessage, res: ServerResponse): boolean => {
+      if (!isProvisionedInstance() || !(this._authOrigin.get(req) ?? '').startsWith('bearer')) return false;
+      noStoreJson(res, 403, { error: 'On a managed instance a person is erased from the web app, signed in as the owner', code: 'session_required' });
+      return true;
+    };
+    const readIds = (v: unknown): string[] | null =>
+      v === undefined ? [] : Array.isArray(v) && v.length <= 10_000 && v.every(x => typeof x === 'string' && x.length <= 200) ? v as string[] : null;
+
+    this.addStatic('user', 'POST /api/privacy/person-erasure/preview', async (req, res, _params, body) => {
+      if (refuseBearerOnProvisioned(req, res)) return;
+      const subjectId = readSubjectId(body);
+      if (subjectId === null) { noStoreJson(res, 400, { error: '"subjectId" is required' }); return; }
+      const deps = await personErasureDeps();
+      if (deps === null) { noStoreJson(res, 503, { error: 'The memory stores are not open on this instance', code: 'stores_unavailable' }); return; }
+      let preview: PersonErasurePreview | PersonErasureRefusal;
+      try {
+        preview = previewPersonErasure(deps, subjectId);
+      } catch (err: unknown) {
+        if (err instanceof UndecryptableTextError) {
+          noStoreJson(res, 503, { error: 'Some stored memory cannot be decrypted with this instance\'s key, so the search cannot be complete', code: 'key_unavailable' });
+          return;
+        }
+        throw err;
+      }
+      if ('refused' in preview) { personErasureRefusal(res, preview); return; }
+      noStoreJson(res, 200, preview);
+    }, ownerOnly('erase a person\'s data'));
+
+    this.addStatic('user', 'POST /api/privacy/person-erasure', async (req, res, _params, body) => {
+      if (refuseBearerOnProvisioned(req, res)) return;
+      const b = body as Record<string, unknown> | null;
+      const subjectId = readSubjectId(body);
+      const plan = b?.['plan'];
+      const entryIds = readIds(b?.['entryIds']);
+      const memoryIds = readIds(b?.['memoryIds']);
+      const entityIds = readIds(b?.['entityIds']);
+      if (subjectId === null || typeof plan !== 'string' || entryIds === null || memoryIds === null || entityIds === null) {
+        noStoreJson(res, 400, { error: '"subjectId" and "plan" are required; "entryIds", "memoryIds" and "entityIds" are lists of ids' });
+        return;
+      }
+      if (b?.['confirm'] !== PERSON_ERASURE_CONFIRM) {
+        noStoreJson(res, 400, { error: `Confirmation required: send { "confirm": "${PERSON_ERASURE_CONFIRM}" }` });
+        return;
+      }
+      const deps = await personErasureDeps();
+      if (deps === null) { noStoreJson(res, 503, { error: 'The memory stores are not open on this instance', code: 'stores_unavailable' }); return; }
+      // After the last await: from here to the answer the route runs without yielding, so nothing
+      // checked below can change before the erasure has run.
+      if (this.erasureInProgress) { noStoreJson(res, 409, { error: 'An erasure is already running', code: 'erasure_in_progress' }); return; }
+      // A running chat can write the person again right after the erasure (its extraction runs
+      // when the turn ends), and the answer could not say so. Refused instead; stopping the chat
+      // and trying again erases what it wrote too.
+      if (this.runningSessions.size > 0) {
+        noStoreJson(res, 409, { error: 'A chat is running, so nothing was erased; stop it or let it finish, then try again', code: 'runs_active' });
+        return;
+      }
+      // The owner's trail: an attempt row before the first step, an outcome row after it, ids and
+      // counts only. A missing outcome row is how a crash mid-erasure shows.
+      const log = engine.getAuditLog();
+      const trail: { entry: AuditEntry | null } = { entry: null };
+      let result: PersonErasureResult | PersonErasureRefusal;
+      try {
+        result = erasePerson(deps, {
+          subjectId, plan, entryIds, memoryIds, entityIds,
+          beforeErase: (planned) => {
+            if (log === null) throw new Error('no audit log');
+            trail.entry = {
+              principal: this._principalOf(req), action: 'person-erasure',
+              target: `subject:${planned.subjectId} entries:${String(planned.entries)} memories:${String(planned.memories)} entities:${String(planned.legacyEntities)}`,
+              phase: 'attempt', correlationId: newCorrelationId(),
+            };
+            log.record(trail.entry);
+          },
+        });
+      } catch (err: unknown) {
+        if (err instanceof UndecryptableTextError) {
+          noStoreJson(res, 503, { error: 'Some stored memory cannot be decrypted with this instance\'s key, so nothing was erased', code: 'key_unavailable' });
+          return;
+        }
+        throw err;
+      }
+      if ('refused' in result) { personErasureRefusal(res, result); return; }
+      const opened = trail.entry;
+      if (opened !== null) {
+        // The outcome row carries what went, which after a failed step is less than the attempt planned.
+        const target = `subject:${result.subjectId} entries:${String(result.counts.entries)} memories:${String(result.counts.memories)} entities:${String(result.counts.legacyEntities)}`;
+        const closing: AuditEntry = result.erased
+          ? { ...opened, phase: 'done', target }
+          : { ...opened, phase: 'failed', target, action: `person-erasure failed:${result.failed ?? 'unknown'}` };
+        try { log?.record(closing); } catch { /* the attempt row stands alone, which reads as "did not finish" */ }
+      }
+      process.stderr.write(`[privacy] person erasure: erased=${String(result.erased)} done=${result.done.join(',')} failed=${result.failed ?? '-'}\n`);
+      const { error, ...rest } = result;
+      if (!result.erased) {
+        // 500 on any failed step: a client reading the status alone must not conclude the person
+        // is gone. `done` and `failed` say how far it got; a new preview shows what is left, and
+        // erasing that finishes it (every step is idempotent, the subject id survives to the end).
+        noStoreJson(res, 500, {
+          ...rest,
+          error: `Erasure incomplete: the step "${result.failed ?? ''}" failed${error ? ` (${maskForClient(error)})` : ''}; the steps after it did not run. Preview again and erase what is left.`,
+        });
+        return;
+      }
+      noStoreJson(res, 200, rest);
+    }, ownerOnly('erase a person\'s data'));
 
     // ── Available tools (T5 — Tool Toggles UI) ──
     // Drives the categorised Tool Toggles surface (P3-FOLLOWUP-HOTFIX).
