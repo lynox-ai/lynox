@@ -4217,7 +4217,8 @@ export class Agent implements IAgent {
           };
         }
       } else {
-        const refusal = `Permission denied (non-interactive): ${tc.name}${headlessRefusalNote(tc.name, tc.input, this.governingContract().withheld === 'untrusted')}`;
+        const governing = this.governingContract();
+        const refusal = `Permission denied (non-interactive): ${tc.name}${headlessRefusalNote(tc.name, tc.input, governing.withheld === 'untrusted', governing.contract)}`;
         // Streamed like every other result, so a step's recorder sees the refusal: a
         // headless run's owner learns of a refused write only through it (the step itself
         // still completes). Same shape as the escalated-skip result above.

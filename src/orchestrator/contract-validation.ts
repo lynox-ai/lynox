@@ -2,6 +2,8 @@ import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/c
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/pre-approve.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
+import { isReviewedHeaderName } from '../tools/permission-guard.js';
+import { headerListForNote } from '../core/write-notes.js';
 
 /**
  * Base `params.<name>` reference. Captures the base name up to the next path
@@ -385,6 +387,25 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
 }
 
 /**
+ * Why a step's template sets a header a run under a reviewed grant is refused at dispatch
+ * (`isReviewedHeaderName`, the list `contractGrants` enforces), or `null`. Header names are
+ * read as written: `resolveInputTemplate` substitutes values, never keys. A `headers` that is
+ * not an object (a placeholder, which a parameter or an earlier step fills) names nothing
+ * that could be checked here, so it is refused too. A step without a template writes its
+ * call at run time, and only the run can refuse its headers.
+ */
+function reviewedHeaderError(step: InlinePipelineStep): string | null {
+  const template = step.input_template;
+  if (template === undefined || !('headers' in template) || template['headers'] === undefined) return null;
+  const headers = template['headers'];
+  if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) {
+    return `Step "${step.id}" takes its request headers from a value, and a reviewed grant needs each header named.`;
+  }
+  const refused = Object.keys(headers).filter((name) => !isReviewedHeaderName(name));
+  return refused.length === 0 ? null : `Step "${step.id}" sets ${headerListForNote(refused)}, which a run under a reviewed grant may not set.`;
+}
+
+/**
  * The contract a person's entry grants, with every parameter that reaches a tool call
  * pinned to the value bound for this schedule. Built from the dialog, never from the
  * steps: a recorded step may be a call the consent gate refused, and its template was
@@ -420,5 +441,13 @@ export function buildReviewedContract(
     paramConstraints,
   };
   const shapeError = reviewedContractShapeError(contract, steps);
-  return shapeError === null ? { contract } : { error: shapeError.charAt(0).toUpperCase() + shapeError.slice(1) };
+  if (shapeError !== null) return { error: shapeError.charAt(0).toUpperCase() + shapeError.slice(1) };
+  // Checked here, where a person is about to accept, and not in the shape a save checks: an
+  // edit drops the grant anyway (`update_workflow`), and refusing it for headers the dropped
+  // grant would have refused helps nobody. Without this, every run of an accepted grant fails.
+  for (const step of steps ?? []) {
+    const headerError = reviewedHeaderError(step);
+    if (headerError !== null) return { error: headerError };
+  }
+  return { contract };
 }

@@ -158,6 +158,23 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     expect(tm.getTrigger(trigger.id)?.last_run_status).toBe('success');
   });
 
+  it('a write the grant refuses for its header is not sent, and the owner\'s run record names the header, not its value', async () => {
+    const trigger = accept(saveWorkflow());
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', headers: { Prefer: 'respond-async-zq7' }, body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+    await fire(trigger);
+    expect(posts()).toEqual([]);
+    expect(lastRun(trigger.id)).toContain(`Not granted for an unattended run: POST ${TARGET}. It sets a header "Prefer", which a run under a reviewed grant may not set.`);
+    expect(lastRun(trigger.id)).not.toContain('respond-async-zq7');
+  });
+
+  it('CONTROL: the same write with a header the grant allows reaches the host', async () => {
+    const trigger = accept(saveWorkflow());
+    mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', headers: { 'Idempotency-Key': 'k-1' }, body: '{}' })).mockResolvedValueOnce(endTurn('posted'));
+    await fire(trigger);
+    expect(posts().map((p) => p.url)).toEqual([TARGET]);
+    expect(lastRun(trigger.id)).not.toContain('sets a header');
+  });
+
   it('steps changed after the acceptance by a raw blob write: the checksum differs and the run does not write', async () => {
     const planned = saveWorkflow();
     const trigger = accept(planned);
