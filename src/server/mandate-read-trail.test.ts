@@ -193,6 +193,27 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     expect(got[2]).toBe('/api/files/read?path=März Bericht.pdf');
   });
 
+  it('masks a key that follows a character the row escapes', async () => {
+    // Masked before escaping: after `%3F` the key would no longer start on a boundary.
+    const tail = 'A1b2'.repeat(6);
+    for (const path of [`/api/threads/x%3Fsk-ant-${tail}`, `/api/files/read?path=x%3Fsk-ant-${tail}`]) {
+      const res = await ask('GET', path, mandateCookie);
+      await res.arrayBuffer();
+    }
+    const got = newReadRows();
+    expect(got).toHaveLength(2);
+    for (const r of got) expect(r.target).not.toContain(tail);
+  });
+
+  it('masks an encoded key behind a byte that is not UTF-8', async () => {
+    const tail = 'A1b2'.repeat(6);
+    const res = await ask('GET', `/api/threads/%FF%73k-ant-${tail}`, mandateCookie);
+    await res.arrayBuffer();
+    const got = newReadRows();
+    expect(got).toHaveLength(1);
+    expect(got[0]?.target).not.toContain(tail);
+  });
+
   it('masks an encoded key next to a malformed escape', async () => {
     const tail = 'A1b2'.repeat(6);
     const res = await ask('GET', `/api/threads/%73k-ant-${tail}%ZZ`, mandateCookie);
