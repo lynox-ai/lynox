@@ -11,6 +11,16 @@ vi.mock('./toast.svelte.js', () => ({ addToast: () => 1 }));
 const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const gone = (): Response => json({ error: 'This conversation was deleted.', code: 'thread_deleted' }, 410);
+function sseStream(): { body: ReadableStream<Uint8Array>; send: (type: string, data: unknown) => void; close: () => void } {
+	const enc = new TextEncoder();
+	let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+	const body = new ReadableStream<Uint8Array>({ start(c) { ctrl = c; } });
+	return { body, send: (type, data) => ctrl.enqueue(enc.encode(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`)), close: () => ctrl.close() };
+}
+const sse = (st: ReturnType<typeof sseStream>): Response =>
+	new Response(st.body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+const settle = async (): Promise<void> => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
+const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 let store: Store;
 let deletedText: string;
@@ -75,6 +85,31 @@ describe('a conversation deleted elsewhere', () => {
 		expect(opens, 'opened, then one attempt to reopen it').toHaveLength(2);
 		expect(opens[1]!.body, 'reopened under its own id').toEqual({ threadId: 't1' });
 		expect(runPosts()).toBe(1);
+	});
+
+	it('the turns queued behind it are not sent into it', async () => {
+		// Every one of them would get the same 410. Contrast: after a lost connection the queue
+		// moves on (chat-turn-start-failures), because the next try may get through.
+		const first = sseStream();
+		serve((url, n) => {
+			if (url.endsWith('/run')) return n === 1 ? sse(first) : json({ error: 'no session' }, 404);
+			if (url.endsWith('/sessions') && n >= 2) return gone();
+			return undefined;
+		});
+		void store.sendMessage('one');
+		await settle();
+		void store.sendMessage('two');
+		void store.sendMessage('three');
+		await settle();
+		first.send('done', {});
+		first.close();
+		await settle();
+		await wait(400);
+		await settle();
+
+		expect(store.getMessages().find((m) => m.content === 'two')?.failed).toBe(true);
+		expect(store.getChatError()).toBe(deletedText);
+		expect(runPosts(), '"three" was not sent').toBe(2);
 	});
 
 	it('the two texts exist in German and English', async () => {
