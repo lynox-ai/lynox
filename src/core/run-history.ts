@@ -1069,14 +1069,22 @@ const MIGRATIONS: string[] = [
   // constraint in place — the table must be recreated.
   //
   // Unlike the tasks rebuilds (v31/v42), this DROPs and recreates instead of
-  // INSERT..SELECT-preserving rows: pending_prompts is EPHEMERAL — a pending
-  // prompt is bound to a live SSE connection that a restart already severed,
-  // and the engine calls expireUnparked() on every cold boot (see v27), so no
-  // row here outlives the restart that runs this migration — with the single
-  // exception added later for a trigger's parked question, which by definition
-  // did not exist when this migration ran. Dropping is therefore
-  // lossless in practice AND robust to a partial-schema DB (DROP IF EXISTS
-  // tolerates a table that a minimal seed never created).
+  // INSERT..SELECT-preserving rows, on the premise that pending_prompts was
+  // EPHEMERAL: a pending prompt is bound to a live SSE connection that a
+  // restart already severed, and the engine expires what is left pending on
+  // every cold boot (see v27). DROP IF EXISTS also tolerates a table that a
+  // minimal seed never created.
+  //
+  // Premise withdrawn 2026-09-06 (#1331): since then a pending question a
+  // trigger is parked on outlives a restart by design — expireUnparked()
+  // (prompt-store.ts) skips rows with a trigger_id. That cannot reach this
+  // migration: trigger_id arrives with v53, so a table that still runs v43
+  // holds no parked question. What the DROP discards is everything else in the
+  // table: the pending rows of the process that ended, which the boot sweep
+  // would expire anyway, and the closed (answered or expired) rows, which are
+  // never deleted and which later code reads by id (getById, closed_reason).
+  // So the drop is lossless for pending prompts; the closed rows of a database
+  // that predates v43 are gone, and a lookup of such an id finds nothing.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
 
    DROP TABLE IF EXISTS pending_prompts;
