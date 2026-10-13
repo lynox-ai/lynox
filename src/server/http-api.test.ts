@@ -14712,6 +14712,60 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       expect(mockSecretSet).not.toHaveBeenCalled();
     });
 
+    describe('the actor trail of a mandate\'s consent', () => {
+      // The route answers before dispatch, so it opens its own trail; the caller closes it.
+      let recorded: Array<{ phase: string; action: string; target?: string; principal: { kind: string } }> = [];
+      let origLog: unknown;
+      beforeEach(() => {
+        recorded = [];
+        origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record: (e: (typeof recorded)[number]) => { recorded.push(e); } });
+      });
+      afterEach(() => { engineRef()['getAuditLog'] = origLog; });
+
+      it('records attempt and done around the tokens it stores, naming the profile', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(recorded.map((e) => [e.phase, e.action, e.target, e.principal.kind])).toEqual([
+          ['attempt', 'GET /api/oauth/callback', `profile:${PROFILE}`, 'mandate'],
+          ['done', 'GET /api/oauth/callback', `profile:${PROFILE}`, 'mandate'],
+        ]);
+      });
+
+      it('stores nothing when the attempt cannot be written', async () => {
+        engineRef()['getAuditLog'] = () => ({ record: () => { throw new Error('disk full'); } });
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        mockSecretSet.mockClear();
+        mockExchangeToken.mockClear();
+        const res = await complete(cookie);
+        expect(res.status).toBe(503);
+        expect(await res.text()).toContain('Nothing was stored');
+        // The code is not spent at the provider either: the attempt goes before the exchange.
+        expect(mockExchangeToken).not.toHaveBeenCalled();
+        expect(mockSecretSet).not.toHaveBeenCalled();
+        expect(store.get(PROFILE)?.oauth_grant?.connected_by).not.toBe(TAG);
+      });
+
+      it('records attempt and failed when the provider refuses the exchange, which spent the code', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        mockExchangeToken.mockResolvedValueOnce({ ok: true, status: 400, responseOk: false, text: '' });
+        expect((await complete(cookie)).status).toBe(502);
+        expect(recorded.map((e) => [e.phase, e.action, e.target])).toEqual([
+          ['attempt', 'GET /api/oauth/callback', `profile:${PROFILE}`],
+          ['failed', 'GET /api/oauth/callback', `profile:${PROFILE}`],
+        ]);
+      });
+
+      it('records nothing for the owner\'s consent', async () => {
+        const { cookie } = await arrange({});
+        expect((await complete(cookie)).status).toBe(200);
+        expect(recorded).toEqual([]);
+      });
+    });
+
     it('control: the same mandate and profile complete while the mandate is live', async () => {
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
       store.register({ ...store.get(PROFILE)!, created_by: TAG });
@@ -15534,9 +15588,12 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   }
   const failingLog = { record: (): void => { throw new Error('disk full'); } };
 
-  /** The two rows of one recorded act, read in full. `closingAction` is the outcome row's action
-   *  where the request names what it did beyond its action (a delete and the run it stopped). */
-  function expectPair(action: string, target: string, outcome: 'done' | 'refused', closingAction = action): void {
+  /** The two rows of one recorded act, read in full. The dispatcher writes them (`_beganMandateChange`):
+   *  the target is the request's path, and the outcome row follows when the answer closes, so it
+   *  is waited for. `closingAction` is the outcome row's action where the handler names what the
+   *  request did beyond its action (a delete and the run it stopped, the trigger a start named). */
+  async function expectPair(action: string, target: string, outcome: 'done' | 'refused' | 'failed', closingAction = action): Promise<void> {
+    for (let i = 0; i < 50 && rows().length < 2; i++) await new Promise((r) => setTimeout(r, 5));
     const r = rows();
     expect(r.map((x) => x.phase)).toEqual(['attempt', outcome]);
     r.forEach((x, i) => {
@@ -15549,7 +15606,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   }
 
   describe('DELETE /api/data is the owner\'s alone', () => {
-    it('refuses a mandate with 403, erases nothing and leaves the log as it was', async () => {
+    it('refuses a mandate with 403, erases nothing, keeps the log and records the refused attempt', async () => {
       log.record({ principal: MANDATE, action: 'earlier act', phase: 'attempt', correlationId: 'c-0' });
       const deleteAllData = vi.fn();
       await withEngine({ getRunHistory: () => ({ deleteAllData, scrubFreedPages: vi.fn() }) }, async () => {
@@ -15559,7 +15616,8 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect(((await res.json()) as { error: string }).error).toBe('Only the owner of this instance can delete all data.');
       });
       expect(deleteAllData).not.toHaveBeenCalled();
-      expect(rows().map((x) => x.correlation_id)).toEqual(['c-0']);
+      for (let i = 0; i < 50 && rows().length < 3; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(rows().map((x) => [x.correlation_id === 'c-0' ? 'c-0' : 'new', x.phase])).toEqual([['c-0', 'attempt'], ['new', 'attempt'], ['new', 'refused']]);
     });
   });
 
@@ -15584,7 +15642,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       });
       expect(h.deleteTodo).toHaveBeenCalledWith('todo-1', MANDATE);
       expect(h['deleteTrigger']).not.toHaveBeenCalled();
-      expectPair('DELETE /api/tasks/:id', 'todo-1', 'refused');
+      await expectPair('DELETE /api/tasks/:id', '/api/tasks/todo-1', 'refused');
     });
 
     it('control: the owner deletes a to-do', async () => {
@@ -15604,7 +15662,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       });
       expect(h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
       // A mandate is not told whether a run is going: the same word as for a run it may not stop.
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
+      await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
 
     // PRD 3b-2 G9 (a): a delete by whoever may stop the run (§3.13 E7) stops it too, for the
@@ -15636,14 +15694,14 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
       expect(byMandate).toMatchObject({ status: 200, body: { deleted: true, run: 'not_stopped' } });
       expect(byMandate.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
       expect(foreign.stopTask).not.toHaveBeenCalled();
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
+      await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:not_stopped');
     });
 
     it('a mandate\'s delete stops a run it started itself, and the trail says so', async () => {
       const own = loopWith(TAG, 'run_agent');
       expect(await deleteAs('mandate', own)).toMatchObject({ status: 200, body: { deleted: true, run: 'stopped' } });
       expect(own.stopTask).toHaveBeenCalledWith('trg-9');
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:stopped');
+      await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:stopped');
     });
 
     it('a mandate learns nothing about a foreign run whose effect a delete leaves alone', async () => {
@@ -15677,7 +15735,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         expect(res).toMatchObject({ status: 200, body: { deleted: true, run: 'stop_failed' } });
         expect(res.h['deleteTrigger']).toHaveBeenCalledWith('trg-9');
       } finally { write.mockRestore(); }
-      expectPair('DELETE /api/tasks/:id', 'trg-9', 'done', 'DELETE /api/tasks/:id run:stop_failed');
+      await expectPair('DELETE /api/tasks/:id', '/api/tasks/trg-9', 'done', 'DELETE /api/tasks/:id run:stop_failed');
     });
 
     it('a delete that finds no row stops nothing', async () => {
@@ -15694,7 +15752,7 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         asMandate();
         expect((await jsonFetch('/api/tasks/nope', { method: 'DELETE' })).status).toBe(404);
       });
-      expectPair('DELETE /api/tasks/:id', 'nope', 'refused');
+      await expectPair('DELETE /api/tasks/:id', '/api/tasks/nope', 'refused');
     });
 
     it('answers 503 and deletes nothing when the attempt cannot be written', async () => {
@@ -15720,9 +15778,9 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
   });
 
   describe('DELETE /api/workflows/:id', () => {
-    // Owner-only: deleting a workflow silences every schedule that runs it. The route keeps
-    // its trail writer for the day it opens; while it is closed a mandate leaves no row,
-    // because nothing was attempted.
+    // Owner-only: deleting a workflow silences every schedule that runs it. The stance refuses a
+    // mandate before dispatch reaches the trail writer, so it leaves no row: nothing was
+    // attempted. The day the route opens, the dispatcher records it like every other change.
     it('refuses a mandate before anything runs: nothing deleted, no row', async () => {
       const deletePlannedPipeline = vi.fn().mockReturnValue(true);
       await withEngine({ getRunHistory: () => ({ deletePlannedPipeline }) }, async () => {
@@ -15751,23 +15809,25 @@ describe('actor trail — what a mandate\'s request leaves in audit_log', () => 
         asMandate();
         expect((await jsonFetch('/api/triggers/trg-full/run', { method: 'POST' })).status).toBe(202);
       });
-      expectPair('POST /api/triggers/:id/run', 'trg-full-id', 'done');
+      // The path carries a prefix of the id; the outcome row names the trigger it resolved to.
+      await expectPair('POST /api/triggers/:id/run', '/api/triggers/trg-full/run', 'done', 'POST /api/triggers/:id/run trigger:trg-full-id');
     });
 
-    it('records refused when the start is refused, and when it throws', async () => {
+    it('records refused when the start is refused, and failed when it throws', async () => {
       const refused = loop(() => Promise.resolve({ ok: false, reason: 'already_running' }));
       await withEngine({ getWorkerLoop: () => refused.loop, getTaskManager: () => tm }, async () => {
         asMandate();
         expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(409);
       });
-      expectPair('POST /api/triggers/:id/run', 'trg-full-id', 'refused');
+      await expectPair('POST /api/triggers/:id/run', '/api/triggers/trg-full-id/run', 'refused', 'POST /api/triggers/:id/run trigger:trg-full-id');
       db.getDb().exec('DROP TRIGGER audit_log_no_update; DELETE FROM audit_log;');
       const threw = loop(() => Promise.reject(new Error('boom')));
       await withEngine({ getWorkerLoop: () => threw.loop, getTaskManager: () => tm }, async () => {
         asMandate();
         expect((await jsonFetch('/api/triggers/trg-full-id/run', { method: 'POST' })).status).toBe(500);
       });
-      expectPair('POST /api/triggers/:id/run', 'trg-full-id', 'refused');
+      // A 500 is not a refusal: the start broke while it was being made.
+      await expectPair('POST /api/triggers/:id/run', '/api/triggers/trg-full-id/run', 'failed', 'POST /api/triggers/:id/run trigger:trg-full-id');
     });
 
     it('answers 503, mints no marker and starts nothing when the attempt cannot be written', async () => {
@@ -16873,6 +16933,34 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
           fresh.setPrincipalResolverForTesting(resolver);
         }
       });
+
+      it('lets the control plane change through its admin routes while the instance log cannot be written', async () => {
+        const resolver = resolverOf();
+        const engine = (fresh as unknown as { engine: Record<string, unknown> }).engine;
+        const orig = engine['getAuditLog'];
+        const origEnds = engine['getMandateEnds'];
+        engine['getAuditLog'] = () => null;
+        // A store that takes the empty list, so the route answers 200 when it runs at all.
+        engine['getMandateEnds'] = () => ({ revoke: () => false });
+        const revoke = (): Promise<Response> => as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: [] }) }, freshBase);
+        try {
+          await withEnv(MANAGED, async () => {
+            const cp = await revoke();
+            expect(((await cp.json()) as { error?: string }).error ?? '').not.toContain('cannot be recorded');
+            expect(cp.status).toBe(200);
+            // Control: the same broken log refuses the same change from a mandate.
+            fresh.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' }));
+            const refused = await revoke();
+            expect(refused.status).toBe(503);
+            expect(((await refused.json()) as { error: string }).error).toBe('This change cannot be recorded in the instance log right now, so it was not made.');
+          });
+        } finally {
+          engine['getAuditLog'] = orig;
+          engine['getMandateEnds'] = origEnds;
+          fresh.setPrincipalResolverForTesting(resolver);
+        }
+      });
+
     });
 
     it('refuses a second registration of a route, so no handler inherits the control plane\'s reach', () => {

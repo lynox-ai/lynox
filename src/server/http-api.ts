@@ -78,7 +78,7 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
-import { newCorrelationId, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { newCorrelationId, requestPathTarget, type AuditEntry, type AuditPhase } from '../core/audit-log.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
@@ -201,7 +201,7 @@ const MAX_BODY_BYTES = 30 * 1024 * 1024; // 30 MB
  * behind a delete that also stops the run; pure so a test can hold both directions.
  */
 /**
- * Whether a request leaves the mandate's actor trail (`_beginRequestTrail`, `_recordedMandateRead`),
+ * Whether a request leaves the mandate's actor trail (`_beganMandateChange`, `_recordedMandateRead`),
  * whose rows refuse the act when they cannot be written. A mandate does; the owner and the control
  * plane's admin bearer (`cp-admin`) do not.
  */
@@ -2011,25 +2011,70 @@ export class LynoxHTTPApi {
     this._principalResolver = resolver;
   }
 
+  /** The attempt row of a request's change, kept until its outcome row is written. */
+  private readonly _openTrails = new WeakMap<IncomingMessage, AuditEntry>();
+  /** What a request did beyond its action, set by its handler for the closing row of its trail. */
+  private readonly _requestTrailNotes = new WeakMap<IncomingMessage, string>();
+
   /**
-   * The actor trail of a mandate's request (`audit-log.ts`, PRD §3.6): the `attempt` row,
-   * written before the act. `null` for the owner, who leaves no trail in this piece. `false`
-   * when the row cannot be written — the route has answered 503 and must not act. The action
-   * is the route; the target an id from the path, never a body.
+   * Write the `attempt` row of a change before it is made, and keep it for `_closeTrail`.
+   * `false` when the row cannot be written; the caller refuses the change then.
    */
-  private _beginRequestTrail(req: IncomingMessage, res: ServerResponse, action: string, target: string): AuditEntry | null | false {
-    const principal = this._principalOf(req);
-    if (!writesMandateTrail(principal)) return null;
-    const log = this.engine?.getAuditLog() ?? null;
+  private _openTrail(req: IncomingMessage, principal: RequestPrincipal, action: string, target: string): boolean {
     const entry: AuditEntry = { principal, action, target, phase: 'attempt', correlationId: newCorrelationId() };
     try {
+      const log = this.engine?.getAuditLog() ?? null;
       if (log === null) throw new Error('no audit log');
       log.record(entry);
     } catch {
-      errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
       return false;
     }
-    return entry;
+    this._openTrails.set(req, entry);
+    return true;
+  }
+
+  /**
+   * Write the outcome row of an open trail, once its handler has finished:
+   * - `done` when the handler answered 2xx;
+   * - `refused` for any other answer below 500 (a 4xx): the change was turned down;
+   * - `failed` when it answered 5xx, or nothing (it threw before answering): the change did not
+   *   end cleanly, and the answer does not tell whether a part of it happened. A 503 from a
+   *   service that is not there, before anything was done, is in this class too; the row errs
+   *   toward a change that may have happened rather than away from one.
+   * Run after the handler, not when the connection closes: a client that leaves early does not
+   * decide the outcome, and the act it started is still recorded. A handler that awaits its
+   * whole run (a chat run) is closed only when the run ends, so its outcome row can follow the
+   * attempt by minutes; a process that stops in between leaves the attempt without one. For a
+   * streamed answer, `done` means the change was accepted and its stream began; what the run did
+   * is in its own trail. A handler's note names what the request did beyond its action, on this
+   * row only.
+   */
+  private _closeTrail(req: IncomingMessage, res: ServerResponse): void {
+    const entry = this._openTrails.get(req);
+    if (entry === undefined) return;
+    this._openTrails.delete(req);
+    const status = res.headersSent ? res.statusCode : 0;
+    const phase: AuditPhase = status >= 200 && status < 300 ? 'done' : status === 0 || status >= 500 ? 'failed' : 'refused';
+    const note = this._requestTrailNotes.get(req);
+    const closing: AuditEntry = { ...entry, phase, action: note === undefined ? entry.action : `${entry.action} ${note}` };
+    try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
+  }
+
+  /**
+   * A mandate's change (PRD §3.6, §7(c)): every request it makes other than GET or HEAD opens a
+   * trail in the dispatcher before the handler runs, so a route is covered by being registered;
+   * the dispatcher closes it when the handler has finished (`_closeTrail`). The action is the
+   * route as registered, the target the path; never the body or the query. The owner's requests
+   * open none. `false` when the attempt cannot be written: this has answered 503 and the change
+   * is not made.
+   */
+  private _beganMandateChange(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string): boolean {
+    if (method === 'GET' || method === 'HEAD') return true;
+    const principal = this._principalOf(req);
+    if (!writesMandateTrail(principal)) return true;
+    if (this._openTrail(req, principal, `${method} ${routePath}`, requestPathTarget(pathname))) return true;
+    errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
+    return false;
   }
 
   /**
@@ -2057,15 +2102,6 @@ export class LynoxHTTPApi {
       return false;
     }
     return true;
-  }
-
-  /** The outcome row of a request trail: `done` when the act happened, `refused` otherwise. */
-  private _endRequestTrail(trail: AuditEntry | null, phase: 'done' | 'refused', outcome?: string): void {
-    if (trail === null) return;
-    // `outcome` names what the request did beyond its action (a delete that stopped a run), on
-    // the closing row only; the attempt row keeps the bare action.
-    const closing = outcome === undefined ? { ...trail, phase } : { ...trail, phase, action: `${trail.action} ${outcome}` };
-    try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
   }
 
   /**
@@ -3004,7 +3040,8 @@ export class LynoxHTTPApi {
     if (method === 'GET' && pathname === LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH) {
       if (this._rateLimit(req, res, clientIp)) return;
       const handler = this.staticRoutes.get(`GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`);
-      if (handler) { await handler(req, res, {}, null); return; }
+      // The handler opens a trail when a mandate's consent is about to be stored.
+      if (handler) { try { await handler(req, res, {}, null); } finally { this._closeTrail(req, res); } return; }
     }
 
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
@@ -3230,8 +3267,10 @@ export class LynoxHTTPApi {
       const stance = this.staticRouteStances.get(stanceKey);
       if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
       if (this._refusedByStance(req, res, stance)) return;
-      if (!this._recordedMandateRead(req, res, method, stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname, url.searchParams)) return;
-      await staticHandler(req, res, {}, body);
+      const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
+      if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;
+      if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
+      try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
       return;
     }
 
@@ -3251,7 +3290,8 @@ export class LynoxHTTPApi {
         if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, route.stance)) return;
         if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
-        await route.handler(req, res, params, body);
+        if (!this._beganMandateChange(req, res, method, route.path, pathname)) return;
+        try { await route.handler(req, res, params, body); } finally { this._closeTrail(req, res); }
         return;
       }
     }
@@ -7591,12 +7631,9 @@ export class LynoxHTTPApi {
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/workflows/:id', async (_req, res, params) => {
       const history = engine.getRunHistory();
       if (!requireService(res, history, 'History')) return;
-      // Deleting a workflow stops every schedule that runs it, so a mandate's delete is
-      // recorded like a schedule's (PRD §3.13, N10b).
-      const trail = this._beginRequestTrail(_req, res, 'DELETE /api/workflows/:id', params['id']!);
-      if (trail === false) return;
+      // Deleting a workflow stops every schedule that runs it; a mandate's delete is in its
+      // trail like every change it makes (PRD §3.13, N10b; `_beganMandateChange`).
       const deleted = history.deletePlannedPipeline(params['id']!);
-      this._endRequestTrail(trail, deleted ? 'done' : 'refused');
       if (!deleted) { errorResponse(res, 404, 'Workflow not found'); return; }
       // Evict the in-memory cache so the deleted workflow can't be resurrected.
       const { forgetPipeline } = await import('../tools/builtin/pipeline.js');
@@ -7853,8 +7890,6 @@ export class LynoxHTTPApi {
       // A to-do it deletes only when it is its own, with no subtask of the owner's under it
       // (`TaskManager.deleteTodo`, checked on the row it deletes).
       const by = this._principalOf(_req);
-      const trail = this._beginRequestTrail(_req, res, 'DELETE /api/tasks/:id', params['id']!);
-      if (trail === false) return;
       // A row id lives in exactly one table after the v42 split — try the TODO
       // table first, then triggers, so deleting a scheduled trigger still works.
       let deleted: boolean;
@@ -7863,7 +7898,6 @@ export class LynoxHTTPApi {
         deleted = taskManager.deleteTodo(params['id']!, by);
         if (!deleted) scheduleDeleted = deleted = runHistory.deleteTrigger(params['id']!);
       } catch (err: unknown) {
-        this._endRequestTrail(trail, 'refused');
         if (this._answerTodoRefusal(res, err)) return;
         throw err;
       }
@@ -7880,7 +7914,7 @@ export class LynoxHTTPApi {
           process.stderr.write(`[lynox:http] stopping the run of deleted schedule "${params['id']!}" threw: ${err instanceof Error ? err.message : String(err)}\n`);
         }
       }
-      this._endRequestTrail(trail, deleted ? 'done' : 'refused', run === undefined ? undefined : `run:${run}`);
+      if (run !== undefined) this._requestTrailNotes.set(_req, `run:${run}`);
       if (!deleted) { errorResponse(res, 404, 'Task not found'); return; }
       jsonResponse(res, 200, run === undefined ? { deleted: true } : { deleted: true, run });
     }, MARK));
@@ -8038,7 +8072,6 @@ export class LynoxHTTPApi {
       // passes the stamp checks as it always has, or not at all.
       const principal = this._principalOf(_req);
       let marker: HandRunMarker | undefined;
-      let trail: AuditEntry | null = null;
       if (!isOwnerPrincipal(principal)) {
         // Bound to the CANONICAL id: the route accepts an id prefix, and the dispatch
         // checks the marker against the row it resolved.
@@ -8052,21 +8085,13 @@ export class LynoxHTTPApi {
         }
         const mint = this.#handRunMinterFor(workerLoop);
         if (!mint) { errorResponse(res, 503, 'Test runs by hand are not available on this instance right now.'); return; }
-        // Every hand start of a mandate is recorded (PRD §3.13 E4, G1), and before the
-        // marker is minted: a start that cannot be recorded leaves no marker behind.
-        const begun = this._beginRequestTrail(_req, res, 'POST /api/triggers/:id/run', trigger.id);
-        if (begun === false) return;
-        trail = begun;
+        // Every hand start of a mandate is in its trail (PRD §3.13 E4, G1), written by the
+        // dispatcher before this handler ran: a start that cannot be recorded mints no marker.
+        // The path may carry only a prefix of the id, so the closing row names the trigger.
+        this._requestTrailNotes.set(_req, `trigger:${trigger.id}`);
         marker = mint(trigger.id, principal);
       }
-      let outcome: Awaited<ReturnType<typeof workerLoop.runTriggerNow>>;
-      try {
-        outcome = await workerLoop.runTriggerNow(params['id']!, marker);
-      } catch (err: unknown) {
-        this._endRequestTrail(trail, 'refused');
-        throw err;
-      }
-      this._endRequestTrail(trail, outcome.ok ? 'done' : 'refused');
+      const outcome = await workerLoop.runTriggerNow(params['id']!, marker);
       if (!outcome.ok) {
         if (outcome.reason === 'already_running') {
           // After a deploy the lease of the lost run holds until its TTL; say from when a start
@@ -10072,6 +10097,15 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // A mandate's consent spends the code at the provider and writes tokens into the vault: a
+      // change, recorded like one (PRD §3.6, §7(c)). The attempt goes before the exchange, so the
+      // code is not spent unrecorded. This route answers before dispatch, so it opens its trail
+      // itself; the caller closes it.
+      if (by.tag !== 'owner' && !this._openTrail(req, reader, `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, `profile:${signed.profileId}`)) {
+        sendOAuthHtml(res, 503, 'This connection cannot be recorded in the instance log right now. Nothing was stored.');
+        return;
+      }
+
       const exchanged = await exchangeToken({
         endpoint: vetting,
         params: authorizationCodeParams({
@@ -10113,7 +10147,6 @@ export class LynoxHTTPApi {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
         return;
       }
-
       // Guarded, and the message is deliberately NOT "nothing was stored".
       //
       // These are two synchronous SQLite writes. If the second one throws —
