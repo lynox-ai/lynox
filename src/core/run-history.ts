@@ -1069,14 +1069,23 @@ const MIGRATIONS: string[] = [
   // constraint in place — the table must be recreated.
   //
   // Unlike the tasks rebuilds (v31/v42), this DROPs and recreates instead of
-  // INSERT..SELECT-preserving rows: pending_prompts is EPHEMERAL — a pending
-  // prompt is bound to a live SSE connection that a restart already severed,
-  // and the engine calls expireUnparked() on every cold boot (see v27), so no
-  // row here outlives the restart that runs this migration — with the single
-  // exception added later for a trigger's parked question, which by definition
-  // did not exist when this migration ran. Dropping is therefore
-  // lossless in practice AND robust to a partial-schema DB (DROP IF EXISTS
-  // tolerates a table that a minimal seed never created).
+  // INSERT..SELECT-preserving rows, on the premise that pending_prompts was
+  // EPHEMERAL: a pending prompt is bound to a live SSE connection that a
+  // restart already severed, and the engine expires what is left pending on
+  // every cold boot (see v27). DROP IF EXISTS also tolerates a table that a
+  // minimal seed never created.
+  //
+  // Premise withdrawn 2026-09-06 (#1331): since then a pending question a
+  // trigger is parked on outlives a restart by design — expireUnparked()
+  // (prompt-store.ts) skips rows with a trigger_id. That cannot reach this
+  // migration: trigger_id arrives with v53, so a table that still runs v43
+  // holds no parked question. What the DROP does discard is the table's
+  // history: its closed (answered or expired) rows, and the pending rows of the
+  // process that ended, which the boot sweep would only have marked expired.
+  // Outside a full data erasure (deleteAllData) such rows are kept and read by
+  // id (getById, closed_reason). So no question that could still be answered
+  // is lost, and the prompt history of a database from before v43 is not
+  // carried over.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
 
    DROP TABLE IF EXISTS pending_prompts;
