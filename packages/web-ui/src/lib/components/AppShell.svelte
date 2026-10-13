@@ -20,6 +20,7 @@
 	import CommandPalette from './CommandPalette.svelte';
 	import { isSessionExpired, clearSessionExpired } from '../stores/session.svelte.js';
 	import { installApiFetchInterceptor } from '../utils/api-fetch-interceptor.js';
+	import { installMandateRenewTimer } from '../utils/mandate-renew-timer.js';
 	import type { Snippet } from 'svelte';
 
 	let { children, userSlot }: {
@@ -315,6 +316,9 @@
 		// (or 30-day TTL expiry) surfaces as "Session abgelaufen" instead
 		// of generic "Laden fehlgeschlagen" toasts in every view.
 		installApiFetchInterceptor();
+		// A mandate session ends 15 minutes after it was minted unless renewed; the owner's is
+		// left alone (the first answer says which this is).
+		installMandateRenewTimer();
 
 		// /inbox/counts returns 503 when the flag is off; treating ok=true as
 		// "enabled" mirrors the store's own probe (see inbox.svelte.ts).
@@ -787,6 +791,7 @@
 						href="/logout"
 						data-sveltekit-preload-data="off"
 						data-sveltekit-reload
+						onclick={() => window.__lynoxRenewTimer?.stop(true)}
 						class="flex items-center justify-center h-11 w-11 rounded-[var(--radius-sm)] text-text-subtle hover:text-text hover:bg-bg-muted transition-colors"
 						aria-label={t('nav.logout')}
 						title={t('nav.logout')}

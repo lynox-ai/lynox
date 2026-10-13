@@ -16,6 +16,7 @@ import {
 } from '$lib/server/auth.js';
 import { LOGIN_PRINCIPAL_VERSION, type AuthCodeRequest } from '$lib/contract/http.js';
 import { verifyCodeLogin } from '$lib/server/code-login.js';
+import { setSessionCookie } from '$lib/server/session-cookie.js';
 
 // ── Managed mode detection ─────────────────────────────────────────
 
@@ -45,38 +46,6 @@ function consumeOnboardingToken(): void {
 	const dir = env.LYNOX_DATA_DIR ?? join(homedir(), '.lynox');
 	try { mkdirSync(dir, { recursive: true }); } catch { /* exists */ }
 	writeFileSync(join(dir, '.onboarding-consumed'), new Date().toISOString(), 'utf-8');
-}
-
-// ── Session cookie helper ──────────────────────────────────────────
-
-/**
- * Set the session cookie for a verified login. Every path here is the owner
- * (`ownerSession`) except a code login the CP verified as a mandate recipient.
- */
-function setSessionCookie(
-	cookies: Parameters<PageServerLoad>[0]['cookies'],
-	session: { token: string; maxAge: number },
-	isSecure: boolean,
-): void {
-	cookies.set('lynox_session', session.token, {
-		path: '/',
-		httpOnly: true,
-		secure: isSecure,
-		// Lax (not Strict): with Strict the cookie is NOT attached on top-level
-		// cross-site GETs (e.g. tap a link from Mail.app or another tab to
-		// /login). The server load() therefore can't redirect a logged-in
-		// user away from /login on first paint — they see the OTP form, type
-		// their email, click "Send code", and only THEN does the same-site
-		// form POST attach the cookie. enhance.update() re-runs the load
-		// function, the redirect fires, and the user is logged in without
-		// ever entering an OTP code. Confusing + looks like a bypass even
-		// though the cookie was genuinely valid. Lax sends cookie on safe
-		// methods (GET) cross-site → load() redirects on first paint as
-		// expected. State-changing POSTs (e.g. /api/run) still need same-site
-		// origin under Lax, so CSRF is still blocked. Pilot tenant 2026-05-19.
-		sameSite: 'lax',
-		maxAge: session.maxAge,
-	});
 }
 
 // ── Load function ──────────────────────────────────────────────────
