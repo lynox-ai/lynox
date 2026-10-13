@@ -269,6 +269,8 @@ describe('installMandateRenewTimer', () => {
 		const first = installMandateRenewTimer()!;
 		await first.ready;
 		expect(installMandateRenewTimer()).toBe(first);
+		// A restore while it still runs keeps it: never two timers in one page.
+		expect(installMandateRenewTimer(true)).toBe(first);
 		pageListeners.get('pagehide')!({});
 		expect(first.stopped).toBe(true);
 		// A remount of the shell does not start it again, and neither does a fresh page show.

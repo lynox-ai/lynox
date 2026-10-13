@@ -36,7 +36,7 @@ export interface RenewTimerDeps {
 export interface RenewTimer {
 	/** Stop asking, here and (when `announce`) in every other tab of this origin. */
 	stop(announce?: boolean): void;
-	/** Whether it has stopped; a stopped timer is replaced on the next install. */
+	/** Whether it has stopped; only a page restored from the back-forward cache starts a new one. */
 	readonly stopped: boolean;
 	/** The first ask, made on start; settles when its answer is handled. */
 	ready: Promise<void>;
