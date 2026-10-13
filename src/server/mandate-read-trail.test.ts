@@ -180,20 +180,32 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     }
   });
 
-  it('answers the owner\'s read with a broken trail, and leaves a mandate\'s write path to its own writer', async () => {
+  it('answers the owner\'s read with a broken trail', async () => {
     await withBrokenTrail(async () => {
       const owner = await ask('GET', '/api/threads', ownerCookie);
       await owner.arrayBuffer();
       expect(owner.status).toBe(200);
-      // A POST is not a read: this writer does not answer for it (the write trail does).
-      const post = await fetch(`${base}/api/threads`, {
-        method: 'POST',
-        headers: { cookie: `lynox_session=${mandateCookie}`, 'content-type': 'application/json' },
-        body: '{}',
-      });
-      await post.arrayBuffer();
-      expect(post.status).not.toBe(503);
     });
+  });
+
+  it('writes no read row for a mandate\'s POST', async () => {
+    inner().rateCounts.clear();
+    const res = await fetch(`${base}/api/push/subscribe`, {
+      method: 'POST',
+      headers: { cookie: `lynox_session=${mandateCookie}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ subscription: { endpoint: 'https://fcm.googleapis.com/fcm/send/ida-read', keys: { p256dh: 'p256dh', auth: 'auth' } } }),
+    });
+    await res.arrayBuffer();
+    // Reached its handler: the write happened, and no read row came with it.
+    expect(res.status).toBe(201);
+    expect(newReadRows()).toHaveLength(0);
+  });
+
+  it('refuses a mandate at an admin route before any read row', async () => {
+    const res = await ask('GET', '/api/export', mandateCookie);
+    await res.arrayBuffer();
+    expect(res.status).toBe(403);
+    expect(newReadRows()).toHaveLength(0);
   });
 
   /**

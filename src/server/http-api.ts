@@ -1969,14 +1969,16 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * A mandate's read (D15, PRD §3.6 and §7(o)): one `read` row for every GET or HEAD of the
-   * `user` scope, written by the dispatcher before the handler runs, so a route is covered by
+   * A mandate's read (D15, PRD §3.6 and §7(o)): one `read` row for every GET or HEAD it makes,
+   * written by the dispatcher before the handler runs, so a route is covered by
    * being registered. The action is the route as registered, the target the path; never the
    * query or the answer. The owner's reads leave no row. `false` when the row cannot be
    * written: the dispatcher has answered 503 and the read is not answered, as a write is not.
    */
-  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, scope: RouteScope | undefined, routePath: string, pathname: string): boolean {
-    if ((method !== 'GET' && method !== 'HEAD') || scope !== 'user') return true;
+  private _recordedMandateRead(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string): boolean {
+    // No scope test: an `admin` route refuses a mandate before dispatch (D6), so every read a
+    // mandate reaches here is a `user` route's.
+    if (method !== 'GET' && method !== 'HEAD') return true;
     const principal = this._principalOf(req);
     if (isOwnerPrincipal(principal)) return true;
     try {
@@ -3125,7 +3127,7 @@ export class LynoxHTTPApi {
       const stance = this.staticRouteStances.get(stanceKey);
       if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
       if (this._refusedByStance(req, res, stance)) return;
-      if (!this._recordedMandateRead(req, res, method, this.staticRouteScopes.get(stanceKey), stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname)) return;
+      if (!this._recordedMandateRead(req, res, method, stanceKey.slice(stanceKey.indexOf(' ') + 1), pathname)) return;
       await staticHandler(req, res, {}, body);
       return;
     }
@@ -3145,7 +3147,7 @@ export class LynoxHTTPApi {
         }
         if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
         if (this._refusedByStance(req, res, route.stance)) return;
-        if (!this._recordedMandateRead(req, res, method, route.scope, route.path, pathname)) return;
+        if (!this._recordedMandateRead(req, res, method, route.path, pathname)) return;
         await route.handler(req, res, params, body);
         return;
       }
