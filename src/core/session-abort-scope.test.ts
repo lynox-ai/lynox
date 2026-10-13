@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Agent } from './agent.js';
+import { Agent, RunAbortedError } from './agent.js';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { Session } from './session.js';
@@ -232,6 +232,30 @@ describe('Session.abort() is scoped to its own chain', () => {
       // The consequence, not only the identity: the stop still reaches it.
       session.abort();
       expect(member.aborted()).toBe(true);
+    });
+
+    it('a stop that lands before the turn reaches the agent still ends the turn, and only that turn', async () => {
+      // `Agent.send` starts each run on a fresh controller, so an abort in the awaits before
+      // it (here: a compaction in flight) reached no run, and the turn went on to the provider.
+      const engine = await boot();
+      const session = engine.createSession();
+      const send = vi.spyOn(Agent.prototype, 'send').mockResolvedValue('answered');
+      try {
+        let release!: () => void;
+        (session as unknown as { _compactionInFlight: Promise<void> | null })._compactionInFlight =
+          new Promise<void>((r) => { release = r; });
+        const turn = session.run('hello');
+        await new Promise((r) => setTimeout(r, 10));
+        session.abort();
+        release();
+        await expect(turn).rejects.toBeInstanceOf(RunAbortedError);
+        expect(send).not.toHaveBeenCalled();
+        // The next turn is not stopped by it, nor is one after a stop between turns.
+        expect(await session.run('again')).toBe('answered');
+        session.abort();
+        expect(await session.run('and again')).toBe('answered');
+        expect(send).toHaveBeenCalledTimes(2);
+      } finally { send.mockRestore(); }
     });
   });
 });

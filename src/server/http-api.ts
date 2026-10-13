@@ -75,7 +75,7 @@ import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, Promp
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalTag, type RequestPrincipal } from '../core/request-principal.js';
+import { OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from '../core/request-principal.js';
 import { newCorrelationId, type AuditEntry } from '../core/audit-log.js';
 import type { HandRunMarker, HandRunMinter } from '../core/hand-run-door.js';
 import type { WorkerLoop } from '../core/worker-loop.js';
@@ -4280,11 +4280,14 @@ export class LynoxHTTPApi {
         // INSIDE the try so a throw from runRegistry.start (SQLite busy/disk-full)
         // still hits the finally's release() — otherwise the slot would leak and
         // after `maxConcurrent` such failures every /run would 429 forever.
-        runExecutor?.acquire(runId, sessionId, takeover);
+        runExecutor?.acquire(runId, sessionId, takeover, askStamp.principal);
         // Register the run as live (replaces any prior/interrupted row for this
         // thread). A crash before the finally leaves this row 'running' → the
         // boot-sweep marks it 'interrupted' so the client shows a banner + Retry.
         runRegistry?.start(sessionId, runId, principalTag(askStamp.principal));
+        // The grant was live at the door; this request has awaited since, and the sweep that
+        // ends a mandate's runs only finds a run once it is registered just above (§3.13 B8).
+        if (principalHasEnded(askStamp.principal, (id) => this._mandateLive(id))) throw new RunAbortedError();
         const result = await session.run(task, runOptions);
         if (!aborted) {
           // Notify client if changeset has pending file changes for review
@@ -4469,7 +4472,15 @@ export class LynoxHTTPApi {
           res.end();
         }
       };
-      const unsub = buffer.subscribe((e) => write(e.seq, e.event), finish);
+      // Closed from the server when the holder's grant ends (§3.13 B8). No `done`: the run
+      // has not finished, only this tail has.
+      const closeTail = (): void => {
+        if (ended) return;
+        ended = true;
+        clearInterval(keepalive);
+        if (!res.writableEnded) res.end();
+      };
+      const unsub = buffer.subscribe((e) => write(e.seq, e.event), finish, { principal: this._principalOf(req), close: closeTail });
 
       req.on('close', () => {
         clearInterval(keepalive);

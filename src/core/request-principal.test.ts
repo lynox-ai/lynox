@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { OWNER_PRINCIPAL, ownedBy, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, ownedBy, principalFromTag, principalHasEnded, principalTag, type RequestPrincipal } from './request-principal.js';
 
 const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
 const OTHER: RequestPrincipal = { kind: 'mandate', email: 'other@example.org' };
@@ -35,5 +35,19 @@ describe('principalFromTag — only ever narrows', () => {
   it('gives the mandate for a mandate tag, and the owner for anything else', () => {
     expect(principalFromTag('mandate:setup@example.org')).toEqual({ kind: 'mandate', email: 'setup@example.org' });
     for (const tag of ['owner', null, undefined, '', 'somebody']) expect(principalFromTag(tag)).toBe(OWNER_PRINCIPAL);
+  });
+});
+
+describe('principalHasEnded — whose grant has ended (§3.13 B8)', () => {
+  const live = (id: string): boolean => id === 'grant-1';
+  it('never for the owner, whatever the grants', () => {
+    expect(principalHasEnded(OWNER_PRINCIPAL, () => false)).toBe(false);
+  });
+  it('for a mandate, by its own grant only', () => {
+    expect(principalHasEnded({ ...MANDATE, mandateId: 'grant-1' }, live)).toBe(false);
+    expect(principalHasEnded({ ...MANDATE, mandateId: 'grant-2' }, live)).toBe(true);
+  });
+  it('for a mandate that names no grant: ended', () => {
+    expect(principalHasEnded(MANDATE, () => true)).toBe(true);
   });
 });

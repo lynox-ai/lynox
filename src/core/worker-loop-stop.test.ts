@@ -32,6 +32,7 @@ import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, TriggerEffect, PlannedPipeline } from '../types/index.js';
 import { stopHandleOf, keepsQuestionForNextProcess } from './worker-loop.js';
 import type { ActiveTask } from './worker-loop.js';
+import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
 import { getPipelineStore } from '../tools/builtin/pipeline.js';
 import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
 
@@ -1116,5 +1117,43 @@ describe('the recorded word for a run that returns rather than throws', () => {
     expect(keepsQuestionForNextProcess(entry(undefined, undefined))).toBe(false);
     expect(keepsQuestionForNextProcess(entry(undefined, true))).toBe(false);
     expect(keepsQuestionForNextProcess(undefined)).toBe(false);
+  });
+});
+
+// PRD customer-granted-operator-access §3.13 B8: a run a mandate started, or whose question it
+// answered, ends with its grant. The starter is set on the running entry directly: how it gets
+// there (a hand run, an answer pickup) is asserted where those paths live.
+describe('a run whose starter\'s grant has ended', () => {
+  const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+  const entryOf = (h: Harness): ActiveTask =>
+    (h.loop as unknown as { activeTasks: Map<string, ActiveTask> }).activeTasks.get('trg-stop')!;
+
+  it('is stopped once the grant has ended, and recorded as stopped', async () => {
+    const h = makeHarness();
+    await h.running;
+    entryOf(h).starter = EVA;
+    // While the grant lives, and while another grant for the same address ends, nothing stops.
+    expect(h.loop.stopEndedStarters(() => true)).toEqual([]);
+    expect(h.loop.stopEndedStarters((id) => id === 'grant-1')).toEqual([]);
+    expect(h.abortCalls()).toBe(0);
+    expect(h.loop.stopEndedStarters(() => false)).toEqual(['trg-stop']);
+    await h.tick;
+    await waitUntil(
+      'the run to be recorded as finished',
+      () => h.history.getTrigger('trg-stop')?.last_run_status != null,
+    );
+    expect(h.history.getTrigger('trg-stop')!.last_run_status).toBe('stopped');
+  });
+
+  it('leaves a run the schedule fired, which is the owner\'s', async () => {
+    const h = makeHarness();
+    await h.running;
+    expect(entryOf(h).starter).toBeUndefined();
+    expect(h.loop.stopEndedStarters(() => false)).toEqual([]);
+    expect(h.abortCalls()).toBe(0);
+    // And one the owner started by hand.
+    entryOf(h).starter = OWNER_PRINCIPAL;
+    expect(h.loop.stopEndedStarters(() => false)).toEqual([]);
+    expect(h.abortCalls()).toBe(0);
   });
 });

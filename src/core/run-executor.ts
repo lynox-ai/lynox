@@ -20,6 +20,8 @@
  * where PR-C placed it — already correct for a headless run.
  */
 
+import { principalHasEnded, type RequestPrincipal } from './request-principal.js';
+
 /** Default max concurrent chat runs per engine (D-S2). Configurable via
  * `config.maxConcurrentRuns`. Five covers realistic multi-tab / parallel-thread
  * use while bounding cost + memory. */
@@ -29,6 +31,8 @@ interface ActiveRun {
   runId: string;
   threadId: string;
   abort: () => void;
+  /** Who started the run: the request's principal, not the thread's creator. */
+  starter: RequestPrincipal;
 }
 
 export class RunExecutor {
@@ -57,8 +61,8 @@ export class RunExecutor {
    * (a re-acquire replaces the handle — e.g. a takeover rewiring abort). The
    * caller MUST have checked `atCapacity()` first; acquire itself does not gate
    * (so an in-flight run being re-registered never trips the cap). */
-  acquire(runId: string, threadId: string, abort: () => void): void {
-    this.active.set(runId, { runId, threadId, abort });
+  acquire(runId: string, threadId: string, abort: () => void, starter: RequestPrincipal): void {
+    this.active.set(runId, { runId, threadId, abort, starter });
   }
 
   /** Drop a run from the active set (terminal completion). Idempotent. */
@@ -77,6 +81,21 @@ export class RunExecutor {
     if (!run) return false;
     try { run.abort(); } catch { /* abort is best-effort; the run unwinds itself */ }
     return true;
+  }
+
+  /**
+   * Abort every live run whose starter's grant has ended (PRD customer-granted-operator-access
+   * §3.13 B8; `principalHasEnded`). Keyed on who started the run, never on the thread: the
+   * owner's run in a thread a mandate created stays. Returns how many were aborted.
+   */
+  abortEnded(isLive: (mandateId: string) => boolean): number {
+    let aborted = 0;
+    for (const run of [...this.active.values()]) {
+      if (!principalHasEnded(run.starter, isLive)) continue;
+      try { run.abort(); } catch { /* abort is best-effort; the run unwinds itself */ }
+      aborted++;
+    }
+    return aborted;
   }
 
   /** runIds currently executing (for diagnostics / tests). */

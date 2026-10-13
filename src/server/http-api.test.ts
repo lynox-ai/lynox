@@ -3378,6 +3378,162 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // PRD customer-granted-operator-access §3.13 B8: what a mandate is running ends with its grant.
+  // The engine's sweep calls `abortEnded` and `closeEndedTails`; these pin that the routes hand
+  // them the request's principal, grant included.
+  describe('what a mandate is running ends with its grant (§3.13 B8)', () => {
+    const EVA: RequestPrincipal = { kind: 'mandate', email: 'eva@example.invalid', mandateId: 'grant-1' };
+    const engineRef = (): { getRunBufferManager: () => unknown; getRunExecutor: () => unknown; getThreadStore: () => unknown } =>
+      (api as unknown as { engine: { getRunBufferManager: () => unknown; getRunExecutor: () => unknown; getThreadStore: () => unknown } }).engine;
+    // Put back the cookie-borne resolver, not a constant owner: the blocks after this one read
+    // principals from real session cookies.
+    type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+    let cookieResolver: Resolver;
+    beforeEach(() => { cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver; });
+    afterEach(() => { api.setPrincipalResolverForTesting(cookieResolver); });
+
+    async function readUntilEnd(res: Response, ms = 3000): Promise<{ sse: string; closed: boolean }> {
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let sse = '';
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 200)),
+        ]);
+        if (next === 'timeout') continue;
+        if (next.done) return { sse, closed: true };
+        sse += dec.decode(next.value, { stream: true });
+      }
+      await reader.cancel();
+      return { sse, closed: false };
+    }
+
+    for (const [who, principal] of [['a mandate', EVA], ['the owner', OWNER_PRINCIPAL]] as const) {
+      it(`a chat run ${who} started is registered under that principal`, async () => {
+        const { RunExecutor } = await import('../core/run-executor.js');
+        const ex = new RunExecutor(5);
+        const ref = engineRef();
+        const origEx = ref.getRunExecutor;
+        const origThreads = ref.getThreadStore;
+        ref.getRunExecutor = (): unknown => ex;
+        const origEnds = (ref as unknown as { getMandateEnds: () => unknown }).getMandateEnds;
+        (ref as unknown as { getMandateEnds: () => unknown }).getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
+        // A thread the mandate started, so its run is let in (§3.13 E1).
+        ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
+        api.setPrincipalResolverForTesting(() => principal);
+        // The run's provider preflight needs a key; the suite strips the real ones.
+        const prevKey = process.env['ANTHROPIC_API_KEY'];
+        process.env['ANTHROPIC_API_KEY'] = 'test-only-placeholder';
+        let finish: (v: string) => void = () => {};
+        // One event first, so the response's headers go out and the fetch returns.
+        mockSessionRun.mockImplementationOnce(async () => {
+          const onStream = mockSessionInstance.onStream as ((e: unknown) => Promise<void>) | null;
+          if (onStream) await onStream({ type: 'text', text: 'working', agent: 'lynox' });
+          return new Promise<string>((r) => { finish = r; });
+        });
+        mockSessionAbort.mockClear();
+        try {
+          const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) });
+          expect(res.status).toBe(200);
+          for (let i = 0; i < 50 && ex.activeCount === 0; i++) await new Promise((r) => setTimeout(r, 10));
+          expect(ex.activeCount).toBe(1);
+          // While the grant lives, nothing ends.
+          expect(ex.abortEnded(() => true)).toBe(0);
+          expect(mockSessionAbort).not.toHaveBeenCalled();
+          // Once it has ended, a mandate's run is aborted; the owner's is not.
+          expect(ex.abortEnded(() => false)).toBe(principal === EVA ? 1 : 0);
+          if (principal === EVA) expect(mockSessionAbort).toHaveBeenCalled();
+          else expect(mockSessionAbort).not.toHaveBeenCalled();
+          finish('done');
+          await readUntilEnd(res);
+        } finally {
+          finish('done');
+          if (prevKey === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = prevKey;
+          ref.getRunExecutor = origEx;
+          ref.getThreadStore = origThreads;
+          (ref as unknown as { getMandateEnds: () => unknown }).getMandateEnds = origEnds;
+        }
+      });
+    }
+
+    it('does not start a mandate\'s chat run whose grant ended while the request was on its way', async () => {
+      const { RunExecutor } = await import('../core/run-executor.js');
+      const ex = new RunExecutor(5);
+      const ref = engineRef() as ReturnType<typeof engineRef> & { getMandateEnds: () => unknown };
+      const origEx = ref.getRunExecutor;
+      const origThreads = ref.getThreadStore;
+      const origEnds = ref.getMandateEnds;
+      ref.getRunExecutor = (): unknown => ex;
+      ref.getThreadStore = (): unknown => ({ getThread: () => ({ created_by: 'mandate:eva@example.invalid' }) });
+      // The seam skips the door's check, so this stands for a grant that ended after it.
+      ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => false });
+      api.setPrincipalResolverForTesting(() => EVA);
+      const prevKey = process.env['ANTHROPIC_API_KEY'];
+      process.env['ANTHROPIC_API_KEY'] = 'test-only-placeholder';
+      mockSessionRun.mockClear();
+      try {
+        const res = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) });
+        const out = await readUntilEnd(res);
+        expect(out.closed).toBe(true);
+        expect(mockSessionRun).not.toHaveBeenCalled();
+        expect(ex.activeCount).toBe(0);
+        // Twin: the same request on a live grant runs.
+        ref.getMandateEnds = (): unknown => ({ record: (): void => {}, isLive: (): boolean => true });
+        const live = await jsonFetch('/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) });
+        await readUntilEnd(live);
+        expect(mockSessionRun).toHaveBeenCalledOnce();
+      } finally {
+        if (prevKey === undefined) delete process.env['ANTHROPIC_API_KEY']; else process.env['ANTHROPIC_API_KEY'] = prevKey;
+        ref.getRunExecutor = origEx;
+        ref.getThreadStore = origThreads;
+        ref.getMandateEnds = origEnds;
+      }
+    });
+
+    it('closes a mandate\'s tail of a run when its grant ends, and leaves the run and the owner\'s tail', async () => {
+      const { RunBufferManager } = await import('../core/run-buffer.js');
+      const mgr = new RunBufferManager();
+      const ref = engineRef();
+      const orig = ref.getRunBufferManager;
+      ref.getRunBufferManager = (): unknown => mgr;
+      const buf = mgr.create('b8-tail');
+      buf.append({ type: 'text', text: 'hello', agent: 'main' });
+      try {
+        api.setPrincipalResolverForTesting(() => EVA);
+        const evaRes = await fetch(`${baseUrl}/api/runs/b8-tail/stream`, { headers: authHeaders() });
+        api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+        const ownerRes = await fetch(`${baseUrl}/api/runs/b8-tail/stream`, { headers: authHeaders() });
+        expect(evaRes.status).toBe(200);
+        expect(ownerRes.status).toBe(200);
+        expect(buf.subscriberCount).toBe(2);
+
+        // While the grant lives, both stay.
+        expect(mgr.closeEndedTails(() => true)).toBe(0);
+        expect(mgr.closeEndedTails((id) => id === 'grant-1')).toBe(0);
+        // Ended: only the mandate's tail closes, without a `done` (the run has not finished).
+        expect(mgr.closeEndedTails(() => false)).toBe(1);
+        const eva = await readUntilEnd(evaRes);
+        expect(eva.closed).toBe(true);
+        expect(eva.sse).not.toContain('event: done');
+        expect(buf.ended).toBe(false);
+        expect(buf.subscriberCount).toBe(1);
+
+        // The owner's tail goes on to the run's end.
+        buf.append({ type: 'text', text: 'more', agent: 'main' });
+        setTimeout(() => mgr.remove('b8-tail'), 100);
+        const owner = await readUntilEnd(ownerRes);
+        expect(owner.closed).toBe(true);
+        expect(owner.sse).toContain('more');
+        expect(owner.sse).toContain('event: done');
+      } finally {
+        ref.getRunBufferManager = orig;
+        mgr.remove('b8-tail');
+      }
+    });
+  });
+
   // Tier 2 PR-E: run executor (concurrency cap + abort-by-id) and the active-run
   // seq field. The cap bounds parallel-run cost (AC6); DELETE aborts a live run
   // or acks an interrupted one (AC10); /active carries lastPersistedSeq so a
@@ -3421,7 +3577,7 @@ describe('LynoxHTTPApi', () => {
 
     it('POST /run returns 429 run_queue_full when the executor is at capacity', async () => {
       await withExecutor(1, async (ex) => {
-        ex.acquire('other-run', 'other-thread', () => {}); // fill the single slot
+        ex.acquire('other-run', 'other-thread', () => {}, OWNER_PRINCIPAL); // fill the single slot
         const res = await jsonFetch('/api/sessions/cap-test/run', {
           method: 'POST',
           body: JSON.stringify({ task: 'hi' }),
@@ -3436,7 +3592,7 @@ describe('LynoxHTTPApi', () => {
     it('DELETE /api/runs/:runId aborts a live run and invokes its abort handle', async () => {
       await withExecutor(5, async (ex) => {
         const abortSpy = vi.fn();
-        ex.acquire('live-run', 'thread-1', abortSpy);
+        ex.acquire('live-run', 'thread-1', abortSpy, OWNER_PRINCIPAL);
         const res = await jsonFetch('/api/runs/live-run', { method: 'DELETE' });
         expect(res.status).toBe(200);
         expect(await res.json()).toMatchObject({ aborted: true, runId: 'live-run' });
@@ -15915,7 +16071,9 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
         await gate;
         return 'done';
       });
-      asMandate();
+      // A run starts only under a live grant (§3.13 B8), as a cookie's mandate always names one.
+      swap('getMandateEnds', () => ({ record: (): void => {}, isLive: (): boolean => true }));
+      api.setPrincipalResolverForTesting(() => ({ ...MANDATE, mandateId: 'TEST-GRANT-1' }));
       const res = await jsonFetch(`/api/sessions/${OWN}/run`, { method: 'POST', body: JSON.stringify({ task: 'hi', protocol: 1 }) });
       expect(res.status).toBe(200);
       let asked = prompts.getPending(OWN);
