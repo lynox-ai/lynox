@@ -155,10 +155,12 @@ describe('Engine boot — the Google tools are visible before a credential exist
     // §3.3 — "clearing the credential is the whole of disconnect; the registry is
     // not touched") and nothing held the design in place.
     //
-    // MUTATION THIS KILLS: remove `this._googleAuth = null` from the `!pair`
-    // branch of `reloadGoogle()`. The tools resolve the auth per call, so a
-    // disconnect that leaves the instance behind keeps them answering as if
-    // still connected — the refusal assertion below is what fails.
+    // MUTATION THIS KILLS: drop the assignment to `this._googleAuth` in the
+    // `!pair` branch of `reloadGoogle()`, so the old instance stays behind. The
+    // tools resolve the auth per call, so a disconnect that leaves it behind keeps
+    // them answering as if still connected. Measured: the first assertion to fail
+    // is the one on the value `reloadGoogle()` returns ("must reach the
+    // DISCONNECT branch").
     //
     // ⚠ The `version` assertion is NOT the killing one and is not claimed to be:
     // `ToolRegistry` has no `unregister`, so "unregisters on disconnect" is not
@@ -166,11 +168,12 @@ describe('Engine boot — the Google tools are visible before a credential exist
     // removal API later has something to break.
     //
     // ⚠ SCOPE: this is the SELF-HOST disconnect — a pair was configured and is
-    // taken away. It deliberately does not bless the same nulling for a BROKERED
-    // tenant, which has no pair by construction and whose credential is built on
-    // the claim: there `POST /api/google/reload` reaches the same branch and
-    // destroys a working credential. That is a separate, open defect, and this
-    // test must not be read as holding it in place.
+    // taken away, and this fixture is no managed instance, so nothing is rebuilt
+    // from the vault and the branch ends with no credential. A BROKERED tenant
+    // has no pair by construction and reaches the same branch on
+    // `POST /api/google/reload`; there the branch rebuilds the connection from
+    // the vault, the way the boot does, and keeps it. That half is held by
+    // `google-broker-boot.test.ts`, not here.
     const engine = await bootWithCredential('disconnect');
 
     // BOTH directions, for the same reason the suffix test below gives. Asserting
