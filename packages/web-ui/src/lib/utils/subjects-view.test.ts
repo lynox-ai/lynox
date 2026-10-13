@@ -23,5 +23,9 @@ describe('subjectsBody', () => {
 		expect(src).toContain("{#if body === 'loading'}");
 		expect(src).toContain("{:else if body === 'empty'}");
 		expect(src).not.toContain('{:else if subjects.length === 0}');
+		// The erased person leaves the list, but the panel holding the result stays open.
+		const onerased = /onerased=\{\(id\) => \{([^}]*)\}\}/.exec(src)?.[1];
+		expect(onerased).toContain('subjects = subjects.filter(x => x.id !== id)');
+		expect(onerased).not.toMatch(/selected\s*=|erasing\s*=/);
 	});
 });
