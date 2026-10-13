@@ -3916,10 +3916,9 @@ describe('httpRequestTool', () => {
       expect(sentHeader('authorization')).toBe(`Bearer ${VAULT_JWT}`);
     });
 
-    // The writes a request names are read from the headers that go out, after the engine has
-    // attached its credential: a profile whose slot is an override header names a write the
-    // model's own headers do not.
-    it('the writes a request names include an override the engine attaches', async () => {
+    // A profile whose credential slot is an override header would name a write the model's own
+    // headers do not: it is refused at the attach, before anything is sent.
+    it('a profile whose credential slot is an override header is refused before anything is sent', async () => {
       const store = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] });
       const contract: CapabilityContract = {
         version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
@@ -3937,7 +3936,8 @@ describe('httpRequestTool', () => {
       } as never;
       const out = await visible({ url: 'https://api.bexio.com/3.0/items', method: 'POST', body: '{}' }, agent);
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(out).toContain('requires user consent');
+      // Refused at the attach, before the consent check that reads the attached headers.
+      expect(out).toContain('changes the request\'s method, target or body type');
     });
 
     it('`header` type puts the RAW token in its own named slot — no Bearer prefix', async () => {
@@ -4149,6 +4149,75 @@ describe('httpRequestTool', () => {
       const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
       expect(result).toContain('not a valid header name');
       expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    // The gate reads the method, the target and the body type off the request before the
+    // engine attaches the credential; a slot named like one of those would change the request
+    // after it was checked, and on a GET nothing asks at all.
+    it.each([
+      ['X-HTTP-Method-Override', 'DELETE'],
+      ['x-method-override', 'DELETE'],
+      ['X-Forwarded-Host', 'internal.example'],
+      ['Content-Type', 'application/x-www-form-urlencoded'],
+      ['X_HTTP_Method_Override', 'DELETE'],
+    ])('SECURITY: a header profile whose slot is %s sends nothing, on a GET too', async (slot, value) => {
+      const store = await storeWith({ type: 'header', header_name: slot, vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: value }));
+      expect(result).toContain('changes the request\'s method, target or body type');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('SECURITY: an oauth2 profile whose own header is a method override sends nothing', async () => {
+      const store = await storeWith({
+        type: 'oauth2', header_name: 'X-HTTP-Method-Override',
+        oauth: { token_url: 'https://idp.bexio.com/token' },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'DELETE' }));
+      expect(result).toContain('changes the request\'s method, target or body type');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('refuses a shaping slot before it reads the vault or renews a token', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const reads: string[] = [];
+      const agent = (store: unknown): never => ({
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => { reads.push(k); return 'DELETE'; } },
+        sessionCounters: testCounters,
+      }) as never;
+      const header = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] });
+      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(header))).toContain('changes the request\'s method, target or body type');
+      // An expired token would be renewed against its token endpoint before the attach.
+      const oauth = await storeWith({
+        type: 'oauth2', header_name: 'X-HTTP-Method-Override',
+        oauth: { token_url: 'https://idp.bexio.com/token', token_expires_at: 1 },
+      });
+      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(oauth))).toContain('changes the request\'s method, target or body type');
+      expect(reads).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('a header profile with an ordinary slot still attaches on a GET', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const store = await storeWith({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['BEXIO_API_TOKEN'] });
+      await handler({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: 'v1' }));
+      expect(sentHeader('x-api-key')).toBe('v1');
+    });
+
+    it('an oauth2 profile with an ordinary own header still attaches on a GET', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const store = await storeWith({ type: 'oauth2', header_name: 'X-Shopify-Access-Token', oauth: { token_url: 'https://idp.bexio.com/token' } });
+      await handler({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'v2' }));
+      expect(sentHeader('x-shopify-access-token')).toBe('v2');
     });
 
     it('SECURITY: a custom auth header is dropped on a cross-origin redirect', async () => {

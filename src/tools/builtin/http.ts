@@ -38,7 +38,7 @@ import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -1540,6 +1540,10 @@ async function attachEngineManagedAuth(
   }
   const auth = profile.auth;
   if (!auth) return {};
+  // Before any vault read or renewal: a profile that will be refused here costs no secret access.
+  if ((auth.type === 'header' || auth.type === 'oauth2') && typeof auth.header_name === 'string' && isRequestShapingHeaderName(auth.header_name)) {
+    return { refusal: shapingSlotRefusal(profile.id) };
+  }
   // Every read below, the renewal's included, goes through the profile's view: a profile a
   // mandate wrote does not get the environment's values or a preset account's credentials.
   // A release of the owner's name to such a profile counts for the grant it was given to: the
@@ -1830,6 +1834,15 @@ async function attachEngineManagedAuth(
       secretStore,
     }),
   };
+}
+
+/**
+ * A profile (one loaded from a file never passed `validateProfile`) whose credential slot is a
+ * header that changes how the request is read: the gate has already read the request without
+ * it, so attaching it would send something other than what was checked.
+ */
+function shapingSlotRefusal(profileId: string): string {
+  return `Error: api_profile "${profileId}" puts its credential in auth.header_name, a header that changes the request's method, target or body type, so it was not attached and nothing was sent. Fix the profile with api_setup action="update" to use the header the API documents for its key (for example "X-Api-Key").`;
 }
 
 /**

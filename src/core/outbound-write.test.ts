@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, outboundEffectField, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -197,6 +197,27 @@ describe('retargetingHeader', () => {
     }
     for (const name of ['X-Forwarded-For', 'X-RapidAPI-Host', 'X-Originating-IP', 'X-Originator', 'X-Rewritten', 'Foo-X-Forwarded-Host']) {
       expect(retargetingHeader({ [name]: 'y' }), name).toBeUndefined();
+    }
+  });
+});
+
+describe('a header name read the way a CGI-style server reads it', () => {
+  // PHP-FPM maps `-` and `_` alike to `HTTP_X_…`, so an underscore spelling is the same header.
+  it('reads an underscore spelling of an override or a routing header as that header', () => {
+    expect(effectiveWriteMethod('GET', { X_HTTP_Method_Override: 'DELETE' }, U)).toBe('DELETE');
+    expect(effectiveWriteMethod('POST', { 'x_method-override': 'PUT' }, U)).toBe('PUT');
+    expect(retargetingHeader({ X_Forwarded_Host: 'y' })).toBe('X_Forwarded_Host');
+    expect(retargetingHeader({ x_host: 'y' })).toBe('x_host');
+    expect(retargetingHeader({ X_Forwarded_For: 'y' }), 'the client, not the target').toBeUndefined();
+    expect(effectiveWriteMethod('GET', { X_Api_Key: 'DELETE' }, U), 'an ordinary name').toBe('GET');
+  });
+
+  it('names a credential slot that would shape the request, in any spelling, and no ordinary one', () => {
+    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type']) {
+      expect(isRequestShapingHeaderName(name), name).toBe(true);
+    }
+    for (const name of ['X-Api-Key', 'X_Api_Key', 'Authorization', 'X-Shopify-Access-Token', 'X-Forwarded-For', 'X-RapidAPI-Host', 'Content-Length']) {
+      expect(isRequestShapingHeaderName(name), name).toBe(false);
     }
   });
 });
