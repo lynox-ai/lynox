@@ -1920,7 +1920,7 @@ export class Session {
   getContextUsagePercent(): number {
     if (!this.agent) return 0;
     const estimatedTokens = this.agent.getEstimatedOccupancyTokens();
-    // agent.model may carry a [1m] suffix; MODEL_MAP[tier] would strip it.
+    // agent.model, not MODEL_MAP[tier]: a pinned model id need not be the tier's default.
     const maxCtx = this._displayContextWindow(this.agent.model);
     return Math.round(estimatedTokens / maxCtx * 100);
   }

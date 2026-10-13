@@ -382,8 +382,20 @@ export function normalizeModelId(model: string): string {
   // degrades to the fallback capability instead of a `.replace of undefined`
   // TypeError → 500.
   if (typeof model !== 'string') return '';
-  // Strip Vertex AI version suffix: '@YYYYMMDD'
-  return model.replace(/@\d{8}$/, '');
+  // Strip Vertex AI version suffix: '@YYYYMMDD', and the `[1m]` spelling of a variant.
+  return (oneMVariantBase(model) ?? model).replace(/@\d{8}$/, '');
+}
+
+/**
+ * The base id of a model written with a `[1m]` suffix (`claude-sonnet-4-6[1m]`), or undefined.
+ *
+ * The suffix is a client-side spelling for a 1M-context variant. A configured `[1m]` id is
+ * looked up as its base (context window, price, request rules) and sent as its base
+ * (`shapeRequestForModel`). The context window is the base model's: 1M where the base has it,
+ * otherwise the base's own, and the first request says so once (`noteOneMVariant`).
+ */
+export function oneMVariantBase(model: string): string | undefined {
+  return model.endsWith('[1m]') ? model.slice(0, -'[1m]'.length) : undefined;
 }
 
 /** Approximate characters per token for context estimation. */
@@ -634,7 +646,6 @@ const FIREWORKS_VISION_FEATURES: ModelFeatures = {
   pdfInput: false,
 };
 
-const ONE_M_BETA: AnthropicBeta[] = ['context-1m-2025-08-07'];
 
 /**
  * The cache TTL the agent attaches to every Anthropic/Vertex cache breakpoint
@@ -835,7 +846,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     wireRules: { forcedToolChoice: 'rejected', thinkingDisabled: 'between_tools', samplingParams: 'rejected' },
   },
   // Claude Sonnet 5 — additive opt-in (4.6 stays the balanced default). 1M
-  // context NATIVELY (no `context-1m` beta header, unlike the 4.6[1m] variant),
+  // context NATIVELY (no `context-1m` beta header),
   // mirroring the Opus base entries' shape. Pricing is $2/$10: Anthropic launched it
   // as an introductory rate through 2026-08-31 with a step to $3/$15 announced for
   // Sep 1, and then kept $2/$10 as the standard price (pricing page, footnote 3,
@@ -916,53 +927,6 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.10 },
     uiLabel: 'Claude Haiku 4.5',
-  },
-  // 1M-context beta variants — Anthropic's identifier for the 1M-context
-  // beta when `anthropic-beta: context-1m-2025-08-07` is on. Without these
-  // explicit entries the lookup falls through to the 200k default (only
-  // @YYYYMMDD gets stripped, not bracket suffixes), which historically caused
-  // the staging "Kontext: 423%" UI mismatch when an extended-Sonnet session
-  // was treated as 200k for trim/percentage calc. Pricing mirrors the base
-  // model for now — Anthropic may levy a 1M-tier premium later; revisit when
-  // that lands.
-  'claude-opus-4-7[1m]': {
-    id: 'claude-opus-4-7[1m]',
-    provider: 'anthropic',
-    tier: 'deep',
-    contextWindow: 1_000_000,
-    defaultMaxOutput: 32_000,
-    maxContinuations: 20,
-    betaHeaders: ONE_M_BETA,
-    features: CLAUDE_FEATURES,
-    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
-    uiLabel: 'Claude Opus 4.7 (1M)',
-    // Non-default temperature/top_p/top_k is a 400 (Anthropic migration guide, Opus 4.7:
-    // "The `temperature`, `top_p`, and `top_k` parameters are no longer accepted").
-    wireRules: { samplingParams: 'rejected' },
-  },
-  'claude-opus-4-6[1m]': {
-    id: 'claude-opus-4-6[1m]',
-    provider: 'anthropic',
-    tier: 'deep',
-    contextWindow: 1_000_000,
-    defaultMaxOutput: 32_000,
-    maxContinuations: 20,
-    betaHeaders: ONE_M_BETA,
-    features: CLAUDE_FEATURES,
-    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
-    uiLabel: 'Claude Opus 4.6 (1M)',
-  },
-  'claude-sonnet-4-6[1m]': {
-    id: 'claude-sonnet-4-6[1m]',
-    provider: 'anthropic',
-    tier: 'balanced',
-    contextWindow: 1_000_000,
-    defaultMaxOutput: 16_000,
-    maxContinuations: 10,
-    betaHeaders: ONE_M_BETA,
-    features: CLAUDE_FEATURES,
-    pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
-    uiLabel: 'Claude Sonnet 4.6 (1M)',
   },
   // === Mistral tier-set (eu-sovereign managed via openai-compat) ===
   // cacheRead = 10% of input per Mistral pricing docs (2026-05-24).
@@ -1615,8 +1579,9 @@ export type ThinkingHint = ThinkingMode['type'];
  * coercing 400s — so the safe bias is "unknown Claude ⇒ reject".
  */
 const CLAUDE_MODELS_ACCEPTING_MANUAL_THINKING: ReadonlySet<string> = new Set([
-  'claude-sonnet-4-6', 'claude-sonnet-4-6[1m]',
-  'claude-opus-4-6', 'claude-opus-4-6[1m]',
+  // `[1m]` spellings are normalized to these ids before the lookup.
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
   // Haiku 4.5 has no extended thinking at all (force-disabled upstream), so it
   // never carries an `enabled` block to coerce — omitting it is inconsequential.
 ]);
@@ -1627,7 +1592,7 @@ const CLAUDE_MODELS_ACCEPTING_MANUAL_THINKING: ReadonlySet<string> = new Set([
  * anything newer). Non-Claude models return false — their thinking support is
  * governed by their own provider guard. Used as a defense-in-depth normalizer
  * so a free-form `thinking` object handed in via the spawn tool schema can never
- * 400 a Sonnet-5/Opus-4.7+ run. Normalizes @-suffixed ids.
+ * 400 a Sonnet-5/Opus-4.7+ run. Normalizes @-suffixed and `[1m]` ids.
  */
 export function claudeModelRejectsManualThinking(model: string): boolean {
   const id = normalizeModelId(model);

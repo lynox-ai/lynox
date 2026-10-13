@@ -20,7 +20,7 @@
  * and then reports the miss with {@link reportForcedToolMiss}.
  */
 import type Anthropic from '@anthropic-ai/sdk';
-import { modelCapability } from '../types/models.js';
+import { getContextWindow, modelCapability, oneMVariantBase } from '../types/models.js';
 
 /** What the caller forced before the boundary relaxed it to `auto`. */
 export type ForcedTool = { type: 'tool'; name: string } | { type: 'any' };
@@ -75,17 +75,44 @@ function appendSystem(system: unknown, text: string): unknown {
   return system;
 }
 
+/** `[1m]` ids already reported by {@link noteOneMVariant} in this process, at most this many. */
+const notedOneMVariants = new Set<string>();
+const MAX_NOTED_ONE_M_VARIANTS = 64;
+
 /**
- * Rewrite `params` to what `params.model` accepts. Pure: the input is not mutated, and a
- * model without rules gets the very same object back. Returns the forced tool the
- * caller asked for when it had to be relaxed, so the reply can be checked against it.
+ * Say once per id and process that a `[1m]` id is sent as its base id, and, when the base
+ * model's context window is below 1M, what that window is. The id stays `[1m]` in config,
+ * logs and thread metadata; this line is where the difference shows.
+ */
+function noteOneMVariant(requested: string, base: string): void {
+  if (notedOneMVariants.has(requested) || notedOneMVariants.size >= MAX_NOTED_ONE_M_VARIANTS) return;
+  notedOneMVariants.add(requested);
+  const window = getContextWindow(base);
+  // JSON-quoted: the id comes from configuration or a request body, and a line break in it
+  // must not start a line of its own.
+  process.stderr.write(
+    `[lynox:model] ${JSON.stringify(requested)} is sent as ${JSON.stringify(base)}`
+    + (window < 1_000_000 ? `; its context window is ${String(window)} tokens, not 1M` : '')
+    + '.\n',
+  );
+}
+
+/**
+ * Rewrite `params` to what `params.model` accepts. Pure apart from the one-time notice
+ * above: the input is not mutated, and a model without rules or a `[1m]` suffix gets the
+ * very same object back. A `[1m]` id is sent as its base id (`oneMVariantBase`), and its
+ * rules are the base model's. Returns the forced tool the caller asked for when it had to
+ * be relaxed, so the reply can be checked against it.
  */
 export function shapeRequestForModel<P extends Params>(params: P): { params: P; forced: ForcedTool | undefined } {
   const model = typeof params['model'] === 'string' ? params['model'] : undefined;
+  const base = model === undefined ? undefined : oneMVariantBase(model);
+  if (model !== undefined && base !== undefined) noteOneMVariant(model, base);
+  const sent: Params = base === undefined ? params : { ...params, model: base };
   const rules = model === undefined ? undefined : modelCapability(model)?.wireRules;
-  if (!rules) return { params, forced: undefined };
+  if (!rules) return { params: sent as P, forced: undefined };
 
-  const out: Params = { ...params };
+  const out: Params = { ...sent };
   let forced: ForcedTool | undefined;
 
   if (rules.samplingParams === 'rejected') {
