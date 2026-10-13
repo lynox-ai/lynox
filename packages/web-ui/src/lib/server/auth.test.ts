@@ -329,6 +329,9 @@ describe('session tokens with a principal', () => {
 			{ ...mandateAt(nowS), mandate_id: null },
 			{ ...mandateAt(nowS), mandate_exp: 'later' },
 			{ ...mandateAt(nowS), mandate_exp: nowS + MANDATE_SESSION_MAX_S - 1 },
+			{ ...mandateAt(nowS), auth_time: 'earlier' },
+			{ ...mandateAt(nowS), auth_time: nowS + 0.5 },
+			{ ...mandateAt(nowS), auth_time: nowS + MANDATE_SESSION_MAX_S + 1 },
 		]) {
 			expect(readSessionToken(sign(`aaaaaaaaaaaaaaaa.${b64(p)}.${nowS}`), SECRET), JSON.stringify(p)).toBeNull();
 		}
@@ -371,6 +374,30 @@ describe('loginSession', () => {
 		const endsIn5Min = { ...LOGIN, mandate_expires_at: new Date(t0 + 300_000).toISOString() };
 		expect(loginSession(SECRET, endsIn5Min)!.maxAge).toBe(300);
 		expect(mandateSessionPrincipal(endsIn5Min)!.exp).toBe(Math.floor(t0 / 1000) + 300);
+	});
+
+	it('signs the login time and keeps it through a renewal, ending at most a working day after it', () => {
+		vi.useFakeTimers();
+		const t0 = Date.UTC(2026, 9, 8, 12, 0, 0);
+		vi.setSystemTime(t0);
+		const loginS = Math.floor(t0 / 1000);
+		expect(mandateSessionPrincipal(LOGIN)!.auth_time).toBe(loginS);
+		// A renewal 7h58m after the login: the 15 minutes would run past 8h, so 8h is the end.
+		const renewS = loginS + 8 * 3600 - 120;
+		const renewed = mandateSessionPrincipal(LOGIN, renewS, loginS)!;
+		expect(renewed.auth_time).toBe(loginS);
+		expect(renewed.exp).toBe(loginS + 8 * 3600);
+		// At 8h itself nothing more is minted.
+		expect(mandateSessionPrincipal(LOGIN, loginS + 8 * 3600, loginS)).toBeNull();
+		// Well inside the day, the 15 minutes are the end.
+		expect(mandateSessionPrincipal(LOGIN, loginS + 3600, loginS)!.exp).toBe(loginS + 3600 + MANDATE_SESSION_MAX_S);
+	});
+
+	it('reads the signed login time back from the cookie', () => {
+		const nowS = Math.floor(Date.now() / 1000);
+		const tok = createSessionToken(SECRET, mandateAt(nowS, { auth_time: nowS - 60 }));
+		expect(readSessionToken(tok, SECRET)?.principal?.auth_time).toBe(nowS - 60);
+		expect(readSessionToken(createSessionToken(SECRET, mandateAt(nowS)), SECRET)?.principal?.auth_time).toBeUndefined();
 	});
 
 	it('gives no session for a mandate that has already ended', () => {

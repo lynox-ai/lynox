@@ -307,6 +307,45 @@ export function readLoginPrincipal(body: unknown): MandateLoginPrincipal | null 
 }
 
 /**
+ * Renewal of a mandate session (PRD customer-granted-operator-access, piece D): the web UI asks
+ * the control plane, shortly before the session's `exp`, whether the mandate it names is still
+ * live for this instance's account. Sent with the instance's secret like the login calls.
+ * `mandate_id` and `email` come from the signed session cookie, never from the browser.
+ */
+export const MANDATE_RENEW_PATH = '/internal/auth/renew-mandate';
+
+/** Body of `POST /internal/auth/renew-mandate`. */
+export interface MandateRenewRequest {
+  instanceId: string;
+  mandate_id: string;
+  email: string;
+  principal_version: typeof LOGIN_PRINCIPAL_VERSION;
+}
+
+/**
+ * The control plane's yes to a renewal: a login success body whose principal is required.
+ * Every no is a 403.
+ */
+export interface MandateRenewSuccessBody {
+  valid: true;
+  principal: MandateLoginPrincipal;
+}
+
+/**
+ * Read the principal off a renewal's success body. Only `valid: true` with a principal for the
+ * same mandate and the same address renews; everything else is `null`, a refusal. Unlike
+ * `readLoginPrincipal`, a body without a principal is a refusal too: there is no owner in a
+ * renewal, and reading it as one would hand a mandate session the owner's.
+ */
+export function readRenewedPrincipal(body: unknown, expect: { mandate_id: string; email: string }): MandateLoginPrincipal | null {
+  if (typeof body !== 'object' || body === null || (body as { valid?: unknown }).valid !== true) return null;
+  const principal = readLoginPrincipal(body);
+  if (principal === null || principal === 'invalid') return null;
+  if (principal.mandate_id !== expect.mandate_id || principal.email !== expect.email) return null;
+  return principal;
+}
+
+/**
  * The control plane's list of an account's revoked mandates, sent to each of the account's
  * instances on the admin route `POST /api/admin/mandates/revoke` (PRD
  * customer-granted-operator-access §3.5, piece C). The whole list each time, applied

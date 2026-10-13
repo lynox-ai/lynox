@@ -9,6 +9,7 @@ vi.mock('$env/dynamic/private', () => ({ env }));
 vi.mock('$lib/server/auth.js', async () => await import('../../lib/server/auth.js'));
 vi.mock('$lib/contract/http.js', async () => await import('../../lib/contract/http.js'));
 vi.mock('$lib/server/code-login.js', async () => await import('../../lib/server/code-login.js'));
+vi.mock('$lib/server/session-cookie.js', async () => await import('../../lib/server/session-cookie.js'));
 
 const { load, actions } = await import('./+page.server.js');
 const { createSessionToken, createLinkCode, consumeLinkCode, readSessionToken, MANDATE_SESSION_MAX_S } = await import('../../lib/server/auth.js');

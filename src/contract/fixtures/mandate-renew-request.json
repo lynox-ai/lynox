@@ -1,0 +1,6 @@
+{
+  "instanceId": "TEST-INSTANCE-1",
+  "mandate_id": "TEST-MANDATE-1",
+  "email": "recipient@example.invalid",
+  "principal_version": 2
+}

@@ -11,8 +11,14 @@ function deriveKey(secret: string, purpose: string): Buffer {
 
 // ── Session tokens ──────────────────────────────────────────────────
 
-/** A mandate session lasts at most this long; the web-ui does not renew one yet. */
+/** A mandate session lasts at most this long before it must be renewed (`/auth/renew`). */
 export const MANDATE_SESSION_MAX_S = 15 * 60;
+/**
+ * Renewal stops this long after the login itself: a working day. After it the recipient logs in
+ * again, by code or link. A cookie that leaves the recipient's hands therefore lives at most this
+ * long, not until the mandate ends.
+ */
+export const MANDATE_RENEW_MAX_S = 8 * 60 * 60;
 /** A session stamped further than this in the future is refused. */
 export const SESSION_FUTURE_SKEW_S = 60;
 
@@ -55,19 +61,25 @@ export interface MandateSessionPrincipal {
 	 *  it for what runs after the session (a connection the mandate made, PRD §3.13 B9). Absent
 	 *  in a cookie minted before this field existed. */
 	mandate_exp?: number;
+	/** Unix seconds. When the recipient logged in; a renewal carries it unchanged and stops
+	 *  `MANDATE_RENEW_MAX_S` after it. Absent in a cookie minted before this field existed,
+	 *  which is then not renewed. */
+	auth_time?: number;
 }
 
 /**
- * The principal for a mandate login verified now: it ends 15 minutes from now, or
- * when the mandate ends, whichever comes first. `null` when the mandate has
- * already ended or its end cannot be read.
+ * The principal for a mandate login verified now: it ends 15 minutes from now, when
+ * the mandate ends, or when renewal stops (`authTimeS` + `MANDATE_RENEW_MAX_S`),
+ * whichever comes first. `authTimeS` is the login's own time, now for a login and
+ * the cookie's for a renewal. `null` when that end is not in the future or the
+ * mandate's end cannot be read.
  */
-export function mandateSessionPrincipal(p: MandateLoginPrincipal, nowS = Math.floor(Date.now() / 1000)): MandateSessionPrincipal | null {
+export function mandateSessionPrincipal(p: MandateLoginPrincipal, nowS = Math.floor(Date.now() / 1000), authTimeS = nowS): MandateSessionPrincipal | null {
 	const mandateEndS = Math.floor(Date.parse(p.mandate_expires_at) / 1000);
 	if (!Number.isFinite(mandateEndS)) return null;
-	const exp = Math.min(nowS + MANDATE_SESSION_MAX_S, mandateEndS);
+	const exp = Math.min(nowS + MANDATE_SESSION_MAX_S, mandateEndS, authTimeS + MANDATE_RENEW_MAX_S);
 	if (exp <= nowS) return null;
-	return { v: 1, kind: 'mandate', email: p.email, display: p.display, mandate_id: p.mandate_id, exp, mandate_exp: mandateEndS };
+	return { v: 1, kind: 'mandate', email: p.email, display: p.display, mandate_id: p.mandate_id, exp, mandate_exp: mandateEndS, auth_time: authTimeS };
 }
 
 /**
@@ -105,10 +117,18 @@ function parseSessionPrincipal(part: string): OwnerSessionPrincipal | MandateSes
 	if (typeof display !== 'string' || display.length === 0) return null;
 	if (typeof mandateId !== 'string' || mandateId.length === 0) return null;
 	if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) return null;
+	const principal: MandateSessionPrincipal = { v: 1, kind: 'mandate', email, display, mandate_id: mandateId, exp };
 	const mandateExp = p['mandate_exp'];
-	if (mandateExp === undefined) return { v: 1, kind: 'mandate', email, display, mandate_id: mandateId, exp };
-	if (typeof mandateExp !== 'number' || !Number.isSafeInteger(mandateExp) || mandateExp < exp) return null;
-	return { v: 1, kind: 'mandate', email, display, mandate_id: mandateId, exp, mandate_exp: mandateExp };
+	if (mandateExp !== undefined) {
+		if (typeof mandateExp !== 'number' || !Number.isSafeInteger(mandateExp) || mandateExp < exp) return null;
+		principal.mandate_exp = mandateExp;
+	}
+	const authTime = p['auth_time'];
+	if (authTime !== undefined) {
+		if (typeof authTime !== 'number' || !Number.isSafeInteger(authTime) || authTime > exp) return null;
+		principal.auth_time = authTime;
+	}
+	return principal;
 }
 
 /**

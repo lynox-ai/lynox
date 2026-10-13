@@ -28,7 +28,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { isModelProfile } from '../src/contract/shapes.js';
-import { readLoginPrincipal, readMandateRevocation, MANDATE_REVOCATION_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../src/contract/http.js';
+import { readLoginPrincipal, readMandateRevocation, readRenewedPrincipal, MANDATE_REVOCATION_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../src/contract/http.js';
 import type { UsageSummaryResponse } from '../src/contract/http.js';
 // The typed mirrors live INSIDE the contract (src/contract/fixtures/mirrors.ts)
 // so their `satisfies` welds are checked by root tsc — this test dir is outside
@@ -195,3 +195,35 @@ describe('the revoked-mandates list the control plane sends (readMandateRevocati
   });
 });
 
+describe('the principal a renewal answers with (readRenewedPrincipal)', () => {
+  const expect_ = { mandate_id: 'TEST-MANDATE-1', email: 'recipient@example.invalid' };
+  const principal = {
+    kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+    mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2030-01-01T00:00:00.000Z',
+  };
+
+  it('reads the principal of the same mandate and address', () => {
+    expect(readRenewedPrincipal({ valid: true, principal }, expect_)).toEqual(principal);
+  });
+
+  it('refuses a success body without a principal: a renewal is never the owner', () => {
+    expect(readRenewedPrincipal({ valid: true }, expect_)).toBeNull();
+    expect(readRenewedPrincipal({}, expect_)).toBeNull();
+    // The login reader reads the same body as the owner; that is exactly what must not carry over.
+    expect(readLoginPrincipal({ valid: true })).toBeNull();
+  });
+
+  it('refuses another mandate, another address, and a principal it cannot read', () => {
+    expect(readRenewedPrincipal({ valid: true, principal: { ...principal, mandate_id: 'TEST-MANDATE-2' } }, expect_)).toBeNull();
+    expect(readRenewedPrincipal({ valid: true, principal: { ...principal, email: 'other@example.invalid' } }, expect_)).toBeNull();
+    expect(readRenewedPrincipal({ valid: true, principal: { ...principal, kind: 'owner' } }, expect_)).toBeNull();
+    expect(readRenewedPrincipal(null, expect_)).toBeNull();
+  });
+
+  it('refuses a principal that does not come with valid: true', () => {
+    for (const valid of [false, undefined, 'true', 1]) {
+      expect(readRenewedPrincipal({ valid, principal }, expect_), String(valid)).toBeNull();
+    }
+    expect(readRenewedPrincipal({ principal }, expect_)).toBeNull();
+  });
+});

@@ -24,6 +24,7 @@ import {
 	isHttpsRequest,
 } from '$lib/server/auth.js';
 import { decideMagicLinkOutcome, type MagicLinkOutcome } from '$lib/server/magic-link.js';
+import { setSessionCookie } from '$lib/server/session-cookie.js';
 
 function getManagedConfig(): { instanceId: string; controlPlaneUrl: string } | null {
 	const instanceId = env.LYNOX_MANAGED_INSTANCE_ID;
@@ -36,23 +37,6 @@ function getManagedConfig(): { instanceId: string; controlPlaneUrl: string } | n
 
 function getSecret(): string | null {
 	return env.LYNOX_HTTP_SECRET ?? null;
-}
-
-function setSessionCookie(
-	cookies: Parameters<RequestHandler>[0]['cookies'],
-	session: { token: string; maxAge: number },
-	isSecure: boolean,
-): void {
-	cookies.set('lynox_session', session.token, {
-		path: '/',
-		httpOnly: true,
-		secure: isSecure,
-		// Lax for the same reason as /login (#469): top-level navigation from
-		// Mail.app must allow the cookie to land. State-changing POSTs still
-		// need same-site origin so CSRF is unaffected.
-		sameSite: 'lax',
-		maxAge: session.maxAge,
-	});
 }
 
 export const GET: RequestHandler = async ({ url, request, cookies, getClientAddress }) => {
