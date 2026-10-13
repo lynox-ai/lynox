@@ -17,7 +17,7 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
-import { isOutboundEffectWrite } from './outbound-write.js';
+import { effectiveWriteMethod, isOutboundEffectWrite } from './outbound-write.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
@@ -309,10 +309,14 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // Before the contract: `contractGrants` refuses a mail target as well, and checked second
     // this would halt as `contract`, which names the wrong reason.
     if (isMailProviderTarget(url)) return { kind: 'blocked' };
-    if (!contractGrants('http_request', { url, method }, deps.contract)) return { kind: 'not_granted' };
+    const payload = method !== 'GET' ? JSON.stringify(body) : undefined;
+    // The records decide the body, and a top-level `_method` field in it is read by some
+    // servers as the request's method: the contract is checked against what such a server does.
+    const gated = effectiveWriteMethod(method, { 'content-type': 'application/json' }, url, payload);
+    if (gated === null || !contractGrants('http_request', { url, method: gated }, deps.contract)) return { kind: 'not_granted' };
     // A path that sends to a third party or issues something bindingly is asked on its own,
     // every time (`outbound-write.ts`); a bulk run has no one to ask, so no grant covers it.
-    if (isOutboundEffectWrite(url, method)) return { kind: 'not_granted' };
+    if (isOutboundEffectWrite(url, gated)) return { kind: 'not_granted' };
     const hostname = new URL(url).hostname;
     try {
       assertHostPolicy(url, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.hostPolicy);
@@ -323,7 +327,6 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // the after-image when it is made; this also covers the address, and a body the plan never
     // saw (an undo writes back what the host held). Before the credential is attached: the
     // header it adds carries a secret by design and is the profile's, not the request's.
-    const payload = method !== 'GET' ? JSON.stringify(body) : undefined;
     if (urlScanForms(url).some((form) => deps.scan(form) !== null) || (payload !== undefined && deps.scan(payload) !== null)) {
       return { kind: 'secret' };
     }
