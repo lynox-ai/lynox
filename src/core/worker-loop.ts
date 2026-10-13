@@ -440,16 +440,24 @@ export type StopOutcome =
  *    a bulk write finishes and records it, a preview's read is cut short, and a
  *    workflow's step agents are aborted at their next provider call.
  */
-/** The effects whose run reads no abort at any point (see the `switch (effect)` in
- *  `executeTask`): a stop is refused for them as `unstoppable`, whatever their phase. */
-const EFFECTS_NO_STOP_REACHES: ReadonlySet<string> = new Set(['backup', 'notify']);
-
 export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
   if (active.pendingPromptId !== undefined) return 'wait';
   if (active.session !== undefined) return 'session';
   if (active.readsSignal === true) return 'signal';
   return undefined;
 }
+
+/**
+ * The effects whose run reads no abort at any point (see the `switch (effect)` in
+ * `executeTask`): a stop is refused for them as `unstoppable`, whatever their phase.
+ *
+ * ⚠ A list of effect names, which {@link stopHandleOf} avoids on purpose — it answers
+ * the schedules view's question BEFORE a stop is tried ("offer one?"), where the handle
+ * only exists once the run has reached it. It fails toward offering: an effect added
+ * later and missing here gets a stop button whose click answers `unstoppable`, which is
+ * the honest refusal, never a stop that claims to have landed.
+ */
+const EFFECTS_NO_STOP_REACHES: ReadonlySet<string> = new Set(['backup', 'notify']);
 
 /**
  * Whether a parked run's question must outlive this process: it is being torn down AND

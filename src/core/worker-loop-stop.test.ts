@@ -793,7 +793,7 @@ describe('what a stop can reach — one case per effect class', () => {
     // The positive control for the two above: a run a stop reaches is offered one.
     expect(h.loop.runningStoppable('trg-class')).toBe(true);
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
-    // and once the run is over, nothing is offered.
+    // and a trigger with no run in flight is offered nothing.
     expect(h.loop.runningStoppable('no-such-trigger')).toBe(false);
     expect(h.sessionCreations()).toBe(0);
   });

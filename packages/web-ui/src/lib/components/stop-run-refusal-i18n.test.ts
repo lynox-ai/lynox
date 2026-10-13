@@ -76,6 +76,12 @@ describe('the schedules view can stop a run', () => {
     expect(body).toMatch(/res\.status === 202\)\s*\{[^}]*addToast\(t\('triggers\.run_started'\)[^}]*await loadTriggers\(true\);/);
   });
 
+  it('a Run now refused as already running also reloads, so the running row shows its stop', () => {
+    const start = VIEW.indexOf('async function runNow(');
+    const body = VIEW.slice(start, VIEW.indexOf('\n\t}\n', start));
+    expect(body).toMatch(/res\.status === 409\)\s*\{[\s\S]*?'triggers\.run_already'\), 'info'\);\s*\/\/[^\n]*\n\s*await loadTriggers\(true\);/);
+  });
+
   it('the refresh after a stop or a start is quiet — the list is not swapped for the loading line', () => {
     expect(stopHandler()).toContain('await loadTriggers(true);');
     expect(VIEW).toMatch(/async function loadTriggers\(quiet = false\) \{\s*if \(!quiet\) loading = true;/);

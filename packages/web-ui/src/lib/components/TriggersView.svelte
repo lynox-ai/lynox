@@ -155,6 +155,8 @@
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
 				addToast(t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer' : 'triggers.run_already'), 'info');
+				// "Already running" — so show it running, and offer its stop.
+				await loadTriggers(true);
 			} else {
 				addToast(t('triggers.run_failed'), 'error');
 			}
