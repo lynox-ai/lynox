@@ -71,6 +71,43 @@ export interface BackupAuthProvider {
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 /**
+ * Where the uploader keeps the id of its `lynox-backups` root across restarts.
+ *
+ * Once a root is pinned, the uploader takes that folder and no other: a listing by name is not
+ * asked again, so a second folder of the same name that later appears in the user's Drive —
+ * one the user owns and this app is authorized for — is not taken in its place. Ownership of a
+ * folder can be transferred to the user, and the previous owner keeps write access to it.
+ */
+export interface RootFolderPin {
+  read(): string | null;
+  write(id: string): void;
+}
+
+const ROOT_PIN_FILE = 'gdrive-backup-root';
+/** A Drive file id as the pin stores it; anything else in the file is not a pin. */
+const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+
+/** A pin kept in a file of its own in `dir`, readable by the owner only. */
+export function fileRootPin(dir: string): RootFolderPin {
+  const path = join(dir, ROOT_PIN_FILE);
+  return {
+    read: () => {
+      let text: string;
+      try {
+        text = readFileSync(path, 'utf8').trim();
+      } catch {
+        return null;
+      }
+      return DRIVE_ID.test(text) ? text : null;
+    },
+    write: (id: string) => {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(path, `${id}\n`, { mode: 0o600 });
+    },
+  };
+}
+
+/**
  * Whether this instance may upload backups to Google Drive at all.
  *
  * Self-hosted only. On a CP-provisioned instance the control plane already runs restic
@@ -156,10 +193,13 @@ async function driveFetch(auth: BackupAuthProvider, url: string, options?: Reque
  */
 export class GDriveBackupUploader {
   private readonly auth: BackupAuthProvider;
+  /** Without a pin the root is looked up by name after every restart. */
+  private readonly rootPin: RootFolderPin | undefined;
   private rootFolderId: string | null = null;
 
-  constructor(auth: BackupAuthProvider) {
+  constructor(auth: BackupAuthProvider, options: { rootPin?: RootFolderPin | undefined } = {}) {
     this.auth = auth;
+    this.rootPin = options.rootPin;
   }
 
   /**
@@ -310,23 +350,37 @@ export class GDriveBackupUploader {
 
     const folder = await response.json() as DriveFile;
     this.rootFolderId = folder.id;
+    this.pin(folder.id);
     return folder.id;
   }
 
   /**
    * Find the root 'lynox-backups' folder this app created and the user owns (null if none).
    *
-   * A name alone does not identify it: under the full `drive` scope a listing by name also
-   * returns folders other accounts shared with the user (under `drive.file` alone, those the app
-   * has opened) and folders the user made by hand. Only one the user owns (the query) and this
-   * app is authorized for (the check below) counts — owned alone admits a hand-made folder,
-   * authorized alone admits a folder another account of the same app shared in. Without a match
-   * the caller creates its own. Authorization belongs to the app that created the folder, so
-   * after the instance moves to a different Google app the earlier root no longer matches and a
-   * new one is created beside it.
+   * With a pinned root, only that folder: it counts while it is a folder the user owns, this app
+   * is authorized for and that is not in the bin. Otherwise the answer is null and the caller
+   * creates a new root — no lookup by name, which would let a folder that appeared since stand
+   * in for the pinned one. A Drive that cannot be asked is an error, not a missing root: a new
+   * root created on a passing failure would leave the backups split over two.
+   *
+   * Without a pin, by name. A name alone does not identify it: under the full `drive` scope a
+   * listing by name also returns folders other accounts shared with the user (under `drive.file`
+   * alone, those the app has opened) and folders the user made by hand. Only one the user owns
+   * (the query) and this app is authorized for (the check below) counts — owned alone admits a
+   * hand-made folder, authorized alone admits a folder another account of the same app shared in.
+   * The one found is pinned. Without a match the caller creates its own. Authorization belongs
+   * to the app that created the folder, so after the instance moves to a different Google app
+   * the earlier root no longer matches and a new one is created beside it.
    */
   private async findRootFolder(): Promise<string | null> {
     if (this.rootFolderId) return this.rootFolderId;
+
+    const pinned = this.rootPin?.read() ?? null;
+    if (pinned !== null) {
+      if (!await this.isOwnRoot(pinned)) return null;
+      this.rootFolderId = pinned;
+      return pinned;
+    }
 
     let pageToken: string | undefined;
     for (let page = 0; page < MAX_LISTING_PAGES; page++) {
@@ -347,12 +401,38 @@ export class GDriveBackupUploader {
       const own = data.files?.find(f => f.isAppAuthorized === true);
       if (own) {
         this.rootFolderId = own.id;
+        this.pin(own.id);
         return own.id;
       }
       pageToken = data.nextPageToken;
       if (!pageToken) return null;
     }
     return null;
+  }
+
+  /** Whether the pinned folder is still this instance's root. Throws when Drive cannot say. */
+  private async isOwnRoot(id: string): Promise<boolean> {
+    const params = new URLSearchParams({ fields: 'id,mimeType,trashed,ownedByMe,isAppAuthorized' });
+    const response = await driveFetch(this.auth, `${DRIVE_BASE}/files/${encodeURIComponent(id)}?${params.toString()}`);
+    if (response.status === 404) return false;
+    if (!response.ok) throw new Error(`Could not read the pinned ${BACKUP_FOLDER_NAME} folder: ${String(response.status)}`);
+    const f = await response.json() as {
+      mimeType?: string | undefined; trashed?: boolean | undefined;
+      ownedByMe?: boolean | undefined; isAppAuthorized?: boolean | undefined;
+    };
+    return f.mimeType === FOLDER_MIME && f.trashed === false && f.ownedByMe === true && f.isAppAuthorized === true;
+  }
+
+  /**
+   * Keep `id` as the root. A pin that cannot be written leaves the backup itself untouched: the
+   * next restart then looks the root up by name, as an uploader without a pin does.
+   */
+  private pin(id: string): void {
+    try {
+      this.rootPin?.write(id);
+    } catch {
+      // See above.
+    }
   }
 
   /** Create a subfolder inside a parent folder. */
@@ -568,8 +648,8 @@ export function driveAuthFrom(google: {
  * The root itself is not checked: the checks that keep foreign content out are on the level
  * below. The backup folder must be one lynox created and carry a backup-directory name, and
  * the agent's Drive tool cannot create folders (`google-drive.ts`, `upload`). And a file is
- * deleted only when it is the USER's (`ownedByMe`): `isAppAuthorized` is per OAuth app, and the
- * managed client is one app for every tenant — another tenant's backup in a folder shared in
+ * deleted only when it is the USER's (`ownedByMe`): `isAppAuthorized` is per OAuth app, and one
+ * app can serve several users of a deployment — another user's backup in a folder shared in
  * would pass every other check.
  *
  * Why the structure and not "anything of ours under a folder of that name": lynox creates
