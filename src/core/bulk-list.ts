@@ -52,8 +52,8 @@ export interface BulkListFormSpec {
  */
 export const BULK_LIST_FORMS = {
   woocommerce: {
-    // `/wp-json/wc/v3/<collection>`: products, orders, customers, coupons, … — one segment.
-    path: /^\/wp-json\/wc\/v3\/[a-z_]{1,32}$/,
+    // The products list: the filters below are the products list's own.
+    path: /^\/wp-json\/wc\/v3\/products$/,
     filters: ['category', 'tag', 'status', 'sku', 'type', 'stock_status'],
     pageParam: 'page',
     perPageParam: 'per_page',
