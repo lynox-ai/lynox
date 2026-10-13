@@ -16933,6 +16933,34 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
           fresh.setPrincipalResolverForTesting(resolver);
         }
       });
+
+      it('lets the control plane change through its admin routes while the instance log cannot be written', async () => {
+        const resolver = resolverOf();
+        const engine = (fresh as unknown as { engine: Record<string, unknown> }).engine;
+        const orig = engine['getAuditLog'];
+        const origEnds = engine['getMandateEnds'];
+        engine['getAuditLog'] = () => null;
+        // A store that takes the empty list, so the route answers 200 when it runs at all.
+        engine['getMandateEnds'] = () => ({ revoke: () => false });
+        const revoke = (): Promise<Response> => as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: [] }) }, freshBase);
+        try {
+          await withEnv(MANAGED, async () => {
+            const cp = await revoke();
+            expect(((await cp.json()) as { error?: string }).error ?? '').not.toContain('cannot be recorded');
+            expect(cp.status).toBe(200);
+            // Control: the same broken log refuses the same change from a mandate.
+            fresh.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'recipient@example.invalid', mandateId: 'TEST-MANDATE-1' }));
+            const refused = await revoke();
+            expect(refused.status).toBe(503);
+            expect(((await refused.json()) as { error: string }).error).toBe('This change cannot be recorded in the instance log right now, so it was not made.');
+          });
+        } finally {
+          engine['getAuditLog'] = orig;
+          engine['getMandateEnds'] = origEnds;
+          fresh.setPrincipalResolverForTesting(resolver);
+        }
+      });
+
     });
 
     it('refuses a second registration of a route, so no handler inherits the control plane\'s reach', () => {
