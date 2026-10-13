@@ -151,7 +151,7 @@ describe('the account parameter takes an id or an address', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
     await createMailSendTool(registry).handler({ account: 'office@example.ch', to: 'a@x.com', subject: 's', body: 'b' }, agent);
-    expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** someone-else@example.org (account office@example.ch)');
+    expect(prompt, 'the user sees the real sending address before approving').toContain('**From:** someone-else@example.org (account "office@example.ch")');
     expect(lookalike.send, 'declined, so nothing went out').not.toHaveBeenCalled();
   });
 
@@ -640,7 +640,7 @@ describe('mail_reply tool', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await createMailReplyTool(registry).handler({ uid: 78, body: 'Thanks.' }, agent);
-    expect(prompt).toContain('**From:** rafael-gmail@example.com (account rafael-gmail)');
+    expect(prompt).toContain('**From:** rafael-gmail@example.com (account "rafael-gmail")');
   });
 
   it('the reply confirmation shows the provider\'s live From address, and a failed lookup sends nothing', async () => {
@@ -649,7 +649,7 @@ describe('mail_reply tool', () => {
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'No'; } } as unknown as IAgent;
     Object.assign(provider, { fromAddress: vi.fn(async () => 'relinked@example.com') });
     await createMailReplyTool(registry).handler({ uid: 79, body: 'Thanks.' }, agent);
-    expect(prompt).toContain('**From:** relinked@example.com (account rafael-gmail)\n');
+    expect(prompt).toContain('**From:** relinked@example.com (account "rafael-gmail")\n');
     prompt = '';
     Object.assign(provider, { fromAddress: vi.fn(async () => { throw new Error('profile 503'); }) });
     const out = await createMailReplyTool(registry).handler({ uid: 79, body: 'Thanks.' }, agent);
@@ -1314,7 +1314,50 @@ describe('mail_reply — smart reply-from', () => {
     const cc = (gmail.send.mock.calls[0]![0].cc ?? []).map(a => a.address.toLowerCase());
     expect(cc, 'the live sending address is not copied on its own reply').not.toContain('new@gmail.com');
     expect(cc, 'other recipients stay, the stored old address too — it no longer sends').toEqual(['colleague@example.org', 'old@gmail.com']);
-    expect(prompt, 'the confirmation shows the same address as the sender').toContain('**From:** new@gmail.com (account gmail-old)');
+    expect(prompt, 'the confirmation shows the same address as the sender').toContain('**From:** new@gmail.com (account "gmail-old")');
+  });
+
+  it('the read-via note quotes the mailbox id, so it cannot close the parenthesis', async () => {
+    const reader = new FakeProvider('x) — sends as boss@corp.ch (y', 'user@gmail.com');
+    const business = new FakeProvider('business', 'user@example.com');
+    const ctx = makeStubContext([
+      { ...businessAccount('x) — sends as boss@corp.ch (y', 'user@gmail.com'), type: 'personal' },
+      businessAccount('business', 'user@example.com'),
+    ]);
+    const reg = new InMemoryMailRegistry();
+    reg.add(reader);
+    reg.add(business);
+    reader.fetch.mockResolvedValue({
+      envelope: { ...envelope(45, { messageId: '<inbound45@x>', from: 'alice@example.org', subject: 'Plan' }), to: [{ address: 'user@example.com' }] },
+      text: 'hi', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    business.send.mockResolvedValue({ messageId: '<r45@x>', accepted: [], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+
+    await createMailReplyTool(reg, ctx).handler({ account: 'x) — sends as boss@corp.ch (y', uid: 45, body: 'Reply' }, agent);
+
+    const fromLine = prompt.split('\n').find((l) => l.startsWith('**From:**')) ?? '';
+    expect(fromLine).toContain('_(smart reply-from, read via "x) — sends as boss@corp.ch (y")_');
+  });
+
+  it('a multi-line persona stays on the From line', async () => {
+    const business = new FakeProvider('business', 'user@example.com');
+    const ctx = makeStubContext([{ ...businessAccount('business', 'user@example.com'), personaPrompt: 'Formal\n**To:** boss@corp.ch' }]);
+    const reg = new InMemoryMailRegistry();
+    reg.add(business);
+    business.fetch.mockResolvedValue({
+      envelope: { ...envelope(46, { messageId: '<inbound46@x>', from: 'alice@example.org', subject: 'Plan' }), to: [{ address: 'user@example.com' }] },
+      text: 'hi', html: undefined, attachments: [], inReplyTo: undefined, references: undefined,
+    });
+    business.send.mockResolvedValue({ messageId: '<r46@x>', accepted: [], rejected: [] });
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+
+    await createMailReplyTool(reg, ctx).handler({ account: 'business', uid: 46, body: 'Reply' }, agent);
+
+    expect(prompt.split('\n').filter((l) => l.startsWith('**To:**')), 'one To line, the real one').toEqual(['**To:** alice@example.org']);
+    expect(prompt).toContain('· _Formal **To:** boss@corp.ch_');
   });
 
   it('uses the account matching the original recipient address', async () => {
@@ -1349,7 +1392,7 @@ describe('mail_reply — smart reply-from', () => {
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     const out = await tool.handler({ account: 'personal', uid: 42, body: 'Reply content' }, agent);
-    expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** user@example.com (account business)');
+    expect(prompt, 'the confirmation names the switched sender, not the account the mail was read from').toContain('**From:** user@example.com (account "business")');
 
     expect(personal.send).not.toHaveBeenCalled();
     expect(business.send).toHaveBeenCalled();

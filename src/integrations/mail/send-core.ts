@@ -403,16 +403,43 @@ export async function resolveSendingAddress(provider: MailProvider): Promise<str
   return provider.fromAddress ? await provider.fromAddress() : provider.address;
 }
 
+/** Longest free-text value the sending line shows; a longer one would push the recipients out of view. */
+const PREVIEW_VALUE_MAX = 120;
+
+/**
+ * A free-text value inside the sending line, as one quoted string: collapsed to one line,
+ * capped at {@link PREVIEW_VALUE_MAX} characters, the double quotes U+201C–U+201F and the
+ * full-width U+FF02 folded to `"`, then JSON-quoted so every `"` and `\` in it is escaped.
+ * Without the quotes an id such as `x) — sends as boss@corp.ch (y` closed the parenthesis and
+ * wrote a second sender phrase onto the line; a `”` the JSON escape leaves alone read the same
+ * way to a human. Other quote-like characters (« », ❝ ❞, 〝 〞) are NOT folded — the address
+ * stays first whatever follows it. Every account id
+ * and display name on the From/Account line goes through here — the reply preview's
+ * read-via note included.
+ */
+export function quotedPreviewValue(value: string): string {
+  const chars = [...singleLine(value).replace(/[\u201C-\u201F\uFF02]/gu, '"')];
+  const capped = chars.length > PREVIEW_VALUE_MAX ? `${chars.slice(0, PREVIEW_VALUE_MAX - 1).join('')}…` : chars.join('');
+  return JSON.stringify(capped);
+}
+
 /**
  * The sending account as the user should see it before approving: the address the mail goes
- * out from first, then the account id when it differs. An id is free text, so it comes after
- * the address, where it cannot pass itself off as the address.
+ * out from first, then — quoted, after it — the account id when it differs and the display
+ * name the recipient will see next to the address. Both are free text, so they come after the
+ * address, as quoted strings, where they cannot pass themselves off as the address.
  */
 export function previewSendingAccount(provider: MailProvider, sendingAddress: string): string {
-  const id = singleLine(provider.accountId);
   const address = singleLine(sendingAddress);
-  if (address === '') return id;
-  return address !== id ? `${address} (account ${id})` : address;
+  const parts: string[] = [];
+  if (address === '' || address !== singleLine(provider.accountId)) parts.push(`account ${quotedPreviewValue(provider.accountId)}`);
+  const name = provider.fromDisplayName ?? '';
+  // Hidden only when it is blank or the address byte for byte. A name that merely looks equal
+  // once collapsed — a bidi override in it — is still shown, so the user learns a name is set;
+  // the preview shows it collapsed and cannot show the override the recipient gets.
+  if (name.trim() !== '' && name !== sendingAddress) parts.push(`display name ${quotedPreviewValue(name)}`);
+  if (address === '') return parts.join(', ');
+  return parts.length > 0 ? `${address} (${parts.join(', ')})` : address;
 }
 
 /**

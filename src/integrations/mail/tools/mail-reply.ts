@@ -15,7 +15,7 @@ import {
   type MailSendInput,
 } from '../provider.js';
 import type { MailContext } from '../context.js';
-import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, resolveSendingAddress } from '../send-core.js';
+import { buildBodyBlock, checkSendAccount, previewAddressList, previewSendingAccount, quotedPreviewValue, resolveSendingAddress } from '../send-core.js';
 import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
@@ -210,10 +210,10 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // what voice will be used. Phase 1 will inject this as a compose-time
         // system prompt; Phase 0.1 is just the advisory render.
         const smartNote = sendProvider.accountId !== readProvider.accountId
-          ? ` _(smart reply-from, read via ${readProvider.accountId})_` : '';
+          ? ` _(smart reply-from, read via ${quotedPreviewValue(readProvider.accountId)})_` : '';
         const sendAccountConfig = sendVerdict.accountConfig;
         const personaNote = sendAccountConfig
-          ? ` · _${truncate(personaFor(sendAccountConfig), 80)}_` : '';
+          ? ` · _${singleLine(truncate(personaFor(sendAccountConfig), 80))}_` : '';
         // Shared with mail_send's preview: an oversized body must state its
         // real size instead of ending in a bare "…". Reply is the likelier
         // injection path of the two — the untrusted inbound mail is already in
