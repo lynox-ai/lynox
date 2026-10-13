@@ -16,8 +16,9 @@ import { LynoxHTTPApi, READ_IDENTIFIERS } from './http-api.js';
  * - a read of the query in any form other than `searchParams.get('<name>')`, and any use of
  *   `req.url` other than `new URL(req.url ?? …)`, must be listed;
  * - a literal read of an identifying name must sit in a `user` GET route that declares it, or
- *   be listed: a read in a helper or a handler held in a `const` is credited to whatever
- *   registration precedes it, and so is caught here wherever that is;
+ *   be listed. A read in a helper or a handler held in a `const` is credited to the
+ *   registration above it: caught when that is anything but a GET route declaring the same
+ *   name. Only this file is scanned; the routes are all registered here;
  * - the scan must find exactly the `user` GET routes of the real table.
  */
 const NOT_IDENTIFYING = new Set([
@@ -136,10 +137,15 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     // split on `?`, a regex over `req.url`, `.search` or `querystring` would read it unseen.
     const other = SOURCE.split('\n')
       .filter((l) => !/^\s*(\/\/|\*)/.test(l))
-      .filter((l) => /req\.url|\.search\b(?!\()|querystring/.test(l))
+      .filter((l) => /req\.url|req\[['"]url|\{[^}]*\burl\b[^}]*\}\s*=\s*req\b|\.search\b(?!\()|\.href\b|querystring/.test(l))
       .filter((l) => !/new URL\(req\.url \?\? /.test(l))
       .map((l) => l.trim());
-    expect(other).toEqual(["const url = req.url ?? '/';"]);
+    expect(other).toEqual([
+      // A plugin's file URL, not a request's.
+      'const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };',
+      // The request log line.
+      "const url = req.url ?? '/';",
+    ]);
   });
 });
 

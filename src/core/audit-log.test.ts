@@ -202,6 +202,9 @@ describe('requestPathTarget: no secret shape survives into a read row', () => {
     expect(t('/api/files/x%3Fpath%3D%2Fetc%26threadId%3D1')).toBe('/api/files/x%3Fpath%3D%2Fetc%26threadId%3D1');
     expect(t('/api/files/a%E2%80%AEb')).toBe('/api/files/a%E2%80%AEb');
     expect(t('/api/files/read', [['path', 'a&hidden=1\n']])).toBe('/api/files/read?path=a%26hidden%3D1%0A');
+    // Also when a secret is there and the row is the masked view: its marks stay escaped.
+    const key = `sk-ant-${'Q7x9Kp2L'.repeat(3)}`;
+    expect(t(`/api/files/x%3Fpath%3D1%E2%80%AE${encodeURIComponent(key)}`)).toBe('/api/files/x%3Fpath%3D1%E2%80%AE***Kp2L');
   });
 
   it('keeps an id readable', () => {
