@@ -7445,14 +7445,29 @@ export class LynoxHTTPApi {
       if (!requireService(res, taskManager, 'Task manager')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const status = url.searchParams.get('status') as 'open' | 'in_progress' | 'completed' | undefined;
-      // `running` says whether a run of the trigger is in flight NOW, so the view offers a
-      // stop only where there is something to stop. It is a snapshot: a run that ends
-      // between this read and the click is answered by the stop route's `not_running`.
-      // A boolean and nothing more — who started the run (`runningStarterTag`) stays
-      // inside, since a mandate reads this list too.
+      // Two flags about the run in flight NOW. `running`: there is one (the view shows it).
+      // `stoppable`: a stop can end it — false for the effects nothing interrupts, where the
+      // stop route answers `unstoppable` every time, so the view offers no stop there. Both
+      // are snapshots: a run that ends before the click is answered by the stop route's
+      // own codes.
+      //
+      // ⛔ A mandate sees a run only if it may stop it — its own hand run. The stop route
+      // gives one 403 for "not yours" and "nothing running", and a delete answers a mandate
+      // `not_stopped` for both, so that a mandate does not learn whether someone else's run
+      // is going (`RunOnDelete`). These flags would tell it exactly that. Who started the
+      // run stays inside either way.
       const loop = engine.getWorkerLoop();
+      const principal = this._principalOf(req);
       const triggers = taskManager.listTriggers(status ? { status } : undefined)
-        .map((trigger) => ({ ...trigger, running: loop?.runningEffect(trigger.id) !== undefined }));
+        .map((trigger) => {
+          const starter = loop?.runningStarterTag(trigger.id);
+          const visible = starter !== undefined && mayStopRun(principal, starter);
+          return {
+            ...trigger,
+            running: visible,
+            stoppable: visible && loop?.runningStoppable(trigger.id) === true,
+          };
+        });
       jsonResponse(res, 200, { triggers });
     }, READS);
 

@@ -38,9 +38,11 @@
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
 		last_escalation_outcome?: string;
-		// Whether a run of this trigger is in flight right now (`GET /api/triggers`). A
-		// snapshot from the last load: the stop route still answers a run that ended since.
+		// Whether a run of this trigger is in flight right now, and whether a stop can end it
+		// (`GET /api/triggers`; a mandate is told only about its own runs). Snapshots from
+		// the last load: the stop route still answers a run that ended since.
 		running?: boolean;
+		stoppable?: boolean;
 	}
 
 	let triggers = $state<Trigger[]>([]);
@@ -140,6 +142,9 @@
 			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/run`, { method: 'POST' });
 			if (res.status === 202) {
 				addToast(t('triggers.run_started'), 'success');
+				// The run is registered before the 202 is sent, so a reload shows it running —
+				// and offers its stop, which is when an owner most wants one.
+				await loadTriggers();
 			} else if (res.status === 409) {
 				// ⛔ TWO different 409s, and telling the owner the wrong one is what this
 				// branch is for. "Already running" is true for a run in flight; a trigger
@@ -159,8 +164,8 @@
 	}
 
 	// Stop = end the run in flight (`POST /api/tasks/:id/stop`). Offered only on a row the
-	// list reported as running. 202 = the stop was REQUESTED, not completed — the run may
-	// still finish the step it is in, and the toast says so. Every refusal gets its own
+	// list reported as stoppable. 202 = the stop was REQUESTED, not completed — the run can
+	// still finish on its own, and the toast says so. Every refusal gets its own
 	// sentence, told apart by the route's `code`: a run that ended since the list loaded,
 	// a phase nothing can interrupt (pausing is what is left), an id that names more than
 	// one task, and a 403 for someone who neither owns the instance nor started the run.
@@ -364,11 +369,13 @@
 						     wider than `sm` has no hover either, and there they only appeared when a
 						     tap happened to leave the card in `:hover`. -->
 						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
-							<!-- Not offered while waiting: the engine refuses the run after the request
-							     has already been answered as started. -->
-							{#if trigger.running === true}
+							<!-- Stop: only where a stop can end the run. Not hidden until hover like the
+							     others — a run the owner wants to end should not need finding. -->
+							{#if trigger.stoppable === true}
 								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
 							{/if}
+							<!-- Not offered while waiting: the engine refuses the run after the request
+							     has already been answered as started. -->
 							{#if !awaitsConfirmation(trigger)}
 								<button onclick={() => runNow(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.run_now')} title={t('triggers.run_now')} class="[@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded-[var(--radius-sm)] border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent-text hover:bg-accent/20 transition-opacity disabled:opacity-40">▶ {t('triggers.run_now')}</button>
 							{/if}

@@ -1583,13 +1583,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'triggers.running': { de: 'Läuft gerade', en: 'Running' },
 	'triggers.stop_run': { de: 'Lauf anhalten', en: 'Stop run' },
 	'triggers.stop_requested': {
-		de: 'Anhalten angefordert. Ein Schritt, der schon läuft, kann noch zu Ende gehen.',
-		en: 'Stop requested. A step that is already under way may still finish.',
+		de: 'Anhalten angefordert. Der Lauf kann trotzdem noch von selbst zu Ende gehen.',
+		en: 'Stop requested. The run may still finish on its own.',
 	},
 	'triggers.stop_not_running': { de: 'Dieser Lauf ist inzwischen beendet.', en: 'This run has already ended.' },
 	'triggers.stop_unstoppable': {
-		de: 'Dieser Lauf steckt in einem Schritt, der sich nicht unterbrechen lässt. Pausiere den Zeitplan, damit er nicht neu startet.',
-		en: "This run is in a step that can't be interrupted. Pause the schedule so it doesn't start again.",
+		de: 'Dieser Lauf lässt sich gerade nicht unterbrechen. Soll er nicht erneut starten, pausiere den Zeitplan.',
+		en: "This run can't be interrupted right now. If it shouldn't start again, pause the schedule.",
 	},
 	'triggers.stop_ambiguous': {
 		de: 'Diese Kennung passt auf mehrere Aufgaben, deshalb wurde nichts angehalten.',

@@ -59,15 +59,21 @@ describe('the schedules view can stop a run', () => {
     expect(stopHandler()).toMatch(/fetch\(`\$\{getApiBase\(\)\}\/tasks\/\$\{trigger\.id\}\/stop`, \{ method: 'POST' \}\)/);
   });
 
-  it('the stop control is offered only on a row the list reports as running', () => {
+  it('the stop control is offered only on a row the list reports as stoppable', () => {
     // The button's `{#if}` is what has to read the flag — a flag read only by the badge
-    // would leave the button on every row.
+    // would leave the button on every row, and `running` would offer it on a backup.
     const button = VIEW.indexOf('onclick={() => stopRun(trigger)}');
     expect(button, 'the button exists').toBeGreaterThan(-1);
     const guard = VIEW.lastIndexOf('{#if', button);
-    expect(VIEW.slice(guard, button)).toMatch(/^\{#if trigger\.running === true\}/);
+    expect(VIEW.slice(guard, button)).toMatch(/^\{#if trigger\.stoppable === true\}/);
     // and the route sends the flag at all.
-    expect(ROUTE).toMatch(/running: loop\?\.runningEffect\(trigger\.id\) !== undefined/);
+    expect(ROUTE).toMatch(/stoppable: visible && loop\?\.runningStoppable\(trigger\.id\) === true/);
+  });
+
+  it('a started run is shown at once: Run now reloads the list after its 202', () => {
+    const start = VIEW.indexOf('async function runNow(');
+    const body = VIEW.slice(start, VIEW.indexOf('\n\t}\n', start));
+    expect(body).toMatch(/res\.status === 202\)\s*\{[^}]*addToast\(t\('triggers\.run_started'\)[^}]*await loadTriggers\(\);/);
   });
 
   it('every 409 of the route carries one of the codes, and the view switches on each', () => {
@@ -79,8 +85,8 @@ describe('the schedules view can stop a run', () => {
     expect(new Set(conflicts)).toEqual(new Set(CODES));
     const handler = stopHandler();
     for (const code of CODES) {
-      expect(handler, `the view reads ${code}`).toContain(`code === '${code}'`);
-      expect(handler, `and maps it to its own line`).toContain(`'${KEY_OF[code]}'`);
+      // The PAIR, not two substrings: a swap of two keys would leave both strings present.
+      expect(handler, `the view maps ${code} to ${KEY_OF[code]}`).toContain(`code === '${code}' ? '${KEY_OF[code]}'`);
     }
   });
 
@@ -104,5 +110,9 @@ describe('the schedules view can stop a run', () => {
     const line = i18nLine('triggers.stop_requested');
     expect(line).toMatch(/angefordert/);
     expect(line).not.toMatch(/angehalten\.|wurde beendet|has stopped|was stopped/);
+    // and it says the RUN may finish, not only the step it is in: between model calls a
+    // stop reaches nothing, so the whole run can complete.
+    expect(line).toMatch(/Der Lauf kann/);
+    expect(line).toMatch(/The run may still finish/);
   });
 });

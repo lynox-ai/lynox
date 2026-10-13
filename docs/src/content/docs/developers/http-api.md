@@ -195,7 +195,19 @@ POST   /api/tasks                 # Create task
 PATCH  /api/tasks/:id             # Update task
 DELETE /api/tasks/:id             # Delete task
 POST   /api/tasks/:id/complete    # Mark complete
+POST   /api/tasks/:id/stop        # Stop the run in flight (202 = requested, not completed)
+GET    /api/triggers              # List schedules, watches and reminders
 ```
+
+`GET /api/triggers` marks each row with `running` (a run of it is in flight) and
+`stoppable` (a stop can end that run; false for backups and reminders). Someone you let
+in sees both only for runs they started themselves.
+
+`POST /api/tasks/:id/stop` answers `202` when the stop was requested; the run can still
+finish on its own. A `409` carries a `code`: `not_running` (nothing to stop),
+`unstoppable` (the run is in a phase a stop cannot reach) or `ambiguous_id` (a short id
+that matches more than one task). A `403` means the caller neither owns the instance nor
+started the run.
 
 ### Artifacts
 

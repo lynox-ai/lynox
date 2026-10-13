@@ -7983,43 +7983,60 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    // ── `running` on the trigger list: where the view offers a stop ─────────────────────
+    // ── `running` / `stoppable` on the trigger list: where the view offers a stop ───────
     //
-    // The view shows "Stop run" only on a row the list reports as running, so the flag has
-    // to be TRUE for a run in flight and FALSE for one that is not — each direction has its
-    // own case below, because a constant in either direction passes the other.
-    const listed = [{ id: 'trg-busy', title: 'busy' }, { id: 'trg-idle', title: 'idle' }];
+    // The view shows "Running" on a row the list reports as running and offers "Stop run"
+    // only where it reports `stoppable`. Each flag has to be TRUE where it holds and FALSE
+    // where it does not — a constant in either direction passes one of the cases below.
+    const listed = [{ id: 'trg-agent', title: 'agent' }, { id: 'trg-backup', title: 'backup' }, { id: 'trg-idle', title: 'idle' }];
+    // trg-agent: a run a stop can end · trg-backup: a run nothing interrupts · trg-idle: none
+    const loopWith = (starter: string) => ({
+      runningEffect: (id: string) => ({ 'trg-agent': 'run_agent', 'trg-backup': 'backup' } as Record<string, string>)[id],
+      runningStarterTag: (id: string) => (id === 'trg-idle' ? undefined : starter),
+      runningStoppable: (id: string) => id === 'trg-agent',
+    });
+    type Flags = { triggers: Array<Record<string, unknown> & { id: string; running: unknown; stoppable: unknown }> };
+    const flagsOf = async (): Promise<Array<[string, unknown, unknown]>> =>
+      ((await (await jsonFetch('/api/triggers')).json()) as Flags).triggers.map((t) => [t.id, t.running, t.stoppable]);
 
-    it('GET /api/triggers marks the trigger whose run is in flight as running, and only that one', async () => {
-      await withEngine({
-        getTaskManager: () => ({ listTriggers: () => listed }),
-        getWorkerLoop: () => ({ runningEffect: (id: string) => (id === 'trg-busy' ? 'agent' : undefined) }),
-      }, async () => {
-        const res = await jsonFetch('/api/triggers');
-        expect(res.status).toBe(200);
-        const { triggers } = await res.json() as { triggers: Array<{ id: string; running: unknown }> };
-        expect(triggers.map((t) => [t.id, t.running])).toEqual([['trg-busy', true], ['trg-idle', false]]);
+    it('GET /api/triggers tells the owner which run is going and which of them a stop can end', async () => {
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
+        expect(await flagsOf()).toEqual([['trg-agent', true, true], ['trg-backup', true, false], ['trg-idle', false, false]]);
       });
     });
 
-    it('GET /api/triggers says running:false for every row when there is no worker loop', async () => {
-      await withEngine({
-        getTaskManager: () => ({ listTriggers: () => listed }),
-        getWorkerLoop: () => null,
-      }, async () => {
-        const { triggers } = await (await jsonFetch('/api/triggers')).json() as { triggers: Array<{ running: unknown }> };
-        expect(triggers.map((t) => t.running)).toEqual([false, false]);
+    it('GET /api/triggers says false for every row when there is no worker loop', async () => {
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => null }, async () => {
+        expect(await flagsOf()).toEqual([['trg-agent', false, false], ['trg-backup', false, false], ['trg-idle', false, false]]);
       });
     });
 
-    it('GET /api/triggers carries a boolean, not who started the run', async () => {
-      // A mandate reads this list too; the starter stays inside the loop.
-      await withEngine({
-        getTaskManager: () => ({ listTriggers: () => listed }),
-        getWorkerLoop: () => ({ runningEffect: () => 'agent', runningStarterTag: () => 'mandate:m-1' }),
-      }, async () => {
-        const text = await (await jsonFetch('/api/triggers')).text();
-        expect(text).not.toContain('mandate:m-1');
+    it('GET /api/triggers does not tell a mandate whether SOMEONE ELSE\'s run is going — only its own', async () => {
+      // The stop route answers a mandate one 403 for "not yours" and "nothing running", and a
+      // delete one `not_stopped`, so that a mandate cannot learn whether another run is going.
+      // These flags must not tell it either.
+      const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
+      const mandate: RequestPrincipal = { kind: 'mandate', email: 'stop-list@example.invalid' };
+      api.setPrincipalResolverForTesting(() => mandate);
+      try {
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
+          expect(await flagsOf()).toEqual([['trg-agent', false, false], ['trg-backup', false, false], ['trg-idle', false, false]]);
+        });
+        // control: the same mandate sees its OWN hand run
+        await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('mandate:stop-list@example.invalid') }, async () => {
+          expect(await flagsOf()).toEqual([['trg-agent', true, true], ['trg-backup', true, false], ['trg-idle', false, false]]);
+        });
+      } finally {
+        api.setPrincipalResolverForTesting(resolver);
+      }
+    });
+
+    it('GET /api/triggers adds the two flags and nothing else to a row', async () => {
+      // Who started the run stays inside: any further field — a starter tag, an effect —
+      // would be a new disclosure on a list a mandate reads.
+      await withEngine({ getTaskManager: () => ({ listTriggers: () => listed }), getWorkerLoop: () => loopWith('owner') }, async () => {
+        const { triggers } = (await (await jsonFetch('/api/triggers')).json()) as Flags;
+        for (const row of triggers) expect(Object.keys(row).sort()).toEqual(['id', 'running', 'stoppable', 'title']);
       });
     });
 

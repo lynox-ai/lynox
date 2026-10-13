@@ -440,6 +440,10 @@ export type StopOutcome =
  *    a bulk write finishes and records it, a preview's read is cut short, and a
  *    workflow's step agents are aborted at their next provider call.
  */
+/** The effects whose run reads no abort at any point (see the `switch (effect)` in
+ *  `executeTask`): a stop is refused for them as `unstoppable`, whatever their phase. */
+const EFFECTS_NO_STOP_REACHES: ReadonlySet<string> = new Set(['backup', 'notify']);
+
 export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
   if (active.pendingPromptId !== undefined) return 'wait';
   if (active.session !== undefined) return 'session';
@@ -557,6 +561,23 @@ export class WorkerLoop {
   /** The effect of the run of `taskId` in flight, or undefined when none is. */
   runningEffect(taskId: string): string | undefined {
     return this.activeTasks.get(taskId)?.effect;
+  }
+
+  /**
+   * Whether `taskId` has a run in flight that a stop can end — the question the schedules
+   * view asks before it offers "Stop run". False when nothing runs, and for the two effects
+   * nothing in the run ever reads an abort (`backup`, `notify`: `executeTask` hands them no
+   * session, signal or wait), where {@link stopTask} answers `unstoppable` every time.
+   *
+   * ⚠ Keyed on the EFFECT, not on {@link stopHandleOf} at this instant: an agent run is
+   * registered before its session exists, so the instant test said "not stoppable" for
+   * exactly the run an owner just started with "Run now". A stop in that window gets the
+   * route's `unstoppable` answer, which is true then and short-lived.
+   */
+  runningStoppable(taskId: string): boolean {
+    const active = this.activeTasks.get(taskId);
+    if (active === undefined) return false;
+    return stopHandleOf(active) !== undefined || !EFFECTS_NO_STOP_REACHES.has(active.effect);
   }
 
   /**
