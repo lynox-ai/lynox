@@ -233,6 +233,7 @@ export function erasePerson(
   const entryIds = preview.entries.filter(e => e.matchedBy === 'subject' || pickedEntries.has(e.id)).map(e => e.id);
   const memoryIds = preview.memories.filter(m => m.matchedBy === 'subject' || pickedMemories.has(m.id)).map(m => m.id);
   const canonical = preview.subject.id;
+  const personSubjects = [canonical, ...deps.subjects.mergedShellIds(canonical)];
   try {
     input.beforeErase?.({ entries: entryIds.length, memories: memoryIds.length });
   } catch {
@@ -261,7 +262,12 @@ export function erasePerson(
     }],
     ['memories_legacy', () => { result.counts.legacyMemories = deps.layer.purgeLegacyMemoriesForErasure(memoryIds); }],
     ['memories_engine', () => { result.counts.memoryStubs = deps.layer.purgeMemoryStubsForErasure(memoryIds); }],
-    ['subject', () => { result.counts.subjects = deps.subjects.eraseSubject(canonical).length; }],
+    // Counted as the person's subjects that are gone afterwards: the engine.db step's orphan
+    // reap can already have taken one that nothing else held.
+    ['subject', () => {
+      deps.subjects.eraseSubject(canonical);
+      result.counts.subjects = personSubjects.filter(id => deps.subjects.getSubject(id) === null).length;
+    }],
   ];
   for (const [step, run] of steps) {
     try {
