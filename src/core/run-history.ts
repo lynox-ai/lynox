@@ -1079,12 +1079,13 @@ const MIGRATIONS: string[] = [
   // trigger is parked on outlives a restart by design — expireUnparked()
   // (prompt-store.ts) skips rows with a trigger_id. That cannot reach this
   // migration: trigger_id arrives with v53, so a table that still runs v43
-  // holds no parked question. What the DROP discards is everything else in the
-  // table: the pending rows of the process that ended, which the boot sweep
-  // would expire anyway, and the closed (answered or expired) rows, which are
-  // never deleted and which later code reads by id (getById, closed_reason).
-  // So the drop is lossless for pending prompts; the closed rows of a database
-  // that predates v43 are gone, and a lookup of such an id finds nothing.
+  // holds no parked question. What the DROP does discard is the table's
+  // history: its closed (answered or expired) rows, and the pending rows of the
+  // process that ended, which the boot sweep would only have marked expired.
+  // Outside a full data erasure (deleteAllData) such rows are kept and read by
+  // id (getById, closed_reason). So no question that could still be answered
+  // is lost, and the prompt history of a database from before v43 is not
+  // carried over.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
 
    DROP TABLE IF EXISTS pending_prompts;
