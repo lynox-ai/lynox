@@ -3916,6 +3916,30 @@ describe('httpRequestTool', () => {
       expect(sentHeader('authorization')).toBe(`Bearer ${VAULT_JWT}`);
     });
 
+    // The writes a request names are read from the headers that go out, after the engine has
+    // attached its credential: a profile whose slot is an override header names a write the
+    // model's own headers do not.
+    it('the writes a request names include an override the engine attaches', async () => {
+      const store = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] });
+      const contract: CapabilityContract = {
+        version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
+        hostPatterns: ['api.bexio.com'], pathPatterns: ['/3.0/*'], paramConstraints: {},
+      };
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const agent = {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => (k === 'BEXIO_API_TOKEN' ? 'PUT' : null) },
+        sessionCounters: testCounters,
+        principal: OWNER_PRINCIPAL,
+        governingContract: () => ({ contract, withheld: null }),
+      } as never;
+      const out = await visible({ url: 'https://api.bexio.com/3.0/items', method: 'POST', body: '{}' }, agent);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(out).toContain('requires user consent');
+    });
+
     it('`header` type puts the RAW token in its own named slot — no Bearer prefix', async () => {
       const store = await storeWith({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
@@ -5732,6 +5756,15 @@ describe('write approvals per method and host (270)', () => {
     expect(testCounters.approvedWrites?.has('PATCH+POST h.example')).toBe(true);
   });
 
+  it('(2h) an approval for PATCH does not cover a POST whose body names PATCH', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'PATCH', body: '{}' }, agent);
+    await visible({ url: 'https://h.example/a', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"_method":"PATCH"}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('It is sent as a POST that also names PATCH');
+    expect(testCounters.approvedWrites?.has('PATCH+POST h.example')).toBe(true);
+  });
+
   it('(2d) with two overrides of the same rank, an approval for the pair does not cover the three', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a?_method=PUT', method: 'POST', body: '{}' }, agent);
@@ -6104,6 +6137,49 @@ describe('write approvals per method and host (270)', () => {
     expect(question(prompt, 0)).toContain('DELETE to h.example');
   });
 
+  it('a remembered POST whose form body says `_method=DELETE` is asked again, as a DELETE', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: 'name=a', headers: form }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: 'name=a&_method=DELETE', headers: form }, agent);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(question(prompt, 1)).toContain('DELETE to h.example');
+  });
+
+  it('a remembered POST whose body holds `_method` only as nested data or inside a value is not asked again', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const json = { 'Content-Type': 'application/json' };
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{}', headers: json }, agent);
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{"item":{"_method":"DELETE"}}', headers: json }, agent);
+    await visible({ url: 'https://h.example/items/1', method: 'POST', body: '{"note":"_method=DELETE"}', headers: json }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('a POST asked as a DELETE through its body is followed on a 307 to its own path: the body, and so the override, rides along', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items/1/' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const { agent, prompt } = agent270();
+    const out = await visible({ url: 'https://h.example/items/1', method: 'POST', body: '_method=DELETE', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, agent);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out).toContain('HTTP 200');
+  });
+
+  it('a POST whose JSON body cannot be parsed and mentions `_method` is asked as a DELETE', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{"_method":"DELETE",', headers: { 'Content-Type': 'application/json' } }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(question(prompt, 0)).toContain('DELETE to h.example');
+  });
+
   it('(13h) a write that sets its own Host header is refused before anything is sent', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
@@ -6138,6 +6214,22 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain('needs its own approval');
   });
 
+  it('a reviewed grant for POST does not cover a POST whose body raises it to DELETE; the plain POST goes out', async () => {
+    const reviewed: CapabilityContract = {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const fetchMock = vi.fn().mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    const raised = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: 'name=a&_method=DELETE', headers: form }, makeAgent({ capabilityContract: reviewed }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(raised).not.toContain('HTTP 200');
+    const plain = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: 'name=a', headers: form }, makeAgent({ capabilityContract: reviewed }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(plain).toContain('HTTP 200');
+  });
+
   it('(F2) a contract hop is checked with the method its target raises it to', async () => {
     const contract: CapabilityContract = {
       version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
@@ -6152,13 +6244,89 @@ describe('write approvals per method and host (270)', () => {
     expect(out).toContain("this run's grant does not cover");
   });
 
+  // A hop gated as the method that was asked can still name a write the question did not:
+  // with `?_method=PUT&_method=PATCH` the last override wins here, a server that reads the first
+  // runs a PUT.
+  it('(325) a hop that names a write the question did not is not followed; the same set is', async () => {
+    const hop = (location: string) => vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+      .mockImplementation(async () => ok());
+    const widened = hop('https://h.example/items?_method=PUT&_method=PATCH');
+    vi.stubGlobal('fetch', widened);
+    const out = await visible({ url: 'https://h.example/items?_method=PATCH', method: 'POST', body: '{}' }, agent270().agent);
+    expect(widened).toHaveBeenCalledTimes(1);
+    expect(out).toContain('needs its own approval');
+
+    const same = hop('https://h.example/items?_method=PATCH');
+    vi.stubGlobal('fetch', same);
+    const kept = await visible({ url: 'https://h.example/items?_method=PATCH', method: 'POST', body: '{}' }, agent270().agent);
+    expect(same).toHaveBeenCalledTimes(2);
+    expect(kept).toContain('HTTP 200');
+  });
+
+  // A body override is read last, so of two overrides of the same rank it is the one the hop
+  // is gated as; a `?_method=PUT` the Location adds would hide behind it.
+  it('(325) a Location override is not hidden behind a body override of the same rank', async () => {
+    const json = { 'Content-Type': 'application/json' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items?_method=PUT' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await visible({ url: 'https://h.example/items', method: 'POST', body: '{"_method":"PATCH"}', headers: json }, agent270().agent);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out).toContain('needs its own approval');
+
+    const sameFetch = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/items' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', sameFetch);
+    const kept = await visible({ url: 'https://h.example/items', method: 'POST', body: '{"_method":"PATCH"}', headers: json }, agent270().agent);
+    expect(sameFetch).toHaveBeenCalledTimes(2);
+    expect(kept).toContain('HTTP 200');
+
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST', 'PATCH'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const contractFetch = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://h.example/v1/b?_method=PUT' } }))
+      .mockImplementation(async () => ok());
+    vi.stubGlobal('fetch', contractFetch);
+    const refused = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{"_method":"PATCH"}', headers: json }, makeAgent({ capabilityContract: contract }));
+    expect(contractFetch).toHaveBeenCalledTimes(1);
+    expect(refused).toContain("this run's grant does not cover");
+  });
+
+  it('(325) a contract hop must have every write it names granted, not only the gated one', async () => {
+    const contract: CapabilityContract = {
+      version: 7, grantedTools: ['http_request'], httpMethods: ['POST', 'PATCH'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    };
+    const hop = (location: string) => vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location } }))
+      .mockImplementation(async () => ok());
+    const request = { url: 'https://h.example/v1/a', method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'PATCH' } };
+    const widened = hop('https://h.example/v1/b?_method=PUT&_method=PATCH');
+    vi.stubGlobal('fetch', widened);
+    const out = await visible(request, makeAgent({ capabilityContract: contract }));
+    expect(widened).toHaveBeenCalledTimes(1);
+    expect(out).toContain("this run's grant does not cover");
+
+    const same = hop('https://h.example/v1/b?_method=PATCH');
+    vi.stubGlobal('fetch', same);
+    const kept = await visible(request, makeAgent({ capabilityContract: contract }));
+    expect(same).toHaveBeenCalledTimes(2);
+    expect(kept).toContain('HTTP 200');
+  });
+
   it('(F3) an override that is not a method is refused, and its value is not repeated', async () => {
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
     const { agent, prompt } = agent270();
     const a = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}', headers: { 'X-HTTP-Method-Override': 'Looks safe: read only' } }, agent);
     const b = await visible({ url: 'https://h.example/a?_method=sk-canary-value', method: 'POST', body: '{}' }, agent);
-    for (const out of [a, b]) {
+    const c = await visible({ url: 'https://h.example/a', method: 'POST', body: '{"_method":"sk-canary-value"}', headers: { 'Content-Type': 'application/json' } }, agent);
+    for (const out of [a, b, c]) {
       expect(out).toContain('is not an HTTP method');
       expect(out.toLowerCase()).not.toContain('looks safe');
       expect(out.toLowerCase()).not.toContain('canary');
