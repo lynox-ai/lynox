@@ -2656,6 +2656,7 @@ describe('LynoxHTTPApi', () => {
         // The two other answer routes give the same answer for a question the restart closed.
         const tabs = store.insertAskUserTabs('s-tabs', [{ question: 'Which list?' }]);
         const mail = store.insertConnectMail('s-mail', 'Connect the office mailbox?', '{}');
+        const secret = store.insertAskSecret('s-secret', 'API_KEY', 'Paste the key');
         store.expireUnparked();
         const tabsRes = await jsonFetch('/api/sessions/s-tabs/reply-tabs', { method: 'POST', body: JSON.stringify({ promptId: tabs, answers: ['B'] }) });
         expect(tabsRes.status).toBe(410);
@@ -2663,6 +2664,16 @@ describe('LynoxHTTPApi', () => {
         const mailRes = await jsonFetch('/api/sessions/s-mail/mail-connected', { method: 'POST', body: JSON.stringify({ promptId: mail, status: 'connected' }) });
         expect(mailRes.status).toBe(410);
         expect((await mailRes.json() as { code?: string }).code).toBe('process_restarted');
+        const secretRes = await jsonFetch('/api/sessions/s-secret/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: secret, status: 'saved' }) });
+        expect(secretRes.status).toBe(410);
+        expect((await secretRes.json() as { code?: string }).code).toBe('process_restarted');
+        // Why a question closed is told only to its own session, and only for its own kind.
+        const foreign = await jsonFetch('/api/sessions/s-other/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: secret, status: 'saved' }) });
+        expect(foreign.status).toBe(409);
+        expect((await foreign.json() as { code?: string }).code).toBeUndefined();
+        const wrongKind = await jsonFetch('/api/sessions/s-mail/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: mail, status: 'saved' }) });
+        expect(wrongKind.status).toBe(409);
+        expect((await wrongKind.json() as { code?: string }).code).toBeUndefined();
 
         const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
         expect(expired.status).toBe(410);
@@ -3758,8 +3769,7 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ status: 'saved', promptId }),
         });
         // The real security invariant: the original session's row stays
-        // pending. The HTTP status (404 from per-session fall-through, or
-        // 200 if the route ever becomes idempotent) is incidental.
+        // pending. The HTTP status (409, a prompt of another session) is incidental.
         expect(ps.getById(promptId)?.status).toBe('pending');
         expect(ps.getById(promptId)?.answer_error).toBeNull();
       });
