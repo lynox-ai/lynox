@@ -126,6 +126,36 @@ describe('grant ledger', () => {
     expect(storedGrantOf('shop')).toBe(g);
   });
 
+  it('a write that throws during a mint keeps a profile in the host conflict the boot left, so the host stays refused', () => {
+    for (const id of ['alpha', 'beta']) {
+      const { name, ...rest } = profile(id, { base_url: 'https://shared.example' });
+      conn.upsert({ id, kind: 'api', name, subjectId: null, direction: 'outbound', configJson: JSON.stringify(rest), vaultKeys: [], status: 'active' });
+    }
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      wire();
+      expect(store.getHostConflict('shared.example')).toEqual(['alpha', 'beta']);
+      const upsert = conn.upsert.bind(conn);
+      conn.upsert = () => { throw new Error('disk full'); };
+      expect(() => store.save(store.get('alpha')!, undefined, { newConsent: true })).toThrow('disk full');
+      conn.upsert = upsert;
+    } finally { stderr.mockRestore(); }
+    expect(store.get('alpha')).toBeDefined();
+    expect(store.getHostConflict('shared.example')).toEqual(['alpha', 'beta']);
+    expect(store.getByHostname('shared.example')).toBeUndefined();
+  });
+
+  it('a write that throws during a mint that moved the host leaves the new host free', () => {
+    store.save(profile('shop', { base_url: 'https://old.example' }));
+    const upsert = conn.upsert.bind(conn);
+    conn.upsert = () => { throw new Error('disk full'); };
+    expect(() => store.save(profile('shop', { base_url: 'https://new.example' }), undefined, { newConsent: true })).toThrow('disk full');
+    conn.upsert = upsert;
+    expect(store.getByHostname('old.example')?.id).toBe('shop');
+    expect(store.getByHostname('new.example')).toBeUndefined();
+    expect(store.save(profile('other', { base_url: 'https://new.example' })).ok).toBe(true);
+  });
+
   it('a save flipping the OAuth grant type mints', () => {
     const oauth = (grant_type: 'client_credentials' | 'refresh_token'): Partial<ApiProfile> =>
       ({ auth: { type: 'oauth2', vault_keys: [], oauth: { grant_type, client_id_key: 'C_ID' } } });

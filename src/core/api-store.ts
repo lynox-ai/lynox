@@ -1397,7 +1397,10 @@ export class ApiStore {
       const registered = this.profiles.get(profile.id);
       if (registered) this._releaseHost(registered);
       this.profiles.delete(profile.id);
-      if (prev) this._admit(prev, 'save');
+      // Back in 'load' mode: the profile was just deleted, so a 'save' admit would count it as
+      // joining its own host and refuse it whenever a conflict the boot kept leaves another
+      // profile there — dropping it from memory and leaving the other one sole holder.
+      if (prev) this._admit(prev, 'load');
       throw err;
     }
   }
