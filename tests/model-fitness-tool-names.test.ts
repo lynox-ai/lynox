@@ -41,7 +41,7 @@ function engineInjectedNames(): string[] {
 }
 
 const HARNESS_DIR = 'scripts/model-fitness';
-const FILES = [`${HARNESS_DIR}/scenarios.ts`, `${HARNESS_DIR}/capabilities.ts`];
+const FILES = [`${HARNESS_DIR}/scenarios.ts`, `${HARNESS_DIR}/capabilities.ts`, `${HARNESS_DIR}/token-factor.ts`];
 
 /** Every `name: '…'` that sits inside a tool definition literal in a harness file. */
 function declaredToolNames(rel: string): string[] {
