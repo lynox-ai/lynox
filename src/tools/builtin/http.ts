@@ -2632,8 +2632,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // creating, changing, cancelling, booking a payment, issuing and sending, and a provider
     // changes a document's state with a POST to a path of its own, so neither the method nor a
     // path list separates them. The question does. A scheduled run therefore does not write
-    // there through this tool; a bulk run writes there in its own forms, after the run is approved
-    // (`bulk-external.ts`).
+    // there through this tool; a bulk run writes there only in a measured form, after the person
+    // approved the run as a whole (`bulk-external.ts`).
     const connectedAccount = presetOnHost.length > 0;
     const contractGrantsWrite =
       contract !== undefined &&
