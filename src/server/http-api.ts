@@ -36,7 +36,7 @@ import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
-import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
+import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
@@ -3640,6 +3640,11 @@ export class LynoxHTTPApi {
         // instead of message content.
         const INLINE_FILE_MAX_CHARS = 20_000;
         const INLINE_FILE_PREVIEW_CHARS = 2_000;
+        // A capped upload says so in its FIRST line. The cap's own marker sits at the end of
+        // the text, and an agent that works from the preview, or reads a file only as far as
+        // it needs, never reaches it and takes the upload for the whole document.
+        const cutNote = (kept: number, omitted: number): string =>
+          `CUT: only the first ${String(kept)} of ${String(kept + omitted)} chars are included; the remaining ${String(omitted)} chars are not available.`;
         // Lazy import — consistent with the other workspace imports below.
         const { persistChatUpload: persistChatUploadRef } = await import('../core/workspace.js');
         // Allowlist matches what Anthropic vision accepts AND what the frontend
@@ -3706,6 +3711,7 @@ export class LynoxHTTPApi {
                 // document body past the inline threshold becomes a real file
                 // (the knowledge-layer ingest below still runs — recall is not
                 // affected by how the model receives the text).
+                const docCut = extracted.truncated ? cutNote(MAX_EXTRACTED_CHARS, extracted.omittedChars) : null;
                 const bigDoc = safeBody.length > INLINE_FILE_MAX_CHARS
                   ? persistChatUploadRef(`${safeName}.txt`, safeBody)
                   : null;
@@ -3718,12 +3724,13 @@ export class LynoxHTTPApi {
                 // to the review queue instead of landing active and pinnable.
                 content.push(bigDoc !== null
                   ? { type: 'text', text: wrapUntrustedData(
-                      `[File: ${safeName}] — extracted text, ${String(safeBody.length)} chars, too large to inline into the message. `
+                      `[File: ${safeName}] — extracted text, ${String(docCut !== null ? MAX_EXTRACTED_CHARS : safeBody.length)} chars, too large to inline into the message. `
+                      + (docCut !== null ? `${docCut} The saved file holds only the included part, followed by a cut marker. ` : '')
                       + `Saved to the files area as \`${bigDoc.rel}\`. `
                       + `Work on it there: read_file('${bigDoc.abs}'), or bash/python on '${bigDoc.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
                       + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${safeBody.slice(0, INLINE_FILE_PREVIEW_CHARS)}`,
                       'file_upload') }
-                  : { type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
+                  : { type: 'text', text: wrapUntrustedData(`[File: ${safeName}]${docCut !== null ? ` — ${docCut}` : ''}\n${safeBody}`, 'file_upload') });
                 // U1 persist+recall: store the document into the knowledge layer
                 // (best-effort, OFF the request path) so it survives the turn and
                 // is auto-recalled on later turns. Never awaited — embedding /
@@ -3825,7 +3832,10 @@ export class LynoxHTTPApi {
               // through to the inline path below rather than lose the upload —
               // the old behavior is the fallback, not the void.
             }
-            content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${text}`, 'file_upload') });
+            const textCut = decoded.length > MAX_TEXT_FILE_DECODED_CHARS
+              ? ` — ${cutNote(MAX_TEXT_FILE_DECODED_CHARS, decoded.length - MAX_TEXT_FILE_DECODED_CHARS)}`
+              : '';
+            content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]${textCut}\n${text}`, 'file_upload') });
           }
         }
         content.push({ type: 'text', text: composedTask });

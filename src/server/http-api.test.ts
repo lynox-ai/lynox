@@ -16,6 +16,7 @@ import type { LynoxHooks } from '../core/engine.js';
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
 import { buildPdf, buildDocx } from '../../tests/fixtures/minimal-documents.js';
+import { MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
@@ -14040,6 +14041,73 @@ describe('mail custom-server defaults are the same on both routes', () => {
         expect(fileBlock!.text).toContain('a,b\n1,2');
         expect(fileBlock!.text).not.toContain('files area');
         expect(existsSync(join(tmpArea, 'uploads'))).toBe(false);
+      });
+
+      // A capped upload names the cap in its HEADER line. The cap's own marker sits at the end
+      // of the text, which an agent working from the preview never reaches.
+      describe('a capped upload says so in its header line', () => {
+        const OVER = 7_000;
+        async function headerOf(file: { name: string; type: string; data: string }): Promise<{ header: string; text: string }> {
+          mockSessionRun.mockResolvedValueOnce('ok');
+          const res = await jsonFetch('/api/sessions/test/run', {
+            method: 'POST',
+            body: JSON.stringify({ task: 'read it', files: [file] }),
+          });
+          expect(res.status).toBe(200);
+          const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+          const block = taskArg?.find(b => b.type === 'text' && b.text?.includes(`[File: ${file.name}]`));
+          expect(block).toBeDefined();
+          const lines = block!.text!.split('\n');
+          const header = lines.find(l => l.startsWith(`[File: ${file.name}]`));
+          expect(header).toBeDefined();
+          return { header: header!, text: block!.text! };
+        }
+        const docx = (chars: number) => ({
+          name: 'vertrag.docx',
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          data: buildDocx('B'.repeat(chars)).toString('base64'),
+        });
+        const csv = (chars: number) => ({ name: 'liste.csv', type: 'text/csv', data: Buffer.from('C'.repeat(chars)).toString('base64') });
+        // A regular FILE as the workspace: `uploads/` cannot be created under it, so the
+        // files-area write fails and the upload takes the inline fallback.
+        function breakFileArea(): void {
+          const asFile = join(tmpArea, 'not-a-dir');
+          writeFileSync(asFile, '');
+          setTenantWorkspace(asFile);
+        }
+
+        it('PDF/Word saved to the files area: the header names the cut and the omitted count', async () => {
+          const { header } = await headerOf(docx(MAX_EXTRACTED_CHARS + OVER));
+          expect(header).toContain('files area');
+          expect(header).toContain(`CUT: only the first ${String(MAX_EXTRACTED_CHARS)} of ${String(MAX_EXTRACTED_CHARS + OVER)} chars are included; the remaining ${String(OVER)} chars are not available.`);
+          expect(header).toContain('The saved file holds only the included part, followed by a cut marker.');
+          // One length, not two: the stored text is the kept part plus the cut marker, and the
+          // header names the kept part.
+          expect(header).toContain(`extracted text, ${String(MAX_EXTRACTED_CHARS)} chars,`);
+        });
+
+        it('PDF/Word in the inline fallback: the header names the cut', async () => {
+          breakFileArea();
+          const { header, text } = await headerOf(docx(MAX_EXTRACTED_CHARS + OVER));
+          expect(text).not.toContain('files area');
+          expect(header).toBe(`[File: vertrag.docx] — CUT: only the first ${String(MAX_EXTRACTED_CHARS)} of ${String(MAX_EXTRACTED_CHARS + OVER)} chars are included; the remaining ${String(OVER)} chars are not available.`);
+        });
+
+        it('a text file in the inline fallback: the header names the cut', async () => {
+          breakFileArea();
+          const { header, text } = await headerOf(csv(200_000 + OVER));
+          expect(text).not.toContain('files area');
+          expect(header).toBe(`[File: liste.csv] — CUT: only the first 200000 of ${String(200_000 + OVER)} chars are included; the remaining ${String(OVER)} chars are not available.`);
+        });
+
+        it('nothing cut, nothing said: an uncapped document, a large text file on disk, the same text inline', async () => {
+          // Saved as a file: the text file is stored WHOLE, so even past the inline cap it is not cut.
+          expect((await headerOf(csv(200_000 + OVER))).header).not.toContain('CUT');
+          expect((await headerOf(docx(MAX_EXTRACTED_CHARS - 1))).header).not.toContain('CUT');
+          breakFileArea();
+          expect((await headerOf(csv(200_000))).header).toBe('[File: liste.csv]');
+          expect((await headerOf(docx(MAX_EXTRACTED_CHARS))).header).toBe('[File: vertrag.docx]');
+        });
       });
     });
 
