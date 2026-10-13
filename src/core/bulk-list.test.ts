@@ -94,7 +94,7 @@ describe('parseListSource', () => {
 describe('listPageUrl', () => {
   const s = parse({ ...base, filters: { status: 'publish', category: '12' } });
 
-  it('builds the address in a fixed order: filters by name, order, page size, page', () => {
+  it('builds the address in a fixed order: filters by name, order, fields, page size, page', () => {
     expect(listPageUrl(HOST, s, 3)).toBe(
       'https://shop.example.com/wp-json/wc/v3/products?category=12&status=publish&orderby=id&order=asc&_fields=id&per_page=50&page=3',
     );
