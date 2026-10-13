@@ -14,6 +14,7 @@
 		type SubjectTimelineEntry,
 	} from '../api/subject-footprint.js';
 	import PersonErasurePanel from './PersonErasurePanel.svelte';
+	import { subjectsBody } from '../utils/subjects-view.js';
 
 	// Record-on-spine R2b — the read-only subject-graph surface. A subjects list
 	// (left) → a footprint detail panel (right): records + threads as an occurrence
@@ -34,6 +35,7 @@
 	let error = $state('');
 	let erasing = $state(false);
 	let erasedIds = $state<Set<string>>(new Set());
+	const body = $derived(subjectsBody(loading, subjects.length, selected !== null));
 
 	// Kind palette — same theme-agnostic hues KnowledgeGraphView uses for entity types.
 	const kindHues: Record<string, string> = {
@@ -135,14 +137,17 @@
 			class="w-full rounded-[var(--radius-md)] border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-border-hover" />
 	</div>
 
-	{#if loading}
+	{#if body === 'loading'}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
-	{:else if subjects.length === 0}
+	{:else if body === 'empty'}
 		<p class="text-text-subtle text-sm">{t('subjects.no_subjects')}</p>
 	{:else}
 		<div class="flex gap-4">
 			<!-- Subject list -->
 			<div class="flex-1 min-w-0">
+				{#if subjects.length === 0}
+					<p class="text-text-subtle text-sm">{t('subjects.no_subjects')}</p>
+				{/if}
 				<div class="space-y-1">
 					{#each subjects as subject}
 						<button onclick={() => selectSubject(subject)}
