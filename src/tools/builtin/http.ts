@@ -2747,19 +2747,27 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // The hop's own method, with the override forms its target may carry: a
             // `?_method=` in a Location raises it like one in the request. The body rides along
             // on a hop that keeps its method (307/308); for a hop turned into a GET none is read.
-            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, typeof input.body === 'string' ? input.body : undefined);
+            // As for the request itself, the contract must grant every write the hop names, not
+            // only the one it is gated as: a server may run any of them.
+            const hopBody = typeof input.body === 'string' ? input.body : undefined;
+            const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, hopBody);
             return hop !== null &&
               contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
+              writeMethodsNamed(redirectMethod, headers, nextUrl, hopBody).every((m) => contractGrants('http_request', { url: nextUrl, method: m }, contract)) &&
               !isOutboundEffectWrite(nextUrl, hop);
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
-              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, typeof input.body === 'string' ? input.body : undefined);
+              const hopBody = typeof input.body === 'string' ? input.body : undefined;
+              const hop = effectiveWriteMethod(redirectMethod, headers, nextUrl, hopBody);
               if (hop === null) return 'consent';
               if (!isWriteMethod(hop)) return true;
               // Another write than the one asked (a Location with `?_method=DELETE`) needs
-              // its own question, whatever the path.
+              // its own question, whatever the path. So does a hop that names a write the
+              // question did not: gated as the same method, a server that reads another of its
+              // overrides runs that one (`?_method=PUT&_method=PATCH` after a PATCH was asked).
               if (hop !== gatedMethod) return 'consent';
+              if (!writeMethodsNamed(redirectMethod, headers, nextUrl, hopBody).every((m) => named.includes(m))) return 'consent';
               const next = new URL(nextUrl);
               if (normalizeApprovalHost(next.hostname) !== approvalHost) return 'consent';
               if (!sameServiceOnHost(askedUrl, next)) return 'consent';
