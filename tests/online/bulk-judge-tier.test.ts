@@ -11,12 +11,13 @@
  *
  * Path: `callForStructuredJson` with an explicit client from `clientForTierSnapshot` — the
  * path L2 takes (Anthropic native, Mistral over the openai wire). Keys from the environment
- * or `~/.lynox/config.json`. Raw outcomes are appended to `<out>/calls.jsonl` as they come,
+ * or `~/.lynox/config.json`. Raw outcomes are appended to `<out>/calls.jsonl` as they come
+ * (`LYNOX_E2_OUT`, else a dated folder under the temp dir — set it to keep the data),
  * so an aborted run keeps what it paid for.
  */
 import { describe, it, expect } from 'vitest';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { callForStructuredJson, extractionSpendOf } from '../../src/core/llm-helper.js';
 import { clientForTierSnapshot, createLLMClient } from '../../src/core/llm-client.js';
@@ -54,7 +55,7 @@ const asked = MODE === 'smoke' || MODE === 'full';
 const describeE2 = asked && ANTHROPIC_KEY && MISTRAL_KEY ? describe : describe.skip;
 
 function outDir(): string {
-  const dir = process.env['LYNOX_E2_OUT'] ?? join(homedir(), 'lynox-plans', `bulk-loop-e2-${new Date().toISOString().slice(0, 10)}`, MODE ?? 'none');
+  const dir = process.env['LYNOX_E2_OUT'] ?? join(tmpdir(), `bulk-judge-e2-${new Date().toISOString().slice(0, 10)}`, MODE ?? 'none');
   mkdirSync(dir, { recursive: true });
   return dir;
 }
