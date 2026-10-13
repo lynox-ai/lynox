@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, normalizeWritePath, pathForQuestion,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -20,6 +20,22 @@ describe('effectiveWriteMethod', () => {
     ['GET', { 'X-HTTP-Method-Override': '' }, U, 'GET'],
   ] as const)('%s with %j at %s is gated as %s', (method, headers, url, want) => {
     expect(effectiveWriteMethod(method, { ...headers }, url)).toBe(want);
+  });
+});
+
+describe('writeMethodsNamed', () => {
+  it.each([
+    ['PATCH', {}, U, ['PATCH']],
+    [' patch ', {}, U, ['PATCH']],
+    ['POST', { 'X-HTTP-Method-Override': 'PATCH' }, U, ['PATCH', 'POST']],
+    ['POST', { 'x-method-override': 'patch' }, `${U}?_method=PUT`, ['PATCH', 'POST', 'PUT']],
+    ['GET', { 'X-HTTP-Method': 'POST' }, U, ['POST']],
+    ['POST', { 'X-HTTP-Method-Override': 'GET' }, U, ['POST']],
+    ['GET', {}, U, []],
+    ['POST', { 'X-Other': 'DELETE' }, U, ['POST']],
+    ['POST', { 'X-HTTP-Method-Override': 'FOO' }, U, ['POST']],
+  ] as const)('%s with %j at %s names %j', (method, headers, url, expected) => {
+    expect(writeMethodsNamed(method, { ...headers }, url)).toEqual(expected);
   });
 });
 
