@@ -155,7 +155,9 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
   });
 
   it('masks a percent-encoded secret shape in the path as well', async () => {
-    const tail = 'A1b2'.repeat(8);
+    // Short enough that only the vendor shape can catch it, not the 40-character catch-all:
+    // the encoded `s` hides the shape until the path is decoded.
+    const tail = 'A1b2'.repeat(6);
     const res = await ask('GET', `/api/threads/%73k-ant-${tail}`, mandateCookie);
     await res.arrayBuffer();
     const got = newReadRows();
