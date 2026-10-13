@@ -30,6 +30,7 @@ import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
+import { UndecryptableTextError } from './engine-db.js';
 import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution, makeSubjectExternalRefs } from './subject-store.js';
 import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
@@ -1296,6 +1297,46 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
     }
     return this.db.purgeByThread(threadId);
+  }
+
+  /**
+   * The memories a person erasure would show: attached to one of `subjectIds` in engine.db
+   * (`subject`), or whose text `matches` (`mention`), from either store. The legacy text is
+   * shown where it exists (plaintext), else the stub's. A text this key cannot decrypt throws
+   * {@link UndecryptableTextError}, so an unreadable store never reads as "nothing found".
+   */
+  erasureMemoryCandidates(subjectIds: ReadonlySet<string>, matches: (text: string) => boolean): Array<{
+    id: string; text: string; matchedBy: 'subject' | 'mention';
+  }> {
+    const legacy = new Map(this.db.listMemoryTextsForErasure().map(r => [r.id, r.text]));
+    const out: Array<{ id: string; text: string; matchedBy: 'subject' | 'mention' }> = [];
+    const seen = new Set<string>();
+    for (const stub of this.memoryGraphStore?.stubsForErasure(subjectIds) ?? []) {
+      seen.add(stub.id);
+      if (stub.text === null) throw new UndecryptableTextError('memories');
+      const text = legacy.get(stub.id) ?? stub.text;
+      if (stub.linked) out.push({ id: stub.id, text, matchedBy: 'subject' });
+      else if (matches(text)) out.push({ id: stub.id, text, matchedBy: 'mention' });
+    }
+    for (const [id, text] of legacy) {
+      if (!seen.has(id) && matches(text)) out.push({ id, text, matchedBy: 'mention' });
+    }
+    return out;
+  }
+
+  /**
+   * A person erasure's memory steps, in this order: legacy first, engine.db last. The reverse
+   * of {@link eraseByPattern}, for the same reason: the store the ids are derived from goes
+   * last. Here that is engine.db — the subject link and the junction live there, and its
+   * encrypted text is searched too — so a failed engine.db step leaves everything a retry needs.
+   */
+  purgeLegacyMemoriesForErasure(ids: string[]): number {
+    return this.db.purgeMemoriesByIds(ids);
+  }
+
+  /** See {@link purgeLegacyMemoriesForErasure}. */
+  purgeMemoryStubsForErasure(ids: string[]): number {
+    return this.memoryGraphStore ? this.memoryGraphStore.purgeMemories(ids) : 0;
   }
 
   // === Retrieve ===

@@ -1325,6 +1325,34 @@ export class SubjectStore {
     return reaped;
   }
 
+  /** The archived shells merged (transitively) into `canonicalId`; see {@link eraseSubject}. */
+  mergedShellIds(canonicalId: string): string[] {
+    return this._mergeDupClosure(canonicalId);
+  }
+
+  /**
+   * Hard-delete one subject and the archived shells merged into it, whatever still points at
+   * it — the last step of erasing one person ({@link reapOrphans} keeps a subject anything
+   * holds, which is the opposite of what an erasure request asks for). The schema does the
+   * rest: the detail row (`people`: email, phone), relationships, the memory junction and
+   * cooccurrences cascade; tasks, triggers, connections and artifacts keep their rows with the
+   * pointer set to NULL. Cross-database pointers (a history.db thread anchor, a datastore cell)
+   * are not reached and are left pointing at an id that no longer exists.
+   *
+   * The owner's own subject is refused. Returns the ids deleted, empty when it is already gone,
+   * so a retry after a later failure is a no-op here.
+   */
+  eraseSubject(canonicalId: string): string[] {
+    return this.db.transaction(() => {
+      const row = this.getSubject(canonicalId);
+      if (!row) return [];
+      if (row.is_self === 1) throw new SelfSubjectErasureError();
+      const doomed = [...this._mergeDupClosure(canonicalId), canonicalId];
+      const del = this.db.prepare('DELETE FROM subjects WHERE id = ?');
+      return doomed.filter(id => del.run(id).changes > 0);
+    }).immediate();
+  }
+
   /** Soft-archive (queries default to active; cascades remain via FK ON DELETE on hard purge). */
   archiveSubject(id: string): void {
     this.db.prepare("UPDATE subjects SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND archived_at IS NULL").run(id);
@@ -1944,5 +1972,13 @@ export class SubjectStore {
       this.db.prepare("UPDATE subjects SET aliases = ?, updated_at = datetime('now') WHERE id = ?")
         .run(u.json, row.id);
     }
+  }
+}
+
+/** {@link SubjectStore.eraseSubject} on the owner's own subject (`is_self`). */
+export class SelfSubjectErasureError extends Error {
+  constructor() {
+    super('The owner\'s own subject cannot be erased this way');
+    this.name = 'SelfSubjectErasureError';
   }
 }

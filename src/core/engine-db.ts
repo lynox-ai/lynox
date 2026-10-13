@@ -1297,6 +1297,18 @@ export class EngineDb {
   }
 
   /**
+   * Decrypt text from storage, or `null` when it is encrypted and cannot be read (no key, wrong
+   * key, corrupted). {@link dec} returns the ciphertext in that case, which a text search reads
+   * as "no match": the person erasure would then report nothing found while the rows stay.
+   * @internal — see {@link enc}.
+   */
+  tryDec(text: string): string | null {
+    if (!text || !text.startsWith(ENCRYPTED_PREFIX)) return text;
+    const out = this.dec(text);
+    return out === text ? null : out;
+  }
+
+  /**
    * Decrypt text from storage. Handles both encrypted and plaintext (mixed mode).
    * @internal — see {@link enc}.
    */
@@ -1324,5 +1336,17 @@ export class EngineDb {
       }
       return text;
     }
+  }
+}
+
+/**
+ * A stored text a search must read could not be decrypted ({@link EngineDb.tryDec}). Thrown
+ * instead of treating the row as "no match", so a search over encrypted rows never reports a
+ * clean result it could not check.
+ */
+export class UndecryptableTextError extends Error {
+  constructor(where: string) {
+    super(`Stored text in ${where} cannot be decrypted with the current key`);
+    this.name = 'UndecryptableTextError';
   }
 }

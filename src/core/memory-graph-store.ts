@@ -563,6 +563,23 @@ export class MemoryGraphStore {
   }
 
   /**
+   * Every stub, active or not, with its decrypted text (`null` when this key cannot read it)
+   * and whether it is attached to one of `subjectIds`, by its own `subject_id` or the junction.
+   * The read half of a person erasure; the caller decides what matches.
+   */
+  stubsForErasure(subjectIds: ReadonlySet<string>): Array<{ id: string; text: string | null; linked: boolean }> {
+    const linked = new Set<string>();
+    const bySubject = this.db.prepare('SELECT id FROM memories WHERE subject_id = ?');
+    const byJunction = this.db.prepare('SELECT memory_id AS id FROM memory_subjects WHERE subject_id = ?');
+    for (const sid of subjectIds) {
+      for (const r of bySubject.all(sid) as Array<{ id: string }>) linked.add(r.id);
+      for (const r of byJunction.all(sid) as Array<{ id: string }>) linked.add(r.id);
+    }
+    return (this.db.prepare('SELECT id, text FROM memories ORDER BY created_at, id').all() as Array<{ id: string; text: string }>)
+      .map(r => ({ id: r.id, text: this.engine.tryDec(r.text), linked: linked.has(r.id) }));
+  }
+
+  /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
    * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, and the
    * orphan-subject reap runs here too (a `memory_delete` soft-deletes, gc hard-deletes,

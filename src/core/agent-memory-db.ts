@@ -989,6 +989,11 @@ export class AgentMemoryDb {
     return rows.map(r => r.id);
   }
 
+  /** Every memory's id and text, active or not — the read half of a person erasure, which matches in code. */
+  listMemoryTextsForErasure(): Array<{ id: string; text: string }> {
+    return this.db.prepare('SELECT id, text FROM memories ORDER BY created_at, id').all() as Array<{ id: string; text: string }>;
+  }
+
   /**
    * All active memories, newest first, across every scope (capped). Part of the debug-export
    * snapshot: it answers "what facts does this tenant's LEGACY memory hold" for diagnosing
