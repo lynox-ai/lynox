@@ -15205,9 +15205,8 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   });
 
   /**
-   * The mint stamp describes the grant this authorization replaced. The record is
-   * built from the previous one, so a stamp the callback does not set by name
-   * survives: `minted_by` would name the client of a grant that no longer exists.
+   * The mint stamp describes the grant this authorization replaced: left on the
+   * record, `minted_by` would name the client of a grant that no longer exists.
    * The callback stamps this exchange instead, the same way `fetch_token` does
    * after a good exchange, and an exchange with no refresh token leaves no stamp.
    */

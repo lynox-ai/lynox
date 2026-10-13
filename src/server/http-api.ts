@@ -10243,13 +10243,11 @@ export class LynoxHTTPApi {
           const rewritten = new Set(written.map((w) => w.name));
           // Built new, not from the previous record: a new consent replaces the
           // grant, and every field of the old one describes that old grant. Only
-          // `written` carries over, merged on purpose (above). Two fields this
-          // used to clear by name show why: a revocation verdict would let
-          // `hasRevokedGrant` keep reporting a connection the user has just
-          // re-established as revoked (the attach steps aside for a changed
-          // refresh token, so the record would be the only thing still saying
-          // it), and a mint stamp would name the client of the replaced grant.
-          // `fetch_token` clears the same verdict after a successful exchange.
+          // `written` carries over, merged on purpose (above). Before, the old
+          // record was copied and its fields cleared by name, so a field added
+          // later would have outlived the consent it described: the mint stamp
+          // did, and named the client of the replaced grant. `state` is written
+          // below, which is also what ends a revocation for `hasRevokedGrant`.
           const grantNext: OAuthGrantRecord = {
             origin: 'callback',
             // `connected` and `no-refresh` are the two honest outcomes of an
@@ -10281,8 +10279,8 @@ export class LynoxHTTPApi {
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
           // This exchange's client and refresh token are the stamp, the same one
-          // `fetch_token` writes after a good exchange. Without a refresh token
-          // there is nothing for it to name, and the record carries none.
+          // `fetch_token` writes after a good exchange. An exchange that returned
+          // no refresh token leaves no stamp.
           if (refreshToken !== null) {
             grantNext.minted_by = tokenFingerprint(clientId);
             grantNext.minted_for = tokenFingerprint(refreshToken);
