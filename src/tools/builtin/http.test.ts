@@ -1170,16 +1170,22 @@ describe('httpRequestTool', () => {
           expect(promptUser).toHaveBeenCalledTimes(2);
         });
 
-        it('does not follow a contract-granted write onto a connected account by redirect', async () => {
-          await withProfile('example-shop');
+        // A hop to another origin keeps its method only without a body (a body turns it into a
+        // bodyless GET), so the write that can reach the account by redirect is a DELETE.
+        it.each([
+          ['example-shop', 1],
+          [undefined, 2],
+        ] as const)('a contract-granted DELETE redirected onto the account follows the hop only without a preset (preset %s: %i requests)', async (presetId, calls) => {
+          await withProfile(presetId);
           mockDnsPublic();
           const fetchMock = vi.fn()
             .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://example.com/v1/report' } }))
-            .mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
           vi.stubGlobal('fetch', fetchMock);
-          const both: CapabilityContract = { ...contract, hostPatterns: ['other.example', 'example.com'] };
-          await handler({ url: 'https://other.example/v1/report', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
-          expect(fetchMock).toHaveBeenCalledTimes(1);
+          const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'example.com'] };
+          await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+          expect(fetchMock).toHaveBeenCalledTimes(calls);
+          expect((fetchMock.mock.calls.at(-1)![1] as RequestInit).method).toBe('DELETE');
         });
 
         it('control: the same contract grants the DELETE on an account without a preset', async () => {
