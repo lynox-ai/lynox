@@ -90,7 +90,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
-import { listPageUrl } from '../core/bulk-list.js';
+import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -7887,6 +7887,7 @@ export class LynoxHTTPApi {
         checksum: actionable ? ledger.computeChecksum(params['id']!) : null,
         listFirstPage: listRun ? listPageUrl(listRun.host, listRun.source, 1) : null,
         listStartChecksum: listRun ? ledger.listStartChecksum(params['id']!) : null,
+        listNote: status.list ? BULK_LIST_NOTE : null,
       });
     }, READS));
 

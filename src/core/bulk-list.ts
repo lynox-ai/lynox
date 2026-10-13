@@ -72,6 +72,12 @@ export interface BulkListSource {
   after: ExternalImage;
 }
 
+/** Shown with every list run where the owner starts or approves it (PRD bulk-loop §3.2): a
+ *  list read page by page is not a snapshot. */
+export const BULK_LIST_NOTE =
+  'The list was read page by page, not at one instant: an element added, removed or re-sorted on the host while it ' +
+  'was read can be missing from the targets, or listed once only though it moved.';
+
 /** A value the engine puts into a query or an id into a path: nothing a parser could split. */
 const TOKEN_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;

@@ -23,7 +23,7 @@ import { MandateEnds } from '../core/mandate-ends.js';
 import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
-import { listReadContract, parseListSource } from '../core/bulk-list.js';
+import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -8284,7 +8284,8 @@ describe('LynoxHTTPApi', () => {
       const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
       expect(shown['listFirstPage']).toBe(`https://${host}/wp-json/wc/v3/products?category=12&orderby=id&order=asc&per_page=50&page=1`);
       expect(shown['listStartChecksum']).toBe(bulkLedger.listStartChecksum(id));
-      expect(shown['list']).toMatchObject({ state: 'pending', idField: 'id', method: 'PUT', after: { status: 'draft' } });
+      expect(shown['list']).toMatchObject({ state: 'pending', filters: { category: '12' }, idField: 'id', method: 'PUT', after: { status: 'draft' } });
+      expect(shown['listNote']).toBe(BULK_LIST_NOTE);
 
       const resume = (body: unknown): Promise<Response> => jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
       expect((await resume({})).status).toBe(400);
