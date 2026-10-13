@@ -31,7 +31,7 @@ import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom 
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
-import type { KnowledgeEntry } from '../types/memory.js';
+import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
@@ -701,6 +701,9 @@ interface DebugKnowledgeEntry {
 interface DebugKnowledgeBlock {
   substrate: string; available: boolean; entries_shown: number; pending_shown: number;
   may_be_incomplete: boolean; entries: DebugKnowledgeEntry[]; pending_entries: DebugKnowledgeEntry[];
+  /** Whole-store counts per status with the `created_at` range — what the capped lists above
+   *  cannot say. `null` when the store is absent or the count could not be read. */
+  status_counts: Record<KnowledgeStatus, { count: number; first_created_at: string | null; last_created_at: string | null }> | null;
   error?: string;
 }
 
@@ -710,7 +713,7 @@ const DK_SUBSTRATE = 'knowledge_entries (durable knowledge)';
  *  prevent. Same device as the Art. 15 export's `EMPTY_KNOWLEDGE`. */
 const EMPTY_DK: Omit<DebugKnowledgeBlock, 'entries' | 'pending_entries'> = {
   substrate: DK_SUBSTRATE, available: false, entries_shown: 0, pending_shown: 0,
-  may_be_incomplete: false,
+  may_be_incomplete: false, status_counts: null,
 };
 
 /**
@@ -792,12 +795,21 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
     pending = raw.map(e => projectKnowledgeEntry(e, threadId));
     if (raw.length >= ENTRY_CAP) incomplete = true;
   } catch { failed = failed ? 'durable knowledge unreadable' : 'pending queue unreadable'; incomplete = true; }
+  // The lists are capped and the queue list is this thread's only, so neither answers "how
+  // many does the store hold, of which status, since when?". A capped list that is right
+  // about its first 200 rows says nothing about the rest; these counts do, and they read no
+  // text. Their own try: a count that fails must not discard readable entries.
+  let statusCounts: DebugKnowledgeBlock['status_counts'] = null;
+  try {
+    statusCounts = store.statusSummary();
+  } catch { failed = failed ?? 'status counts unreadable'; }
   const block: DebugKnowledgeBlock = {
     substrate: DK_SUBSTRATE, available: true,
     entries_shown: entries.length, pending_shown: pending.length,
     // `may_be_incomplete` rather than `truncated`, for the reason spelled out at the Art. 15
     // export below: hitting exactly the cap cannot be told from having exactly that many.
     may_be_incomplete: incomplete, entries, pending_entries: pending,
+    status_counts: statusCounts,
   };
   return failed ? { ...block, error: failed } : block;
 }

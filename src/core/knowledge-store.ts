@@ -860,6 +860,26 @@ export class KnowledgeStore {
   }
 
   /**
+   * Every status with its row count and the oldest and newest `created_at`, over the whole
+   * store — the numbers a capped entry list cannot give. Statuses with no rows are present
+   * with a count of 0, so "none" and "not reported" cannot be confused. Reads no text, so
+   * nothing is decrypted.
+   */
+  statusSummary(): Record<KnowledgeStatus, { count: number; first_created_at: string | null; last_created_at: string | null }> {
+    const rows = this.db.prepare(
+      'SELECT status, COUNT(*) AS n, MIN(created_at) AS first, MAX(created_at) AS last FROM knowledge_entries GROUP BY status',
+    ).all() as Array<{ status: string; n: number; first: string | null; last: string | null }>;
+    const empty = { count: 0, first_created_at: null, last_created_at: null };
+    const out: Record<KnowledgeStatus, { count: number; first_created_at: string | null; last_created_at: string | null }> = {
+      active: { ...empty }, pending_review: { ...empty }, rejected: { ...empty }, superseded: { ...empty },
+    };
+    for (const r of rows) {
+      if (r.status in out) out[r.status as KnowledgeStatus] = { count: r.n, first_created_at: r.first, last_created_at: r.last };
+    }
+    return out;
+  }
+
+  /**
    * How many QUEUED entries name this subject — count only, never their text.
    *
    * The recall-time nudge (DK plan package 1). A queued entry is not knowledge yet: it was
