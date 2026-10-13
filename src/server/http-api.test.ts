@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
 import { principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
@@ -523,6 +523,21 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
     headers['Content-Type'] = 'application/json';
   }
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
+/**
+ * Give the rate-limit window back when the calling test ends: every count goes back to
+ * what it was at the call, never a `clear()`. The tests here share one loopback window
+ * of 600. Call it first in a test added after this helper, when its describe does not
+ * repay its own spend; some describes do, with a snapshot in `beforeAll` restored in
+ * `afterAll` or `afterEach`. Tests that predate the helper do not call it, on purpose:
+ * the comment in the `tasks` describe explains how handing back their spend weakens the
+ * `rate limiting` describe.
+ */
+function repayRateWindow(): void {
+  const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  const before = new Map([...window].map(([k, v]) => [k, v.count]));
+  onTestFinished(() => { for (const [k, e] of window) e.count = before.get(k) ?? 0; });
 }
 
 /**
@@ -3781,6 +3796,7 @@ describe('LynoxHTTPApi', () => {
       ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id), 410],
       ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved'), 200],
     ] as const)('a named question that was %s leaves the newer open one alone', async (_label, close, expected) => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const old = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
         close(ps, old);
@@ -3795,6 +3811,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('an unknown promptId is a 404 and leaves the open question alone', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const open = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
         const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
@@ -3806,6 +3823,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('another session\'s promptId is a 409 and settles neither session\'s question', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const foreign = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
         const own = ps.insertAskSecret('other-1', 'API_KEY', 'Enter');
@@ -3819,6 +3837,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('a promptId of another kind of question is a 409 and leaves it open', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const ask = ps.insertAskUser(sid, 'Which list?');
         const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
@@ -3830,6 +3849,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('without a promptId it settles the session\'s open secret question', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const open = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
         const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
@@ -3842,6 +3862,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('without a promptId it leaves an open question of another kind alone', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const ask = ps.insertAskUser(sid, 'Which list?');
         const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
@@ -3934,6 +3955,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('a promptId of another kind of question is a 409 and leaves it open', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const secret = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
         const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
@@ -3945,6 +3967,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('a named question that expired is a 410 and leaves the newer open one alone', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const old = ps.insertConnectMail(sid, 'q', payload);
         ps.expirePrompt(old);
@@ -3958,6 +3981,7 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('an unknown promptId is a 404 and leaves the open question alone', async () => {
+      repayRateWindow();
       await withStore(async (sid, ps) => {
         const open = ps.insertConnectMail(sid, 'q', payload);
         const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
