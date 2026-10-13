@@ -52,8 +52,10 @@
 	// pause requests for the same row.
 	let busy = $state<Record<string, boolean>>({});
 
-	async function loadTriggers() {
-		loading = true;
+	// `quiet`: refresh in place after a stop or a start, without swapping the list for the
+	// loading line — that would drop keyboard focus from the row the owner just acted on.
+	async function loadTriggers(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
@@ -144,7 +146,7 @@
 				addToast(t('triggers.run_started'), 'success');
 				// The run is registered before the 202 is sent, so a reload shows it running —
 				// and offers its stop, which is when an owner most wants one.
-				await loadTriggers();
+				await loadTriggers(true);
 			} else if (res.status === 409) {
 				// ⛔ TWO different 409s, and telling the owner the wrong one is what this
 				// branch is for. "Already running" is true for a run in flight; a trigger
@@ -187,7 +189,7 @@
 			} else {
 				addToast(t('triggers.stop_failed'), 'error');
 			}
-			await loadTriggers();
+			await loadTriggers(true);
 		} catch {
 			addToast(t('triggers.stop_failed'), 'error');
 		} finally {

@@ -73,7 +73,12 @@ describe('the schedules view can stop a run', () => {
   it('a started run is shown at once: Run now reloads the list after its 202', () => {
     const start = VIEW.indexOf('async function runNow(');
     const body = VIEW.slice(start, VIEW.indexOf('\n\t}\n', start));
-    expect(body).toMatch(/res\.status === 202\)\s*\{[^}]*addToast\(t\('triggers\.run_started'\)[^}]*await loadTriggers\(\);/);
+    expect(body).toMatch(/res\.status === 202\)\s*\{[^}]*addToast\(t\('triggers\.run_started'\)[^}]*await loadTriggers\(true\);/);
+  });
+
+  it('the refresh after a stop or a start is quiet — the list is not swapped for the loading line', () => {
+    expect(stopHandler()).toContain('await loadTriggers(true);');
+    expect(VIEW).toMatch(/async function loadTriggers\(quiet = false\) \{\s*if \(!quiet\) loading = true;/);
   });
 
   it('every 409 of the route carries one of the codes, and the view switches on each', () => {
