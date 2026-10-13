@@ -186,6 +186,15 @@ describe('end to end — a clone of this repository, the real eslint config', ()
     expect(git('worktree', 'list').split('\n')).toHaveLength(1);
   }, SLOW);
 
+  it('a checkout that cannot be made is exit 2, and leaves nothing registered', () => {
+    const r = spawnSync(process.execPath, [SCRIPT, base, bad], {
+      cwd: clone, encoding: 'utf8', env: { ...GIT_ENV, TMPDIR: join(tmp, 'no-such-dir') },
+    });
+    expect(r.stderr).toContain('the temporary checkout could not be created');
+    expect(r.status).toBe(2);
+    expect(git('worktree', 'list').split('\n')).toHaveLength(1);
+  }, SLOW);
+
   it('a push that only deletes a ref lints nothing and passes', () => {
     const r = spawnSync('bash', [HOOK, 'origin', 'x'], {
       cwd: clone, encoding: 'utf8', env: GIT_ENV, input: `(delete) ${'0'.repeat(40)} refs/heads/probe ${base}\n`,
