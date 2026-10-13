@@ -7,7 +7,7 @@ import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS } from '../core/workspace.js';
 import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
 import { channels } from '../core/observability.js';
-import { extractMatchString, globToRegex } from '../core/pre-approve.js';
+import { extractMatchString, globToRegex, patternRegex } from '../core/pre-approve.js';
 import { detectInjectionAttempt } from '../core/data-boundary.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 
@@ -832,7 +832,7 @@ function _matchesPreApproval(toolName: string, input: unknown, set: PreApprovalS
       continue;
     }
 
-    const regex = globToRegex(pat.pattern);
+    const regex = patternRegex(toolName, pat.pattern);
     if (regex.test(matchStr)) {
       set.usageCounts[i] = (set.usageCounts[i] ?? 0) + 1;
       audit?.recordCheck({
