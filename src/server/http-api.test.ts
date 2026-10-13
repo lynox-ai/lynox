@@ -16044,3 +16044,176 @@ describe('a mandate and the conversations it started (H2c, §3.13 E1, E2, E7, E9
     });
   });
 });
+
+// PRD customer-granted-operator-access §3.4, D6, piece C. On a managed instance the admin secret is
+// the control plane's, and its bearer reaches the admin routes only (`cp-admin`). Every place that
+// sets a request's scope is driven here: no secret, the migration token, the admin and the user
+// bearer, a single secret, and the session cookie.
+describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
+  const ADMIN = 'TEST-ADMIN-SECRET-cp-admin';
+  const ADMIN_ROUTE = '/api/security/events/aggregate';
+  const USER_ROUTE = '/api/secrets';
+  const rateCounts = (): Map<string, { count: number }> =>
+    (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  let windowBefore = new Map<string, number>();
+  beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+  afterEach(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
+  async function withEnv(env: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {
+    const before = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+    for (const [k, v] of Object.entries(env)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    try { await fn(); } finally {
+      for (const [k, v] of Object.entries(before)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  }
+  const MANAGED = { LYNOX_HTTP_ADMIN_SECRET: ADMIN, LYNOX_BILLING_TIER: 'managed' };
+  const as = (token: string, path: string, init: RequestInit = {}, base = baseUrl): Promise<Response> =>
+    fetch(`${base}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
+
+  it('on a managed instance, the admin bearer reaches the admin routes and nothing else', async () => {
+    await withEnv(MANAGED, async () => {
+      expect((await as(ADMIN, ADMIN_ROUTE)).status).toBe(200);
+      const refused = await as(ADMIN, USER_ROUTE);
+      expect(refused.status).toBe(403);
+      expect(((await refused.json()) as { error: string }).error).toBe('The control plane reaches admin routes only');
+      // The streaming routes, and a path no route matches.
+      expect((await as(ADMIN, '/api/sessions/test/run', { method: 'POST', body: JSON.stringify({ task: 'hi' }) })).status).toBe(403);
+      expect((await as(ADMIN, '/api/runs/some-run/stream')).status).toBe(403);
+      expect((await as(ADMIN, '/api/no-such-route')).status).toBe(403);
+      // Twin: the user bearer on the same instance keeps the user routes, and not the admin ones.
+      expect((await as(TEST_SECRET, USER_ROUTE)).status).toBe(200);
+      expect((await as(TEST_SECRET, ADMIN_ROUTE)).status).toBe(403);
+    });
+  });
+
+  it('on a self-hosted instance with two secrets, the admin bearer keeps the user routes', async () => {
+    await withEnv({ ...MANAGED, LYNOX_BILLING_TIER: undefined }, async () => {
+      expect((await as(ADMIN, USER_ROUTE)).status).toBe(200);
+      expect((await as(ADMIN, ADMIN_ROUTE)).status).toBe(200);
+    });
+  });
+
+  it('a single secret stays admin, on a managed instance too', async () => {
+    await withEnv({ LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_BILLING_TIER: 'managed' }, async () => {
+      expect((await as(TEST_SECRET, USER_ROUTE)).status).toBe(200);
+      expect((await as(TEST_SECRET, ADMIN_ROUTE)).status).toBe(200);
+    });
+  });
+
+  it('the owner\'s session cookie is admin without an admin secret and user with one; a mandate\'s is user', async () => {
+    // The Web UI's own minter: a managed instance refuses an owner cookie without its principal part.
+    const owner = webUiLoginSession(TEST_SECRET, null)!.token;
+    const cookie = (token: string, path: string): Promise<Response> => fetch(`${baseUrl}${path}`, { headers: { cookie: `lynox_session=${token}` } });
+    await withEnv({ LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_BILLING_TIER: 'managed' }, async () => {
+      expect((await cookie(owner, ADMIN_ROUTE)).status).toBe(200);
+      const mandate = webUiLoginSession(TEST_SECRET, {
+        kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+        mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+      })!.token;
+      expect((await cookie(mandate, ADMIN_ROUTE)).status).toBe(403);
+    });
+    await withEnv(MANAGED, async () => {
+      expect((await cookie(owner, ADMIN_ROUTE)).status).toBe(403);
+      expect((await cookie(owner, USER_ROUTE)).status).toBe(200);
+    });
+  });
+
+  it('the migration token reaches its admin routes, on a managed instance too', async () => {
+    const token = randomBytes(32).toString('hex');
+    await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token }, async () => {
+      const res = await fetch(`${baseUrl}/api/migration/handshake`, { headers: { 'x-migration-token': token } });
+      expect(res.status).not.toBe(401);
+      expect(res.status).not.toBe(403);
+    });
+  });
+
+  it('with no secret at all, a local request is admin, on a managed instance too', async () => {
+    await withEnv({ LYNOX_HTTP_SECRET: undefined, LYNOX_HTTP_ADMIN_SECRET: undefined, LYNOX_BILLING_TIER: 'managed' }, async () => {
+      const open = new LynoxHTTPApi();
+      await open.init();
+      await open.start(0);
+      try {
+        const base = `http://127.0.0.1:${portOf(open)}`;
+        for (let i = 0; i < 20; i++) {
+          try { const r = await fetch(`${base}/health`); if (r.ok) break; } catch { /* not ready */ }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        expect((await fetch(`${base}${USER_ROUTE}`)).status).toBe(200);
+        expect((await fetch(`${base}${ADMIN_ROUTE}`)).status).toBe(200);
+      } finally { await open.shutdown(); }
+    });
+  });
+
+  it('reads and revokes Google on the admin aliases, with the answer the user routes give', async () => {
+    await withEnv(MANAGED, async () => {
+      const cpStatus = await as(ADMIN, '/api/admin/google/status');
+      const ownerStatus = await as(TEST_SECRET, '/api/google/status');
+      expect(cpStatus.status).toBe(200);
+      expect(await cpStatus.json()).toEqual(await ownerStatus.json());
+      const cpRevoke = await as(ADMIN, '/api/admin/google/revoke', { method: 'POST', body: '{}' });
+      const ownerRevoke = await as(TEST_SECRET, '/api/google/revoke', { method: 'POST', body: '{}' });
+      expect(cpRevoke.status).not.toBe(403);
+      expect(cpRevoke.status).toBe(ownerRevoke.status);
+      expect(await cpRevoke.json()).toEqual(await ownerRevoke.json());
+      // The user routes themselves are closed to the control plane's bearer.
+      expect((await as(ADMIN, '/api/google/status')).status).toBe(403);
+      // And the aliases to the user bearer.
+      expect((await as(TEST_SECRET, '/api/admin/google/status')).status).toBe(403);
+    });
+  });
+
+  describe('POST /api/admin/mandates/revoke', () => {
+    let dir: string;
+    let edb: EngineDb;
+    let ends: MandateEnds;
+    let orig: unknown;
+    const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'lynox-cp-revoke-'));
+      edb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
+      ends = new MandateEnds(edb.getDb());
+      orig = engineRef()['getMandateEnds'];
+      engineRef()['getMandateEnds'] = () => ends;
+    });
+    afterEach(() => {
+      engineRef()['getMandateEnds'] = orig;
+      edb.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const revoke = (ids: unknown, token = ADMIN): Promise<Response> =>
+      as(token, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: ids }) });
+
+    it('applies the whole list idempotently, and a revoke that is new is told once', async () => {
+      const seen: string[] = [];
+      ends.onRevoke((id) => { seen.push(id); });
+      await withEnv(MANAGED, async () => {
+        const first = await revoke(['TEST-M-1', 'TEST-M-1', 'TEST-M-2']);
+        expect(first.status).toBe(200);
+        expect(await first.json()).toEqual({ newly_revoked: 2 });
+        const again = await revoke(['TEST-M-1', 'TEST-M-2', 'TEST-M-3']);
+        expect(await again.json()).toEqual({ newly_revoked: 1 });
+      });
+      expect(seen).toEqual(['TEST-M-1', 'TEST-M-2', 'TEST-M-3']);
+      for (const id of ['TEST-M-1', 'TEST-M-2', 'TEST-M-3']) expect(ends.isLive(id)).toBe(false);
+    });
+
+    it('refuses a list it cannot read, and the user bearer', async () => {
+      await withEnv(MANAGED, async () => {
+        const bad = await revoke('TEST-M-1');
+        expect(bad.status).toBe(400);
+        expect(((await bad.json()) as { code?: string }).code).toBe('invalid_revocation');
+        expect((await revoke(['TEST-M-1'], TEST_SECRET)).status).toBe(403);
+      });
+      // A revoke writes a row even for a mandate never seen, so no row means nothing was revoked.
+      expect(ends.endOf('TEST-M-1')).toBeUndefined();
+    });
+
+    it('answers 503 when there is no store of mandate ends', async () => {
+      engineRef()['getMandateEnds'] = () => null;
+      await withEnv(MANAGED, async () => {
+        const res = await revoke(['TEST-M-1']);
+        expect(res.status).toBe(503);
+      });
+    });
+  });
+});

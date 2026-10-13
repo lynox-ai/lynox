@@ -28,7 +28,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { isModelProfile } from '../src/contract/shapes.js';
-import { readLoginPrincipal } from '../src/contract/http.js';
+import { readLoginPrincipal, readMandateRevocation, MANDATE_REVOCATION_MAX, LOGIN_PRINCIPAL_ID_MAX } from '../src/contract/http.js';
 import type { UsageSummaryResponse } from '../src/contract/http.js';
 // The typed mirrors live INSIDE the contract (src/contract/fixtures/mirrors.ts)
 // so their `satisfies` welds are checked by root tsc — this test dir is outside
@@ -170,3 +170,28 @@ describe('contract fixtures: the mandate login body round-trips readLoginPrincip
     for (const [name, value] of cases) expect(readLoginPrincipal(value), name).toBe('invalid');
   });
 });
+
+describe('the revoked-mandates list the control plane sends (readMandateRevocation)', () => {
+  it('reads the ids, folding duplicates; an empty list is a list', () => {
+    expect(readMandateRevocation({ revoked_mandate_ids: ['TEST-M-1', 'TEST-M-2', 'TEST-M-1'] })).toEqual(['TEST-M-1', 'TEST-M-2']);
+    expect(readMandateRevocation({ revoked_mandate_ids: [] })).toEqual([]);
+  });
+
+  it('refuses the whole call for anything it cannot read', () => {
+    for (const body of [
+      null, 'x', {}, { revoked_mandate_ids: 'TEST-M-1' },
+      { revoked_mandate_ids: ['TEST-M-1', 7] },
+      { revoked_mandate_ids: [''] },
+      { revoked_mandate_ids: [' TEST-M-1'] },
+      { revoked_mandate_ids: ['TEST-M\u0000-1'] },
+      { revoked_mandate_ids: ['x'.repeat(LOGIN_PRINCIPAL_ID_MAX + 1)] },
+    ]) expect(readMandateRevocation(body), JSON.stringify(body)).toBe('invalid');
+  });
+
+  it('takes at most MANDATE_REVOCATION_MAX ids', () => {
+    const ids = (n: number): string[] => Array.from({ length: n }, (_, i) => `TEST-M-${String(i)}`);
+    expect(readMandateRevocation({ revoked_mandate_ids: ids(MANDATE_REVOCATION_MAX) })).toHaveLength(MANDATE_REVOCATION_MAX);
+    expect(readMandateRevocation({ revoked_mandate_ids: ids(MANDATE_REVOCATION_MAX + 1) })).toBe('invalid');
+  });
+});
+

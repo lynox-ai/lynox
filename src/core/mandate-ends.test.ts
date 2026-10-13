@@ -148,6 +148,16 @@ describe('MandateEnds', () => {
     expect(ends.isLive('M-1', 1_000)).toBe(false);
   });
 
+  it('revokes a mandate once: a repeat changes nothing, keeps the first time and tells no one again', () => {
+    const seen: string[] = [];
+    ends.onRevoke((id) => { seen.push(id); });
+    expect(ends.revoke('M-1', 500)).toBe(true);
+    expect(ends.revoke('M-1', 900)).toBe(false);
+    expect(seen).toEqual(['M-1']);
+    const db = edb.getDb();
+    expect(db.prepare('SELECT revoked_at FROM mandate_ends WHERE mandate_id = ?').get('M-1')).toEqual({ revoked_at: 500 });
+  });
+
   it('stops telling a listener once it is removed', () => {
     const seen: string[] = [];
     const stop = ends.onRevoke((id) => { seen.push(id); });

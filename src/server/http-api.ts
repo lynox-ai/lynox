@@ -84,7 +84,9 @@ import type {
   OAuthClaimRequest,
   OAuthClaimResponse,
   OAuthDeclineCode,
+  MandateRevocationResponse,
 } from '../contract/http.js';
+import { readMandateRevocation, MANDATE_REVOCATION_MAX } from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -163,7 +165,7 @@ interface DynamicRoute {
    * path-matching enumeration so every new admin route is declared once,
    * at registration. See `addDynamic` / `parseDynamicRoute`.
    */
-  scope: AuthScope;
+  scope: RouteScope;
   /** The path as registered (`/api/x/:id`), for the route table. */
   path: string;
   pattern: RegExp;
@@ -264,7 +266,13 @@ const PKG_VERSION: string = (() => {
 // fragility that adding a new admin route required updating TWO places (the
 // route registration AND the path matcher), and the second was easy to
 // forget — turning a destructive route into a user-scope footgun.
-type AuthScope = 'admin' | 'user';
+type RouteScope = 'admin' | 'user';
+/**
+ * What a request is allowed, beside the route's scope (PRD customer-granted-operator-access §3.4,
+ * D6). `cp-admin` is the control plane's admin bearer on a managed instance: it reaches the admin
+ * routes and nothing else. Kept out of `RouteScope`, so no route can be registered under it.
+ */
+type RequestScope = RouteScope | 'cp-admin';
 /** What a verified session cookie carries beside its time: a mandate always names its grant. */
 type SessionMandate = Extract<RequestPrincipal, { kind: 'mandate' }> & { readonly mandateId: string };
 const RATE_WINDOW_MS = 60_000;
@@ -1330,7 +1338,7 @@ function profileOAuthRedirectUri(): string {
   }
 }
 
-function parseDynamicRoute(scope: AuthScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): DynamicRoute {
+function parseDynamicRoute(scope: RouteScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): DynamicRoute {
   const paramNames: string[] = [];
   const pattern = path.replace(/:([^/]+)/g, (_match, name: string) => {
     paramNames.push(name);
@@ -1491,7 +1499,7 @@ export class LynoxHTTPApi {
    * stable for all existing call sites — see `addStatic` which writes
    * both. Lookup happens once per request in the dispatch path.
    */
-  private readonly staticRouteScopes = new Map<string, AuthScope>();
+  private readonly staticRouteScopes = new Map<string, RouteScope>();
   /** What a mandate may do at each static route that declares it; see `MandateStance`. */
   private readonly staticRouteStances = new Map<string, MandateStance>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
@@ -1538,14 +1546,14 @@ export class LynoxHTTPApi {
   // pathname)` enumeration to drift out of sync.
 
   /** Register a fixed-path route. Scope MUST be set per route. */
-  private addStatic(scope: AuthScope, key: string, handler: RouteHandler, stance?: MandateStance): void {
+  private addStatic(scope: RouteScope, key: string, handler: RouteHandler, stance?: MandateStance): void {
     this.staticRoutes.set(key, handler);
     this.staticRouteScopes.set(key, scope);
     if (stance !== undefined) this.staticRouteStances.set(key, stance);
   }
 
   /** Register a parameterised route (`/api/x/:id`). Scope MUST be set per route. */
-  private addDynamic(scope: AuthScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): void {
+  private addDynamic(scope: RouteScope, method: string, path: string, handler: RouteHandler, stance?: MandateStance): void {
     this.dynamicRoutes.push(parseDynamicRoute(scope, method, path, handler, stance));
   }
 
@@ -1553,8 +1561,8 @@ export class LynoxHTTPApi {
    * The route table as the detector reads it: every registered route with its scope and its
    * mandate stance. Test seam, not reachable over HTTP.
    */
-  routeStancesForTesting(): Array<{ method: string; path: string; scope: AuthScope; stance: MandateStance | undefined }> {
-    const out: Array<{ method: string; path: string; scope: AuthScope; stance: MandateStance | undefined }> = [];
+  routeStancesForTesting(): Array<{ method: string; path: string; scope: RouteScope; stance: MandateStance | undefined }> {
+    const out: Array<{ method: string; path: string; scope: RouteScope; stance: MandateStance | undefined }> = [];
     for (const [key, scope] of this.staticRouteScopes) {
       const space = key.indexOf(' ');
       out.push({ method: key.slice(0, space), path: key.slice(space + 1), scope, stance: this.staticRouteStances.get(key) });
@@ -1580,7 +1588,7 @@ export class LynoxHTTPApi {
    * by accident (it tested `pathname === '…/'`); we keep it here by
    * intent.
    */
-  private _lookupRouteScope(method: string, pathname: string): AuthScope | null {
+  private _lookupRouteScope(method: string, pathname: string): RouteScope | null {
     const dispatchMethods = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
     const candidates: string[] = [pathname];
     if (pathname.endsWith('/') && pathname.length > 1) {
@@ -2795,7 +2803,7 @@ export class LynoxHTTPApi {
     // Two-tier: LYNOX_HTTP_SECRET = user scope, LYNOX_HTTP_ADMIN_SECRET = admin scope.
     // When only LYNOX_HTTP_SECRET is set, it implicitly grants admin (backwards compat).
     // Migration endpoints accept X-Migration-Token as alternative auth (admin scope).
-    let authScope: AuthScope = 'admin'; // default for no-secret (localhost) mode
+    let authScope: RequestScope = 'admin'; // default for no-secret (localhost) mode
     this._authOrigin.set(req, 'local');
     if (secret) {
       // Migration token auth — grants admin scope for /api/migration/* endpoints only
@@ -2835,7 +2843,9 @@ export class LynoxHTTPApi {
           const isAdmin = constantTimeEqual(tokenBuf, adminBuf);
           const isUser = constantTimeEqual(tokenBuf, secretBuf);
           if (isAdmin) {
-            authScope = 'admin';
+            // On a managed instance the admin secret is the control plane's: admin routes only
+            // (§3.4). A self-hosted instance with two secrets keeps `admin`, which includes `user`.
+            authScope = readEnvAlias('LYNOX_BILLING_TIER') ? 'cp-admin' : 'admin';
             this._authOrigin.set(req, 'bearer:admin');
           } else if (isUser) {
             authScope = 'user';
@@ -2890,7 +2900,15 @@ export class LynoxHTTPApi {
     // behaviour where requiresAdmin returned false for unknown paths).
     {
       const routeScope = this._lookupRouteScope(method, pathname);
-      if (routeScope === 'admin' && authScope !== 'admin') {
+      // `cp-admin` is let in where the route is an admin route, and refused everywhere else,
+      // unmatched paths included: allowed by naming what it may reach, not by a list of what it
+      // may not.
+      if (authScope === 'cp-admin') {
+        if (routeScope !== 'admin') {
+          errorResponse(res, 403, 'The control plane reaches admin routes only');
+          return;
+        }
+      } else if (routeScope === 'admin' && authScope !== 'admin') {
         errorResponse(res, 403, 'Admin scope required');
         return;
       }
@@ -9148,6 +9166,31 @@ export class LynoxHTTPApi {
         releaseUploads?.();
       }
     }, ownerOnly('revoke the Google connection'));
+
+    // The control plane asks these two with its admin bearer, which reaches admin routes only on a
+    // managed instance (§3.4): the same handlers, registered once more as admin routes.
+    this.addStatic('admin', 'GET /api/admin/google/status', this.staticRoutes.get('GET /api/google/status')!);
+    this.addStatic('admin', 'POST /api/admin/google/revoke', this.staticRoutes.get('POST /api/google/revoke')!);
+
+    // The control plane's list of the account's revoked mandates (§3.5, piece C): the whole list
+    // each call, applied idempotently, so a call after a restore heals what the restore undid.
+    // A revoke that is new ends what the mandate holds at once (the `onRevoke` sweeps).
+    this.addStatic('admin', 'POST /api/admin/mandates/revoke', async (_req, res, _params, body) => {
+      const ids = readMandateRevocation(body);
+      if (ids === 'invalid') {
+        errorResponse(res, 400, `Expected { revoked_mandate_ids: string[] } with at most ${String(MANDATE_REVOCATION_MAX)} ids.`, 'invalid_revocation');
+        return;
+      }
+      const ends = engine.getMandateEnds();
+      if (!ends) {
+        errorResponse(res, 503, 'The store of mandate ends is not available.', 'mandate_ends_unavailable');
+        return;
+      }
+      let newly = 0;
+      for (const id of ids) if (ends.revoke(id)) newly++;
+      const out: MandateRevocationResponse = { newly_revoked: newly };
+      jsonResponse(res, 200, out);
+    });
 
     // Drop the local grant WITHOUT revoking it at Google — the switch-back
     // path (D12). Separate from `/revoke` on purpose: the two differ only in
