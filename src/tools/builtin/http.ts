@@ -2339,11 +2339,25 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // today. A profile that works now keeps working; `custom_endpoint_ack` only
     // exists since 2026-07-02 and the self→managed migration strips it on purpose,
     // so anything else would break live integrations on upgrade.
+    // Everything the gates above and below read off the headers, as they read it. The attach
+    // adds a header, and a slot named like a method override, a routing header or the body's
+    // type would change that reading after it was checked. `isRequestShapingHeaderName` keeps
+    // such a slot from being attached at all; this compares the two readings, so a name that
+    // list does not know yet fails closed instead of passing.
+    const gateReading = (): string => JSON.stringify([
+      effectiveWriteMethod(method, headers, input.url, gateBodyReadings(input.body, headers)),
+      writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)),
+      retargetingHeader(headers)?.trim().toLowerCase() ?? null,
+    ]);
+    const readBeforeAttach = gateReading();
     const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);
     // A refusal means nothing was sent — a failed call, not a quiet one. It is
     // phrased for the model (`Error: api_profile "x" is oauth2 but the vault has
     // no access_token …`), so it goes to the ledger verbatim.
     if (auth.refusal) blockedVerbatim(auth.refusal);
+    if (gateReading() !== readBeforeAttach) {
+      blockedVerbatim(`Blocked: the credential the engine attached for ${new URL(input.url).hostname} changes the request's method, target or how its body is read, so nothing was sent. Fix the api_profile with api_setup action="update" to put the credential in the header the API documents for its key.`);
+    }
     const attachedAuthSlot = auth.slot;
     // Which of the refusal's three cases this host is in — decided here, from what
     // the attach did and whether a profile exists, so no profile text is needed.
