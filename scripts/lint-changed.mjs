@@ -111,6 +111,10 @@ function checkoutAt(repo, tip) {
     if (dir !== null) rmSync(dir, { recursive: true, force: true });
     try { git(repo, ['worktree', 'prune']); } catch { /* best effort */ }
   };
+  // Ctrl-C reaches node before any `finally`; without this the checkout stays registered. Set
+  // BEFORE the checkout is made: a signal during `worktree add` is handled once that call returns.
+  const onSignal = (sig) => { remove(); process.kill(process.pid, sig); };
+  for (const sig of SIGNALS) process.once(sig, onSignal);
   try {
     dir = mkdtempSync(join(tmpdir(), 'lint-changed-'));
     wt = join(dir, 'tree');
@@ -120,12 +124,10 @@ function checkoutAt(repo, tip) {
       if (existsSync(join(repo, m)) && existsSync(dirname(join(wt, m)))) symlinkSync(join(repo, m), join(wt, m));
     }
   } catch (e) {
+    for (const sig of SIGNALS) process.removeListener(sig, onSignal);
     remove();
     throw e instanceof CannotCheck ? e : new CannotCheck(`the temporary checkout could not be created: ${String(e?.message ?? e).split('\n')[0]}`);
   }
-  // Ctrl-C reaches node before any `finally`; without this the checkout stays registered.
-  const onSignal = (sig) => { remove(); process.kill(process.pid, sig); };
-  for (const sig of SIGNALS) process.once(sig, onSignal);
   return {
     wt,
     remove() {
