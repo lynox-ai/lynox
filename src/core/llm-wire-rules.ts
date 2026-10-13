@@ -7,7 +7,10 @@
  * and are applied HERE, once, for every request every client sends, instead of at the
  * dozen call sites that build requests. A new caller or a new model therefore cannot
  * reintroduce a field the model refuses: the rule follows the model id, not the code
- * path. `createLLMClient` wraps every Anthropic and Vertex client it builds.
+ * path. `createLLMClient` wraps every Anthropic and Vertex client it builds; the probes
+ * that post to a Messages URL with `fetch` instead (the endpoint test in the HTTP API, for
+ * Anthropic and for a custom Anthropic-wire endpoint, and the installer's key check) pass
+ * their body through {@link shapeRequestForModel} too.
  *
  * The one rewrite that changes behaviour is the forced tool. With `auto` the model may
  * answer without calling the tool, so the boundary checks the reply and throws
@@ -109,6 +112,38 @@ export function shapeRequestForModel<P extends Params>(params: P): { params: P; 
   return { params: out as P, forced };
 }
 
+/**
+ * A batch request forced a tool on a model that rejects the forced choice. A single
+ * request is relaxed to `auto` and its reply checked; a batch's replies arrive later,
+ * through the results, where nothing checks them, so relaxing there would lose the call
+ * silently. Thrown before the batch is sent.
+ */
+export class ForcedToolInBatchError extends Error {
+  override readonly name = 'ForcedToolInBatchError';
+  constructor(readonly model: string, readonly customId: string) {
+    super(`${model} rejects a forced tool_choice, and batch request "${customId}" forces one; its reply could not be checked`);
+  }
+}
+
+/**
+ * Shape every request of a `batches.create` call as {@link shapeRequestForModel} shapes a
+ * single one. Pure. Throws {@link ForcedToolInBatchError} where a forced tool would have
+ * to be relaxed.
+ */
+export function shapeBatchRequests<P extends Params>(params: P): P {
+  const requests = params['requests'];
+  if (!Array.isArray(requests)) return params;
+  return {
+    ...params,
+    requests: requests.map((r: { custom_id?: unknown; params?: Params }) => {
+      if (!r?.params) return r;
+      const { params: shaped, forced } = shapeRequestForModel(r.params);
+      if (forced) throw new ForcedToolInBatchError(String(shaped['model']), String(r.custom_id));
+      return shaped === r.params ? r : { ...r, params: shaped };
+    }),
+  };
+}
+
 /** Throw {@link ForcedToolNotCalledError} when the reply lacks the call `forced` required. */
 export function assertForcedToolCalled(
   model: string,
@@ -147,7 +182,7 @@ function intercept(surface: Record<string, unknown>, key: string, call: (orig: F
   });
 }
 
-/** Wrap one `messages`-like surface: create, stream, countTokens. */
+/** Wrap one `messages`-like surface: create, stream, countTokens, and batches.create. */
 function wrapMessages(surface: Record<string, unknown> | undefined): void {
   if (!surface) return;
 
@@ -181,6 +216,10 @@ function wrapMessages(surface: Record<string, unknown> | undefined): void {
   // Token counting rejects the same fields (the forced choice included), but has no
   // reply to check.
   intercept(surface, 'countTokens', (orig, _this, params, rest) => orig(shapeRequestForModel(params).params, ...rest));
+
+  // A batch carries many requests, each with its own params.
+  const batches = surface['batches'] as Record<string, unknown> | undefined;
+  if (batches) intercept(batches, 'create', (orig, _this, params, rest) => orig(shapeBatchRequests(params), ...rest));
 }
 
 /**

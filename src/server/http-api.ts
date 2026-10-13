@@ -21,6 +21,7 @@ import {
   PROFILE_OAUTH_STATE_TTL_SEC,
 } from '../core/oauth-state-cookie.js';
 import { createPkcePair } from '../core/oauth-pkce.js';
+import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
@@ -8769,11 +8770,11 @@ export class LynoxHTTPApi {
               'x-api-key': apiKey,
               'anthropic-version': '2023-06-01',
             },
-            body: JSON.stringify({
+            body: JSON.stringify(shapeRequestForModel({
               model: model || 'claude-haiku-4-5-20251001',
               max_tokens: 1,
               messages: [{ role: 'user', content: 'hi' }],
-            }),
+            }).params),
             signal: AbortSignal.timeout(10_000),
           });
           if (!probeRes.ok) {
@@ -8800,7 +8801,7 @@ export class LynoxHTTPApi {
               ? { 'Authorization': `Bearer ${apiKey}` }
               : { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
             ...(provider === 'custom' && {
-              body: JSON.stringify({ model: model || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+              body: JSON.stringify(shapeRequestForModel({ model: model || 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }).params),
             }),
             signal: AbortSignal.timeout(10_000),
           });
