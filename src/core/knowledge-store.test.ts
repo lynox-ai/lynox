@@ -1264,11 +1264,41 @@ describe('the always-loaded profile block and who may reach into it', () => {
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
   });
 
-  it('deleteEntry: a failing profile write does not undo the delete', () => {
+  it('deleteEntry THROWS when the block cannot be changed, keeps the row, and a retry finishes', () => {
+    // Same order as the private purge above. The row is the only place the line can be
+    // matched from, so it stays until the block no longer holds the text.
     const { ks } = make();
     const id = seed(ks, 'agent');
-    vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
+    const spy = vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
+
+    expect(() => ks.deleteEntry(id)).toThrow('disk full');
+    expect(ks.getEntry(id)).not.toBeNull();
+    expect(ks.getBlock('profile')?.content).toContain(LINE);
+
+    spy.mockRestore();
     expect(ks.deleteEntry(id)).toBe(true);
+    expect(ks.getEntry(id)).toBeNull();
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('deleteBySubject THROWS when the block cannot be changed, keeps every row, and a retry finishes', () => {
+    const { ks } = make();
+    const SUBJECT_LINE = 'Jana Reber prefers terse replies';
+    ks.setBlockContent('profile', SUBJECT_LINE);
+    const first = ks.write({ text: SUBJECT_LINE, subjectName: 'Jana Reber', sourceChannel: 'ui', sourceUntrusted: false });
+    const second = ks.write({ text: 'Jana Reber works from Bern', subjectName: 'Jana Reber', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(first.subjectId, 'fixture guard: the subject resolved').not.toBeNull();
+    expect(second.subjectId, 'fixture guard: one subject').toBe(first.subjectId);
+    const spy = vi.spyOn(ks, 'setBlockContent').mockImplementation(() => { throw new Error('disk full'); });
+
+    expect(() => ks.deleteBySubject(first.subjectId!)).toThrow('disk full');
+    expect(ks.getEntry(first.id)).not.toBeNull();
+    expect(ks.getEntry(second.id)).not.toBeNull();
+    expect(ks.getBlock('profile')?.content).toContain(SUBJECT_LINE);
+
+    spy.mockRestore();
+    expect(ks.deleteBySubject(first.subjectId!)).toBe(2);
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(SUBJECT_LINE);
   });
 });
 
