@@ -36,7 +36,12 @@ const REPS = 3;
 const MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
 
 type Family = 'anthropic' | 'mistral' | 'fireworks';
-interface Candidate { family: Family; modelId: string }
+interface Candidate {
+  family: Family;
+  modelId: string;
+  /** Output budget when the model thinks without saying so in its capability entry (measured). */
+  maxOutput?: number;
+}
 
 /** Every model the eval knows. `LYNOX_E2_MODELS` (comma list) picks from it; unset → the first four. */
 const CANDIDATES: readonly Candidate[] = [
@@ -46,20 +51,24 @@ const CANDIDATES: readonly Candidate[] = [
   { family: 'anthropic', modelId: 'claude-sonnet-4-6' },
   { family: 'mistral', modelId: 'mistral-small-2603' },
   { family: 'fireworks', modelId: 'accounts/fireworks/models/deepseek-v4p1-flash' },
-  { family: 'fireworks', modelId: 'accounts/fireworks/models/minimax-m3' },
+  // Measured 2026-10-13: on R-a it spends all 400 tokens thinking and never calls the tool;
+  // the capability entry declares no thinking. Same headroom as the thinking-only models.
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/minimax-m3', maxOutput: 1424 },
   { family: 'fireworks', modelId: 'accounts/fireworks/models/gpt-oss-120b' },
   { family: 'fireworks', modelId: 'accounts/fireworks/models/glm-5p3' },
 ];
 const picked = process.env['LYNOX_E2_MODELS']?.split(',').map((x) => x.trim()).filter(Boolean);
 const MODELS: readonly Candidate[] = picked ? CANDIDATES.filter((c) => picked.includes(c.modelId)) : CANDIDATES.slice(0, 4);
+const unknownPicks = (picked ?? []).filter((id) => !CANDIDATES.some((c) => c.modelId === id));
 
 /**
  * Output budget per call. A model the provider will not let stop thinking needs room above its
  * measured silent bound, or the adapter refuses the call; its thinking is billed as output and
  * so shows in the measured cost. Everyone else gets the judge's own small budget.
  */
-function maxOutputFor(modelId: string): number {
-  const silent = modelCapability(modelId)?.thinkingOnly?.emptyAtOrBelow;
+function maxOutputFor(m: Candidate): number {
+  if (m.maxOutput !== undefined) return m.maxOutput;
+  const silent = modelCapability(m.modelId)?.thinkingOnly?.emptyAtOrBelow;
   return silent === undefined ? MAX_OUTPUT_TOKENS : silent + 1024;
 }
 
@@ -76,7 +85,7 @@ const FIREWORKS_KEY = process.env['FIREWORKS_API_KEY'] ?? configKey('fireworks_a
 const KEYS: Record<Family, string | undefined> = { anthropic: ANTHROPIC_KEY, mistral: MISTRAL_KEY, fireworks: FIREWORKS_KEY };
 
 const asked = MODE === 'smoke' || MODE === 'full';
-// Every picked model needs its key; a typo in LYNOX_E2_MODELS picks nothing and the test fails.
+// Every picked model needs its key. A name in LYNOX_E2_MODELS that matches no candidate fails the run.
 const describeE2 = asked && ANTHROPIC_KEY && MODELS.every((m) => KEYS[m.family]) ? describe : describe.skip;
 
 function outDir(): string {
@@ -98,7 +107,8 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
     };
     const clientFor = (m: Candidate) => clientForTierSnapshot(snapshot(m), ambient, 'anthropic');
 
-    const smokeModel = process.env['LYNOX_E2_SMOKE_MODEL'] ?? MODELS[0]!.modelId;
+    expect(unknownPicks, 'LYNOX_E2_MODELS names no such candidate').toEqual([]);
+    const smokeModel = process.env['LYNOX_E2_SMOKE_MODEL'] ?? MODELS[0]?.modelId;
     const models = MODE === 'smoke' ? MODELS.filter((m) => m.modelId === smokeModel) : MODELS;
     expect(models.length).toBeGreaterThan(0);
     const fixtures: readonly Fixture[] = MODE === 'smoke' ? FIXTURES.filter((f) => f.id === 'c01') : FIXTURES;
@@ -123,7 +133,7 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
             const user = userMessage(rule, f);
             // Worst case for the next call: two characters per token in, the full output cap out.
             const price = modelCapability(m.modelId)!.pricing;
-            const maxOut = maxOutputFor(m.modelId);
+            const maxOut = maxOutputFor(m);
             const worst = (Math.ceil((JUDGE_SYSTEM.length + user.length) / 2) * price.input + maxOut * price.output) / 1_000_000;
             if (spent + worst > LIMIT_USD) { aborted = `limit: spent ${spent.toFixed(4)} + next worst ${worst.toFixed(4)} > ${String(LIMIT_USD)}`; break; }
             let o: CallOutcome | null = null;
