@@ -2649,13 +2649,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
-        // shown cut short. In a mandate's session a write whose body cannot be shown is refused,
-        // with the way out that fits it; the owner is asked with the field names, as before.
+        // shown cut short. In a mandate's session, and for a write to an account connected through
+        // a built-in provider, a write whose body cannot be shown is refused, with the way out that
+        // fits it: there the values (amounts, recipients) are what the approval is about. Otherwise
+        // the owner is asked with the field names, as before.
         const sentBody = repairedBody?.body ?? input.body;
         const bodyGoesOut = typeof sentBody === 'string' && sentBody !== '' && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';
         const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
         const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ')) : undefined;
-        if (bodyGoesOut && !isOwnerPrincipal(agent.principal) && (shown === undefined || 'unshowable' in shown)) {
+        if (bodyGoesOut && (!isOwnerPrincipal(agent.principal) || connectedAccount) && (shown === undefined || 'unshowable' in shown)) {
           blockedVerbatim(
             shown !== undefined
               ? `Blocked: the body of this ${gatedMethod} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`

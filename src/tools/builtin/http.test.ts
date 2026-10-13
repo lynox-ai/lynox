@@ -1088,6 +1088,31 @@ describe('httpRequestTool', () => {
           expect(promptUser).toHaveBeenCalledTimes(1);
         });
 
+        // One byte over what an approval question shows whole: the values would not be shown.
+        const overLimit = (): string => { const b = `{"note":"${'one position, '.repeat(Math.ceil(SHOWN_BODY_MAX_BYTES / 14))}"}`; expect(sentBytes(b)).toBeGreaterThan(SHOWN_BODY_MAX_BYTES); return b; };
+
+        it('refuses a body the question cannot show whole, with the way out, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const out = await visible({ ...post, body: overLimit() }, makeAgent({ promptUser }));
+          expect(out).toContain(`is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes`);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: without a preset, the same body is asked with its field names', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await visible({ ...post, body: overLimit() }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(flattenPrompt(promptUser.mock.calls[0]![0])).toContain('is too large to show; its field names are listed.');
+        });
+
         it('refuses a scheduled write without a contract, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
