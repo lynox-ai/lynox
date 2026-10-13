@@ -6,7 +6,7 @@
  * Supports binary file upload (SQLite, encrypted files).
  */
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { BackupManifest } from './backup.js';
 import { isProvisionedInstance } from './wire-capture.js';
@@ -73,10 +73,8 @@ const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 /**
  * Where the uploader keeps the id of its `lynox-backups` root across restarts.
  *
- * Once a root is pinned, the uploader takes that folder and no other: a listing by name is not
- * asked again, so a second folder of the same name that later appears in the user's Drive —
- * one the user owns and this app is authorized for — is not taken in its place. Ownership of a
- * folder can be transferred to the user, and the previous owner keeps write access to it.
+ * Once a root is pinned, the uploader takes that folder while the account can see it: a second
+ * folder of the same name that later appears in the user's Drive is not taken in its place.
  */
 export interface RootFolderPin {
   read(): string | null;
@@ -102,7 +100,10 @@ export function fileRootPin(dir: string): RootFolderPin {
     },
     write: (id: string) => {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      writeFileSync(path, `${id}\n`, { mode: 0o600 });
+      // Beside the file and renamed over it, so a reader never sees a half-written id.
+      const tmp = `${path}.${String(process.pid)}.tmp`;
+      writeFileSync(tmp, `${id}\n`, { mode: 0o600 });
+      renameSync(tmp, path);
     },
   };
 }
@@ -357,11 +358,15 @@ export class GDriveBackupUploader {
   /**
    * Find the root 'lynox-backups' folder this app created and the user owns (null if none).
    *
-   * With a pinned root, only that folder: it counts while it is a folder the user owns, this app
-   * is authorized for and that is not in the bin. Otherwise the answer is null and the caller
-   * creates a new root — no lookup by name, which would let a folder that appeared since stand
-   * in for the pinned one. A Drive that cannot be asked is an error, not a missing root: a new
-   * root created on a passing failure would leave the backups split over two.
+   * With a pinned root, that folder: it counts while it is a folder the user owns, this app is
+   * authorized for and that is not in the bin. When the account sees it but it no longer is all
+   * of that, the answer is null and the caller creates a new root — no lookup by name, which
+   * would let a folder that appeared since stand in for the pinned one. When the account does
+   * not see it at all (Drive answers 404), the pin names nothing this account has — it was
+   * deleted, or the instance is now connected to another Google account — and the lookup goes
+   * by name, as without a pin; otherwise switching back to an earlier account would hide that
+   * account's backups behind a new root. A Drive that cannot be asked is an error, not a
+   * missing root: a new root created on a passing failure would leave the backups split over two.
    *
    * Without a pin, by name. A name alone does not identify it: under the full `drive` scope a
    * listing by name also returns folders other accounts shared with the user (under `drive.file`
@@ -377,9 +382,12 @@ export class GDriveBackupUploader {
 
     const pinned = this.rootPin?.read() ?? null;
     if (pinned !== null) {
-      if (!await this.isOwnRoot(pinned)) return null;
-      this.rootFolderId = pinned;
-      return pinned;
+      const seen = await this.pinnedRoot(pinned);
+      if (seen === 'own') {
+        this.rootFolderId = pinned;
+        return pinned;
+      }
+      if (seen === 'not-own') return null;
     }
 
     let pageToken: string | undefined;
@@ -410,17 +418,22 @@ export class GDriveBackupUploader {
     return null;
   }
 
-  /** Whether the pinned folder is still this instance's root. Throws when Drive cannot say. */
-  private async isOwnRoot(id: string): Promise<boolean> {
+  /**
+   * What the pinned folder is to this account: still its root (`own`), a file it sees that is
+   * not its root (`not-own`), or nothing it sees (`unseen`). Throws when Drive cannot say.
+   */
+  private async pinnedRoot(id: string): Promise<'own' | 'not-own' | 'unseen'> {
     const params = new URLSearchParams({ fields: 'id,mimeType,trashed,ownedByMe,isAppAuthorized' });
     const response = await driveFetch(this.auth, `${DRIVE_BASE}/files/${encodeURIComponent(id)}?${params.toString()}`);
-    if (response.status === 404) return false;
+    if (response.status === 404) return 'unseen';
     if (!response.ok) throw new Error(`Could not read the pinned ${BACKUP_FOLDER_NAME} folder: ${String(response.status)}`);
     const f = await response.json() as {
       mimeType?: string | undefined; trashed?: boolean | undefined;
       ownedByMe?: boolean | undefined; isAppAuthorized?: boolean | undefined;
     };
-    return f.mimeType === FOLDER_MIME && f.trashed === false && f.ownedByMe === true && f.isAppAuthorized === true;
+    // `trashed` is compared against true: a response that leaves it out is not a folder in the bin.
+    const own = f.mimeType === FOLDER_MIME && f.trashed !== true && f.ownedByMe === true && f.isAppAuthorized === true;
+    return own ? 'own' : 'not-own';
   }
 
   /**

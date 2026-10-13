@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -284,19 +284,48 @@ describe('once a root is pinned, the uploader keeps it', () => {
     expect(pin.value).toBe(root);
   });
 
-  it('creates a new root when the pinned one no longer exists', async () => {
-    folder('other', { ownedByMe: true, isAppAuthorized: true });
+  it('looks the root up by name when this account does not see the pinned one, and pins what it finds', async () => {
+    // A pin from another Google account the instance was connected to: Drive answers 404 for it.
+    // Switching back must find this account's root again, not hide its backups behind a new one.
+    folder('this-account', { ownedByMe: true, isAppAuthorized: true });
+    const pin = memPin('other-account-root');
+    const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
+    expect(out.success).toBe(true);
+    expect(rootsWritten()).toEqual(['this-account']);
+    expect(pin.value).toBe('this-account');
+  });
+
+  it('creates and pins a new root when this account sees neither the pinned root nor one by name', async () => {
     const pin = memPin('gone');
     await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
     const [root] = rootsWritten();
-    expect(root).not.toBe('other');
+    expect(root).toBeDefined();
     expect(pin.value).toBe(root);
   });
 
   it('does not take a pinned id that names a file, not a folder', async () => {
     drive.set('a-file', { id: 'a-file', name: 'lynox-backups', mimeType: 'text/plain', parents: ['my-drive'], ownedByMe: true, isAppAuthorized: true });
-    await upload(new GDriveBackupUploader(auth, { rootPin: memPin('a-file') }));
+    const out = await upload(new GDriveBackupUploader(auth, { rootPin: memPin('a-file') }));
+    expect(out.success).toBe(true);
     expect(rootsWritten()).not.toContain('a-file');
+  });
+
+  it('takes a pinned folder whose answer leaves out `trashed`', async () => {
+    folder('own', { ownedByMe: true, isAppAuthorized: true });
+    const real = mockGoogleFetch.getMockImplementation()!;
+    mockGoogleFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      const u = new URL(url);
+      if ((init?.method ?? 'GET') === 'GET' && u.pathname === '/drive/v3/files/own' && u.searchParams.get('alt') !== 'media') {
+        return respond(200, { id: 'own', mimeType: FOLDER, ownedByMe: true, isAppAuthorized: true });
+      }
+      return real(url, init);
+    });
+    try {
+      await upload(new GDriveBackupUploader(auth, { rootPin: memPin('own') }));
+      expect(rootsWritten()).toEqual(['own']);
+    } finally {
+      mockGoogleFetch.mockImplementation(real);
+    }
   });
 
   it('fails the upload and creates nothing when Drive cannot say what the pinned folder is', async () => {
@@ -326,6 +355,23 @@ describe('once a root is pinned, the uploader keeps it', () => {
     expect(listed.map(b => b.id)).toEqual(['mine']);
   });
 
+  it('lists nothing and creates nothing when the pinned root is no longer this instance\'s', async () => {
+    drive.set('pinned', { id: 'pinned', name: 'lynox-backups', mimeType: FOLDER, parents: ['my-drive'], ownedByMe: true, isAppAuthorized: true, trashed: true });
+    drive.set('old', { id: 'old', name: '2026-10-01T00000000Z', mimeType: FOLDER, parents: ['pinned'], ownedByMe: true, isAppAuthorized: true });
+    folder('other', { ownedByMe: true, isAppAuthorized: true });
+    drive.set('theirs', { id: 'theirs', name: '2026-10-02T00000000Z', mimeType: FOLDER, parents: ['other'], ownedByMe: true, isAppAuthorized: true });
+    const before = drive.size;
+    expect(await new GDriveBackupUploader(auth, { rootPin: memPin('pinned') }).list()).toEqual([]);
+    expect(drive.size).toBe(before);
+  });
+
+  it('pins the root a listing finds by name', async () => {
+    folder('own', { ownedByMe: true, isAppAuthorized: true });
+    const pin = memPin();
+    await new GDriveBackupUploader(auth, { rootPin: pin }).list();
+    expect(pin.value).toBe('own');
+  });
+
   it('still uploads when the pin cannot be written', async () => {
     const pin: RootFolderPin = { read: () => null, write: () => { throw new Error('disk full'); } };
     const out = await upload(new GDriveBackupUploader(auth, { rootPin: pin }));
@@ -341,6 +387,16 @@ describe('fileRootPin', () => {
     expect(pin.read()).toBe('1AbC_d-9');
     expect(statSync(join(dir, 'data', 'gdrive-backup-root')).mode & 0o777).toBe(0o600);
     expect(readFileSync(join(dir, 'data', 'gdrive-backup-root'), 'utf8')).toBe('1AbC_d-9\n');
+  });
+
+  it('replaces the file rather than writing into it, so a reader never sees half an id', () => {
+    // A file that cannot be written in place, but can be replaced in its directory.
+    mkdirSync(join(dir, 'data'));
+    writeFileSync(join(dir, 'data', 'gdrive-backup-root'), 'old-id\n', { mode: 0o400 });
+    const pin = fileRootPin(join(dir, 'data'));
+    pin.write('new-id');
+    expect(pin.read()).toBe('new-id');
+    expect(readdirSync(join(dir, 'data'))).toEqual(['gdrive-backup-root']);
   });
 
   it('reads anything that is not a Drive id as no pin', () => {
