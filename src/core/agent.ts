@@ -1648,7 +1648,7 @@ export class Agent implements IAgent {
       // still landed: chips gone on reload, orphan tool_result on disk.
       const last = this.messages.at(-1);
       // 9 alphanumerics: the narrowest shape reported for a target provider
-      // (Mistral is documented as validating `^[a-zA-Z0-9]{9}$`), chosen because
+      // (Mistral is reported to validate `^[a-zA-Z0-9]{9}$`), chosen because
       // this pair is PERSISTED — a rejected id fails not just this turn but every
       // later turn in the thread, on exactly the provider the recovery exists
       // for. This says nothing about ids from other sources.
