@@ -194,7 +194,7 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
   });
 
   it('masks a key that follows a character the row escapes', async () => {
-    // Masked before escaping: after `%3F` the key would no longer start on a boundary.
+    // Through the real server: a key after a character the row escapes is masked all the same.
     const tail = 'A1b2'.repeat(6);
     for (const path of [`/api/threads/x%3Fsk-ant-${tail}`, `/api/files/read?path=x%3Fsk-ant-${tail}`]) {
       const res = await ask('GET', path, mandateCookie);
