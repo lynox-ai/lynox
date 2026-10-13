@@ -23,6 +23,54 @@ describe('effectiveWriteMethod', () => {
   });
 });
 
+// A name counts when some common parser reads it as the override (PHP 8.3 `parse_str` measured,
+// Express's `qs` measured, Rack 2 and ASP.NET MVC from their documented parsing), or when it is
+// read as one on purpose (`_method[`: cut at the bracket); a name no parser reads as one stays a field.
+describe('a query or form name a server may read as the override', () => {
+  const FORM = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  it.each([
+    ['.method', 'DELETE'],
+    ['%2Emethod', 'DELETE'],
+    ['+_method', 'DELETE'],
+    ['%20_method', 'DELETE'],
+    ['_method%00x', 'DELETE'],
+    ['_method[]', 'DELETE'],
+    ['_method%5B%5D', 'DELETE'],
+    ['_method[x]y', 'DELETE'],
+    ['_method[a][b]', 'DELETE'],
+    ['_method[', 'DELETE'],
+    ['_method]', 'DELETE'],
+    ['[_method]', 'DELETE'],
+    [']]_method]]', 'DELETE'],
+    ['._method', 'DELETE'],
+    ['._method.', 'DELETE'],
+    ['._method..', 'DELETE'],
+    ['X-HTTP-Method-Override', 'DELETE'],
+    ['x-method-override', 'DELETE'],
+    ['+method', 'POST'],
+    ['[method', 'POST'],
+    ['_method.', 'POST'],
+    ['_method+', 'POST'],
+    ['%00_method', 'POST'],
+    ['data[_method]', 'POST'],
+    ['x[_method]', 'POST'],
+    ['payment_method', 'POST'],
+    ['_method.x', 'POST'],
+    ['.x._method', 'POST'],
+  ] as const)('%s=DELETE is gated as %s, in the query and in a form body', (name, want) => {
+    expect(effectiveWriteMethod('POST', {}, `${U}?${name}=DELETE`)).toBe(want);
+    expect(effectiveWriteMethod('POST', FORM, U, `${name}=DELETE`)).toBe(want);
+  });
+
+  it('reads a multipart part name the same way', () => {
+    const MULTI = { 'Content-Type': 'multipart/form-data; boundary=b' };
+    const part = (name: string) => `--b\r\nContent-Disposition: form-data; name="${name}"\r\n\r\nDELETE\r\n--b--`;
+    expect(effectiveWriteMethod('POST', MULTI, U, part('[_method]'))).toBe('DELETE');
+    expect(effectiveWriteMethod('POST', MULTI, U, part('X-HTTP-Method-Override'))).toBe('DELETE');
+    expect(effectiveWriteMethod('POST', MULTI, U, part('data[_method]'))).toBe('POST');
+  });
+});
+
 describe('writeMethodsNamed', () => {
   it.each([
     ['PATCH', {}, U, ['PATCH']],
@@ -77,7 +125,7 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
     ['form key as an array', FORM, '_method[]=DELETE', 'DELETE'],
     ['form key as an indexed array', FORM, '_method[0]=delete', 'DELETE'],
     ['form key in capitals', FORM, '_METHOD=DELETE', 'DELETE'],
-    ['form key with an unclosed bracket, which PHP reads as _method_x', FORM, '_method[x=DELETE', 'POST'],
+    ['form key with an unclosed bracket, read as _method on purpose (PHP reads _method_x)', FORM, '_method[x=DELETE', 'DELETE'],
     ['JSON with a stray close tag a repair strips before sending', JSON_T, '{"_method":"DELETE"}</body>', 'DELETE'],
     ['JSON-like type a server reads as JSON', { 'Content-Type': 'application/json-seq' }, '{"_method":"DELETE"}</body>', 'DELETE'],
     ['JSON that does not parse, method name escaped', JSON_T, '{"_\\u006dethod":"DELETE"}</body>', 'DELETE'],
