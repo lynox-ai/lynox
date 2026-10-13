@@ -4,30 +4,59 @@ import { channels } from './observability.js';
 import { isCriticalTool } from '../tools/permission-guard.js';
 
 /**
+ * What a glob's `**`, `*` and `?` may stand for: a run of characters, a run without `/`, and one
+ * character other than `/`. Which characters count is the alphabet's choice: all of them, or for a
+ * bash pattern all but those listed at {@link ONE_SHELL_COMMAND}.
+ */
+export interface GlobAlphabet { readonly any: string; readonly segment: string; readonly one: string }
+
+const ANY_TEXT: GlobAlphabet = { any: '.*', segment: '[^/]*', one: '[^/]' };
+
+/**
+ * The characters that end one shell command and start another, or feed it from or into a file:
+ * `;`, `&`, `|`, a line break, a command substitution (`$(`, backtick), a subshell (`(`), and a
+ * redirection. And `$`: a variable or substitution expands at run time to text the pattern never
+ * shows. No wildcard in a bash pattern (`*`, `**`, `?`) covers one of these, so
+ * `curl https://api.x.test/*` never covers that request followed by a second command. A pattern
+ * that writes such a character itself still matches it literally.
+ */
+const ONE_SHELL_COMMAND: GlobAlphabet = {
+  any: '[^;&|\\n\\r`$(<>]*',
+  segment: '[^/;&|\\n\\r`$(<>]*',
+  one: '[^/;&|\\n\\r`$(<>]',
+};
+
+/** The regex a pre-approval pattern is matched with, for the tool it names. */
+export function patternRegex(toolName: string, pattern: string): RegExp {
+  return globToRegex(pattern, toolName === 'bash' ? ONE_SHELL_COMMAND : ANY_TEXT);
+}
+
+/**
  * Convert a glob pattern to a RegExp.
  * - `**` matches anything (including `/`)
  * - `*` matches anything except `/`
+ * - `?` matches one character except `/`
+ * (each within the alphabet given; a bash pattern narrows all three)
  * - All other regex-special characters are escaped.
  *
  * INVARIANT: the emitted pattern never contains two ADJACENT unanchored
- * quantifiers (`.*`/`[^/]*`), which is the catastrophic-backtracking shape — a
- * hostile glob (e.g. an imported capability-contract `hostPattern`) tested
- * against a non-matching host would otherwise freeze the event loop. Adjacency
+ * quantifiers (the alphabet's `any`/`segment`), a catastrophic-backtracking shape that, tested
+ * against a non-matching input, can freeze the event loop. Adjacency
  * arises not only from consecutive stars but from repeated double-star groups
  * separated by slashes: each double-star also consumes its trailing slash, so the
  * separators vanish and the quantifiers land side by side — both cases coalesce.
- * Two adjacent unanchored quantifiers are match-equivalent to a single `.*` (both
- * match any run), so they merge; a quantifier separated by any literal (a `?`, a
- * dot, a domain label, an un-eaten slash) stays anchored and never backtracks.
+ * Two adjacent unanchored quantifiers match the same as a single `any` (`any` ⊇
+ * `segment`), so they merge.
  */
-export function globToRegex(glob: string): RegExp {
+export function globToRegex(glob: string, within: GlobAlphabet = ANY_TEXT): RegExp {
   const parts: string[] = [];
+  const { any, segment } = within;
   // Append an unanchored quantifier, merging with a preceding one so the output
-  // can never hold two in a row (`.*` ⊇ `[^/]*`, so the union is always `.*`).
-  const coalesceQuantifier = (q: '.*' | '[^/]*'): void => {
+  // can never hold two in a row (`any` ⊇ `segment`, so the union is always `any`).
+  const coalesceQuantifier = (q: string): void => {
     const last = parts[parts.length - 1];
-    if (last === '.*' || last === '[^/]*') {
-      parts[parts.length - 1] = '.*';
+    if (last === any || last === segment) {
+      parts[parts.length - 1] = any;
     } else {
       parts.push(q);
     }
@@ -36,14 +65,14 @@ export function globToRegex(glob: string): RegExp {
   while (i < glob.length) {
     const ch = glob[i]!;
     if (ch === '*' && glob[i + 1] === '*') {
-      coalesceQuantifier('.*');
+      coalesceQuantifier(any);
       i += 2;
       if (glob[i] === '/') i++;
     } else if (ch === '*') {
-      coalesceQuantifier('[^/]*');
+      coalesceQuantifier(segment);
       i++;
     } else if (ch === '?') {
-      parts.push('[^/]');
+      parts.push(within.one);
       i++;
     } else if ('.+(){}[]^$|\\'.includes(ch)) {
       parts.push('\\' + ch);
@@ -160,7 +189,7 @@ export function matchesPreApproval(
       continue;
     }
 
-    const regex = globToRegex(pat.pattern);
+    const regex = patternRegex(toolName, pat.pattern);
     if (regex.test(matchStr)) {
       set.usageCounts[i] = (set.usageCounts[i] ?? 0) + 1;
       audit?.recordCheck({

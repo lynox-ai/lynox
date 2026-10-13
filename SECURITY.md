@@ -81,11 +81,10 @@ When running in Docker, lynox operates in a sandboxed workspace:
 
 ### Pre-Approval System
 
-Tool execution can be controlled via pre-approval patterns:
-- Glob-based matching
-- Critical tool detection and blocking
+A workflow manifest step can pre-approve tool calls with `pre_approve` patterns:
+- Glob-based matching; in a bash pattern no wildcard stands for a command separator, a substitution, a variable expansion or a redirection
+- Critical tool detection and blocking: a pattern can lift a warning, never a block
 - TTL and usage limits
-- Full SQLite audit trail
 
 ### Plugin Isolation
 
