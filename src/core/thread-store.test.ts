@@ -13,6 +13,7 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 function freshDb(): Database.Database {
   const db = new BetterSqlite3(':memory:');
   db.exec(`
+    CREATE TABLE deleted_threads (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL DEFAULT (datetime('now')));
     CREATE TABLE threads (
       created_by TEXT,
       id TEXT PRIMARY KEY,

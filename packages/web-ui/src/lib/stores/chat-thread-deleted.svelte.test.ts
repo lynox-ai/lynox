@@ -1,0 +1,89 @@
+// Runs in the browser-compile project (vitest.config.ts): Svelte state behaves as in the browser.
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// A deleted conversation stays deleted: the server answers 410 to opening it again. The chat says
+// so, in the user's language, instead of "no connection", and nothing tries it again.
+
+type Store = typeof import('./chat.svelte.js');
+
+vi.mock('./toast.svelte.js', () => ({ addToast: () => 1 }));
+
+const json = (body: unknown, status = 200): Response =>
+	new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+const gone = (): Response => json({ error: 'This conversation was deleted.', code: 'thread_deleted' }, 410);
+
+let store: Store;
+let deletedText: string;
+let calls: Array<{ url: string; body: unknown }>;
+
+function serve(route: (url: string, n: number) => Response | undefined): void {
+	const seen: Record<string, number> = {};
+	vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+		const url = String(input);
+		calls.push({ url, body: typeof init?.body === 'string' ? JSON.parse(init.body) as unknown : undefined });
+		const key = url.replace(/^.*\/api/, '');
+		seen[key] = (seen[key] ?? 0) + 1;
+		const r = route(url, seen[key]!);
+		if (r) return r;
+		if (url.endsWith('/sessions')) return json({ sessionId: 't1' });
+		if (url.endsWith('/runs/active')) return json({ runs: [] });
+		return json({ messages: [], activeRun: null });
+	}));
+}
+const sessionPosts = (): number => calls.filter((c) => c.url.endsWith('/sessions')).length;
+const runPosts = (): number => calls.filter((c) => c.url.endsWith('/run')).length;
+
+beforeEach(async () => {
+	vi.stubGlobal('navigator', { onLine: true });
+	vi.stubGlobal('window', { addEventListener: () => {} });
+	vi.resetModules();
+	store = await import('./chat.svelte.js');
+	deletedText = (await import('../i18n.svelte.js')).t('chat.error_thread_deleted');
+	calls = [];
+});
+afterEach(() => { vi.unstubAllGlobals(); });
+
+describe('a conversation deleted elsewhere', () => {
+	it('opening it starts a new chat and says it was deleted', async () => {
+		serve((url) => (url.endsWith('/sessions') ? gone() : undefined));
+
+		await store.resumeThread('t-gone');
+
+		expect(store.getChatError()).toBe(deletedText);
+		expect(store.getSessionId(), 'not attached to the deleted thread').toBeNull();
+		expect(store.getMessages()).toEqual([]);
+		expect(sessionPosts(), 'asked once, not again').toBe(1);
+	});
+
+	it('a message sent into it is kept as failed and says why', async () => {
+		// The session was dropped (another tab deleted the chat), so the run answers 404 and the
+		// session is opened again under the thread's id: that answers 410.
+		serve((url, n) => {
+			if (url.endsWith('/run')) return json({ error: 'no session' }, 404);
+			if (url.endsWith('/sessions') && n >= 2) return gone();
+			return undefined;
+		});
+
+		await store.sendMessage('hello');
+
+		expect(store.getChatError()).toBe(deletedText);
+		const user = store.getMessages().find((m) => m.role === 'user' && m.content === 'hello');
+		expect(user?.failed, 'kept, failed').toBe(true);
+		expect(store.getMessages().some((m) => m.role === 'assistant' && !m.content), 'empty bubble removed').toBe(false);
+		expect(store.getIsStreaming()).toBe(false);
+		const opens = calls.filter((c) => c.url.endsWith('/sessions'));
+		expect(opens, 'opened, then one attempt to reopen it').toHaveLength(2);
+		expect(opens[1]!.body, 'reopened under its own id').toEqual({ threadId: 't1' });
+		expect(runPosts()).toBe(1);
+	});
+
+	it('the two texts exist in German and English', async () => {
+		const i18n = await import('../i18n.svelte.js');
+		i18n.setLocale('de');
+		const de = i18n.t('chat.error_thread_deleted');
+		i18n.setLocale('en');
+		const en = i18n.t('chat.error_thread_deleted');
+		expect(de).toBe('Diese Unterhaltung wurde gelöscht. Starte einen neuen Chat.');
+		expect(en).toBe('This conversation was deleted. Start a new chat.');
+	});
+});

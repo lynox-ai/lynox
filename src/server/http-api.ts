@@ -3336,6 +3336,13 @@ export class LynoxHTTPApi {
         }
         if (this._refuseUnlessOwns(_req, res, 'continue this conversation', () => [this._threadRow(threadId)])) return;
       }
+      // A deleted conversation stays deleted. A tab still showing it, or a link into it, would
+      // otherwise open an empty thread under the old id (`createThread` refuses it, but the
+      // session would run on with nowhere to write). 410, so the browser starts a new chat.
+      if (threadId !== undefined && engine.getThreadStore()?.isDeleted(threadId) === true) {
+        jsonResponse(res, 410, { error: 'This conversation was deleted.', code: 'thread_deleted' });
+        return;
+      }
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         principal,

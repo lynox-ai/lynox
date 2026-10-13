@@ -17,6 +17,7 @@ import type { IAgent } from '../../types/index.js';
 function freshThreadsDb(): Database.Database {
   const db = new BetterSqlite3(':memory:');
   db.exec(`
+    CREATE TABLE deleted_threads (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL DEFAULT (datetime('now')));
     CREATE TABLE threads (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL DEFAULT '',

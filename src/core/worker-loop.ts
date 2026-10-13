@@ -1789,10 +1789,15 @@ export class WorkerLoop {
     const running = this.#runSlotOf(task.id);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const triggerTier = admittedTriggerTier(task.model_tier);
+    // Same thread, so the run's own history shows the exchange it continues — unless the owner
+    // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
+    // one is not opened again, and the question and its answer reach the run as input anyway.
+    const continueIn = answered !== undefined && this.engine.getThreadStore()?.isDeleted(answered.session_id) !== true
+      ? answered.session_id
+      : undefined;
     const session = this.engine.createSession({
       autonomy: 'autonomous',
-      // Same thread, so the run's own history shows the exchange it continues.
-      ...(answered ? { sessionId: answered.session_id } : {}),
+      ...(continueIn !== undefined ? { sessionId: continueIn } : {}),
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       // Per-run cost ceiling: without this an autonomous background task could
       // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard

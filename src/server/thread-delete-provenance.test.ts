@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -188,6 +188,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(first.status).toBe(500);
     expect(first.body['failed']).toEqual([expect.stringContaining('memories')]);
     expect(ts.getThread('t-legacy-fails')).toBeDefined();
+    expect(ts.isDeleted('t-legacy-fails'), 'not deleted, so not refused either').toBe(false);
     expect(legacyMarker(seeded.legacy)).toBeNull();
     for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).not.toBeNull();
     const FIRST = '2000-01-01 00:00:00';
@@ -199,5 +200,54 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(ts.getThread('t-legacy-fails')).toBeUndefined();
     expect(legacyMarker(seeded.legacy)).toMatch(/^\d{4}-/);
     for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBe(FIRST);
+  });
+
+  async function openChat(threadId: string): Promise<{ status: number; body: Record<string, unknown> }> {
+    const res = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId }),
+    });
+    return { status: res.status, body: await res.json() as Record<string, unknown> };
+  }
+
+  it('a deleted chat stays deleted: opening it again answers 410 and creates no thread', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    const live = randomUUID();
+    ts.createThread(id, { title: 'about to go' });
+    ts.createThread(live, { title: 'stays' });
+    expect((await deleteChat(id)).status).toBe(200);
+
+    // A tab that still shows it, or a link into it.
+    const again = await openChat(id);
+
+    expect(again.status).toBe(410);
+    expect(again.body['code']).toBe('thread_deleted');
+    expect(ts.getThread(id), 'no empty thread under the old id').toBeUndefined();
+    // Positive control on the same route: a chat that was not deleted still opens.
+    expect((await openChat(live)).status).toBe(201);
+  });
+
+  it('an escalation thread the owner deleted is refused the same way', async () => {
+    const { ts } = stores();
+    const id = 'escalation-tomb01';
+    ts.createThread(id, { title: 'agent asked' });
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect((await openChat(id)).status).toBe(410);
+    expect(ts.getThread(id)).toBeUndefined();
+  });
+
+  it('a session built for a deleted id writes no thread row', () => {
+    // The session path behind the route, for a caller that does not ask the route first: the
+    // store refuses, so nothing comes back under the old id.
+    const { ts } = stores();
+    const id = randomUUID();
+    ts.createThread(id);
+    ts.deleteThread(id);
+    const engine = (api as unknown as { engine: { createSession: (o: { sessionId: string }) => unknown } }).engine;
+    engine.createSession({ sessionId: id });
+    expect(ts.getThread(id)).toBeUndefined();
   });
 });

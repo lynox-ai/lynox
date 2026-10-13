@@ -2914,7 +2914,7 @@ describe('history.db v58 — who created a to-do', () => {
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare('SELECT id, title, created_by FROM tasks').get()).toEqual({ id: 'old1', title: 'kept', created_by: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(60);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(61);
     } finally { after.close(); }
   });
 });
@@ -2936,7 +2936,7 @@ describe('history.db v59 — why a question was closed', () => {
     const after = new RunHistory(path);
     try {
       expect(after.getDb().prepare("SELECT id, status, closed_reason FROM pending_prompts WHERE id = 'p-old'").get()).toEqual({ id: 'p-old', status: 'pending', closed_reason: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(60);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(61);
     } finally { after.close(); }
   });
 });
@@ -2959,7 +2959,7 @@ describe('history.db v60 — which mandate asked a question', () => {
     try {
       expect(after.getDb().prepare("SELECT id, status, created_by, mandate_id FROM pending_prompts WHERE id = 'p-old'").get())
         .toEqual({ id: 'p-old', status: 'pending', created_by: 'mandate:old@example.org', mandate_id: null });
-      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(60);
+      expect((after.getDb().prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(61);
     } finally { after.close(); }
   });
 });

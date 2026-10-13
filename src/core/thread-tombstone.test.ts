@@ -1,0 +1,143 @@
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { RunHistory } from './run-history.js';
+import { PromptStore } from './prompt-store.js';
+import { principalFromTag } from './request-principal.js';
+import { ThreadStore, ThreadDeletedError } from './thread-store.js';
+import { escalateToUser } from './escalation.js';
+import type { NotificationRouter, NotifyReport } from './notification-router.js';
+import { WorkflowQuestions } from './workflow-questions.js';
+
+/**
+ * A deleted conversation stays deleted. `createThread` was INSERT OR IGNORE, so every writer
+ * still holding a deleted id re-created an empty thread under it and went on writing. The
+ * refusal sits in the store, and each writer that can meet a deleted id is checked here on a
+ * real history database: the escalation, a workflow run's question, and a session.
+ */
+const cleanups: Array<() => void> = [];
+afterEach(() => {
+  while (cleanups.length > 0) cleanups.pop()!();
+  vi.restoreAllMocks();
+});
+
+function freshHistory(): { history: RunHistory; threads: ThreadStore } {
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-tomb-'));
+  const history = new RunHistory(join(dir, 'history.db'));
+  cleanups.push(() => { try { history.close(); } catch { /* closed */ } rmSync(dir, { recursive: true, force: true }); });
+  return { history, threads: new ThreadStore(history.getDb()) };
+}
+
+describe('ThreadStore: a deleted thread is not opened again', () => {
+  it('refuses the id of a deleted thread and creates no row', () => {
+    const { threads } = freshHistory();
+    threads.createThread('t-1', { title: 'mine' });
+    threads.deleteThread('t-1');
+
+    expect(threads.isDeleted('t-1')).toBe(true);
+    expect(() => threads.createThread('t-1', { title: 'again' })).toThrow(ThreadDeletedError);
+    expect(threads.getThread('t-1'), 'no row came back').toBeUndefined();
+  });
+
+  it('leaves every other id alone: a new one is created, a live one resumes', () => {
+    const { threads } = freshHistory();
+    threads.createThread('live', { title: 'kept' });
+    threads.createThread('gone');
+    threads.deleteThread('gone');
+
+    expect(threads.isDeleted('live')).toBe(false);
+    threads.createThread('live', { title: 'not re-stamped' });
+    expect(threads.getThread('live')?.title, 'a resume is still a no-op').toBe('kept');
+    threads.createThread('fresh', { title: 'new' });
+    expect(threads.getThread('fresh')?.title).toBe('new');
+  });
+
+  it('a message for the deleted id has no row to land in', () => {
+    // The refusal is enough on its own because `thread_messages` references `threads`: a writer
+    // that kept the id cannot append once the row is gone and cannot be re-created.
+    const { threads } = freshHistory();
+    threads.createThread('t-2');
+    threads.deleteThread('t-2');
+    expect(() => threads.appendMessages('t-2', [{ role: 'user', content: 'hello' }], 0)).toThrow();
+    expect(threads.getMessages('t-2')).toEqual([]);
+  });
+});
+
+describe('an escalation after its thread was deleted', () => {
+  function router(): { router: NotificationRouter; data: Array<Record<string, string> | undefined> } {
+    const data: Array<Record<string, string> | undefined> = [];
+    const notify = vi.fn(async (msg: { data?: Record<string, string> }): Promise<NotifyReport> => { data.push(msg.data); return []; });
+    return { router: { notify } as unknown as NotificationRouter, data };
+  }
+
+  it('opens a new thread instead of reviving the deleted one, and points the push at it', () => {
+    const { threads } = freshHistory();
+    const r = router();
+    expect(escalateToUser(threads, r.router, { key: 'abc123', title: 'Watcher', body: 'first change' })).toEqual({ threadId: 'escalation-abc123' });
+    threads.deleteThread('escalation-abc123');
+
+    const second = escalateToUser(threads, r.router, { key: 'abc123', title: 'Watcher', body: 'second change' });
+
+    expect(second).toEqual({ threadId: 'escalation-abc123-2' });
+    expect(threads.getThread('escalation-abc123'), 'the deleted thread stays deleted').toBeUndefined();
+    const msgs = threads.getMessages('escalation-abc123-2', { apiOnly: true });
+    expect(msgs.map((m) => m.role), 'a valid conversation of its own').toEqual(['user', 'assistant']);
+    expect(msgs[1]!.content_json).toContain('second change');
+    expect(r.data.at(-1)?.['threadId']).toBe('escalation-abc123-2');
+  });
+
+  it('keeps bumping the new thread, and moves on again when that one is deleted', () => {
+    const { threads } = freshHistory();
+    const r = router();
+    escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'one' });
+    threads.deleteThread('escalation-k9');
+    escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'two' });
+    expect(escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'three' }), 'one thread per key while it lives').toEqual({ threadId: 'escalation-k9-2' });
+    threads.deleteThread('escalation-k9-2');
+    expect(escalateToUser(threads, r.router, { key: 'k9', title: 'Job', body: 'four' })).toEqual({ threadId: 'escalation-k9-3' });
+    expect(threads.getThread('escalation-k9-2')).toBeUndefined();
+  });
+});
+
+describe('a workflow run whose thread was deleted while it ran', () => {
+  const RUN_ID = '21111111-2222-4333-8444-555555555555';
+
+  it('asks again without re-creating the thread; the question still reaches the owner', async () => {
+    const { history, threads } = freshHistory();
+    const prompts = new PromptStore(history.getDb());
+    const notified: unknown[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // A run's thread is created with its first question. Here it is the run's second
+    // question, after the owner deleted what the first one opened.
+    threads.createThread(RUN_ID, { title: 'Weekly offer' });
+    threads.deleteThread(RUN_ID);
+    const q = new WorkflowQuestions({
+      runId: RUN_ID,
+      scheduleId: 'trg-wf',
+      title: 'Weekly offer',
+      principal: principalFromTag('owner'),
+      handRun: false,
+      promptStore: () => prompts,
+      threadStore: () => threads,
+      maskOffBox: (text) => text,
+      notify: async (msg): Promise<NotifyReport> => { notified.push(msg); return [{ channel: 'push', outcome: 'delivered' }]; },
+      recordDelivery: () => () => {},
+      ownerStop: new AbortController().signal,
+      teardown: new AbortController().signal,
+      tearingDown: () => false,
+      abortScope: { members: new Set() },
+      onPending: () => {},
+    });
+
+    const answer = q.ask('Which list, A or B?', ['A', 'B']);
+    await vi.waitFor(() => { expect(prompts.getPending(RUN_ID)).toBeDefined(); });
+
+    expect(threads.getThread(RUN_ID), 'the deleted thread stays deleted').toBeUndefined();
+    expect(notified, 'the question still reached the owner').toHaveLength(1);
+    const written = stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('writing a workflow question to its thread failed'));
+    expect(written, 'said once, not retried').toHaveLength(1);
+    prompts.answerUser(prompts.getPending(RUN_ID)!.id, 'B');
+    await expect(answer).resolves.toBe('B');
+  });
+});

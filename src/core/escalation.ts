@@ -32,6 +32,21 @@ function sendWakeup(router: NotificationRouter, msg: NotificationMessage, onRepo
 }
 
 /**
+ * The thread an escalation for `key` goes to: `escalation-<key>`, or, once the user has deleted
+ * that one, `escalation-<key>-2`, then `-3`, the first that was not deleted. A deleted thread
+ * stays deleted (`ThreadStore.createThread` refuses its id), and the next escalation for the same
+ * key still gets a conversation, a new one. Derived from the store, so nothing else is kept.
+ */
+export function escalationThreadId(threadStore: ThreadStore, key: string): string {
+  const first = `escalation-${key}`;
+  if (!threadStore.isDeleted(first)) return first;
+  for (let n = 2; ; n++) {
+    const next = `${first}-${String(n)}`;
+    if (!threadStore.isDeleted(next)) return next;
+  }
+}
+
+/**
  * The reusable Agent→User escalation primitive (Slice B3): open (or BUMP) an
  * UNREAD chat thread seeded with `body` as context, and fire a push that merely
  * POINTS at it (the wakeup, not the content). One thread per `key`, bumped on
@@ -53,7 +68,7 @@ export function escalateToUser(
     sendWakeup(router, { title: opts.title, body: opts.body, priority: 'high', ...(opts.data ? { data: opts.data } : {}) }, opts.onReported);
     return null;
   }
-  const threadId = `escalation-${opts.key}`;
+  const threadId = escalationThreadId(threadStore, opts.key);
   // INSERT OR IGNORE — first event creates the thread (+ its title); later events
   // keep the same row and just append + re-unread below.
   threadStore.createThread(threadId, { title: opts.title });

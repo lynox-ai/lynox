@@ -91,6 +91,7 @@ describe('ThreadStore.updateThread write-restriction (P1 provenance, S4/RI2)', (
     // Positive control: the widened whitelist actually works for the re-pick path.
     const db = new BetterSqlite3(':memory:');
     db.exec(`
+      CREATE TABLE deleted_threads (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL DEFAULT (datetime('now')));
       CREATE TABLE threads (
         created_by TEXT,
         id TEXT PRIMARY KEY,

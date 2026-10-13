@@ -749,6 +749,7 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 	};
 	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
+	if (res.status === 410) throw new ThreadDeletedError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
 	if (data.model) { sessionModel = data.model; sessionTier = data.model; }
@@ -758,6 +759,11 @@ export async function ensureSession(resumeThreadId?: string | null): Promise<str
 
 class SessionExpiredError extends Error {
 	constructor() { super('session_expired'); this.name = 'SessionExpiredError'; }
+}
+
+/** The conversation was deleted (410). It is not opened again, so nothing retries it. */
+class ThreadDeletedError extends Error {
+	constructor() { super('thread_deleted'); this.name = 'ThreadDeletedError'; }
 }
 
 function handleSessionExpired(assistantIdx?: number, userMsgIdx?: number): void {
@@ -1042,7 +1048,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			console.error('[chat] a run failed after its stream began', err);
 			return;
 		}
-		failTurnStart(turn, displayText ?? task, files, queueId);
+		failTurnStart(turn, displayText ?? task, files, queueId, err instanceof ThreadDeletedError);
 	}
 }
 
@@ -1052,7 +1058,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
  * the message is marked failed AND unconfirmed: it is never sent again without first asking
  * whether a turn is still running (`askBeforeResend`).
  */
-function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined): void {
+function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[] | undefined, queueId: string | undefined, threadDeleted = false): void {
 	// Still the turn's thread: its own message is in the list (the list may have been rebuilt),
 	// or, for a turn that failed before adding one, the list is the one it started in.
 	let ownMsg = turn.userMsg && messages.includes(turn.userMsg) ? turn.userMsg : null;
@@ -1117,9 +1123,13 @@ function failTurnStart(turn: TurnStart, display: string, files: FileAttachment[]
 		persistChat();
 		return;
 	}
-	chatError = t('chat.error_connection');
+	// The thread was deleted meanwhile (another tab, another device): the server answered, and it
+	// will answer the same to every turn queued behind this one, so none of them is started. The
+	// message stays on screen, failed, to be copied into a new chat.
+	chatError = threadDeleted ? t('chat.error_thread_deleted') : t('chat.error_connection');
 	chatErrorDetail = null;
 	persistChat();
+	if (threadDeleted) return;
 	// The turns queued behind this one still get their go, once there is a connection to try:
 	// a turn started offline returns without sending and would be dropped from the queue.
 	const online = typeof navigator === 'undefined' || navigator.onLine;
@@ -1230,8 +1240,7 @@ async function _runTurn(task: string, files: FileAttachment[] | undefined, displ
 		throw err;
 	}
 	turn.sid = sid;
-	// A turn starts in this thread, so it is in use again, even if this page saw it dropped (an
-	// escalation thread has a fixed id and is re-created on demand).
+	// A turn starts in this thread, so it is in use again, even if this page saw it dropped.
 	forgetDroppedThread(sid);
 
 	// Find and un-queue if this message was already added as queued.
@@ -3571,6 +3580,12 @@ export async function resumeThread(threadId: string): Promise<void> {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
+		if (res.status === 410) {
+			// Deleted, here or elsewhere: open a new chat instead, and say why.
+			newChat();
+			chatError = t('chat.error_thread_deleted');
+			return;
+		}
 		if (!res.ok) {
 			// The server responded with an error status (not a dropped
 			// connection) — opening the conversation failed. Don't blame the
