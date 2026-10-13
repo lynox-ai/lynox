@@ -321,7 +321,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // that quietly stopped being exported cannot pass as an emptied one.
     const afterJson = JSON.parse(after) as Record<string, unknown>;
     expect(Object.keys(afterJson).sort()).toEqual([
-      'config', 'contacts', 'datastore', 'deals', 'durable_knowledge', 'exported_at',
+      'config', 'contacts', 'contacts_may_be_incomplete', 'datastore', 'datastore_may_be_incomplete',
+      'deals', 'deals_may_be_incomplete', 'durable_knowledge', 'exported_at',
       'knowledge_graph', 'memory', 'memory_scopes', 'memory_scopes_may_be_incomplete', 'secrets',
       'threads', 'threads_may_be_incomplete', 'version',
     ]);

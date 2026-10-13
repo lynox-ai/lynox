@@ -69,6 +69,7 @@ import { maskSecretPatterns, isInfraSecret, withoutTypedCredentials } from '../c
 import { promptOriginOf, parseOriginJson, originWireFields, type PendingPromptRow, type PromptStore } from '../core/prompt-store.js';
 import type { ThreadRecord } from '../core/thread-store.js';
 import { EXPORT_PAGE_MAX } from '../core/thread-store.js';
+import { RECORD_EXPORT_PAGE_MAX } from '../core/data-store.js';
 import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -10864,32 +10865,91 @@ export class LynoxHTTPApi {
         exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
-      // CRM contacts + deals
+      // CRM contacts + deals, and every DataStore collection: walked to the END by
+      // `_id`, the way the threads are walked above.
+      //
+      // Both blocks used to read once through the store's listing, which caps at 500
+      // rows, so a tenant with 501 contacts got an Art. 15 copy with 500 and no sign
+      // of the rest.
+      //
+      // One row budget for both blocks together, for the reason the thread cap gives:
+      // the dump is materialised and serialised into one string. Per collection would
+      // not do — a hundred collections of `MAX_RECORDS` rows each is ten million. The
+      // budget counts rows; it is about five times the most the old caps let through
+      // (51 000 rows: 100 collections and the two CRM lists at 500 each), and when it
+      // runs out the block says so in `*_may_be_incomplete`. Exact at the boundary: a
+      // collection that ends where the budget does is probed with one more one-row
+      // read and is not reported short.
+      //
+      // The CRM's collections are DataStore collections too (the CRM is built on this
+      // engine's DataStore), so the DataStore block below meets `contacts` and `deals`
+      // again. It reuses the rows walked here instead of reading them a second time:
+      // paid twice, a large CRM would spend the budget on copies and leave the user's
+      // own collections out. The budget therefore counts rows READ. Those two
+      // collections still appear twice in the dump, as they always have (under their
+      // own keys and under `datastore`), so it serialises at most twice the budget.
+      const RECORD_BUDGET = 250_000;
+      let budget = RECORD_BUDGET;
+      type Walked = { rows: Array<Record<string, unknown>>; truncated: boolean };
+      const crmWalked = new Map<string, Walked>();
+      const walkRecords = (page: (afterId: number | undefined, limit: number) => Array<Record<string, unknown>>): Walked => {
+        const rows: Array<Record<string, unknown>> = [];
+        let afterId: number | undefined;
+        for (;;) {
+          const limit = Math.max(1, Math.min(RECORD_EXPORT_PAGE_MAX, budget));
+          const batch = page(afterId, limit);
+          if (budget <= 0) return { rows, truncated: batch.length > 0 };
+          rows.push(...batch);
+          budget -= batch.length;
+          if (batch.length < limit) return { rows, truncated: false };
+          afterId = batch[batch.length - 1]!['_id'] as number;
+        }
+      };
+
       const crm = engine.getCRM();
       if (crm) {
-        exportData['contacts'] = crm.listContacts(undefined, 500);
-        exportData['deals'] = crm.getAllDeals(undefined, 500);
+        const contacts = walkRecords((afterId, limit) => crm.listForExport('contacts', { afterId, limit }));
+        const deals = walkRecords((afterId, limit) => crm.listForExport('deals', { afterId, limit }));
+        exportData['contacts'] = contacts.rows;
+        exportData['contacts_may_be_incomplete'] = contacts.truncated;
+        exportData['deals'] = deals.rows;
+        exportData['deals_may_be_incomplete'] = deals.truncated;
+        crmWalked.set('contacts', contacts);
+        crmWalked.set('deals', deals);
       } else {
         exportData['contacts'] = [];
+        exportData['contacts_may_be_incomplete'] = false;
         exportData['deals'] = [];
+        exportData['deals_may_be_incomplete'] = false;
       }
 
-      // DataStore collections + records
       const ds = engine.getDataStore();
       if (ds) {
         const collections = ds.listCollections();
         const datastoreExport: Record<string, unknown[]> = {};
+        // One flag for the block, set by a truncated collection AND by one that could
+        // not be read: the latter used to export as `[]`, an empty collection to
+        // anyone reading the dump.
+        const incomplete: string[] = [];
         for (const col of collections) {
           try {
-            const result = ds.queryRecords({ collection: col.name, limit: 500 });
-            datastoreExport[col.name] = result.rows;
+            const walked = crmWalked.get(col.name)
+              ?? walkRecords((afterId, limit) => ds.listRecordsForExport({ collection: col.name, afterId, limit }));
+            datastoreExport[col.name] = walked.rows;
+            if (walked.truncated) incomplete.push(col.name);
           } catch {
             datastoreExport[col.name] = [];
+            incomplete.push(col.name);
           }
         }
+        if (incomplete.length > 0) {
+          process.stderr.write(`⚠ /api/export: datastore collection(s) ${incomplete.join(', ')} truncated or unreadable — dump may be incomplete\n`);
+        }
         exportData['datastore'] = datastoreExport;
+        exportData['datastore_may_be_incomplete'] = incomplete.length > 0;
       } else {
         exportData['datastore'] = {};
+        exportData['datastore_may_be_incomplete'] = false;
       }
 
       // Secret names (never values — GDPR export must not leak secrets)

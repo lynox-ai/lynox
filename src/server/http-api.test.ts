@@ -12871,6 +12871,115 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    // A store that hands back FULL pages drives the record walk to its budget in cheap
+    // mock calls; seeding 250 000 real rows per case is what this avoids. That every row
+    // below the budget arrives is asserted on a real engine in
+    // `export-crm-complete.test.ts`.
+    const BUDGET = 250_000;
+    /** A collection of `n` rows, served in whatever page size the walk asks for. */
+    const rowsUpTo = (n: number) => {
+      let served = 0;
+      return vi.fn(({ limit }: { limit: number }) => {
+        const page = Array.from({ length: Math.max(0, Math.min(limit, n - served)) }, (_, i) => ({ _id: served + i + 1 }));
+        served += page.length;
+        return page;
+      });
+    };
+    const crmOf = (contacts: number, deals: number) => {
+      const c = rowsUpTo(contacts);
+      const d = rowsUpTo(deals);
+      return { listForExport: vi.fn((collection: 'contacts' | 'deals', opts: { limit: number }) => (collection === 'contacts' ? c(opts) : d(opts))) };
+    };
+    type CrmBody = { contacts: unknown[]; contacts_may_be_incomplete: boolean; deals: unknown[]; deals_may_be_incomplete: boolean };
+    const exportWith = async <T,>(over: Record<string, unknown>): Promise<T> => {
+      let body: T | undefined;
+      await swapEngine({ getThreadStore: () => null, getKnowledgeLayer: () => null, getCRM: () => null, getDataStore: () => null, ...over }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        body = await res.json() as T;
+      });
+      return body!;
+    };
+
+    it('GET /api/export marks contacts incomplete when they exhaust the row budget, and deals on their own', async () => {
+      const capped = await exportWith<CrmBody>({ getCRM: () => crmOf(Number.MAX_SAFE_INTEGER, 0) });
+      expect(capped.contacts_may_be_incomplete, 'the dump is short and must say so').toBe(true);
+      expect(capped.contacts).toHaveLength(BUDGET);
+      // An empty collection after the budget is spent is still a complete one.
+      expect(capped.deals_may_be_incomplete).toBe(false);
+
+      const dealsCapped = await exportWith<CrmBody>({ getCRM: () => crmOf(0, Number.MAX_SAFE_INTEGER) });
+      expect(dealsCapped.deals_may_be_incomplete).toBe(true);
+      expect(dealsCapped.contacts_may_be_incomplete).toBe(false);
+    });
+
+    it('GET /api/export is exact at the budget: a collection that ends on it is complete, one row more is not', async () => {
+      const exact = await exportWith<CrmBody>({ getCRM: () => crmOf(BUDGET, 0) });
+      expect(exact.contacts).toHaveLength(BUDGET);
+      expect(exact.contacts_may_be_incomplete, 'ends exactly where the budget does').toBe(false);
+
+      const over = await exportWith<CrmBody>({ getCRM: () => crmOf(BUDGET + 1, 0) });
+      expect(over.contacts).toHaveLength(BUDGET);
+      expect(over.contacts_may_be_incomplete).toBe(true);
+
+      // And the budget is SHARED: contacts that spend it leave none for the deals.
+      const shared = await exportWith<CrmBody>({ getCRM: () => crmOf(BUDGET, 1) });
+      expect(shared.contacts_may_be_incomplete).toBe(false);
+      expect(shared.deals).toHaveLength(0);
+      expect(shared.deals_may_be_incomplete, 'the one deal the budget had no room for').toBe(true);
+    });
+
+    it('GET /api/export marks the datastore incomplete for a truncated collection and for one it could not read', async () => {
+      type DsBody = { datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean };
+      const dsOf = (names: string[]) => {
+        const huge = rowsUpTo(Number.MAX_SAFE_INTEGER);
+        const listRecordsForExport = vi.fn((p: { collection: string; limit: number }) => {
+          if (p.collection === 'huge') return huge(p);
+          if (p.collection === 'broken') throw new Error('disk I/O error');
+          return (p as { afterId?: number }).afterId === undefined ? [{ _id: 1 }] : [];
+        });
+        return { listCollections: () => names.map(name => ({ name })), listRecordsForExport };
+      };
+      const huge = await exportWith<DsBody>({ getDataStore: () => dsOf(['small', 'huge']) });
+      expect(huge.datastore_may_be_incomplete, 'a collection cut at the budget').toBe(true);
+      expect(huge.datastore['huge']).toHaveLength(BUDGET - 1);
+      const broken = await exportWith<DsBody>({ getDataStore: () => dsOf(['small', 'broken']) });
+      expect(broken.datastore_may_be_incomplete, 'an unreadable collection is not an empty one').toBe(true);
+      expect(broken.datastore['broken']).toEqual([]);
+      const fine = await exportWith<DsBody>({ getDataStore: () => dsOf(['small']) });
+      expect(fine.datastore_may_be_incomplete).toBe(false);
+      expect(fine.datastore['small']).toHaveLength(1);
+      // The CRM block spends from the same budget as the DataStore block.
+      const both = await exportWith<DsBody & CrmBody>({ getCRM: () => crmOf(BUDGET, 0), getDataStore: () => dsOf(['small']) });
+      expect(both.contacts_may_be_incomplete).toBe(false);
+      expect(both.datastore_may_be_incomplete, 'no budget left for the one DataStore row').toBe(true);
+    });
+
+    it('GET /api/export does not pay twice for the CRM collections the DataStore block meets again', async () => {
+      // The CRM's `contacts` and `deals` are DataStore collections too. Read a second time,
+      // they spent the budget on copies and pushed the user's own collections out.
+      type Body = DsBody & CrmBody;
+      type DsBody = { datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean };
+      const dsWith = (names = ['contacts', 'deals', 'user_rows']) => () => {
+        const again = rowsUpTo(Number.MAX_SAFE_INTEGER);
+        const listRecordsForExport = vi.fn((p: { collection: string; limit: number; afterId?: number }) => {
+          if (p.collection === 'contacts' || p.collection === 'deals') return again(p);
+          return p.afterId === undefined ? [{ _id: 1 }] : [];
+        });
+        return { listCollections: () => names.map(name => ({ name })), listRecordsForExport };
+      };
+      const full = await exportWith<Body>({ getCRM: () => crmOf(BUDGET - 1, 0), getDataStore: dsWith() });
+      expect(full.datastore['user_rows'], 'the user collection still fits').toHaveLength(1);
+      expect(full.datastore_may_be_incomplete).toBe(false);
+      expect(full.datastore['contacts'], 'the CRM rows, reused').toHaveLength(BUDGET - 1);
+
+      // And a CRM cut short stays cut short where the DataStore block shows it. No user
+      // collection here, so nothing but the reused walk can set the flag.
+      const cut = await exportWith<Body>({ getCRM: () => crmOf(BUDGET + 1, 0), getDataStore: dsWith(['contacts', 'deals']) });
+      expect(cut.contacts_may_be_incomplete).toBe(true);
+      expect(cut.datastore_may_be_incomplete).toBe(true);
+    });
+
     it('GET /api/export passes the memory store\'s scopes and its incompleteness through, in both directions', async () => {
       // What `exportAllScopes` reads is asserted on disk in `export-memory-scopes.test.ts`;
       // this is only the hand-over, so a route that dropped the flag cannot pass for one

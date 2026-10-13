@@ -528,6 +528,19 @@ export class CRM {
     return result.rows;
   }
 
+  /**
+   * One page of an exhaustive read of contacts or deals, for the data export. Not
+   * {@link listContacts} / {@link getAllDeals}: those serve the overview and are
+   * capped at 500 by the store. Goes through the CRM rather than straight to the
+   * DataStore so the schema is ensured first, like every other CRM read: the
+   * constructor creates nothing, so on a CRM whose first read this is, the two
+   * collections do not exist yet.
+   */
+  listForExport(collection: 'contacts' | 'deals', opts: { afterId?: number | undefined; limit: number }): Array<Record<string, unknown>> {
+    this.ensureSchema();
+    return this.ds.listRecordsForExport({ collection, afterId: opts.afterId, limit: opts.limit });
+  }
+
   /** Get pipeline summary (deal count + total value per stage). */
   getPipelineSummary(): Array<Record<string, unknown>> {
     this.ensureSchema();
