@@ -1208,21 +1208,21 @@ export class KnowledgeStore {
   /**
    * Erasure's reach into the block: every line equal to the erased text, whoever wrote it —
    * an erasure request asks for the text to be gone, not only the copy this store seeded.
-   * Best-effort like {@link _dropSeededProfileLine}: the delete is already committed.
+   *
+   * A failure THROWS, and the erasures call this BEFORE they delete the rows, the order
+   * {@link deleteByThread} uses and for the same reason: the rows are the only place the
+   * text can be matched from. Deleted first, a failing block write left the line loading
+   * into every turn with nothing left to find it by, and the caller was told the erasure
+   * succeeded. Block first, a failure leaves the rows, reaches the caller, and a retry
+   * finishes.
    */
-  private _dropErasedProfileLines(entryText: string): void {
-    try {
-      const block = this.getBlock('profile');
-      const erased = collapseToSingleLine(entryText);
-      if (!block?.content || !erased) return;
-      const kept = block.content.split('\n').filter(l => l.trim() !== erased);
-      if (kept.length === block.content.split('\n').length) return;
-      this.setBlockContent('profile', kept.join('\n').trim());
-    } catch (err: unknown) {
-      process.stderr.write(
-        `[lynox:knowledge] could not drop the erased line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    }
+  private _removeErasedProfileLines(entryText: string): void {
+    const block = this.getBlock('profile');
+    const erased = collapseToSingleLine(entryText);
+    if (!block?.content || !erased) return;
+    const kept = block.content.split('\n').filter(l => l.trim() !== erased);
+    if (kept.length === block.content.split('\n').length) return;
+    this.setBlockContent('profile', kept.join('\n').trim());
   }
 
   /**
@@ -1273,7 +1273,7 @@ export class KnowledgeStore {
    * retirement leaves the text in place.
    *
    * Not reachable from an agent tool by design: erasure is a human act. Returns whether
-   * a row was removed.
+   * a row was removed. Throws when the `profile` block cannot be changed, leaving the row.
    */
   deleteEntry(id: string): boolean {
     // Read the text BEFORE the row is gone — erasure has to reach the copy in the
@@ -1283,9 +1283,8 @@ export class KnowledgeStore {
     // unlike in `retireEntry`: retiring is a routine downgrade where provenance decides who
     // may touch the block, while a deletion IS the request to be forgotten.
     const doomed = this.getEntry(id);
-    const gone = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
-    if (gone && doomed) this._dropErasedProfileLines(doomed.text);
-    return gone;
+    if (doomed) this._removeErasedProfileLines(doomed.text);
+    return this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
   }
 
   /**
@@ -1294,7 +1293,8 @@ export class KnowledgeStore {
    * `subject_id` is the only handle that gathers "everything this store holds about one
    * person" — the shape an erasure request actually arrives in. Entries that were never
    * resolved to a subject carry a plaintext `subject_hint` instead and are NOT reached
-   * by this; they need {@link deleteEntry}. Returns the number of rows removed.
+   * by this; they need {@link deleteEntry}. Returns the number of rows removed. Throws when
+   * the `profile` block cannot be changed, leaving every row.
    *
    * Follows merges first, like every other subject read in this file. A merge repoints
    * `knowledge_entries.subject_id` onto the canonical (`subject-store.ts` REPOINT_TARGETS),
@@ -1310,11 +1310,8 @@ export class KnowledgeStore {
     const doomed = this.db.prepare(
       'SELECT text FROM knowledge_entries WHERE subject_id = ?',
     ).all(canonical) as Array<{ text: string }>;
-    const removed = this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
-    if (removed > 0) {
-      for (const row of doomed) this._dropErasedProfileLines(this.engine.dec(row.text));
-    }
-    return removed;
+    for (const row of doomed) this._removeErasedProfileLines(this.engine.dec(row.text));
+    return this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
   }
 
   /**
