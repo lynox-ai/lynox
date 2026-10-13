@@ -38,6 +38,7 @@ describe('extractDocumentText', () => {
 		expect(res!.format).toBe('pdf');
 		expect(res!.text).toContain('Quarterly revenue up 12 percent');
 		expect(res!.truncated).toBe(false);
+		expect(res!.omittedChars).toBe(0);
 	});
 
 	it('extracts text from a DOCX', async () => {
@@ -63,6 +64,7 @@ describe('extractDocumentText', () => {
 		const res = await extractDocumentText(buildDocx(huge), 'big.docx');
 		expect(res).not.toBeNull();
 		expect(res!.truncated).toBe(true);
+		expect(res!.omittedChars).toBe(50);
 		expect(res!.text.length).toBeGreaterThan(MAX_EXTRACTED_CHARS);
 		expect(res!.text).toContain('truncated');
 	});

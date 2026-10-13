@@ -21,6 +21,8 @@ export interface DocumentExtractResult {
 	text: string;
 	/** True when the extracted text was capped at MAX_EXTRACTED_CHARS. */
 	truncated: boolean;
+	/** Characters of the document's text that the cap dropped; 0 when `truncated` is false. */
+	omittedChars: number;
 }
 
 /** Raised when a recognized format (PDF/DOCX) cannot be parsed (corrupt / encrypted / image-only). */
@@ -60,12 +62,13 @@ export function detectDocumentFormat(buf: Buffer, fileName: string): Extractable
 	return null;
 }
 
-function cap(text: string): { text: string; truncated: boolean } {
-	if (text.length <= MAX_EXTRACTED_CHARS) return { text, truncated: false };
+function cap(text: string): { text: string; truncated: boolean; omittedChars: number } {
+	if (text.length <= MAX_EXTRACTED_CHARS) return { text, truncated: false, omittedChars: 0 };
 	const omitted = text.length - MAX_EXTRACTED_CHARS;
 	return {
 		text: `${text.slice(0, MAX_EXTRACTED_CHARS)}\n[…truncated, ${String(omitted)} chars omitted]`,
 		truncated: true,
+		omittedChars: omitted,
 	};
 }
 
@@ -215,8 +218,7 @@ export async function extractDocumentText(
 		if (trimmed.length === 0) {
 			throw new DocumentExtractError('pdf', 'No extractable text (the PDF may be scanned/image-only)');
 		}
-		const { text: capped, truncated } = cap(trimmed);
-		return { format, text: capped, truncated };
+		return { format, ...cap(trimmed) };
 	}
 
 	// docx — bound the decompressed size BEFORE mammoth inflates the zip (throws
@@ -237,6 +239,5 @@ export async function extractDocumentText(
 	if (trimmed.length === 0) {
 		throw new DocumentExtractError('docx', 'No extractable text in the Word document');
 	}
-	const { text: capped, truncated } = cap(trimmed);
-	return { format, text: capped, truncated };
+	return { format, ...cap(trimmed) };
 }
