@@ -763,6 +763,8 @@ describe('what a stop can reach — one case per effect class', () => {
   it('a REMINDER run has nothing to interrupt, and the stop SAYS so', async () => {
     const h = makeClassHarness({ effect: 'notify', pauseAt: 'notify' });
     await h.running;
+    // …and the schedules view is told the same BEFORE anyone clicks: no stop is offered.
+    expect(h.loop.runningStoppable('trg-class')).toBe(false);
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'notify' });
     expect(h.sessionCreations()).toBe(0);
   });
@@ -770,6 +772,7 @@ describe('what a stop can reach — one case per effect class', () => {
   it('a BACKUP run likewise — the owner is told, not answered 200', async () => {
     const h = makeClassHarness({ effect: 'backup', pauseAt: 'backup' });
     await h.running;
+    expect(h.loop.runningStoppable('trg-class')).toBe(false);
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'unstoppable', effect: 'backup' });
     expect(h.sessionCreations()).toBe(0);
   });
@@ -787,7 +790,11 @@ describe('what a stop can reach — one case per effect class', () => {
     // the pause" (the client factory, awaited before the write loop), not "none in the run".
     const h = makeClassHarness({ effect: 'bulk_apply', pauseAt: 'bulkClient', record: { bulk_run_id: 'bulk-1' } });
     await h.running;
+    // The positive control for the two above: a run a stop reaches is offered one.
+    expect(h.loop.runningStoppable('trg-class')).toBe(true);
     expect(h.loop.stopTask('trg-class')).toEqual({ kind: 'requested', via: 'signal' });
+    // and a trigger with no run in flight is offered nothing.
+    expect(h.loop.runningStoppable('no-such-trigger')).toBe(false);
     expect(h.sessionCreations()).toBe(0);
   });
 
@@ -964,6 +971,10 @@ describe('what a stop can reach — one case per effect class', () => {
     // later.
     const h = makeHarness({ watch: true });
     await h.fetching;
+    // The schedules view still offers the stop here, on purpose: `runningStoppable` keys on
+    // the effect, because this window (no session yet) is also the moment right after "Run
+    // now", when an owner most wants a stop. The click gets this `unstoppable`, briefly.
+    expect(h.loop.runningStoppable('trg-stop')).toBe(true);
     expect(h.loop.stopTask('trg-stop')).toEqual({ kind: 'unstoppable', effect: 'run_agent' });
     // …and the refusal changed nothing: the run is still going.
     expect(h.abortCalls()).toBe(0);

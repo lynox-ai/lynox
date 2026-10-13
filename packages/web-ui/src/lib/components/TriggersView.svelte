@@ -38,6 +38,11 @@
 		// finding) reached anyone — see `escalationNotice`.
 		last_escalation_at?: string;
 		last_escalation_outcome?: string;
+		// Whether a run of this trigger is in flight right now, and whether a stop can end it
+		// (`GET /api/triggers`; a mandate is told only about its own runs). Snapshots from
+		// the last load: the stop route still answers a run that ended since.
+		running?: boolean;
+		stoppable?: boolean;
 	}
 
 	let triggers = $state<Trigger[]>([]);
@@ -47,8 +52,10 @@
 	// pause requests for the same row.
 	let busy = $state<Record<string, boolean>>({});
 
-	async function loadTriggers() {
-		loading = true;
+	// `quiet`: refresh in place after a stop or a start, without swapping the list for the
+	// loading line — that would drop keyboard focus from the row the owner just acted on.
+	async function loadTriggers(quiet = false) {
+		if (!quiet) loading = true;
 		error = '';
 		try {
 			const res = await fetch(`${getApiBase()}/triggers`);
@@ -137,6 +144,9 @@
 			const res = await fetch(`${getApiBase()}/triggers/${trigger.id}/run`, { method: 'POST' });
 			if (res.status === 202) {
 				addToast(t('triggers.run_started'), 'success');
+				// The run is registered before the 202 is sent, so a reload shows it running —
+				// and offers its stop, which is when an owner most wants one.
+				await loadTriggers(true);
 			} else if (res.status === 409) {
 				// ⛔ TWO different 409s, and telling the owner the wrong one is what this
 				// branch is for. "Already running" is true for a run in flight; a trigger
@@ -145,11 +155,45 @@
 				// fixed string and never read the body.
 				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
 				addToast(t(code === 'awaiting_answer' ? 'triggers.run_awaiting_answer' : 'triggers.run_already'), 'info');
+				// "Already running" — so show it running, and offer its stop.
+				await loadTriggers(true);
 			} else {
 				addToast(t('triggers.run_failed'), 'error');
 			}
 		} catch {
 			addToast(t('triggers.run_failed'), 'error');
+		} finally {
+			busy[trigger.id] = false;
+		}
+	}
+
+	// Stop = end the run in flight (`POST /api/tasks/:id/stop`). Offered only on a row the
+	// list reported as stoppable. 202 = the stop was REQUESTED, not completed — the run can
+	// still finish on its own, and the toast says so. Every refusal gets its own
+	// sentence, told apart by the route's `code`: a run that ended since the list loaded,
+	// a phase nothing can interrupt (pausing is what is left), an id that names more than
+	// one task, and a 403 for someone who neither owns the instance nor started the run.
+	async function stopRun(trigger: Trigger): Promise<void> {
+		if (busy[trigger.id]) return;
+		busy[trigger.id] = true;
+		try {
+			const res = await fetch(`${getApiBase()}/tasks/${trigger.id}/stop`, { method: 'POST' });
+			if (res.status === 202) {
+				addToast(t('triggers.stop_requested'), 'success');
+			} else if (res.status === 403) {
+				addToast(t('triggers.stop_forbidden'), 'error');
+			} else if (res.status === 409) {
+				const code = await res.json().then((b: { code?: string }) => b.code).catch(() => undefined);
+				addToast(t(code === 'unstoppable' ? 'triggers.stop_unstoppable'
+					: code === 'ambiguous_id' ? 'triggers.stop_ambiguous'
+					: code === 'not_running' ? 'triggers.stop_not_running'
+					: 'triggers.stop_failed'), code === 'not_running' ? 'info' : 'error');
+			} else {
+				addToast(t('triggers.stop_failed'), 'error');
+			}
+			await loadTriggers(true);
+		} catch {
+			addToast(t('triggers.stop_failed'), 'error');
 		} finally {
 			busy[trigger.id] = false;
 		}
@@ -265,6 +309,9 @@
 								{#if awaitsConfirmation(trigger)}
 									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-warning/15 px-1.5 py-0.5 text-warning">{t('triggers.awaiting_confirmation')}</span>
 								{/if}
+								{#if trigger.running === true}
+									<span class="shrink-0 text-[10px] rounded-[var(--radius-sm)] bg-accent/10 px-1.5 py-0.5 text-accent-text" data-trigger-running>{t('triggers.running')}</span>
+								{/if}
 							</div>
 							<div class="flex flex-wrap gap-2 mt-1.5 text-xs text-text-subtle">
 								{#if trigger.schedule_cron}
@@ -326,6 +373,11 @@
 						     wider than `sm` has no hover either, and there they only appeared when a
 						     tap happened to leave the card in `:hover`. -->
 						<div class="flex flex-wrap items-center gap-2 sm:shrink-0 sm:mt-0.5">
+							<!-- Stop: only where a stop can end the run. Not hidden until hover like the
+							     others — a run the owner wants to end should not need finding. -->
+							{#if trigger.stoppable === true}
+								<button onclick={() => stopRun(trigger)} disabled={busy[trigger.id]} aria-label={t('triggers.stop_run')} title={t('triggers.stop_run')} class="rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 px-2 py-0.5 text-[10px] text-danger hover:bg-danger/20 disabled:opacity-40" data-trigger-stop>■ {t('triggers.stop_run')}</button>
+							{/if}
 							<!-- Not offered while waiting: the engine refuses the run after the request
 							     has already been answered as started. -->
 							{#if !awaitsConfirmation(trigger)}

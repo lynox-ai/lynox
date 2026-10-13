@@ -1580,6 +1580,26 @@ const translations: Record<string, Record<Locale, string>> = {
 		en: 'This task is waiting for your answer — answer its question instead of starting it again.',
 	},
 	'triggers.run_failed': { de: 'Trigger konnte nicht gestartet werden.', en: 'Could not start the trigger.' },
+	'triggers.running': { de: 'Läuft gerade', en: 'Running' },
+	'triggers.stop_run': { de: 'Lauf anhalten', en: 'Stop run' },
+	'triggers.stop_requested': {
+		de: 'Anhalten angefordert. Der Lauf kann trotzdem noch von selbst zu Ende gehen.',
+		en: 'Stop requested. The run may still finish on its own.',
+	},
+	'triggers.stop_not_running': { de: 'Dieser Lauf ist inzwischen beendet.', en: 'This run has already ended.' },
+	'triggers.stop_unstoppable': {
+		de: 'Dieser Lauf lässt sich gerade nicht unterbrechen. Soll er nicht erneut starten, pausiere den Zeitplan.',
+		en: "This run can't be interrupted right now. If it shouldn't start again, pause the schedule.",
+	},
+	'triggers.stop_ambiguous': {
+		de: 'Diese Kennung passt auf mehrere Aufgaben, deshalb wurde nichts angehalten.',
+		en: 'This id matches more than one task, so nothing was stopped.',
+	},
+	'triggers.stop_forbidden': {
+		de: 'Anhalten kann nur, wem diese Instanz gehört oder wer den Lauf gestartet hat.',
+		en: 'Only the owner of this instance, or whoever started the run, can stop it.',
+	},
+	'triggers.stop_failed': { de: 'Der Lauf konnte nicht angehalten werden.', en: 'Could not stop the run.' },
 	'triggers.pause': { de: 'Pausieren', en: 'Pause' },
 	'triggers.resume': { de: 'Fortsetzen', en: 'Resume' },
 	'triggers.paused': { de: 'Pausiert', en: 'Paused' },

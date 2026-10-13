@@ -448,6 +448,18 @@ export function stopHandleOf(active: ActiveTask): StopHandle | undefined {
 }
 
 /**
+ * The effects whose run reads no abort at any point (see the `switch (effect)` in
+ * `executeTask`): a stop is refused for them as `unstoppable`, whatever their phase.
+ *
+ * ⚠ A list of effect names, which {@link stopHandleOf} avoids on purpose — it answers
+ * the schedules view's question BEFORE a stop is tried ("offer one?"), where the handle
+ * only exists once the run has reached it. It fails toward offering: an effect added
+ * later and missing here gets a stop button whose click answers `unstoppable`, which is
+ * the honest refusal, never a stop that claims to have landed.
+ */
+const EFFECTS_NO_STOP_REACHES: ReadonlySet<string> = new Set(['backup', 'notify']);
+
+/**
  * Whether a parked run's question must outlive this process: it is being torn down AND
  * its owner has not stopped it.
  *
@@ -557,6 +569,23 @@ export class WorkerLoop {
   /** The effect of the run of `taskId` in flight, or undefined when none is. */
   runningEffect(taskId: string): string | undefined {
     return this.activeTasks.get(taskId)?.effect;
+  }
+
+  /**
+   * Whether `taskId` has a run in flight that a stop can end — the question the schedules
+   * view asks before it offers "Stop run". False when nothing runs, and for the two effects
+   * nothing in the run ever reads an abort (`backup`, `notify`: `executeTask` hands them no
+   * session, signal or wait), where {@link stopTask} answers `unstoppable` every time.
+   *
+   * ⚠ Keyed on the EFFECT, not on {@link stopHandleOf} at this instant: an agent run is
+   * registered before its session exists, so the instant test said "not stoppable" for
+   * exactly the run an owner just started with "Run now". A stop in that window gets the
+   * route's `unstoppable` answer, which is true then and short-lived.
+   */
+  runningStoppable(taskId: string): boolean {
+    const active = this.activeTasks.get(taskId);
+    if (active === undefined) return false;
+    return stopHandleOf(active) !== undefined || !EFFECTS_NO_STOP_REACHES.has(active.effect);
   }
 
   /**
