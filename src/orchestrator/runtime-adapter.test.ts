@@ -1631,6 +1631,19 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     ]);
   });
 
+  it('a repeated id never pairs across tools (an unanswered call keeps its id)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    // A call whose result is never streamed stays pending with its id …
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'bad' }, agent: 'step', toolUseId: 'tool_0' });
+    // … and the next turn's first call carries the same per-turn fallback id.
+    h({ type: 'tool_call', name: 'bash', input: { command: 'ls' }, agent: 'step', toolUseId: 'tool_0' });
+    h({ type: 'tool_result', name: 'bash', result: 'listing', agent: 'step', toolUseId: 'tool_0' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ toolName: 'bash', outputJson: 'listing' });
+    expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'ls' });
+  });
+
   it('the name fallback never takes a call that carried an id', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
