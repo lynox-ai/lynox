@@ -88,7 +88,7 @@ describe('Anthropic models coverage', () => {
       expect(ids, id).toContain(id);
     }
   });
-  it('lists neither Vertex ids nor the [1m] spellings, which the probe cannot call', () => {
+  it('lists base ids of the direct API only: no Vertex ids, no [1m] spellings', () => {
     expect(ids.filter(id => id.includes('[') || modelCapability(id)?.provider !== 'anthropic')).toEqual([]);
   });
   it('does not price the retired control id', () => {

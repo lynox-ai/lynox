@@ -16,9 +16,8 @@ export const RETIRED_ANTHROPIC_ID = 'claude-3-5-sonnet-20241022';
 
 /**
  * Every direct-API Anthropic id in `MODEL_CAPABILITIES`: today's tier models, the opt-ins
- * and the candidates for the next switch. The `[1m]` entries are left out: that spelling
- * is lynox's name for a context-window variant, not a model id the API takes (it answers
- * 404 for it, measured 2026-10-13). Their base ids are in the list.
+ * and the candidates for the next switch. The `[1m]` entries are left out; this guard
+ * checks base ids, and those are in the list.
  */
 export function anthropicDirectIds(): string[] {
   return Object.values(MODEL_CAPABILITIES)
