@@ -1842,7 +1842,7 @@ async function attachEngineManagedAuth(
  * it, so attaching it would send something other than what was checked.
  */
 function shapingSlotRefusal(profileId: string): string {
-  return `Error: api_profile "${profileId}" puts its credential in auth.header_name, a header that changes the request's method, target or body type, so it was not attached and nothing was sent. Fix the profile with api_setup action="update" to use the header the API documents for its key (for example "X-Api-Key").`;
+  return `Error: api_profile "${profileId}" puts its credential in auth.header_name, a header that changes the request's method, target or how its body is read, so it was not attached and nothing was sent. Fix the profile with api_setup action="update" to use the header the API documents for its key (for example "X-Api-Key").`;
 }
 
 /**

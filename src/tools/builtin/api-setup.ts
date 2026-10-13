@@ -190,7 +190,7 @@ function validateProfile(profile: ApiProfile): string | null {
       return 'Invalid auth.header_name: must be an HTTP header name, for example "X-Api-Key" (letters, digits and !#$%&\'*+-.^_`|~, no spaces, at most 64 characters).';
     }
     if (typeof headerName === 'string' && isRequestShapingHeaderName(headerName)) {
-      return 'Invalid auth.header_name: a credential cannot go in a header that changes the request\'s method, target or body type (a method override, Host, Forwarded, X-Forwarded-*, X-Original-*, X-Rewrite-*, Content-Type). Use the header the API documents for its key, for example "X-Api-Key".';
+      return 'Invalid auth.header_name: a credential cannot go in a header that changes the request\'s method, target or how its body is read (a method override, Host, Forwarded, X-Forwarded-*, X-Original-*, X-Rewrite-*, Content-Type, Content-Encoding). Use the header the API documents for its key, for example "X-Api-Key".';
     }
     const queryParam: unknown = profile.auth.query_param;
     if (queryParam !== undefined && (typeof queryParam !== 'string' || !QUERY_PARAM_NAME.test(queryParam))) {

@@ -166,6 +166,38 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
   });
 });
 
+describe('a body the gate cannot read is gated as a DELETE', () => {
+  const JSON_CT = { 'content-type': 'application/json' };
+  // A server that inflates the body reads a `_method` the gate, reading the body as written, does not.
+  it.each([
+    ['deflate', { ...JSON_CT, 'Content-Encoding': 'deflate' }, '{"a":1}', 'DELETE'],
+    ['gzip, any case and spelling', { ...JSON_CT, content_encoding: ' GZip ' }, 'x', 'DELETE'],
+    ['identity listed before a coding', { ...JSON_CT, 'content-encoding': 'identity, br' }, '{"a":1}', 'DELETE'],
+    ['identity alone', { ...JSON_CT, 'Content-Encoding': 'identity' }, '{"a":1}', 'POST'],
+    ['identity in capitals', { ...JSON_CT, 'Content-Encoding': ' IDENTITY ' }, '{"a":1}', 'POST'],
+    ['an empty value', { ...JSON_CT, 'Content-Encoding': '' }, '{"a":1}', 'POST'],
+    ['no body to read', { ...JSON_CT, 'Content-Encoding': 'deflate' }, '', 'POST'],
+  ] as const)('Content-Encoding: %s', (_k, headers, body, want) => {
+    expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
+  });
+
+  it('reads no body for a GET, whatever its encoding', () => {
+    expect(effectiveWriteMethod('GET', { 'Content-Encoding': 'deflate' }, U, 'x')).toBe('GET');
+  });
+
+  // `JSON.parse` keeps the last of two equal keys; a parser that keeps the first reads another method.
+  it.each([
+    ['twice, the weaker one last', '{"_method":"DELETE","_method":"PATCH"}', 'DELETE'],
+    ['twice, the same value', '{"_method":"PATCH","_method":"PATCH"}', 'DELETE'],
+    ['twice, once escaped', '{"_method":"DELETE","_\\u006dethod":"PATCH"}', 'DELETE'],
+    ['once at the top and once nested', '{"item":{"_method":"DELETE"},"_method":"PATCH"}', 'PATCH'],
+    ['twice, in two nested objects', '{"a":{"_method":"x"},"b":{"_method":"y"}}', 'POST'],
+    ['in two cases, both read', '{"_method":"PATCH","_METHOD":"PUT"}', 'PUT'],
+  ] as const)('a JSON `_method` key %s', (_k, body, want) => {
+    expect(effectiveWriteMethod('POST', { ...JSON_CT }, U, body)).toBe(want);
+  });
+});
+
 describe('the body read as given and as sent', () => {
   const JSON_CT = { 'content-type': 'application/json' };
   it('counts an override that only the repaired reading names', () => {
@@ -213,7 +245,7 @@ describe('a header name read the way a CGI-style server reads it', () => {
   });
 
   it('names a credential slot that would shape the request, in any spelling, and no ordinary one', () => {
-    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type']) {
+    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type', 'Content-Encoding', 'content_encoding']) {
       expect(isRequestShapingHeaderName(name), name).toBe(true);
     }
     for (const name of ['X-Api-Key', 'X_Api_Key', 'Authorization', 'X-Shopify-Access-Token', 'X-Forwarded-For', 'X-RapidAPI-Host', 'Content-Length']) {
