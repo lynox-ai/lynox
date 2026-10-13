@@ -12,11 +12,12 @@ vi.mock('node:dns/promises', () => ({
 const formFixture = vi.hoisted(() => ({ measured: true }));
 vi.mock('./bulk-write-forms.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('./bulk-write-forms.js')>();
+  const stand = (host: string, method: string | null): boolean => formFixture.measured && host === 'shop.example.com' && method !== null;
   return {
     ...real,
+    isMeasuredWriteForm: (host: string, path: string, method: string) => stand(host, method) || real.isMeasuredWriteForm(host, path, method),
     writeFormOf: (host: string, paths: readonly string[], method: string | null) =>
-      formFixture.measured && host === 'shop.example.com' && method !== null && paths.length > 0
-        ? 'measured' : real.writeFormOf(host, paths, method),
+      stand(host, method) && paths.length > 0 ? 'measured' : real.writeFormOf(host, paths, method),
   };
 });
 
@@ -1134,7 +1135,7 @@ describe('an unmeasured write form', () => {
       // is on record for them, and still the second run writes one target first.
       const second = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?')
-        .get(HOST, 'PATCH', '/products/')).toEqual({ run_id: first });
+        .get(HOST, 'PATCH', 'unmeasured:/products/')).toEqual({ run_id: first });
       expect(ledger.getStatus(second)!.probeConfirmed).toBe(false);
       expect(ledger.approve(second, { checksum: ledger.computeChecksum(second)!, maxTargets: 2, unmeasuredConfirmed: true }))
         .toEqual({ ok: false, reason: 'probe_required' });
@@ -1182,4 +1183,51 @@ describe('an unmeasured write form', () => {
       restore();
     }
   });
+
+  it('counts a probe only for the form it was written to: a measured target does not vouch for an unmeasured one', async () => {
+    const s = shop();
+    const woo = (id: string): string => `https://${HOST}/wp-json/wc/v3/products/${id}`;
+    s.items.set('/wp-json/wc/v3/products/7', { id: 7, price: '12.00' });
+    s.items.set('/wp-json/wc/v3/products/batch', { id: 'batch', price: '12.00' });
+    const restore = serve(s);
+    try {
+      // Same kind of resource; the measured product is written first and becomes the probe.
+      const c = client({ contract: mintBulkContract(HOST, [woo('7'), woo('batch')]) });
+      const runId = await previewedRun([{ target: woo('7'), after: { price: '15' } }, { target: woo('batch'), after: { price: '15' } }], c);
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.getStatus(runId)!.writeForm).toBe('unmeasured');
+      expect(ledger.approve(runId, { checksum, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      expect(s.items.get('/wp-json/wc/v3/products/7')!['price']).toBe('15.00');
+      expect(ledger.confirmProbe(runId)).toEqual({ ok: true });
+      expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
+      expect(ledger.resume(runId, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(s.items.get('/wp-json/wc/v3/products/batch')!['price']).toBe('12.00');
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps a probe written to an unmeasured target from widening a measured run', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client();
+      const unmeasured = await previewedRun([0, 1].map((i) => ({ target: url(i), after: { price: '15' } })), c);
+      expect(ledger.approve(unmeasured, { checksum: ledger.computeChecksum(unmeasured)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      await runBulkEffect(unmeasured, 'bulk_apply', { ledger, writerFor: writerFor(c) });
+      expect(ledger.confirmProbe(unmeasured)).toEqual({ ok: true });
+      engineDb.getDb().prepare(`UPDATE bulk_runs SET phase = 'aborted' WHERE id = ?`).run(unmeasured);
+
+      // The same host, verb and kind, now a measured form (the stand-in): it needs a probe
+      // written to a measured target, and the unmeasured one is not that.
+      formFixture.measured = true;
+      const measured = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
+      expect(ledger.getStatus(measured)).toMatchObject({ writeForm: 'measured', probeConfirmed: false });
+      expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    } finally {
+      restore();
+    }
+  });
 });
+
