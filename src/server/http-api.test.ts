@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, onTestFinished } from 'vitest';
 import { principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
@@ -527,6 +527,21 @@ async function jsonFetch(path: string, opts: RequestInit = {}): Promise<Response
     headers['Content-Type'] = 'application/json';
   }
   return fetch(`${baseUrl}${path}`, { ...opts, headers });
+}
+
+/**
+ * Give the rate-limit window back when the calling test ends: every count goes back to
+ * what it was at the call, never a `clear()`. The tests here share one loopback window
+ * of 600. Call it first in a test added after this helper, when its describe does not
+ * repay its own spend; some describes do, with a snapshot in `beforeAll` restored in
+ * `afterAll` or `afterEach`. Tests that predate the helper do not call it, on purpose:
+ * the comment in the `tasks` describe explains how handing back their spend weakens the
+ * `rate limiting` describe.
+ */
+function repayRateWindow(): void {
+  const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+  const before = new Map([...window].map(([k, v]) => [k, v.count]));
+  onTestFinished(() => { for (const [k, e] of window) e.count = before.get(k) ?? 0; });
 }
 
 /**
@@ -2660,6 +2675,7 @@ describe('LynoxHTTPApi', () => {
         // The two other answer routes give the same answer for a question the restart closed.
         const tabs = store.insertAskUserTabs('s-tabs', [{ question: 'Which list?' }]);
         const mail = store.insertConnectMail('s-mail', 'Connect the office mailbox?', '{}');
+        const secret = store.insertAskSecret('s-secret', 'API_KEY', 'Paste the key');
         store.expireUnparked();
         const tabsRes = await jsonFetch('/api/sessions/s-tabs/reply-tabs', { method: 'POST', body: JSON.stringify({ promptId: tabs, answers: ['B'] }) });
         expect(tabsRes.status).toBe(410);
@@ -2667,6 +2683,16 @@ describe('LynoxHTTPApi', () => {
         const mailRes = await jsonFetch('/api/sessions/s-mail/mail-connected', { method: 'POST', body: JSON.stringify({ promptId: mail, status: 'connected' }) });
         expect(mailRes.status).toBe(410);
         expect((await mailRes.json() as { code?: string }).code).toBe('process_restarted');
+        const secretRes = await jsonFetch('/api/sessions/s-secret/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: secret, status: 'saved' }) });
+        expect(secretRes.status).toBe(410);
+        expect((await secretRes.json() as { code?: string }).code).toBe('process_restarted');
+        // Why a question closed is told only to its own session, and only for its own kind.
+        const foreign = await jsonFetch('/api/sessions/s-other/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: secret, status: 'saved' }) });
+        expect(foreign.status).toBe(409);
+        expect((await foreign.json() as { code?: string }).code).toBeUndefined();
+        const wrongKind = await jsonFetch('/api/sessions/s-mail/secret-saved', { method: 'POST', body: JSON.stringify({ promptId: mail, status: 'saved' }) });
+        expect(wrongKind.status).toBe(409);
+        expect((await wrongKind.json() as { code?: string }).code).toBeUndefined();
 
         const expired = await jsonFetch('/api/sessions/s-ttl/reply', { method: 'POST', body: JSON.stringify({ promptId: timedOut, answer: 'B' }) });
         expect(expired.status).toBe(410);
@@ -3762,10 +3788,92 @@ describe('LynoxHTTPApi', () => {
           body: JSON.stringify({ status: 'saved', promptId }),
         });
         // The real security invariant: the original session's row stays
-        // pending. The HTTP status (404 from per-session fall-through, or
-        // 200 if the route ever becomes idempotent) is incidental.
+        // pending. The HTTP status (409, a prompt of another session) is incidental.
         expect(ps.getById(promptId)?.status).toBe('pending');
         expect(ps.getById(promptId)?.answer_error).toBeNull();
+      });
+    });
+
+    // A tab left over from an earlier run reports on its own question; the session may have
+    // asked a newer one since, which that report must not settle.
+    it.each([
+      ['expired', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.expirePrompt(id), 410],
+      ['answered', (ps: import('../core/prompt-store.js').PromptStore, id: string) => ps.answerSecret(id, 'saved'), 200],
+    ] as const)('a named question that was %s leaves the newer open one alone', async (_label, close, expected) => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const old = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        close(ps, old);
+        const fresh = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: old }),
+        });
+        expect(res.status).toBe(expected);
+        expect(ps.getById(fresh)?.status).toBe('pending');
+        expect(ps.getById(fresh)?.answer_saved).toBeNull();
+      });
+    });
+
+    it('an unknown promptId is a 404 and leaves the open question alone', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const open = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: 'no-such-id' }),
+        });
+        expect(res.status).toBe(404);
+        expect(ps.getById(open)?.status).toBe('pending');
+      });
+    });
+
+    it('another session\'s promptId is a 409 and settles neither session\'s question', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const foreign = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const own = ps.insertAskSecret('other-1', 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/other-1/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: foreign }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(foreign)?.status).toBe('pending');
+        expect(ps.getById(own)?.status).toBe('pending');
+      });
+    });
+
+    it('a promptId of another kind of question is a 409 and leaves it open', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const ask = ps.insertAskUser(sid, 'Which list?');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'saved', promptId: ask }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(ask)?.status).toBe('pending');
+      });
+    });
+
+    it('without a promptId it settles the session\'s open secret question', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const open = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'saved' }),
+        });
+        expect(res.status).toBe(200);
+        expect(ps.getById(open)?.status).toBe('answered');
+        expect(ps.getById(open)?.answer_saved).toBe(1);
+      });
+    });
+
+    it('without a promptId it leaves an open question of another kind alone', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const ask = ps.insertAskUser(sid, 'Which list?');
+        const res = await jsonFetch(`/api/sessions/${sid}/secret-saved`, {
+          method: 'POST', body: JSON.stringify({ status: 'saved' }),
+        });
+        expect(res.status).toBe(404);
+        expect(ps.getById(ask)?.status).toBe('pending');
       });
     });
   });
@@ -3847,6 +3955,44 @@ describe('LynoxHTTPApi', () => {
           method: 'POST', body: JSON.stringify({ status: 'connected', promptId }),
         });
         expect(again.status).toBe(200);
+      });
+    });
+
+    it('a promptId of another kind of question is a 409 and leaves it open', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const secret = ps.insertAskSecret(sid, 'API_KEY', 'Enter');
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'connected', promptId: secret }),
+        });
+        expect(res.status).toBe(409);
+        expect(ps.getById(secret)?.status).toBe('pending');
+      });
+    });
+
+    it('a named question that expired is a 410 and leaves the newer open one alone', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const old = ps.insertConnectMail(sid, 'q', payload);
+        ps.expirePrompt(old);
+        const fresh = ps.insertConnectMail(sid, 'q', payload);
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: old }),
+        });
+        expect(res.status).toBe(410);
+        expect(ps.getById(fresh)?.status).toBe('pending');
+      });
+    });
+
+    it('an unknown promptId is a 404 and leaves the open question alone', async () => {
+      repayRateWindow();
+      await withStore(async (sid, ps) => {
+        const open = ps.insertConnectMail(sid, 'q', payload);
+        const res = await jsonFetch(`/api/sessions/${sid}/mail-connected`, {
+          method: 'POST', body: JSON.stringify({ status: 'canceled', promptId: 'no-such-id' }),
+        });
+        expect(res.status).toBe(404);
+        expect(ps.getById(open)?.status).toBe('pending');
       });
     });
   });

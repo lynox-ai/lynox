@@ -161,3 +161,96 @@ describe('dismissing a prompt with no network', () => {
 		expect(toasts.filter((t) => t.type === 'error')).toHaveLength(2);
 	});
 });
+
+describe('a new question that arrives while an answer is being saved', () => {
+	it('keeps its card for a secret and for a mail connection', async () => {
+		let putDone!: (r: Response) => void;
+		let accountDone!: (r: Response) => void;
+		const run = openRun((url) => {
+			if (url.includes('/secrets/')) return new Promise<Response>((r) => { putDone = r; });
+			if (url.endsWith('/mail/accounts')) return new Promise<Response>((r) => { accountDone = r; });
+			return json({});
+		});
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		await settle();
+		const saving = store.submitSecret('API_KEY', 'value');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p2' });
+		await settle();
+		putDone(json({}));
+		await expect(saving).resolves.toBe('saved');
+		expect(store.getPendingSecretPrompt()?.promptId).toBe('p2');
+
+		run.send('mail_connect_prompt', { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		const connecting = store.submitMailConnect('pw');
+		await settle();
+		run.send('mail_connect_prompt', { promptId: 'm2', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		accountDone(json({}));
+		await expect(connecting).resolves.toEqual({ ok: true });
+		expect(store.getPendingMailConnect()?.promptId).toBe('m2');
+	});
+
+	it('keeps it for a secret whose vault write failed', async () => {
+		let putFail!: (e: unknown) => void;
+		const run = openRun((url) => (url.includes('/secrets/') ? new Promise<Response>((_, reject) => { putFail = reject; }) : json({})));
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		await settle();
+		const saving = store.submitSecret('API_KEY', 'value');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p2' });
+		await settle();
+		putFail(new TypeError('Failed to fetch'));
+		await expect(saving).resolves.toBe('vault_error');
+		expect(store.getPendingSecretPrompt()?.promptId).toBe('p2');
+	});
+
+	it('does not keep a card shown again for the same question, as a resume does', async () => {
+		let putDone!: (r: Response) => void;
+		let accountDone!: (r: Response) => void;
+		const run = openRun((url) => {
+			if (url.includes('/secrets/')) return new Promise<Response>((r) => { putDone = r; });
+			if (url.endsWith('/mail/accounts')) return new Promise<Response>((r) => { accountDone = r; });
+			return json({});
+		});
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		await settle();
+		const saving = store.submitSecret('API_KEY', 'value');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		await settle();
+		putDone(json({}));
+		await expect(saving).resolves.toBe('saved');
+		expect(store.getPendingSecretPrompt()).toBeNull();
+
+		run.send('mail_connect_prompt', { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		const connecting = store.submitMailConnect('pw');
+		await settle();
+		run.send('mail_connect_prompt', { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		accountDone(json({}));
+		await expect(connecting).resolves.toEqual({ ok: true });
+		expect(store.getPendingMailConnect()).toBeNull();
+	});
+
+	it('control: without a new question the saved card is cleared', async () => {
+		const run = openRun(() => json({}));
+		void store.sendMessage('go');
+		await settle();
+		run.send('secret_prompt', { name: 'API_KEY', prompt: 'key?', promptId: 'p1' });
+		run.send('mail_connect_prompt', { promptId: 'm1', id: 'a1', displayName: 'Me', address: 'me@example.com', preset: 'custom' });
+		await settle();
+		await expect(store.submitSecret('API_KEY', 'value')).resolves.toBe('saved');
+		await expect(store.submitMailConnect('pw')).resolves.toEqual({ ok: true });
+		expect(store.getPendingSecretPrompt()).toBeNull();
+		expect(store.getPendingMailConnect()).toBeNull();
+	});
+});
