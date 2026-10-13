@@ -85,6 +85,17 @@ describe('parseListSource', () => {
     },
   );
 
+  it('reads the products list', () => {
+    expect(parse({ ...base, path: '/wp-json/wc/v3/products' }).path).toBe('/wp-json/wc/v3/products');
+  });
+
+  it.each([['/wp-json/wc/v3/orders'], ['/wp-json/wc/v3/customers'], ['/wp-json/wc/v3/coupons'], ['/wp-json/wc/v3/product'], ['/wp-json/wc/v3/products_x']])(
+    'refuses %j: the form reads the products list only',
+    (path) => {
+      expect(() => parse({ ...base, path })).toThrow(/not a list of the form woocommerce/);
+    },
+  );
+
   it('refuses an unknown form and a write method outside the three', () => {
     expect(() => parse({ ...base, form: 'shopify' })).toThrow(/form must be one of/);
     expect(() => parseListSource(HOST, base, 'DELETE' as 'PUT', noSecret)).toThrow(/write_method/);
