@@ -1651,10 +1651,7 @@ export class Agent implements IAgent {
       // (Mistral is documented as validating `^[a-zA-Z0-9]{9}$`), chosen because
       // this pair is PERSISTED — a rejected id fails not just this turn but every
       // later turn in the thread, on exactly the provider the recovery exists
-      // for. NOT a claim that the engine only ever mints such ids: the
-      // openai-compat adapter names an id-less tool call `tool_<index>`
-      // (see `openai-adapter.ts`), which this shape would reject. If Mistral does
-      // enforce it, that path has the same bug and is the one to fix next.
+      // for. This says nothing about ids from other sources.
       // A `messages.length`-derived id was also not unique: `_truncateHistory`
       // shrinks the array, so it repeats within one thread.
       const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
