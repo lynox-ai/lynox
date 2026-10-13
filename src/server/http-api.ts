@@ -2037,8 +2037,10 @@ export class LynoxHTTPApi {
    * Write the outcome row of an open trail, once its handler has finished:
    * - `done` when the handler answered 2xx;
    * - `refused` for any other answer below 500 (a 4xx): the change was turned down;
-   * - `failed` when it answered 5xx, or nothing (it threw before answering): the change broke
-   *   while it was being made, and a part of it may have happened.
+   * - `failed` when it answered 5xx, or nothing (it threw before answering): the change did not
+   *   end cleanly, and the answer does not tell whether a part of it happened. A 503 from a
+   *   service that is not there, before anything was done, is in this class too; the row errs
+   *   toward a change that may have happened rather than away from one.
    * Run after the handler, not when the connection closes: a client that leaves early does not
    * decide the outcome, and the act it started is still recorded. A handler that awaits its
    * whole run (a chat run) is closed only when the run ends, so its outcome row can follow the

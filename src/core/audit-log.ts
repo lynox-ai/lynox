@@ -22,7 +22,8 @@ import { maskSecretPatterns } from './secret-store.js';
 /**
  * - `attempt` — about to run; written first, and the act does not run without it.
  * - `done` / `refused` / `failed` — a request's outcome, read from its answer: 2xx, another
- *   answer below 500, or a 5xx or none (it broke while being made; a part may have happened).
+ *   answer below 500, or a 5xx or none (it did not end cleanly; the answer does not tell
+ *   whether a part of it happened).
  * - `returned` / `failed` — a tool call's outcome: it returned a result, or it threw. A
  *   returned call is not called done: the result is the tool's own text, and a tool that
  *   asks before it sends returns one when the answer was no.
