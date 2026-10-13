@@ -24,7 +24,7 @@ import { maskCredentialInput, withoutTypedCredentials } from './secret-store.js'
 export type PromptType = 'ask_user' | 'ask_secret' | 'connect_mail';
 export type PromptStatus = 'pending' | 'answered' | 'expired';
 /** Why a question was closed without an answer, where that was not its own expiry. */
-export type PromptClosedReason = 'process_restarted' | 'mandate_ended';
+export type PromptClosedReason = 'process_restarted' | 'mandate_ended' | 'thread_deleted';
 
 export interface PendingPromptRow {
   id: string;
@@ -670,6 +670,31 @@ export class PromptStore {
     const result = this._getExpireUnparkedStmt().run();
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
+  }
+
+  /**
+   * Close the questions a run is waiting on in a thread the owner just deleted, with
+   * `closed_reason = 'thread_deleted'`. The only place to answer them was that thread, so they
+   * could no longer be answered; the run waiting on one is released now, and reads the reason,
+   * instead of waiting for the TTL. Only this thread's questions, and only live waits
+   * (`trigger_id IS NULL`): a parked question belongs to its trigger's wait, which ends on its
+   * own deadline.
+   */
+  withdrawForDeletedThread(sessionId: string): number {
+    const rows = this.db
+      .prepare(`SELECT id FROM pending_prompts WHERE session_id = ? AND status = 'pending' AND trigger_id IS NULL`)
+      .all(sessionId) as { id: string }[];
+    const close = this.db.prepare(
+      `UPDATE pending_prompts SET status = 'expired', closed_reason = 'thread_deleted' WHERE id = ? AND status = 'pending'`,
+    );
+    let closed = 0;
+    for (const row of rows) {
+      if (close.run(row.id).changes > 0) {
+        closed += 1;
+        this._emitSettled(row.id);
+      }
+    }
+    return closed;
   }
 
   /**

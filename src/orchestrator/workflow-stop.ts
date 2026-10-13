@@ -18,3 +18,11 @@ export const WORKFLOW_QUESTION_UNANSWERED_ERROR = 'Question not answered: the wo
  * not the unanswered error; the run still stops, so no step acts without the answer it asked for.
  */
 export const WORKFLOW_QUESTION_NOT_ASKED_ERROR = 'Question not asked: the workflow could not put its question to its owner, so it stopped before acting without an answer.';
+
+/**
+ * The error a scheduled workflow run ends with when its owner deleted the conversation a question
+ * was asked in. That conversation was the only place to answer it, so the question is withdrawn
+ * and the run stops before acting without the answer. The owner deleted a chat, not the run: the
+ * worker records this without a retry or an escalation, and without saying they stopped it.
+ */
+export const WORKFLOW_QUESTION_THREAD_DELETED_ERROR = 'Question withdrawn: the conversation it was asked in was deleted, so the workflow stopped before acting without an answer.';

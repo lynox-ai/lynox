@@ -10,6 +10,7 @@ import { reloadConfig } from '../core/config.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import type { KnowledgeLayer } from '../core/knowledge-layer.js';
+import type { PromptStore } from '../core/prompt-store.js';
 
 /**
  * Deleting a chat keeps what was learned in it, and marks the source as a deleted chat.
@@ -181,6 +182,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
   it('a failed legacy marking answers 500 and leaves the chat; the retry keeps the durable first stamp', async () => {
     const { ts, ks, kl } = stores();
     const seeded = seedThread('t-legacy-fails');
+    const waiting = promptStore().insertAskUser('t-legacy-fails', 'Which list, A or B?');
     vi.spyOn(kl, 'markThreadDeleted').mockImplementationOnce(() => { throw new Error('database is locked'); });
 
     const first = await deleteChat('t-legacy-fails');
@@ -189,6 +191,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(first.body['failed']).toEqual([expect.stringContaining('memories')]);
     expect(ts.getThread('t-legacy-fails')).toBeDefined();
     expect(ts.isDeleted('t-legacy-fails'), 'not deleted, so not refused either').toBe(false);
+    expect(promptStore().getById(waiting), 'nor its question withdrawn').toMatchObject({ status: 'pending' });
     expect(legacyMarker(seeded.legacy)).toBeNull();
     for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).not.toBeNull();
     const FIRST = '2000-01-01 00:00:00';
@@ -198,6 +201,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
 
     expect(second.status).toBe(200);
     expect(ts.getThread('t-legacy-fails')).toBeUndefined();
+    expect(promptStore().getById(waiting), 'withdrawn once the chat is gone').toMatchObject({ closed_reason: 'thread_deleted' });
     expect(legacyMarker(seeded.legacy)).toMatch(/^\d{4}-/);
     for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBe(FIRST);
   });
@@ -237,6 +241,28 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
 
     expect((await openChat(id)).status).toBe(410);
     expect(ts.getThread(id)).toBeUndefined();
+  });
+
+  function promptStore(): PromptStore {
+    const ps = (api as unknown as { engine: { getPromptStore: () => PromptStore | null } }).engine.getPromptStore();
+    if (!ps) throw new Error('fixture: no prompt store');
+    return ps;
+  }
+
+  it('deleting a chat withdraws the question a run waits on in it, and only that one', async () => {
+    const { ts } = stores();
+    const ps = promptStore();
+    const id = randomUUID();
+    const other = randomUUID();
+    ts.createThread(id, { title: 'a run asks here' });
+    ts.createThread(other, { title: 'another chat' });
+    const asked = ps.insertAskUser(id, 'Which list, A or B?');
+    const kept = ps.insertAskUser(other, 'Send it now?');
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(ps.getById(asked)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted' });
+    expect(ps.getById(kept)).toMatchObject({ status: 'pending', closed_reason: null });
   });
 
   it('a session built for a deleted id writes no thread row', () => {

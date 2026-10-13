@@ -9,13 +9,17 @@ import type { NotificationMessage, NotifyReport, DeliverySummary } from './notif
 import { inquiryOptions, summarizeDelivery } from './notification-router.js';
 import { flattenPrompt, offBoxPrompt, promptSegments } from './prompt-value.js';
 
+/** Why a run lacks an answer it asked for. */
+export type UnansweredBecause = 'expired' | 'not_asked' | 'thread_deleted';
+
 /** What the runner reads off a scheduled workflow run that may ask its owner (PRD 3b-2 §4.5, G5). */
 export interface WorkflowQuestionWait {
   /** The run lacks an answer it asked for, so it halts: a question went unanswered until its TTL
-   *  ran out, or could not be put to the owner at all. */
+   *  ran out, could not be put to the owner at all, or was withdrawn because the owner deleted
+   *  the thread it was asked in. */
   readonly unanswered: boolean;
-  /** Which of the two, for the run's error. `undefined` while nothing is missing. */
-  readonly unansweredBecause: 'expired' | 'not_asked' | undefined;
+  /** Which of the three, for the run's error. `undefined` while nothing is missing. */
+  readonly unansweredBecause: UnansweredBecause | undefined;
   /** Milliseconds this run has spent waiting for an answer, so the wall clock leaves them out. */
   pausedMs(now?: number): number;
 }
@@ -73,7 +77,7 @@ const neverSettles = (): Promise<string> => new Promise<string>(() => { /* the r
  */
 export class WorkflowQuestions implements WorkflowQuestionWait {
   readonly #deps: WorkflowQuestionDeps;
-  #unansweredBecause: 'expired' | 'not_asked' | undefined;
+  #unansweredBecause: UnansweredBecause | undefined;
   #pausedMs = 0;
   #waitingSince: number | undefined;
   #threadReady = false;
@@ -85,7 +89,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
   }
 
   get unanswered(): boolean { return this.#unansweredBecause !== undefined; }
-  get unansweredBecause(): 'expired' | 'not_asked' | undefined { return this.#unansweredBecause; }
+  get unansweredBecause(): UnansweredBecause | undefined { return this.#unansweredBecause; }
 
   pausedMs(now: number = Date.now()): number {
     return this.#pausedMs + (this.#waitingSince !== undefined ? now - this.#waitingSince : 0);
@@ -155,6 +159,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
       const cause = this.#causeOfEnd(meta?.signal) ?? this.#causeFromRow(store, promptId);
       if (cause === 'teardown') return neverSettles();
       if (cause === 'ttl') return this.#endUnanswered('expired');
+      if (cause === 'thread_deleted') return this.#endUnanswered('thread_deleted');
       // A stop or a withdrawal: the question goes, so an answer given later finds it closed.
       try { store.expirePrompt(promptId); } catch (err: unknown) {
         process.stderr.write(`[lynox:worker] withdrawing a workflow question failed: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -168,7 +173,7 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
   }
 
   /** The run goes on no further: no later step runs, and every step in flight ends (§4.5). */
-  #endUnanswered(because: 'expired' | 'not_asked'): string {
+  #endUnanswered(because: UnansweredBecause): string {
     this.#unansweredBecause = because;
     for (const member of this.#deps.abortScope.members) {
       try { member.abort(); } catch { /* the next one still gets its abort */ }
@@ -178,13 +183,16 @@ export class WorkflowQuestions implements WorkflowQuestionWait {
 
   /**
    * Why an expired question expired, when nothing on the run says so: the shutdown's sweep
-   * (`process_restarted`), or its TTL. A database the engine already closed is a teardown too.
+   * (`process_restarted`), the owner deleting the thread it was asked in (`thread_deleted`), or
+   * its TTL. A database the engine already closed is a teardown too.
    * Any other failed read ends the run unanswered — bounded and safe for the steps after it,
    * where a step left waiting would hold the run until the process ends.
    */
-  #causeFromRow(store: PromptStore, promptId: string): 'teardown' | 'ttl' {
+  #causeFromRow(store: PromptStore, promptId: string): 'teardown' | 'ttl' | 'thread_deleted' {
     try {
-      return store.getById(promptId)?.closed_reason === 'process_restarted' ? 'teardown' : 'ttl';
+      const reason = store.getById(promptId)?.closed_reason;
+      if (reason === 'thread_deleted') return 'thread_deleted';
+      return reason === 'process_restarted' ? 'teardown' : 'ttl';
     } catch {
       return store.isOpen() ? 'ttl' : 'teardown';
     }

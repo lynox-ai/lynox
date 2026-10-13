@@ -103,16 +103,8 @@ describe('an escalation after its thread was deleted', () => {
 describe('a workflow run whose thread was deleted while it ran', () => {
   const RUN_ID = '21111111-2222-4333-8444-555555555555';
 
-  it('asks again without re-creating the thread; the question still reaches the owner', async () => {
-    const { history, threads } = freshHistory();
-    const prompts = new PromptStore(history.getDb());
-    const notified: unknown[] = [];
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    // A run's thread is created with its first question. Here it is the run's second
-    // question, after the owner deleted what the first one opened.
-    threads.createThread(RUN_ID, { title: 'Weekly offer' });
-    threads.deleteThread(RUN_ID);
-    const q = new WorkflowQuestions({
+  function channel(history: RunHistory, threads: ThreadStore, prompts: PromptStore, notified: unknown[], scopeMember?: { abort: () => void }): WorkflowQuestions {
+    return new WorkflowQuestions({
       runId: RUN_ID,
       scheduleId: 'trg-wf',
       title: 'Weekly offer',
@@ -126,9 +118,57 @@ describe('a workflow run whose thread was deleted while it ran', () => {
       ownerStop: new AbortController().signal,
       teardown: new AbortController().signal,
       tearingDown: () => false,
-      abortScope: { members: new Set() },
+      abortScope: { members: new Set(scopeMember ? [scopeMember] : []) },
       onPending: () => {},
     });
+  }
+
+  it('deleting the thread withdraws the question it waits on, and the run ends with that reason', async () => {
+    // The thread was the only place the owner could answer it. Without the withdrawal the run
+    // waited out the TTL and ended as "expired".
+    const { history, threads } = freshHistory();
+    const prompts = new PromptStore(history.getDb());
+    const member = { abort: vi.fn() };
+    const q = channel(history, threads, prompts, [], member);
+    const answer = q.ask('Which list, A or B?', ['A', 'B']);
+    await vi.waitFor(() => { expect(prompts.getPending(RUN_ID)).toBeDefined(); });
+    const id = prompts.getPending(RUN_ID)!.id;
+
+    threads.deleteThread(RUN_ID);
+    expect(prompts.withdrawForDeletedThread(RUN_ID)).toBe(1);
+
+    await expect(answer).resolves.toBe('__dismissed__');
+    expect(q.unansweredBecause).toBe('thread_deleted');
+    expect(member.abort, 'no later step runs').toHaveBeenCalled();
+    expect(prompts.getById(id)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted' });
+  });
+
+  it('withdraws only the deleted thread\'s live questions', () => {
+    const { history } = freshHistory();
+    const prompts = new PromptStore(history.getDb());
+    const mine = prompts.insertAskUser('gone-thread', 'In the deleted chat?');
+    const elsewhere = prompts.insertAskUser('other-thread', 'In another chat of the same owner?');
+    // A parked question belongs to its trigger's wait, which ends on its own deadline.
+    const parked = prompts.insertAskUser('parked-thread', 'Parked on a trigger?', undefined, undefined, undefined, undefined, 'trg-1');
+
+    expect(prompts.withdrawForDeletedThread('gone-thread')).toBe(1);
+    expect(prompts.withdrawForDeletedThread('parked-thread')).toBe(0);
+
+    expect(prompts.getById(mine)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted' });
+    expect(prompts.getById(elsewhere)).toMatchObject({ status: 'pending', closed_reason: null });
+    expect(prompts.getById(parked)).toMatchObject({ status: 'pending', closed_reason: null });
+  });
+
+  it('asks again without re-creating the thread; the question still reaches the owner', async () => {
+    const { history, threads } = freshHistory();
+    const prompts = new PromptStore(history.getDb());
+    const notified: unknown[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // A run's thread is created with its first question. Here it is the run's second
+    // question, after the owner deleted what the first one opened.
+    threads.createThread(RUN_ID, { title: 'Weekly offer' });
+    threads.deleteThread(RUN_ID);
+    const q = channel(history, threads, prompts, notified);
 
     const answer = q.ask('Which list, A or B?', ['A', 'B']);
     await vi.waitFor(() => { expect(prompts.getPending(RUN_ID)).toBeDefined(); });

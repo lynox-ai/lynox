@@ -5027,6 +5027,12 @@ export class LynoxHTTPApi {
         return;
       }
       threadStore.deleteThread(id);
+      // A run still waiting on a question in this chat could only be answered here. Its question
+      // is withdrawn now, so the run ends with that reason instead of waiting out the TTL. After
+      // the delete: a delete that answered 500 above leaves the chat, and its questions with it.
+      try { engine.getPromptStore()?.withdrawForDeletedThread(id); } catch (err: unknown) {
+        process.stderr.write(`[lynox:thread-delete] withdrawing the questions of deleted thread ${id.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
       // Extended debug capture: drop the thread's captured wire_snapshots too (the
       // runs stay — they are the cost ledger). Without this the redacted-but-personal
       // snapshots outlive their deleted thread with no other prune path.
