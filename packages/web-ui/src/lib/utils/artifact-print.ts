@@ -17,7 +17,7 @@ import { fixMarkdownPreprocessing } from './markdown-preprocess.js';
  * The auto-print script is OURS (added after any sanitization), so it is safe
  * to inline here.
  */
-export function injectPrintScaffold(html: string): string {
+export function injectPrintScaffold(html: string, nonce?: string): string {
   // @page margins + print page-break hygiene so a multi-page document (e.g. an
   // A4 contract) doesn't split tables/figures/headings across pages or leave
   // orphan/widow lines — the prior "zeilenumbrüche schlecht" report.
@@ -31,7 +31,7 @@ export function injectPrintScaffold(html: string): string {
   // Split the closing-script-tag literal so bundlers/inline-HTML parsers don't
   // terminate the surrounding module/markup early.
   const script =
-    '<scr' + 'ipt>window.addEventListener("load",function(){setTimeout(function(){window.print();},200);});' +
+    '<scr' + 'ipt' + (nonce === undefined ? '' : ` nonce="${nonce}"`) + '>window.addEventListener("load",function(){setTimeout(function(){window.print();},200);});' +
     'window.addEventListener("afterprint",function(){window.close();});</scr' + 'ipt>';
   // ONE append, at the END — no pattern match over sanitized HTML, and no
   // insertion OFFSET either. Both halves of that cost a measurement.
@@ -103,6 +103,28 @@ export function injectPrintScaffold(html: string): string {
   return `${html}${style}${script}`;
 }
 
+/** A fresh value for one print document's script policy. */
+function printNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...bytes)).replace(/[+/=]/g, '');
+}
+
+/**
+ * The print document as it is opened: a script policy of its own first, then the document with
+ * the scaffold, whose script alone carries the policy's nonce.
+ *
+ * The document opens from a blob: URL, so it runs in the app's origin, and the app's policy
+ * allows inline script. Its own `<meta>` policy is enforced on top of that one, so a script runs
+ * only when both allow it: the scaffold's does, and nothing the artifact brings does (a
+ * `<script>` element or an event handler attribute), whatever got past the sanitizer. Measured
+ * in Chrome: the meta lands in `<head>` even before a `<!DOCTYPE>` or a full document, and with
+ * it only the scaffold runs. Forms send nowhere and plugins load nothing either.
+ */
+export function buildPrintDocument(html: string, nonce: string = printNonce()): string {
+  const policy = `<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-${nonce}'; object-src 'none'; base-uri 'none'; form-action 'none'">`;
+  return `${policy}${injectPrintScaffold(html, nonce)}`;
+}
+
 /** Open a built print document in a new window. False if the popup was blocked. */
 function openPrintWindow(doc: string): boolean {
   const blob = new Blob([doc], { type: 'text/html;charset=utf-8' });
@@ -127,7 +149,7 @@ function openPrintWindow(doc: string): boolean {
  */
 export function printHtmlDocument(rawHtml: string): boolean {
   const clean = DOMPurify.sanitize(rawHtml, { WHOLE_DOCUMENT: true }) as unknown as string;
-  return openPrintWindow(injectPrintScaffold(clean));
+  return openPrintWindow(buildPrintDocument(clean));
 }
 
 /**
@@ -191,5 +213,5 @@ ${renderedBody}
  */
 export function printMarkdownDocument(md: string, title: string): boolean {
   const rendered = DOMPurify.sanitize(marked.parse(fixMarkdownPreprocessing(md), { async: false }) as string);
-  return openPrintWindow(injectPrintScaffold(buildMarkdownPrintDocument(title || 'Artifact', rendered)));
+  return openPrintWindow(buildPrintDocument(buildMarkdownPrintDocument(title || 'Artifact', rendered)));
 }
