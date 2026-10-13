@@ -47,11 +47,14 @@ describe('changedPaths — from the fork, not from main\'s tip', () => {
       writeFileSync(join(dir, 'src/kept.ts'), 'export const a = 1;\n');
       writeFileSync(join(dir, 'src/old.ts'), 'export const b = 1;\n');
       writeFileSync(join(dir, 'src/gone.ts'), 'export const c = 1;\n');
+      writeFileSync(join(dir, 'src/shared.ts'), 'export const s = 1;\n');
       git('init', '-q', '-b', 'main');
       git('add', '-A');
       git('commit', '-q', '-m', 'A');
       git('branch', 'lane');
       writeFileSync(join(dir, 'src/main-only.ts'), 'export const m = 1;\n');
+      // Main edits a file the lane never touches: diffed against main's tip it reads as the lane's.
+      writeFileSync(join(dir, 'src/shared.ts'), 'export const s = 2;\n');
       git('add', '-A');
       git('commit', '-q', '-m', 'main moves on');
       git('checkout', '-q', 'lane');

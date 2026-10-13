@@ -22,7 +22,7 @@
  * `origin/main` does not resolve or shares no commit with HEAD; a changed file cannot be read at
  * HEAD; eslint cannot be loaded (no `node_modules`) or throws; the config IGNORES a file this hook
  * selected (the selection and the config have drifted apart, so part of the change would go
- * unlinted); eslint returns a different number of results than files it was given; `svelte-kit
+ * unlinted); eslint returns other than one result for a file; `svelte-kit
  * sync` fails (the web UI's tsconfig extends the file it writes). An empty selection is the only
  * way to exit 0 without linting, and it says so.
  *
@@ -86,7 +86,6 @@ export async function lintSelected(files, { root, eslint, read }) {
     if (out.length !== 1) throw new CannotCheck(`eslint returned ${out.length} results for ${f}, expected 1`);
     results.push(...out);
   }
-  if (results.length !== files.length) throw new CannotCheck(`eslint returned ${results.length} results for ${files.length} files`);
   return { errorCount: results.reduce((n, r) => n + r.errorCount, 0), results };
 }
 
