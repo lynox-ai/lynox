@@ -36,11 +36,6 @@ export interface ManifestStep {
   input_template?: Record<string, unknown> | undefined;
   output_schema?: Record<string, unknown> | undefined;
   tool_gates?: string[] | undefined;
-  pre_approve?: Array<{
-    tool: string;
-    pattern: string;
-    risk?: 'low' | 'medium' | 'high' | undefined;
-  }> | undefined;
   pipeline?: string | import('../types/index.js').InlinePipelineStep[] | undefined;
 }
 

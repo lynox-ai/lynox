@@ -41,12 +41,11 @@ export interface ParamConstraint {
  * `(tool, method, host, path)` tuple — and only that tuple. It does NOT restrict
  * otherwise-allowed benign ops (the default posture already does that), and it
  * never lifts a `[BLOCKED]` critical (CRITICAL_BASH, sensitive-path, http
- * DELETE) — those keep their marker and fall through exactly like a pre-approval
- * can't override a critical. A `null`/`undefined` contract = the safe
+ * DELETE) — those keep their marker and fall through. A `null`/`undefined` contract = the safe
  * autonomous-deny default (PRD §4.2 S7).
  *
  * Enforced per-tool-call at `isDangerous` (`tools/permission-guard.ts`), carried
- * there beside `autonomy`/`preApproval` via `RunManifestOptions.capabilityContract`
+ * there beside `autonomy` via `RunManifestOptions.capabilityContract`
  * → `new Agent` → the danger check. The grant requires host AND path AND method
  * to all match, so a re-target param that resolved into a different
  * host/path/method is NOT granted → stays denied (the S1 fix the host-only

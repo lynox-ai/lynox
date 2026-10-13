@@ -80,24 +80,3 @@ export interface CostSnapshot {
   budgetPercent: number;
 }
 
-// === Pre-Approval ===
-
-/** A single pre-approved operation pattern */
-export interface PreApprovalPattern {
-  tool: string;        // 'bash', 'write_file', 'read_file', etc.
-  pattern: string;     // Glob pattern: "npm run *", "dist/**"
-  label: string;       // Human-readable description
-  risk: 'low' | 'medium' | 'high';  // No 'critical' — those can't be approved
-}
-
-/** A set of pre-approved patterns for a session */
-export interface PreApprovalSet {
-  id: string;
-  approvedAt: string;
-  approvedBy: 'operator';
-  taskSummary: string;
-  patterns: PreApprovalPattern[];
-  maxUses: number;           // 0 = unlimited
-  ttlMs: number;             // 0 = session-scoped
-  usageCounts: number[];     // Per-pattern usage counter
-}

@@ -84,6 +84,12 @@ const ManifestConditionSchema = z.object({
   value: z.unknown().optional(),
 });
 
+/** Why a manifest step carrying `pre_approve` is refused. */
+export const PRE_APPROVE_REMOVED =
+  'pre_approve is no longer supported, and a manifest cannot pre-approve tool calls. '
+  + 'Remove the field. A call the guard warns about is asked about when someone is watching, '
+  + 'and refused in an unattended run.';
+
 const ManifestStepSchema = z.object({
   id: z.string().min(1),
   agent: z.string().min(1),
@@ -102,11 +108,9 @@ const ManifestStepSchema = z.object({
   timeout_ms: z.number().positive().optional(),
   output_schema: z.record(z.string(), z.unknown()).optional(),
   tool_gates: z.array(z.string()).optional(),
-  pre_approve: z.array(z.object({
-    tool: z.string().min(1),
-    pattern: z.string().min(1),
-    risk: z.enum(['low', 'medium', 'high']).optional(),
-  })).optional(),
+  // Refused rather than stripped: dropping it silently would run a manifest that relied on it
+  // with every warned call asked about or refused, and nothing would say why.
+  pre_approve: z.undefined({ error: PRE_APPROVE_REMOVED }).optional(),
   pipeline: z.union([z.string(), z.array(z.object({
     id: z.string().min(1),
     task: z.string().min(1),

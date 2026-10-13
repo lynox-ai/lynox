@@ -51,7 +51,7 @@ export { runManifest, loadManifestFile, validateManifest } from './orchestrator/
 export type {
   Manifest, ManifestStep, AgentDef, AgentOutput, RunState, RunHooks,
 } from './types/orchestration.js';
-export { globToRegex, extractMatchString, matchesPreApproval, buildApprovalSet, isCriticalTool } from './core/pre-approve.js';
+export { globToRegex } from './core/glob.js';
 
 export { planDAG, estimatePipelineCost } from './core/dag-planner.js';
 export type { DagPlanResult } from './core/dag-planner.js';

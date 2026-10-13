@@ -386,7 +386,7 @@ export const ALL_ACCOUNT_TYPES: ReadonlyArray<MailAccountType> = [
 
 /**
  * Types that MUST NOT send. The tool layer enforces this as a hard block —
- * not confirm-overrideable, not pre-approvable, independent of autonomy level.
+ * not confirm-overrideable, independent of autonomy level.
  *
  * Bulk types (info/newsletter/notifications) are receive-only because
  * auto-responding to bulk senders creates spam loops. Compliance types

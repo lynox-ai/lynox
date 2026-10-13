@@ -25,7 +25,7 @@ import { MAX_STEPS } from '../orchestrator/validate.js';
 import { stripUntrustedSeparators } from './sanitize.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { SECRET_REF_PATTERN, isInfraSecret } from './secret-store.js';
-import { isOverbroadHostPattern } from './pre-approve.js';
+import { isOverbroadHostPattern } from './glob.js';
 
 /**
  * Version of the SHARE ENVELOPE shape itself — the outer container

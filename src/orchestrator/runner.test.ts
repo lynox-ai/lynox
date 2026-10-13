@@ -23,7 +23,7 @@ vi.mock('./runtime-adapter.js', async (importOriginal) => {
   };
 });
 
-import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx } from './runner.js';
+import { runManifest, retryManifest, workflowBoundExceeded, buildRunCtx, validateManifest } from './runner.js';
 import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from './workflow-stop.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
@@ -418,56 +418,26 @@ describe('runManifest — gate points', () => {
   });
 });
 
-describe('runManifest — per-step pre-approval', () => {
-  it('step with pre_approve runs normally with mock', async () => {
-    const manifest: Manifest = {
+describe('runManifest — pre_approve is refused', () => {
+  it('refuses an unvalidated manifest whose step carries pre_approve', async () => {
+    const manifest = {
       ...MANIFEST,
-      agents: [
-        {
-          id: 'step-1',
-          agent: 'agent-a',
-          runtime: 'mock',
-          pre_approve: [
-            { tool: 'bash', pattern: 'npm run *', risk: 'low' },
-          ],
-        },
-      ],
-    };
+      agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock', pre_approve: [{ tool: 'bash', pattern: 'npm *' }] }],
+    } as unknown as Manifest;
     const mockResponses = new Map([['agent-a', 'ok']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
-    expect(state.status).toBe('completed');
-    expect(state.outputs.get('step-1')?.result).toBe('ok');
+    await expect(runManifest(manifest, CONFIG, { mockResponses }))
+      .rejects.toThrow('agents.step-1.pre_approve: pre_approve is no longer supported');
   });
 
-  it('step without pre_approve runs normally', async () => {
-    const manifest: Manifest = {
-      ...MANIFEST,
-      agents: [
-        { id: 'step-1', agent: 'agent-a', runtime: 'mock' },
-      ],
-    };
-    const mockResponses = new Map([['agent-a', 'ok']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+  it('runs a step whose pre_approve key holds undefined, as validateManifest lets it through', async () => {
+    const manifest = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock', pre_approve: undefined }] } as unknown as Manifest;
+    const state = await runManifest(validateManifest(manifest), CONFIG, { mockResponses: new Map([['agent-a', 'ok']]) });
     expect(state.status).toBe('completed');
   });
 
-  it('pre_approve field accepted in manifest validation', async () => {
-    const manifest: Manifest = {
-      ...MANIFEST,
-      agents: [
-        {
-          id: 'step-1',
-          agent: 'agent-a',
-          runtime: 'mock',
-          pre_approve: [
-            { tool: 'bash', pattern: 'npm *' },
-            { tool: 'write_file', pattern: 'dist/**', risk: 'medium' },
-          ],
-        },
-      ],
-    };
-    const mockResponses = new Map([['agent-a', 'ok']]);
-    const state = await runManifest(manifest, CONFIG, { mockResponses });
+  it('runs a step without it as before', async () => {
+    const manifest: Manifest = { ...MANIFEST, agents: [{ id: 'step-1', agent: 'agent-a', runtime: 'mock' }] };
+    const state = await runManifest(manifest, CONFIG, { mockResponses: new Map([['agent-a', 'ok']]) });
     expect(state.status).toBe('completed');
   });
 });
@@ -942,7 +912,7 @@ describe('runManifest — inline runtime', () => {
     await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
     // spawnInline's runTaint is the 15th positional argument (index 14).
-    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+    expect(mockSpawnInline.mock.calls[0]![13]).toBe(runTaint);
   });
 
   it('caps a configured prompt budget above the maximum on the budget a run hands its steps', async () => {
@@ -955,7 +925,7 @@ describe('runManifest — inline runtime', () => {
     const budgetFor = async (configured: number): Promise<number | undefined> => {
       mockSpawnInline.mockClear();
       await runManifest(step, { ...CONFIG, pipeline_prompt_budget: configured }, { parentTools: tools, parentPrompt });
-      return (mockSpawnInline.mock.calls[0]![7] as { promptBudget?: { limit: number } } | undefined)?.promptBudget?.limit;
+      return (mockSpawnInline.mock.calls[0]![6] as { promptBudget?: { limit: number } } | undefined)?.promptBudget?.limit;
     };
     expect(await budgetFor(50)).toBe(10);
     expect(await budgetFor(3)).toBe(3);
@@ -970,7 +940,7 @@ describe('runManifest — inline runtime', () => {
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
       CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
-    expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
+    expect(mockSpawnInline.mock.calls[0]![14]).toEqual(scopes);
   });
 
   it('threads options.parentActiveScopes through a nested pipeline into its inline steps', async () => {
@@ -981,7 +951,7 @@ describe('runManifest — inline runtime', () => {
       CONFIG, { parentTools: tools, parentActiveScopes: [...scopes] });
     // The inner inline step of the REAL spawnPipeline lands on the stub.
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
-    expect(mockSpawnInline.mock.calls[0]![15]).toEqual(scopes);
+    expect(mockSpawnInline.mock.calls[0]![14]).toEqual(scopes);
   });
 
   it('threads options.principal into the inline spawner, also through a nested pipeline (PRD D1, §3.13 E5)', async () => {
@@ -991,12 +961,12 @@ describe('runManifest — inline runtime', () => {
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' }] },
       CONFIG, { parentTools: tools, principal });
-    expect(mockSpawnInline.mock.calls[0]![17]).toEqual(principal);
+    expect(mockSpawnInline.mock.calls[0]![16]).toEqual(principal);
     mockSpawnInline.mockClear();
     await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
       CONFIG, { parentTools: tools, principal });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
-    expect(mockSpawnInline.mock.calls[0]![17]).toEqual(principal);
+    expect(mockSpawnInline.mock.calls[0]![16]).toEqual(principal);
   });
 
   it('threads options.abortScope through a nested pipeline into its inline steps', async () => {
@@ -1019,7 +989,7 @@ describe('runManifest — inline runtime', () => {
     await runManifest({ ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] },
       CONFIG, { parentTools: tools, abortScope: scope });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
-    expect(mockSpawnInline.mock.calls[0]![16]).toBe(scope);
+    expect(mockSpawnInline.mock.calls[0]![15]).toBe(scope);
   });
 
   it('a nested pipeline receives the SAME accumulator object (identity across nesting)', async () => {
@@ -1039,7 +1009,7 @@ describe('runManifest — inline runtime', () => {
     await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
     // The inner inline step of the REAL spawnPipeline lands on the stub.
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
-    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+    expect(mockSpawnInline.mock.calls[0]![13]).toBe(runTaint);
   });
 
   it('threads options.runTaint into the named-agent spawner too', async () => {
@@ -1058,7 +1028,7 @@ describe('runManifest — inline runtime', () => {
       mockSpawnViaAgent.mockClear();
       await runManifest(manifest, CONFIG, { agentsDir: dir, runTaint });
       expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
-      expect(mockSpawnViaAgent.mock.calls[0]![14]).toBe(runTaint);
+      expect(mockSpawnViaAgent.mock.calls[0]![13]).toBe(runTaint);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1076,7 +1046,7 @@ describe('runManifest — inline runtime', () => {
       mockSpawnViaAgent.mockClear();
       await runManifest(manifest, CONFIG, { agentsDir: dir, parentToolContext });
       expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
-      expect(mockSpawnViaAgent.mock.calls[0]![17]).toBe(parentToolContext);
+      expect(mockSpawnViaAgent.mock.calls[0]![16]).toBe(parentToolContext);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1094,7 +1064,7 @@ describe('runManifest — inline runtime', () => {
     mockSpawnInline.mockClear();
     await runManifest(manifest, CONFIG, { parentTools: tools, parentToolContext });
     expect(mockSpawnInline).toHaveBeenCalledTimes(1);
-    expect(mockSpawnInline.mock.calls[0]![6]).toBe(parentToolContext);
+    expect(mockSpawnInline.mock.calls[0]![5]).toBe(parentToolContext);
   });
 });
 

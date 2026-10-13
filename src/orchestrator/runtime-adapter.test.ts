@@ -793,7 +793,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     const parentPromptUser = vi.fn(async () => 'answer');
     const step: ManifestStep = { id: 'pick', agent: 'pick', runtime: 'inline', task: 'choose' };
     await spawnInline(
-      step, {}, mockConfig, mockParentTools, undefined, undefined, undefined,
+      step, {}, mockConfig, mockParentTools, undefined, undefined,
       { parentPromptUser },
     );
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -828,8 +828,7 @@ describe('spawnInline + parentPrompt propagation', () => {
       { definition: { name, description: '', input_schema: {} } as ToolEntry['definition'], handler: async () => name }
     ));
     await spawnInline(
-      { id: 'scheduled', agent: 'scheduled', runtime: 'inline', task: 'ask' }, {}, mockConfig, [...mockParentTools, ...hitl],
-      undefined, undefined, undefined, { parentAskUserPrompt },
+      { id: 'scheduled', agent: 'scheduled', runtime: 'inline', task: 'ask' }, {}, mockConfig, [...mockParentTools, ...hitl], undefined, undefined, { parentAskUserPrompt },
     );
     const inline = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     const inlineTools = (inline['tools'] as ToolEntry[]).map(t => t.definition.name);
@@ -842,7 +841,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     const agentTools = ['ask_user', 'ask_secret'].map(name => ({ name, description: '', input_schema: { type: 'object' as const, properties: {} }, execute: async () => name }));
     await spawnViaAgent(
       { id: 'a', agent: 'a', runtime: 'agent' }, { name: 'a', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: agentTools },
-      {}, mockConfig, undefined, 'run-1', undefined, undefined, { parentAskUserPrompt },
+      {}, mockConfig, undefined, 'run-1', undefined, { parentAskUserPrompt },
     );
     const named = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     const namedTools = (named['tools'] as ToolEntry[]).map(t => t.definition.name);
@@ -868,10 +867,9 @@ describe('spawnInline + parentPrompt propagation', () => {
         return `answered ${await ask('Which list?')}`;
       });
       const run = runtime === 'inline'
-        ? spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 'ask', timeout_ms: 1_000 }, {}, mockConfig, mockParentTools,
-          undefined, undefined, undefined, { parentAskUserPrompt })
+        ? spawnInline({ id: 's', agent: 's', runtime: 'inline', task: 'ask', timeout_ms: 1_000 }, {}, mockConfig, mockParentTools, undefined, undefined, { parentAskUserPrompt })
         : spawnViaAgent({ id: 's', agent: 's', runtime: 'agent', timeout_ms: 1_000 }, { name: 's', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] },
-          {}, mockConfig, undefined, 'run-1', undefined, undefined, { parentAskUserPrompt });
+          {}, mockConfig, undefined, 'run-1', undefined, { parentAskUserPrompt });
       await vi.advanceTimersByTimeAsync(5_000);
       await expect(run).resolves.toMatchObject({ result: 'answered B' });
       const agent = vi.mocked(Agent).mock.results.at(-1)!.value as { abort: ReturnType<typeof vi.fn> };
@@ -881,8 +879,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     it('control: a step that hangs without asking still times out', async () => {
       vi.useFakeTimers();
       mockSend.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { setTimeout(() => reject(new Error('aborted')), 5_000); }));
-      const run = spawnInline({ id: 'hangs', agent: 'hangs', runtime: 'inline', task: 'work', timeout_ms: 1_000 }, {}, mockConfig, mockParentTools,
-        undefined, undefined, undefined, { parentAskUserPrompt: answerAfter(0) });
+      const run = spawnInline({ id: 'hangs', agent: 'hangs', runtime: 'inline', task: 'work', timeout_ms: 1_000 }, {}, mockConfig, mockParentTools, undefined, undefined, { parentAskUserPrompt: answerAfter(0) });
       const settled = expect(run).rejects.toThrow('Step "hangs" timed out after 1000ms');
       await vi.advanceTimersByTimeAsync(5_000);
       await settled;
@@ -943,7 +940,7 @@ describe('spawnInline + parentPrompt propagation', () => {
     ];
     const step: ManifestStep = { id: 'interactive', agent: 'interactive', runtime: 'inline', task: 'ask' };
     await spawnInline(
-      step, {}, mockConfig, toolsWithAskUser, undefined, undefined, undefined,
+      step, {}, mockConfig, toolsWithAskUser, undefined, undefined,
       { parentPromptUser: vi.fn(async () => 'answer') },
     );
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -981,8 +978,7 @@ describe('spawnInline + parentMemory propagation (regression-gate for memory_* i
 
     const step: ManifestStep = { id: 'remember', agent: 'remember', runtime: 'inline', task: 'store + recall' };
     await spawnInline(
-      step, {}, mockConfig, mockParentTools,
-      undefined, undefined, undefined, undefined, undefined,
+      step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined,
       mockMemory,
     );
 
@@ -1004,8 +1000,7 @@ describe('spawnInline + parentMemory propagation (regression-gate for memory_* i
   it('coerces explicit-null parentMemory to undefined for the Agent constructor', async () => {
     const step: ManifestStep = { id: 'null-mem', agent: 'null-mem', runtime: 'inline', task: 'null mem' };
     await spawnInline(
-      step, {}, mockConfig, mockParentTools,
-      undefined, undefined, undefined, undefined, undefined,
+      step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined,
       null,
     );
 
@@ -1046,8 +1041,7 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
   it('spawnInline threads the given secretStore into the built Agent', async () => {
     const step: ManifestStep = { id: 'creds', agent: 'creds', runtime: 'inline', task: 'call api with secret' };
     await spawnInline(
-      step, {}, mockConfig, mockParentTools,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       mockSecretStore,
     );
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -1058,8 +1052,7 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
     const step: ManifestStep = { id: 'n-creds', agent: 'n-creds', runtime: 'agent', model: 'balanced' };
     const agentDef: AgentDef = { name: 'n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
     await spawnViaAgent(
-      step, agentDef, {}, mockConfig, undefined, 'run-1',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      step, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined,
       mockSecretStore,
     );
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -1070,8 +1063,7 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
     const step: ManifestStep = { id: 'scoped', agent: 'scoped', runtime: 'inline', task: 'tidy up tasks' };
     const scopes = [{ type: 'global', id: 'global' }, { type: 'context', id: 'ctx-a' }] as const;
     await spawnInline(
-      step, {}, mockConfig, mockParentTools,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       [...scopes],
     );
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
@@ -1910,8 +1902,7 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
 
   /** spawnInline's runTaint is the 15th positional arg — keep ONE spelling of the pad. */
   const runInline = (taint: RunTaint | undefined, config = mockConfig) =>
-    spawnInline(inlineStep, {}, config, mockParentTools,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    spawnInline(inlineStep, {}, config, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
 
   const lastInstance = () => {
     const instances = vi.mocked(Agent).mock.instances as unknown as Array<{
@@ -1982,8 +1973,7 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
       this.sawExternalContentTool = true;
       return 'named result';
     });
-    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
     expect(lastInstance().restoreConversationTaint).toHaveBeenCalled();
     expect(taint.earned).toBe('external-tool');
   });
@@ -2111,8 +2101,7 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
       this.sawExternalContentTool = true; // no stream event — finally is the only fold
       return 'named';
     });
-    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
     expect(peer.restoreConversationTaint).toHaveBeenCalled();
   });
 
@@ -2164,8 +2153,7 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
       peerArmedAtEmit = peer.restoreConversationTaint.mock.calls.length > 0;
       return 'named';
     });
-    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
     expect(selfRegistered).toBe(true);       // registered itself live at spawn
     expect(peerArmedAtEmit).toBe(true);      // armed the sibling at its own event
     expect(taint.live!.has(peer)).toBe(true);
@@ -2365,8 +2353,7 @@ describe('a step agent joins the caller\'s abort scope', () => {
     ['spawnInline', async (scope: { members: Set<{ abort: () => void }> }) => {
       const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'inline', task: 'tidy up tasks' };
       await spawnInline(
-        step, {}, mockConfig, mockParentTools,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         undefined, scope,
       );
     }],
@@ -2374,8 +2361,7 @@ describe('a step agent joins the caller\'s abort scope', () => {
       const step: ManifestStep = { id: 'scoped-abort', agent: 'scoped-abort', runtime: 'agent', task: 'tidy up tasks' };
       const agentDef: AgentDef = { id: 'scoped-abort', name: 'scoped-abort', systemPrompt: 'do it', tools: [] };
       await spawnViaAgent(
-        step, agentDef, {}, mockConfig, undefined, 'run-1',
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        step, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         scope,
       );
     }],
@@ -2417,8 +2403,7 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
     ['spawnInline', async () => {
       const step: ManifestStep = { id: 'p', agent: 'p', runtime: 'inline', task: 'tidy up tasks' };
       await spawnInline(
-        step, {}, mockConfig, mockParentTools,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        step, {}, mockConfig, mockParentTools, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         undefined, undefined, MANDATE,
       );
     }],
@@ -2426,8 +2411,7 @@ describe('step agents are built for the run\'s principal (PRD customer-granted-o
       const step: ManifestStep = { id: 'p', agent: 'p', runtime: 'agent', task: 'tidy up tasks' };
       const agentDef: AgentDef = { id: 'p', name: 'p', systemPrompt: 'do it', tools: [] };
       await spawnViaAgent(
-        step, agentDef, {}, mockConfig, undefined, 'run-1',
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        step, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         undefined, MANDATE,
       );
     }],
@@ -2498,8 +2482,7 @@ describe('step runtimes get the engine ToolContext', () => {
     const step: ManifestStep = { id: 'n', agent: 'n', runtime: 'agent', task: 'fetch it' };
     const agentDef: AgentDef = { name: 'n', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
     await spawnViaAgent(
-      step, agentDef, {}, mockConfig, undefined, 'run-1',
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      step, agentDef, {}, mockConfig, undefined, 'run-1', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, engineCtx,
     );
     expect(givenToLastAgent()).toBe(engineCtx);

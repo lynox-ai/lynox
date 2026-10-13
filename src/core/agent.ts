@@ -13,10 +13,8 @@ import type {
   ProviderConfigSnapshot,
   EffortLevel,
   AutonomyLevel,
-  PreApprovalSet,
   CapabilityContract,
   GoverningContract,
-  PreApproveAuditLike,
   SecretStoreLike,
   ChangesetManagerLike,
   LLMProvider,
@@ -556,8 +554,6 @@ export class Agent implements IAgent {
    */
   private _pendingDowngradeTier: import('../types/models.js').ModelTier | undefined;
   readonly autonomy: AutonomyLevel | undefined;
-  private readonly preApproval: PreApprovalSet | undefined;
-  private readonly audit: PreApproveAuditLike | undefined;
   /**
    * Capability contract authorising this agent's headless outbound writes;
    * `undefined` = the safe autonomous-deny default (PRD §4.2). Private on purpose:
@@ -1296,9 +1292,7 @@ export class Agent implements IAgent {
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.autonomy = config.autonomy;
-    this.preApproval = config.preApproval;
     this.capabilityContract = config.capabilityContract;
-    this.audit = config.audit;
     this.knowledgeContext = config.knowledgeContext;
     this.memoryBlocks = config.memoryBlocks;
     this._durableMemoryEnabled = config.durableMemoryEnabled === true;
@@ -1654,13 +1648,10 @@ export class Agent implements IAgent {
       // still landed: chips gone on reload, orphan tool_result on disk.
       const last = this.messages.at(-1);
       // 9 alphanumerics: the narrowest shape reported for a target provider
-      // (Mistral is documented as validating `^[a-zA-Z0-9]{9}$`), chosen because
+      // (Mistral is reported to validate `^[a-zA-Z0-9]{9}$`), chosen because
       // this pair is PERSISTED — a rejected id fails not just this turn but every
       // later turn in the thread, on exactly the provider the recovery exists
-      // for. NOT a claim that the engine only ever mints such ids: the
-      // openai-compat adapter names an id-less tool call `tool_<index>`
-      // (see `openai-adapter.ts`), which this shape would reject. If Mistral does
-      // enforce it, that path has the same bug and is the one to fix next.
+      // for. This says nothing about ids from other sources.
       // A `messages.length`-derived id was also not unique: `_truncateHistory`
       // shrinks the array, so it repeats within one thread.
       const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
@@ -4189,7 +4180,7 @@ export class Agent implements IAgent {
     let downgradeDecision: import('../types/models.js').ModelTier | undefined;
     const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerousDetailed(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.governingContract().contract);
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     if (effectiveSignal) {

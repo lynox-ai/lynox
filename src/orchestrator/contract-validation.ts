@@ -1,6 +1,6 @@
 import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
-import { isOverbroadHostPattern } from '../core/pre-approve.js';
+import { isOverbroadHostPattern } from '../core/glob.js';
 import { isMailProviderTarget } from '../core/bulk-mail-targets.js';
 import { isReviewedHeaderName } from '../tools/permission-guard.js';
 import { headerListForNote } from '../core/write-notes.js';

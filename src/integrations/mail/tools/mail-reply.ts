@@ -140,7 +140,7 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
           }
         }
 
-        // Receive-only hard block — no confirm, no override, no pre-approval.
+        // Receive-only hard block — no confirm, no override.
         // Same decision as sendMail's, including its fail-closed half: an
         // account with no stored configuration does not send.
         const sendVerdict = checkSendAccount(ctx, sendProvider.accountId);

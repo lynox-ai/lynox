@@ -352,7 +352,8 @@ const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS idx_embeddings_project ON memory_embeddings(project_id);
    CREATE INDEX IF NOT EXISTS idx_embeddings_provider ON memory_embeddings(provider);`,
 
-  // v4: Pre-approval audit trail
+  // v4: Pre-approval audit trail. Pre-approval is gone and nothing writes these tables; they
+  // stay, because a database that holds rows in them would lose them to a drop.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (4);
 
    CREATE TABLE IF NOT EXISTS pre_approval_sets (
@@ -2895,54 +2896,6 @@ export class RunHistory {
     scope_type: string; scope_id: string;
   }> {
     return persistence.getEmbeddingsMultiScopeFiltered(this.db, scopes, opts);
-  }
-
-  insertPreApprovalSet(params: {
-    id: string;
-    taskSummary: string;
-    approvedBy: string;
-    patternsJson: string;
-    maxUses: number;
-    ttlMs: number;
-    runId?: string | undefined;
-  }): void {
-    persistence.insertPreApprovalSet(this.db, params);
-  }
-
-  insertPreApprovalEvent(params: {
-    setId: string;
-    patternIdx: number;
-    toolName: string;
-    matchString: string;
-    pattern: string;
-    decision: string;
-    autonomyLevel?: string | undefined;
-    runId?: string | undefined;
-  }): void {
-    persistence.insertPreApprovalEvent(this.db, params);
-  }
-
-  getPreApprovalSets(limit = 20): Array<{
-    id: string; task_summary: string; approved_by: string;
-    patterns_json: string; max_uses: number; ttl_ms: number;
-    run_id: string | null; created_at: string;
-  }> {
-    return persistence.getPreApprovalSets(this.db, limit);
-  }
-
-  getPreApprovalEvents(setId: string): Array<{
-    id: number; set_id: string; pattern_idx: number;
-    tool_name: string; match_string: string; pattern: string;
-    decision: string; autonomy_level: string | null;
-    run_id: string | null; created_at: string;
-  }> {
-    return persistence.getPreApprovalEvents(this.db, setId);
-  }
-
-  getPreApprovalSummary(setId: string): {
-    total_matches: number; total_exhausted: number; total_expired: number;
-  } | undefined {
-    return persistence.getPreApprovalSummary(this.db, setId);
   }
 
   insertPipelineRun(params: {

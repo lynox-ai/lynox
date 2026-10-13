@@ -79,13 +79,6 @@ When running in Docker, lynox operates in a sandboxed workspace:
 - Non-root user (uid 1001)
 - `no-new-privileges` security option
 
-### Pre-Approval System
-
-A workflow manifest step can pre-approve tool calls with `pre_approve` patterns:
-- Glob-based matching; in a bash pattern no wildcard stands for a command separator, a substitution, a variable expansion or a redirection
-- Critical tool detection and blocking: a pattern can lift a warning, never a block
-- TTL and usage limits
-
 ### Plugin Isolation
 
 Plugins are loaded only from `~/.lynox/plugins/node_modules/` with validated package names. Secret content is stripped from plugin context.
