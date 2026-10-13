@@ -7451,11 +7451,11 @@ export class LynoxHTTPApi {
       // are snapshots: a run that ends before the click is answered by the stop route's
       // own codes.
       //
-      // ⛔ A mandate sees a run only if it may stop it — its own hand run. The stop route
-      // gives one 403 for "not yours" and "nothing running", and a delete answers a mandate
-      // `not_stopped` for both, so that a mandate does not learn whether someone else's run
-      // is going (`RunOnDelete`). These flags would tell it exactly that. Who started the
-      // run stays inside either way.
+      // A mandate is shown the flags only for a run it may stop — its own hand run — the
+      // same line the stop route (one 403) and a delete (`not_stopped`) draw. This keeps
+      // the controls consistent; it is NOT a confidentiality boundary: the `READS` routes
+      // are tenant-wide for a mandate (`GET /api/runs/active` lists every run). Who
+      // started a run is not added to the row either way.
       const loop = engine.getWorkerLoop();
       const principal = this._principalOf(req);
       const triggers = taskManager.listTriggers(status ? { status } : undefined)

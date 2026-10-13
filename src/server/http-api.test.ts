@@ -8011,10 +8011,11 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('GET /api/triggers does not tell a mandate whether SOMEONE ELSE\'s run is going — only its own', async () => {
+    it('GET /api/triggers shows a mandate the flags only for its OWN run — the line the stop route draws', async () => {
       // The stop route answers a mandate one 403 for "not yours" and "nothing running", and a
-      // delete one `not_stopped`, so that a mandate cannot learn whether another run is going.
-      // These flags must not tell it either.
+      // delete one `not_stopped`; the list draws the same line, so the view never offers a
+      // mandate a stop it would refuse. (Consistency, not confidentiality: the READS routes
+      // are tenant-wide for a mandate.)
       const resolver = (api as unknown as { _principalResolver: Parameters<typeof api.setPrincipalResolverForTesting>[0] })._principalResolver;
       const mandate: RequestPrincipal = { kind: 'mandate', email: 'stop-list@example.invalid' };
       api.setPrincipalResolverForTesting(() => mandate);
