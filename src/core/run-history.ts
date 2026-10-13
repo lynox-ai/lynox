@@ -1433,6 +1433,15 @@ const MIGRATIONS: string[] = [
   // without one is read as ended (`PromptStore.expireEndedMandates`).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (60);
    ALTER TABLE pending_prompts ADD COLUMN mandate_id TEXT;`,
+  // v61: the ids of deleted threads, so a deleted conversation stays deleted. `createThread` is
+  // INSERT OR IGNORE, so without this any writer still holding the id (a browser tab, a run that
+  // asks again, a worker picking up an answer) re-created an empty thread under it and kept
+  // writing. Holds the id and when it went, nothing a user wrote.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (61);
+   CREATE TABLE IF NOT EXISTS deleted_threads (
+     id TEXT PRIMARY KEY,
+     deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
 ];
 
 export class RunHistory {

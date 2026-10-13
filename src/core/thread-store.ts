@@ -73,6 +73,20 @@ export interface DisplayNoteInput {
  */
 export const EXPORT_PAGE_MAX = 500;
 
+/**
+ * {@link ThreadStore.createThread} refused an id because a thread under it was deleted.
+ *
+ * A caller that may meet a deleted id decides what happens instead: the web UI answers 410 and
+ * the browser starts a new chat, an escalation opens its next thread, a worker continues in a new
+ * one. Nothing retries the same id, because it will be refused every time.
+ */
+export class ThreadDeletedError extends Error {
+  constructor(readonly threadId: string) {
+    super('This conversation was deleted.');
+    this.name = 'ThreadDeletedError';
+  }
+}
+
 export class ThreadStore {
   private readonly db: Database.Database;
 
@@ -93,20 +107,31 @@ export class ThreadStore {
      *  a resume never changes who created a thread. */
     created_by?: string | undefined;
   }): void {
-    // OR IGNORE: on a resume the thread already exists, so this INSERT is a
-    // no-op — the provenance stamped here only takes effect for a genuinely NEW
-    // thread; a resumed thread keeps its original `model_tier_source`.
-    this.db.prepare(`
-      INSERT OR IGNORE INTO threads (id, title, model_tier, model_tier_source, context_id, created_by)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      opts?.title ?? '',
-      opts?.model_tier ?? 'balanced',
-      opts?.model_tier_source ?? 'unknown',
-      opts?.context_id ?? '',
-      opts?.created_by ?? null,
-    );
+    // A deleted thread stays deleted: its id is refused here, for every writer, rather than in
+    // each caller. Before this, OR IGNORE re-created an empty row under the id for anyone still
+    // holding it, and the conversation came back. Checked in the same transaction as the insert.
+    this.db.transaction(() => {
+      if (this.isDeleted(id)) throw new ThreadDeletedError(id);
+      // OR IGNORE: on a resume the thread already exists, so this INSERT is a
+      // no-op — the provenance stamped here only takes effect for a genuinely NEW
+      // thread; a resumed thread keeps its original `model_tier_source`.
+      this.db.prepare(`
+        INSERT OR IGNORE INTO threads (id, title, model_tier, model_tier_source, context_id, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        opts?.title ?? '',
+        opts?.model_tier ?? 'balanced',
+        opts?.model_tier_source ?? 'unknown',
+        opts?.context_id ?? '',
+        opts?.created_by ?? null,
+      );
+    })();
+  }
+
+  /** Whether a thread under `id` was deleted with {@link deleteThread}; {@link createThread} refuses such an id. */
+  isDeleted(id: string): boolean {
+    return this.db.prepare('SELECT 1 FROM deleted_threads WHERE id = ?').get(id) !== undefined;
   }
 
   getThread(id: string): ThreadRecord | undefined {
@@ -291,8 +316,14 @@ export class ThreadStore {
     for (const id of threadIds) stmt.run(toSubjectId, id);
   }
 
+  /**
+   * Delete one thread and remember its id, so {@link createThread} never opens it again.
+   */
   deleteThread(id: string): void {
-    this.db.prepare('DELETE FROM threads WHERE id = ?').run(id);
+    this.db.transaction(() => {
+      this.db.prepare('INSERT OR IGNORE INTO deleted_threads (id) VALUES (?)').run(id);
+      this.db.prepare('DELETE FROM threads WHERE id = ?').run(id);
+    })();
   }
 
   // ── Message Persistence ──

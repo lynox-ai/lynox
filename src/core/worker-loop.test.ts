@@ -144,13 +144,17 @@ function makeEngine(opts?: {
   taskManager?: TaskManager | null;
   session?: Session;
   promptStore?: PromptStore | null;
+  /** Ids of threads the owner deleted; the worker does not continue in one. */
+  deletedThreads?: readonly string[];
 }): Engine {
   const tm = opts?.taskManager ?? null;
   const session = opts?.session ?? makeSession();
   const ps = opts?.promptStore ?? null;
+  const deleted = new Set(opts?.deletedThreads ?? []);
   return {
     getTaskManager: vi.fn(() => tm),
     createSession: vi.fn(() => session),
+    getThreadStore: vi.fn(() => ({ isDeleted: (id: string) => deleted.has(id) })),
     // The real Engine always has this; the mock lacked it, which made every
     // executeStandard test fail loud once the prompt wiring started calling it.
     // `null` is a real production shape (an engine with no store), and the
@@ -800,6 +804,31 @@ describe('WorkerLoop', () => {
       expect(engine.createSession, 'in the thread the question was asked in').toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: 'thread-parked' }),
       );
+      const prompt = (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
+      expect(prompt, 'and the answer reached the run').toContain('Yes, send it.');
+    });
+
+    it('does not continue in the thread of an answered question once the owner deleted it', async () => {
+      // A deleted conversation stays deleted. Continuing in it handed the session an id that
+      // `createThread` now refuses, so the run would have written nowhere. It goes to a new
+      // thread, and the answer still reaches it as input.
+      configurePersistentBudget({ costProvider: spend(0.22), dailyCapUSD: 15 });
+      const answeredStore = {
+        getAnsweredForTrigger: vi.fn(() => ({
+          id: 'prompt-1', session_id: 'thread-parked', question: 'Send the report?', answer: 'Yes, send it.',
+        })),
+        releaseTrigger: vi.fn(),
+      } as unknown as PromptStore;
+      const session = makeSession('Report sent.');
+      const engine = makeEngine({ taskManager: makeTaskManager([makeTask()]), session, promptStore: answeredStore, deletedThreads: ['thread-parked'] });
+
+      await new WorkerLoop(engine, makeNotificationRouter(), 60_000).tick();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(session.run, 'the answered trigger still ran').toHaveBeenCalled();
+      const opts = (engine.createSession as unknown as { mock: { calls: Array<[{ sessionId?: string }?]> } }).mock.calls[0]?.[0];
+      expect(opts, 'a session was created').toBeDefined();
+      expect(opts!.sessionId, 'in a new thread, not the deleted one').toBeUndefined();
       const prompt = (session.run as unknown as { mock: { calls: string[][] } }).mock.calls[0]?.[0] ?? '';
       expect(prompt, 'and the answer reached the run').toContain('Yes, send it.');
     });

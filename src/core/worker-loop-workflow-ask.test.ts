@@ -23,7 +23,7 @@ import type { TriggerRecord, PlannedPipeline } from '../types/index.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
 import type { WorkflowQuestionWait } from './workflow-questions.js';
 import { getPipelineStore } from '../tools/builtin/pipeline.js';
-import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR } from '../orchestrator/workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_UNANSWERED_ERROR, WORKFLOW_QUESTION_NOT_ASKED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 
 interface RunOpts {
   runId?: string;
@@ -48,7 +48,10 @@ vi.mock('./saved-workflow-runner.js', () => ({
 function runnerResult(opts: RunOpts, answers: string[]): Record<string, unknown> {
   if (opts.stopSignal?.aborted === true) return { ok: true, status: 'failed', error: WORKFLOW_STOPPED_ERROR, runId: opts.runId };
   if (opts.questionWait?.unanswered === true) {
-    const error = opts.questionWait.unansweredBecause === 'not_asked' ? WORKFLOW_QUESTION_NOT_ASKED_ERROR : WORKFLOW_QUESTION_UNANSWERED_ERROR;
+    const because = opts.questionWait.unansweredBecause;
+    const error = because === 'not_asked' ? WORKFLOW_QUESTION_NOT_ASKED_ERROR
+      : because === 'thread_deleted' ? WORKFLOW_QUESTION_THREAD_DELETED_ERROR
+      : WORKFLOW_QUESTION_UNANSWERED_ERROR;
     return { ok: true, status: 'failed', error, runId: opts.runId };
   }
   return { ok: true, status: 'completed', runId: opts.runId, answers };
@@ -231,6 +234,35 @@ describe('a scheduled workflow that asks its owner', () => {
     expect(h.records[0]![2]).toBe('stopped');
     expect(h.prompts.getById(q.id)!.status).toBe('expired');
     expect(h.escalations()).toBe(0);
+  });
+
+  it('deleting the run\'s thread during the wait withdraws the question and ends the run in words of its own', async () => {
+    // The thread was the only place to answer the question. The owner deleted a chat, not the
+    // run: no retry, no escalation, and the record does not say they stopped it.
+    const h = makeHarness();
+    wf.step = askingStep([]);
+    void h.loop.tick();
+    const q = await openQuestion(h);
+    h.threads.deleteThread(q.session);
+    expect(h.prompts.withdrawForDeletedThread(q.session)).toBe(1);
+    await waitUntil('the run to end', () => h.records.length > 0);
+    const runId = wf.calls[0]!.runId!;
+    expect(h.records[0]![1]).toBe(`Workflow ended without an answer: the conversation its question was asked in was deleted, and that was the only place to answer it (run ${runId}).`);
+    expect(h.records[0]![1]).not.toMatch(/your instruction|you stopped/i);
+    expect(h.records[0]![2]).toBe('stopped');
+    expect(wf.calls[0]!.questionWait?.unansweredBecause).toBe('thread_deleted');
+    expect(h.prompts.getById(q.id)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted' });
+    expect(h.escalations()).toBe(0);
+    expect(h.threads.getThread(q.session), 'the thread stays deleted').toBeUndefined();
+  });
+
+  it('a step whose own error reads like the withdrawal is still a failure', async () => {
+    // Keyed on the channel too: only a question withdrawn with its thread is recorded as one.
+    const h = makeHarness();
+    wf.step = async (opts) => ({ ok: true, status: 'failed', error: WORKFLOW_QUESTION_THREAD_DELETED_ERROR, runId: opts.runId });
+    void h.loop.tick();
+    await waitUntil('the run to end', () => h.records.length > 0);
+    expect(h.records[0]![2]).toBe('failed');
   });
 
   it('a question that expires ends the run failed as unanswered', async () => {

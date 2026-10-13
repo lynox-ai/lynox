@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
 import type Database from 'better-sqlite3';
 import { LynoxHTTPApi } from './http-api.js';
+import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { reloadConfig } from '../core/config.js';
 import type { ThreadStore } from '../core/thread-store.js';
 import type { KnowledgeStore } from '../core/knowledge-store.js';
 import type { KnowledgeLayer } from '../core/knowledge-layer.js';
+import type { PromptStore } from '../core/prompt-store.js';
 
 /**
  * Deleting a chat keeps what was learned in it, and marks the source as a deleted chat.
@@ -181,6 +183,7 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
   it('a failed legacy marking answers 500 and leaves the chat; the retry keeps the durable first stamp', async () => {
     const { ts, ks, kl } = stores();
     const seeded = seedThread('t-legacy-fails');
+    const waiting = promptStore().insertAskUser('t-legacy-fails', 'Which list, A or B?');
     vi.spyOn(kl, 'markThreadDeleted').mockImplementationOnce(() => { throw new Error('database is locked'); });
 
     const first = await deleteChat('t-legacy-fails');
@@ -188,6 +191,8 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
     expect(first.status).toBe(500);
     expect(first.body['failed']).toEqual([expect.stringContaining('memories')]);
     expect(ts.getThread('t-legacy-fails')).toBeDefined();
+    expect(ts.isDeleted('t-legacy-fails'), 'not deleted, so not refused either').toBe(false);
+    expect(promptStore().getById(waiting), 'nor its question withdrawn').toMatchObject({ status: 'pending' });
     expect(legacyMarker(seeded.legacy)).toBeNull();
     for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).not.toBeNull();
     const FIRST = '2000-01-01 00:00:00';
@@ -197,7 +202,103 @@ describe('DELETE /api/threads/:id keeps what was learned and marks its source as
 
     expect(second.status).toBe(200);
     expect(ts.getThread('t-legacy-fails')).toBeUndefined();
+    expect(promptStore().getById(waiting), 'withdrawn once the chat is gone').toMatchObject({ closed_reason: 'thread_deleted' });
     expect(legacyMarker(seeded.legacy)).toMatch(/^\d{4}-/);
     for (const id of seeded.durable) expect(ks.getEntry(id)?.sourceThreadDeletedAt).toBe(FIRST);
+  });
+
+  async function openChat(threadId: string): Promise<{ status: number; body: Record<string, unknown> }> {
+    const res = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId }),
+    });
+    return { status: res.status, body: await res.json() as Record<string, unknown> };
+  }
+
+  it('a deleted chat stays deleted: opening it again answers 410 and creates no thread', async () => {
+    const { ts } = stores();
+    const id = randomUUID();
+    const live = randomUUID();
+    ts.createThread(id, { title: 'about to go' });
+    ts.createThread(live, { title: 'stays' });
+    expect((await deleteChat(id)).status).toBe(200);
+
+    // A tab that still shows it, or a link into it.
+    const again = await openChat(id);
+
+    expect(again.status).toBe(410);
+    expect(again.body['code']).toBe('thread_deleted');
+    expect(ts.getThread(id), 'no empty thread under the old id').toBeUndefined();
+    // Positive control on the same route: a chat that was not deleted still opens.
+    expect((await openChat(live)).status).toBe(201);
+  });
+
+  it('a mandate is refused a deleted owner chat the same way as one that never existed', async () => {
+    // 410 only after the ownership check: a mandate must not learn which of the owner's chats
+    // existed and were deleted.
+    const { ts } = stores();
+    const deleted = randomUUID();
+    ts.createThread(deleted, { title: 'the owner\'s' });
+    expect((await deleteChat(deleted)).status).toBe(200);
+    const token = webUiLoginSession(SECRET, {
+      kind: 'mandate', email: 'recipient@example.invalid', display: 'TEST-DISPLAY',
+      mandate_id: 'TEST-MANDATE-1', mandate_expires_at: '2100-01-01T00:00:00.000Z',
+    })!.token;
+    const asMandate = async (threadId: string): Promise<number> => (await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { cookie: `lynox_session=${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId }),
+    })).status;
+
+    const onDeleted = await asMandate(deleted);
+    const onNeverExisted = await asMandate(randomUUID());
+
+    expect(onDeleted).toBe(403);
+    expect(onDeleted, 'same answer either way').toBe(onNeverExisted);
+  });
+
+  it('an escalation thread the owner deleted is refused the same way', async () => {
+    const { ts } = stores();
+    const id = 'escalation-tomb01';
+    ts.createThread(id, { title: 'agent asked' });
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect((await openChat(id)).status).toBe(410);
+    expect(ts.getThread(id)).toBeUndefined();
+  });
+
+  function promptStore(): PromptStore {
+    const ps = (api as unknown as { engine: { getPromptStore: () => PromptStore | null } }).engine.getPromptStore();
+    if (!ps) throw new Error('fixture: no prompt store');
+    return ps;
+  }
+
+  it('deleting a chat withdraws the question a run waits on in it, and only that one', async () => {
+    const { ts } = stores();
+    const ps = promptStore();
+    const id = randomUUID();
+    const other = randomUUID();
+    ts.createThread(id, { title: 'a run asks here' });
+    ts.createThread(other, { title: 'another chat' });
+    const asked = ps.insertAskUser(id, 'Which list, A or B?');
+    const kept = ps.insertAskUser(other, 'Send it now?');
+
+    expect((await deleteChat(id)).status).toBe(200);
+
+    expect(ps.getById(asked)).toMatchObject({ status: 'expired', closed_reason: 'thread_deleted' });
+    expect(ps.getById(kept)).toMatchObject({ status: 'pending', closed_reason: null });
+  });
+
+  it('a session built for a deleted id writes no thread row', () => {
+    // The session path behind the route, for a caller that does not ask the route first: the
+    // store refuses, so nothing comes back under the old id.
+    const { ts } = stores();
+    const id = randomUUID();
+    ts.createThread(id);
+    ts.deleteThread(id);
+    const engine = (api as unknown as { engine: { createSession: (o: { sessionId: string }) => unknown } }).engine;
+    engine.createSession({ sessionId: id });
+    expect(ts.getThread(id)).toBeUndefined();
   });
 });

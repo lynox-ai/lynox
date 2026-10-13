@@ -129,6 +129,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
         return session as unknown as Session;
       },
       getPromptStore: () => prompts,
+      // An engine without a thread store is a real shape too: the A10 path asks it whether the
+      // question's thread was deleted, and without the method it threw before dispatching.
+      getThreadStore: () => null,
       getRunHistory: () => history,
       // `null` is a real production shape (an engine with no vault), and the
       // masking path handles it by falling back to shape-only. A mock that

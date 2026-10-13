@@ -34,7 +34,7 @@ import { persistentBudgetHeadroom, reservePersistentBudget, releasePersistentBud
 // is precedented rather than novel.
 import { WallClockBudget } from '../server/wall-clock-budget.js';
 import type { AbortScope } from '../types/config.js';
-import { WORKFLOW_STOPPED_ERROR } from '../orchestrator/workflow-stop.js';
+import { WORKFLOW_STOPPED_ERROR, WORKFLOW_QUESTION_THREAD_DELETED_ERROR } from '../orchestrator/workflow-stop.js';
 import { asksOnlyViaAskUser } from '../orchestrator/human-in-the-loop.js';
 import { WorkflowQuestions } from './workflow-questions.js';
 import { compose, engineText, renderFence } from './data-boundary.js';
@@ -124,6 +124,8 @@ export function reminderTitle(title: string): string {
 /** What a swept run's result reads as. It is a RESULT, not a status: the status
  *  the sweep writes is `failed`, and this is the line a human sees next to it. */
 const WAIT_EXPIRED_RESULT = 'The run asked a question and the wait ran out before an answer arrived.';
+/** What a scheduled workflow run records when its question was withdrawn with the deleted chat it was asked in. */
+export const THREAD_DELETED_RESULT = 'Workflow ended without an answer: the conversation its question was asked in was deleted, and that was the only place to answer it';
 const MANDATE_ENDED_RESULT = 'The run asked a question under a delegated access, and that access ended before the run could continue.';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
@@ -1821,10 +1823,15 @@ export class WorkerLoop {
     const running = this.#runSlotOf(task.id);
     if (running !== undefined && running.starter === undefined && starter !== undefined) running.starter = starter;
     const triggerTier = admittedTriggerTier(task.model_tier);
+    // Same thread, so the run's own history shows the exchange it continues — unless the owner
+    // deleted that conversation in the meantime. Then the run goes to a new thread: a deleted
+    // one is not opened again, and the question and its answer reach the run as input anyway.
+    const continueIn = answered !== undefined && this.engine.getThreadStore()?.isDeleted(answered.session_id) !== true
+      ? answered.session_id
+      : undefined;
     const session = this.engine.createSession({
       autonomy: 'autonomous',
-      // Same thread, so the run's own history shows the exchange it continues.
-      ...(answered ? { sessionId: answered.session_id } : {}),
+      ...(continueIn !== undefined ? { sessionId: continueIn } : {}),
       systemPromptSuffix: WORKER_PROMPT_SUFFIX,
       // Per-run cost ceiling: without this an autonomous background task could
       // loop up to WORKER_MAX_ITERATIONS times with no dollar bound. The guard
@@ -2477,6 +2484,17 @@ export class WorkerLoop {
     if (result.ok && result.error === WORKFLOW_STOPPED_ERROR && ownerStop.aborted) {
       this.#recordRun(this.engine.getTaskManager(), task.id,
         `Workflow stopped on your instruction (run ${result.runId ?? 'unknown'}).`, 'stopped');
+      return;
+    }
+
+    // The owner deleted the conversation the run's question was asked in, so the question was
+    // withdrawn and the run ended without its answer. Recorded like a stop — no retry, no
+    // escalation, a recurring schedule stays healthy — because the owner acted; but in words of
+    // its own, since they deleted a chat and did not stop the run. Keyed on the channel too, so a
+    // step whose error happens to read the same is still a failure.
+    if (result.ok && result.error === WORKFLOW_QUESTION_THREAD_DELETED_ERROR && questions?.channel.unansweredBecause === 'thread_deleted') {
+      this.#recordRun(this.engine.getTaskManager(), task.id,
+        `${THREAD_DELETED_RESULT} (run ${result.runId ?? 'unknown'}).`, 'stopped');
       return;
     }
 
