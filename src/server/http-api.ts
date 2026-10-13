@@ -46,6 +46,7 @@ import { loadConfig, describePinForDisplay, admitBackgroundModel } from '../core
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
+import { isProvisionedInstance } from '../core/wire-capture.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
@@ -271,8 +272,8 @@ const PKG_VERSION: string = (() => {
 type RouteScope = 'admin' | 'user';
 /**
  * What a request is allowed, beside the route's scope (PRD customer-granted-operator-access §3.4,
- * D6). `cp-admin` is the control plane's admin bearer on a managed instance: it reaches the admin
- * routes and nothing else. Kept out of `RouteScope`, so no route can be registered under it.
+ * D6). `cp-admin` is the control plane's admin bearer on an instance it provisioned: it reaches the
+ * admin routes and nothing else. Kept out of `RouteScope`, so no route can be registered under it.
  */
 type RequestScope = RouteScope | 'cp-admin';
 /** What a verified session cookie carries beside its time: a mandate always names its grant. */
@@ -2053,7 +2054,7 @@ export class LynoxHTTPApi {
       return null;
     }
 
-    if (parts.length < 4) return LynoxHTTPApi._provisionedByControlPlane() ? null : { iat: timestamp, principal: null };
+    if (parts.length < 4) return LynoxHTTPApi._ownerNeedsPrincipal() ? null : { iat: timestamp, principal: null };
     const session = LynoxHTTPApi._parseSessionPrincipal(parts[1]!);
     if (session === null) return null;
     if (timestamp - nowS > LynoxHTTPApi.SESSION_FUTURE_SKEW_S) return null;
@@ -2069,12 +2070,11 @@ export class LynoxHTTPApi {
   }
 
   /**
-   * Whether the control plane provisioned this instance. An instance id alone also counts —
-   * mandate login needs it, so a missing or unknown tier must not leave a cookie without a
-   * principal standing where a mandate can log in. Read for two rules: an owner cookie must carry
-   * the owner's principal, and the admin bearer is the control plane's (`cp-admin`, §3.4).
+   * Whether an owner cookie must carry the owner's principal: on an instance the control plane
+   * provisioned. An instance id alone also counts — mandate login needs it, so a missing or
+   * unknown tier must not leave a cookie without a principal standing where a mandate can log in.
    */
-  private static _provisionedByControlPlane(): boolean {
+  private static _ownerNeedsPrincipal(): boolean {
     return isHostedInstance(readEnvAlias('LYNOX_BILLING_TIER')) || Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
   }
 
@@ -2847,9 +2847,10 @@ export class LynoxHTTPApi {
           const isUser = constantTimeEqual(tokenBuf, secretBuf);
           if (isAdmin) {
             // On an instance the control plane provisioned the admin secret is the control plane's:
-            // admin routes only (§3.4). A self-hosted instance with two secrets keeps `admin`, which
-            // includes `user`.
-            authScope = LynoxHTTPApi._provisionedByControlPlane() ? 'cp-admin' : 'admin';
+            // admin routes only (§3.4). Any one marker is enough, an unknown tier included, so a
+            // partial env narrows the bearer. A self-hosted instance with two secrets keeps `admin`,
+            // which includes `user`.
+            authScope = isProvisionedInstance() ? 'cp-admin' : 'admin';
             this._authOrigin.set(req, 'bearer:admin');
           } else if (isUser) {
             authScope = 'user';
@@ -9171,8 +9172,8 @@ export class LynoxHTTPApi {
       }
     }, ownerOnly('revoke the Google connection'));
 
-    // The control plane asks these two with its admin bearer, which reaches admin routes only on a
-    // managed instance (§3.4): the same handlers, registered once more as admin routes.
+    // The control plane asks these two with its admin bearer, which reaches admin routes only on an
+    // instance it provisioned (§3.4): the same handlers, registered once more as admin routes.
     // A user route that moves fails the boot here, instead of leaving an alias that answers 404.
     for (const [from, to] of [
       ['GET /api/google/status', 'GET /api/admin/google/status'],
