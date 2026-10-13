@@ -202,6 +202,10 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     expect(effectiveWriteMethod('POST', { ...JSON_CT }, U, body)).toBe(want);
   });
 
+  it('reads every charset of two Content-Type headers', () => {
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json; charset=utf-8', 'Content-Type': 'application/json; charset=utf-16' }, U, '{"a":1}')).toBe('DELETE');
+  });
+
   it('reads a doubled key without a Content-Type too', () => {
     expect(effectiveWriteMethod('POST', {}, U, '{"_method":"DELETE","_method":"PATCH"}')).toBe('DELETE');
   });
@@ -214,6 +218,11 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     ['utf-8', 'application/json; charset=utf-8', 'POST'],
     ['UTF-8 in capitals', 'application/json; Charset=UTF-8', 'POST'],
     ['quoted utf-8', 'application/json; charset="utf-8"', 'POST'],
+    ['spaces around the equals sign', 'application/json; charset = utf-16', 'DELETE'],
+    ['utf-8, then utf-16 in the same header', 'application/json; charset=utf-8; charset=utf-16', 'DELETE'],
+    ['utf-16 without a semicolon before it', 'application/json,charset=utf-16', 'DELETE'],
+    ['RFC 2231 form', "application/json; charset*=utf-16''", 'DELETE'],
+    ['ascii, which a decoder may read with the high bit dropped', 'application/x-www-form-urlencoded; charset=ascii', 'DELETE'],
     ['iso-8859-1', 'application/x-www-form-urlencoded; charset=iso-8859-1', 'POST'],
   ] as const)('charset %s', (_k, contentType, want) => {
     expect(effectiveWriteMethod('POST', { 'Content-Type': contentType }, U, '{"a":1}')).toBe(want);

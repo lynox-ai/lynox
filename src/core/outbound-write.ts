@@ -93,8 +93,8 @@ function namesMethodKey(body: string): boolean {
 }
 
 /**
- * How many times the text writes a `_method` key in any case, `"_method"` followed by a colon,
- * once its `\uXXXX` escapes are read.
+ * How many times the text writes a `_method` key in any case, `"_method"` followed by a colon
+ * after optional whitespace, once its `\uXXXX` escapes are read.
  */
 function methodKeysWritten(body: string): number {
   const unescaped = body.replace(/\\u([0-9a-f]{4})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
@@ -122,8 +122,12 @@ function encodedBody(headers: Record<string, string>): boolean {
     .some(([, value]) => value.split(',').some((coding) => !['', 'identity'].includes(coding.trim().toLowerCase())));
 }
 
-/** Charsets in which the body's ASCII reads as the same ASCII it was sent as. */
-const ASCII_READING_CHARSETS = new Set(['utf-8', 'utf8', 'us-ascii', 'ascii', 'iso-8859-1', 'latin1', 'windows-1252']);
+/**
+ * Charsets a server decodes the body's UTF-8 bytes in without turning any of them into ASCII the
+ * gate did not read: UTF-8 itself, and single-byte supersets of ASCII whose bytes above 0x7F all
+ * decode to characters above 0x7F. Not `ascii`: a decoder may drop the high bit.
+ */
+const ASCII_READING_CHARSETS = new Set(['utf-8', 'utf8', 'iso-8859-1', 'latin1', 'windows-1252']);
 
 /**
  * Whether the Content-Type names a charset this module cannot read the body in. The body goes out
@@ -131,7 +135,9 @@ const ASCII_READING_CHARSETS = new Set(['utf-8', 'utf8', 'us-ascii', 'ascii', 'i
  * a `_method` field among them, than the ones written.
  */
 function foreignCharset(contentType: string): boolean {
-  for (const match of contentType.matchAll(/;\s*charset\s*=\s*("?)([^";,\s]*)\1/g)) {
+  // Every `charset` parameter counts, wherever it stands: one parser takes the last, another
+  // finds the first by searching for the word, and the RFC 2231 form (`charset*=`) is one too.
+  for (const match of contentType.matchAll(/charset\s*\*?\s*=\s*("?)([^";,\s]*)\1/g)) {
     if (!ASCII_READING_CHARSETS.has(match[2]!)) return true;
   }
   return false;
@@ -175,10 +181,10 @@ function multipartNamesMethod(body: string): boolean {
  * it is a method. The form reading is left out only for a body declared as JSON alone that parses
  * as JSON: no server reads that as a form. `unreadable` is set when a server may read an
  * override this module cannot: a body that looks like JSON (by its type or its first character),
- * does not parse and holds a `"_method":` key; JSON that names a `_method` key twice, at any depth
- * and in any case; a body under a multipart type with a part named `_method`; or a body sent with
- * a `Content-Encoding` other than `identity`, or in a charset other than UTF-8 or one that reads
- * ASCII as ASCII.
+ * does not parse and holds a `"_method":` key; JSON that names the same `_method` key twice (in
+ * any case, at any depth); a body under a multipart type with a part named `_method`; or a body
+ * sent with a `Content-Encoding` other than `identity`, or in a charset outside a fixed list of
+ * UTF-8 and single-byte ASCII supersets.
  * The caller gates such a request as the strongest method.
  */
 function bodyOverrides(body: string, headers: Record<string, string>): { declared: string[]; other: string[]; unreadable: boolean } {
