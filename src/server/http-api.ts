@@ -10862,18 +10862,25 @@ export class LynoxHTTPApi {
       // rows, so a tenant with 501 contacts got an Art. 15 copy with 500 and no sign
       // of the rest.
       //
-      // One row budget for both blocks together, and a real one, for the reason the
-      // thread cap gives: the dump is materialised and serialised into one string, so
-      // an unbounded walk trades a short answer for no answer at all. Per collection
-      // would not do — a hundred collections of `MAX_RECORDS` rows each is ten million.
-      // The budget is about five times the most the old caps let through (51 000 rows:
-      // 100 collections and the two CRM lists at 500 each), and when it
+      // One row budget for both blocks together, for the reason the thread cap gives:
+      // the dump is materialised and serialised into one string. Per collection would
+      // not do — a hundred collections of `MAX_RECORDS` rows each is ten million. The
+      // budget counts rows; it is about five times the most the old caps let through
+      // (51 000 rows: 100 collections and the two CRM lists at 500 each), and when it
       // runs out the block says so in `*_may_be_incomplete`. Exact at the boundary: a
       // collection that ends where the budget does is probed with one more one-row
       // read and is not reported short.
+      //
+      // The CRM's collections are DataStore collections too (the CRM is built on this
+      // engine's DataStore), so the DataStore block below meets `contacts` and `deals`
+      // again. It reuses the rows walked here instead of reading them a second time:
+      // paid twice, a large CRM would spend the budget on copies and leave the user's
+      // own collections out.
       const RECORD_BUDGET = 250_000;
       let budget = RECORD_BUDGET;
-      const walkRecords = (page: (afterId: number | undefined, limit: number) => Array<Record<string, unknown>>): { rows: Array<Record<string, unknown>>; truncated: boolean } => {
+      type Walked = { rows: Array<Record<string, unknown>>; truncated: boolean };
+      const crmWalked = new Map<string, Walked>();
+      const walkRecords = (page: (afterId: number | undefined, limit: number) => Array<Record<string, unknown>>): Walked => {
         const rows: Array<Record<string, unknown>> = [];
         let afterId: number | undefined;
         for (;;) {
@@ -10895,6 +10902,8 @@ export class LynoxHTTPApi {
         exportData['contacts_may_be_incomplete'] = contacts.truncated;
         exportData['deals'] = deals.rows;
         exportData['deals_may_be_incomplete'] = deals.truncated;
+        crmWalked.set('contacts', contacts);
+        crmWalked.set('deals', deals);
       } else {
         exportData['contacts'] = [];
         exportData['contacts_may_be_incomplete'] = false;
@@ -10912,7 +10921,8 @@ export class LynoxHTTPApi {
         const incomplete: string[] = [];
         for (const col of collections) {
           try {
-            const walked = walkRecords((afterId, limit) => ds.listRecordsForExport({ collection: col.name, afterId, limit }));
+            const walked = crmWalked.get(col.name)
+              ?? walkRecords((afterId, limit) => ds.listRecordsForExport({ collection: col.name, afterId, limit }));
             datastoreExport[col.name] = walked.rows;
             if (walked.truncated) incomplete.push(col.name);
           } catch {

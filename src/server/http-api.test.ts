@@ -12897,6 +12897,30 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       expect(both.datastore_may_be_incomplete, 'no budget left for the one DataStore row').toBe(true);
     });
 
+    it('GET /api/export does not pay twice for the CRM collections the DataStore block meets again', async () => {
+      // The CRM's `contacts` and `deals` are DataStore collections too. Read a second time,
+      // they spent the budget on copies and pushed the user's own collections out.
+      type Body = DsBody & CrmBody;
+      type DsBody = { datastore: Record<string, unknown[]>; datastore_may_be_incomplete: boolean };
+      const dsWith = () => {
+        const again = rowsUpTo(Number.MAX_SAFE_INTEGER);
+        const listRecordsForExport = vi.fn((p: { collection: string; limit: number; afterId?: number }) => {
+          if (p.collection === 'contacts' || p.collection === 'deals') return again(p);
+          return p.afterId === undefined ? [{ _id: 1 }] : [];
+        });
+        return { listCollections: () => [{ name: 'contacts' }, { name: 'deals' }, { name: 'user_rows' }], listRecordsForExport };
+      };
+      const full = await exportWith<Body>({ getCRM: () => crmOf(BUDGET - 1, 0), getDataStore: dsWith });
+      expect(full.datastore['user_rows'], 'the user collection still fits').toHaveLength(1);
+      expect(full.datastore_may_be_incomplete).toBe(false);
+      expect(full.datastore['contacts'], 'the CRM rows, reused').toHaveLength(BUDGET - 1);
+
+      // And a CRM cut short stays cut short where the DataStore block shows it.
+      const cut = await exportWith<Body>({ getCRM: () => crmOf(BUDGET + 1, 0), getDataStore: dsWith });
+      expect(cut.contacts_may_be_incomplete).toBe(true);
+      expect(cut.datastore_may_be_incomplete).toBe(true);
+    });
+
     it('GET /api/export passes the memory store\'s scopes and its incompleteness through, in both directions', async () => {
       // What `exportAllScopes` reads is asserted on disk in `export-memory-scopes.test.ts`;
       // this is only the hand-over, so a route that dropped the flag cannot pass for one
