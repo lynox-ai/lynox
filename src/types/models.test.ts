@@ -370,7 +370,7 @@ describe('getModelId for openai provider', () => {
 describe('`[1m]` ids read their base model', () => {
   const BASES = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-7'];
 
-  it.each(BASES)('%s[1m] has the context window, output and continuations of %s', (base) => {
+  it.each(BASES)('%s: the [1m] spelling has the base model\'s context window, output and continuations', (base) => {
     const id = `${base}[1m]`;
     expect(getContextWindow(id)).toBe(getContextWindow(base));
     expect(getDefaultMaxTokens(id)).toBe(getDefaultMaxTokens(base));
