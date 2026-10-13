@@ -9535,13 +9535,26 @@ export class LynoxHTTPApi {
     // The control plane asks these two with its admin bearer, which reaches admin routes only on an
     // instance it provisioned (§3.4): the same handlers, registered once more as admin routes.
     // A user route that moves fails the boot here, instead of leaving an alias that answers 404.
-    for (const [from, to] of [
-      ['GET /api/google/status', 'GET /api/admin/google/status'],
-      ['POST /api/google/revoke', 'POST /api/admin/google/revoke'],
+    //
+    // The control plane disconnects Google; it never deletes the tenant's Drive backups. That is
+    // the owner's choice, made in the instance, so the revoke alias refuses the flag before the
+    // shared handler sees it. Any value other than `false` is refused, not only `true`: what the
+    // handler reads as a request to delete may widen, and the alias must not widen with it.
+    const withoutDriveDeletion = (handler: RouteHandler): RouteHandler => async (req, res, params, body) => {
+      if (typeof body === 'object' && body !== null && 'delete_drive_backups' in body
+        && (body as { delete_drive_backups?: unknown }).delete_drive_backups !== false) {
+        errorResponse(res, 400, 'The control plane cannot delete Drive backups; only the owner can, in the instance.', 'drive_deletion_owner_only');
+        return;
+      }
+      await handler(req, res, params, body);
+    };
+    for (const [from, to, wrap] of [
+      ['GET /api/google/status', 'GET /api/admin/google/status', null],
+      ['POST /api/google/revoke', 'POST /api/admin/google/revoke', withoutDriveDeletion],
     ] as const) {
       const handler = this.staticRoutes.get(from);
       if (!handler) throw new Error(`The admin alias ${to} has no route ${from} to stand for.`);
-      this.addStatic('admin', to, handler);
+      this.addStatic('admin', to, wrap ? wrap(handler) : handler);
     }
 
     // The control plane's list of the account's revoked mandates (§3.5, piece C): the whole list
