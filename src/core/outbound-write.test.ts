@@ -177,6 +177,9 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     ['identity in capitals', { ...JSON_CT, 'Content-Encoding': ' IDENTITY ' }, '{"a":1}', 'POST'],
     ['an empty value', { ...JSON_CT, 'Content-Encoding': '' }, '{"a":1}', 'POST'],
     ['no body to read', { ...JSON_CT, 'Content-Encoding': 'deflate' }, '', 'POST'],
+    ['gzip on a form', { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Encoding': 'gzip' }, 'a=1', 'DELETE'],
+    ['identity first, then a coding in a second header', { ...JSON_CT, 'content-encoding': 'identity', 'Content-Encoding': 'gzip' }, '{"a":1}', 'DELETE'],
+    ['a coding first, then identity in a second header', { ...JSON_CT, 'Content-Encoding': 'gzip', 'content-encoding': 'identity' }, '{"a":1}', 'DELETE'],
   ] as const)('Content-Encoding: %s', (_k, headers, body, want) => {
     expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
   });
@@ -193,8 +196,27 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     ['once at the top and once nested', '{"item":{"_method":"DELETE"},"_method":"PATCH"}', 'PATCH'],
     ['twice, in two nested objects', '{"a":{"_method":"x"},"b":{"_method":"y"}}', 'POST'],
     ['in two cases, both read', '{"_method":"PATCH","_METHOD":"PUT"}', 'PUT'],
+    ['twice, with a space before the colon', '{"_method" :"DELETE","_method" :"PATCH"}', 'DELETE'],
+    ['twice, in capitals', '{"_METHOD":"DELETE","_METHOD":"PATCH"}', 'DELETE'],
   ] as const)('a JSON `_method` key %s', (_k, body, want) => {
     expect(effectiveWriteMethod('POST', { ...JSON_CT }, U, body)).toBe(want);
+  });
+
+  it('reads a doubled key without a Content-Type too', () => {
+    expect(effectiveWriteMethod('POST', {}, U, '{"_method":"DELETE","_method":"PATCH"}')).toBe('DELETE');
+  });
+
+  // The body goes out as UTF-8; a server that decodes it in another charset reads other characters.
+  it.each([
+    ['utf-16le', 'application/json; charset=utf-16le', 'DELETE'],
+    ['quoted UTF-16', 'application/json; charset="UTF-16"', 'DELETE'],
+    ['utf-7', 'application/x-www-form-urlencoded; charset=utf-7', 'DELETE'],
+    ['utf-8', 'application/json; charset=utf-8', 'POST'],
+    ['UTF-8 in capitals', 'application/json; Charset=UTF-8', 'POST'],
+    ['quoted utf-8', 'application/json; charset="utf-8"', 'POST'],
+    ['iso-8859-1', 'application/x-www-form-urlencoded; charset=iso-8859-1', 'POST'],
+  ] as const)('charset %s', (_k, contentType, want) => {
+    expect(effectiveWriteMethod('POST', { 'Content-Type': contentType }, U, '{"a":1}')).toBe(want);
   });
 });
 
@@ -245,7 +267,7 @@ describe('a header name read the way a CGI-style server reads it', () => {
   });
 
   it('names a credential slot that would shape the request, in any spelling, and no ordinary one', () => {
-    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type', 'Content-Encoding', 'content_encoding']) {
+    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type', 'Content-Encoding', 'content_encoding', ' CONTENT-ENCODING ']) {
       expect(isRequestShapingHeaderName(name), name).toBe(true);
     }
     for (const name of ['X-Api-Key', 'X_Api_Key', 'Authorization', 'X-Shopify-Access-Token', 'X-Forwarded-For', 'X-RapidAPI-Host', 'Content-Length']) {

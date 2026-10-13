@@ -92,7 +92,10 @@ function namesMethodKey(body: string): boolean {
   return methodKeysWritten(body) > 0;
 }
 
-/** How many times the text writes `"_method":`, once its `\\uXXXX` escapes are read. */
+/**
+ * How many times the text writes a `_method` key in any case, `"_method"` followed by a colon,
+ * once its `\uXXXX` escapes are read.
+ */
 function methodKeysWritten(body: string): number {
   const unescaped = body.replace(/\\u([0-9a-f]{4})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
   return unescaped.match(/"_method"\s*:/gi)?.length ?? 0;
@@ -117,6 +120,21 @@ function encodedBody(headers: Record<string, string>): boolean {
   return Object.entries(headers)
     .filter(([name]) => headerKey(name) === 'content-encoding')
     .some(([, value]) => value.split(',').some((coding) => !['', 'identity'].includes(coding.trim().toLowerCase())));
+}
+
+/** Charsets in which the body's ASCII reads as the same ASCII it was sent as. */
+const ASCII_READING_CHARSETS = new Set(['utf-8', 'utf8', 'us-ascii', 'ascii', 'iso-8859-1', 'latin1', 'windows-1252']);
+
+/**
+ * Whether the Content-Type names a charset this module cannot read the body in. The body goes out
+ * as UTF-8; a server that decodes it as UTF-16 (or UTF-32, UTF-7) reads other characters,
+ * a `_method` field among them, than the ones written.
+ */
+function foreignCharset(contentType: string): boolean {
+  for (const match of contentType.matchAll(/;\s*charset\s*=\s*("?)([^";,\s]*)\1/g)) {
+    if (!ASCII_READING_CHARSETS.has(match[2]!)) return true;
+  }
+  return false;
 }
 
 /**
@@ -148,8 +166,8 @@ function multipartNamesMethod(body: string): boolean {
 /**
  * The `_method` fields of a request body, as a server that parses the body may read them
  * (Rack's MethodOverride and Laravel read the form or the JSON body; Express's method-override
- * reads whatever its body parser produced). Only top-level fields count: a field of that name
- * inside a nested object, or a form key such as `data[_method]`, is ordinary data.
+ * reads whatever its body parser produced). Only top-level fields are read as overrides: a field
+ * of that name inside a nested object, or a form key such as `data[_method]`, is ordinary data.
  *
  * Servers do not agree on which parser a Content-Type selects, so the body is read both as JSON
  * and as a form. A value from a parser the Content-Type names is `declared`, and one that is not
@@ -157,8 +175,10 @@ function multipartNamesMethod(body: string): boolean {
  * it is a method. The form reading is left out only for a body declared as JSON alone that parses
  * as JSON: no server reads that as a form. `unreadable` is set when a server may read an
  * override this module cannot: a body that looks like JSON (by its type or its first character),
- * does not parse and holds a `"_method":` key; JSON that names a `_method` key twice; a body under
- * a multipart type with a part named `_method`; or a body sent with a `Content-Encoding`.
+ * does not parse and holds a `"_method":` key; JSON that names a `_method` key twice, at any depth
+ * and in any case; a body under a multipart type with a part named `_method`; or a body sent with
+ * a `Content-Encoding` other than `identity`, or in a charset other than UTF-8 or one that reads
+ * ASCII as ASCII.
  * The caller gates such a request as the strongest method.
  */
 function bodyOverrides(body: string, headers: Record<string, string>): { declared: string[]; other: string[]; unreadable: boolean } {
@@ -194,7 +214,7 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
     // two readings, not put in their place.
     unreadable: (looksJson && json === null && namesMethodKey(body)) || duplicateKey ||
       (contentType.includes('multipart/') && multipartNamesMethod(body)) ||
-      (body !== '' && encodedBody(headers)),
+      (body !== '' && (encodedBody(headers) || foreignCharset(contentType))),
   };
 }
 
