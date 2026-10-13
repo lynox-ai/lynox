@@ -464,6 +464,12 @@ export function withheldText(names: readonly string[]): string {
   return `${shown} ${one ? 'is' : 'are'} not available to this profile. A profile set up in a mandate's session reads a vault name of the owner's only once the owner releases it to that profile, and the owner is asked when the profile is saved. Asking for the value with ask_secret does not change this.`;
 }
 
+/**
+ * The vault as the engine reads it for `profile` in a run of `ctx.principal`. A profile the
+ * owner wrote gets the store unchanged, in a mandate's run as well. `GET
+ * /api/bulk/runs/:id/targets` serves a mandate the before-images of a bulk run under `reads`,
+ * and a test in `http-api.test.ts` couples that stance to this read.
+ */
 export function secretsForProfile(
   store: SecretStoreLike,
   profile: ApiProfile,

@@ -20,6 +20,9 @@ import { containsUntrustedMarker } from '../core/data-boundary.js';
 import { readDurableKnowledgeForDebug, decideHeldRunClaim, buildClientErrorBody, mayStopRun } from './http-api.js';
 import { EngineDb } from '../core/engine-db.js';
 import { MandateEnds } from '../core/mandate-ends.js';
+import { secretsForProfile } from '../core/profile-secret-view.js';
+import type { ApiProfile } from '../core/api-store.js';
+import type { SecretStoreLike } from '../types/index.js';
 import { AuditLog } from '../core/audit-log.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
@@ -15244,6 +15247,34 @@ describe('mandate stance of every user route', () => {
       'POST /api/triggers/stance-probe/run own',
       'POST /api/workflows/stance-probe/grant-preview free',
     ]);
+  });
+
+  // The before-images of a bulk run are fields an owner profile's credential read from the
+  // owner's API. A mandate gets them under `reads` exactly as long as it reads with an owner
+  // profile itself; when one side changes, the other has to change with it.
+  it('serves a mandate the bulk targets exactly while a mandate reads with an owner profile', () => {
+    const vault = {
+      resolve: (n: string) => (n === 'OWNER_KEY' ? 'owner-value' : null),
+      extractSecretNames: () => [],
+      resolveSecretRefs: (input: unknown) => input,
+      isEnvironmentSecret: () => false,
+      listNames: () => ['OWNER_KEY'],
+    } as unknown as SecretStoreLike;
+    const profile = (created_by?: string): ApiProfile => ({
+      id: 'crm-api', name: 'CRM', base_url: 'https://crm.example/v1', description: 'd',
+      auth: { type: 'bearer', vault_keys: ['OWNER_KEY'] },
+      ...(created_by === undefined ? {} : { created_by }),
+    });
+    const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+    const readsWith = (p: ApiProfile): boolean =>
+      secretsForProfile(vault, p, { getAll: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
+        .resolve('OWNER_KEY') === 'owner-value';
+    // The probe can say no: a profile the mandate wrote does not read the owner's name unreleased.
+    expect(readsWith(profile('mandate:setup@example.org')), 'control: a mandate profile reads nothing unreleased').toBe(false);
+    const targets = users().find(r => r.method === 'GET' && r.path === '/api/bulk/runs/:id/targets');
+    expect(targets, 'the bulk targets route').toBeDefined();
+    expect(targets!.stance?.kind === 'reads', 'GET /api/bulk/runs/:id/targets is `reads` exactly while a mandate reads with an owner profile')
+      .toBe(readsWith(profile()));
   });
 
   describe('owner-only is applied, not only declared', () => {
