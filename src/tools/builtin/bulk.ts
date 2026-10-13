@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import type { BulkRunStatus, BulkTargetSystem, PlannedTarget } from '../../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, type BulkLedger, type BulkRunStatus, type BulkTargetSystem, type PlannedTarget } from '../../core/bulk-ledger.js';
 import { BULK_WRITE_METHODS, canonicalHost, mintBulkContract, planExternal } from '../../core/bulk-external.js';
+import { listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
@@ -26,6 +27,7 @@ interface BulkPlanInput {
   source_format?: 'json' | 'csv' | undefined;
   source_collection?: string | undefined;
   source_filter?: Record<string, unknown> | undefined;
+  source_list?: unknown;
   atomic?: boolean | undefined;
 }
 
@@ -46,14 +48,21 @@ function formatStatus(s: BulkRunStatus): string {
   if (s.writeMethod !== null) {
     lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);
   }
-  if (s.phase === 'planned') {
+  if (s.list?.state === 'pending') {
+    lines.push(`Targets come from a list on the host, not read to the end yet: ${String(s.list.pagesRead)} page(s) read — ` +
+      'the number of targets is known only once the list is read.');
+  } else if (s.phase === 'planned') {
     lines.push(`Reading targets: ${String(s.unread)} of ${String(s.total - s.changes.invalid)} not read yet — ` +
       'the counts above are final once the phase is previewed.');
   }
   if (s.applied > 0 || s.failed > 0 || s.conflicts > 0 || s.undone > 0) {
     lines.push(`Applied ${String(s.applied)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, undone ${String(s.undone)}.`);
   }
-  if (s.haltReason) lines.push(`Halted: ${s.haltReason}.`);
+  if (s.haltReason === BULK_HALT_REASONS.listed) {
+    lines.push('The list is read. Its targets are read only once the user starts the run again, outside this chat.');
+  } else if (s.haltReason) {
+    lines.push(`Halted: ${s.haltReason}.`);
+  }
   if (s.checksumBinding === 'unkeyed') {
     lines.push('Approval checksum: unkeyed — this instance has no vault key, so the checksum does not bind the approval to the run.');
   }
@@ -80,6 +89,29 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
   }
 }
 
+/** Record a run whose targets come from a list on the host (PRD bulk-loop §3.2): nothing
+ *  is read here — the list is read once the user starts the run. */
+function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger): string {
+  if (input.target_system !== 'http') throw new BulkSourceError('source_list needs target_system "http".');
+  const host = input.target_host === undefined ? null : canonicalHost(input.target_host);
+  if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
+  if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
+  const source = parseListSource(host, input.source_list, input.write_method ?? 'PATCH', detectSecretInContent);
+  const out = ledger.recordExternalListPlan({
+    createdBy: agent.currentThreadId, principal: agent.principal, host, source, readContract: listReadContract(host, source),
+  });
+  if (!out.ok) {
+    return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
+  }
+  return [
+    'List dry run recorded — nothing was sent, read or written. Nothing is read until the user starts it outside this chat.',
+    formatStatus(out.status),
+    'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
+      'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
+      'What the list and the targets hold is in the run\'s ledger for the user to review; it is not shown to you.',
+  ].join('\n');
+}
+
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   // Writes only the ledger — but recording a run also drops the oldest unapproved
   // previews beyond the cap, and nothing keeps what was dropped.
@@ -91,6 +123,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'Targets and new states come from a source you prepared: a JSON or CSV file in the workspace (rows with a "target" field and either an "after" field or the new column values), or a data-store collection holding such rows. ' +
       'target_system "workspace": each target is a file path, "after" its full new text. target_system "data_store": each target is a key value of target_collection\'s unique key, the other fields the new column values. ' +
       'target_system "http": each target is the https URL of one JSON resource on target_host, "after" a JSON object of the fields to set (text, number, true/false or null — no lists or nested objects); once the user starts it, the engine reads every target in the background with the host\'s stored API credential, so the counts are final only once bulk_status shows phase previewed. Only one external dry run reads at a time. ' +
+      'Or, for target_system "http", source_list: a list on target_host the engine reads itself, page by page — every element it lists gets the one "after" given, written with write_method to <path>/<id of the element>. ' +
+      'The list is read only after the user starts the run, with the host\'s stored API credential; what it holds is never shown to you. ' +
+      'Elements can be missed when the list changes while it is read, and the number of targets is known only once it is read. ' +
       'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it, and there is no screen or button for it you could point them to. ' +
       'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole.',
     input_schema: {
@@ -100,10 +135,22 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         target_host: { type: 'string', description: 'For target_system "http": the API host name, e.g. api.example.com — every target URL must be on it.' },
         write_method: { type: 'string', enum: ['PATCH', 'PUT', 'POST'], description: 'For target_system "http": the verb the API edits an existing resource with at its own URL. Default PATCH. Some APIs edit with PUT, or with POST to the resource URL — use what the API documents for an edit, never a create endpoint.' },
         target_collection: { type: 'string', description: 'For target_system "data_store": the collection whose rows change. It needs a single-column unique key.' },
-        source_file: { type: 'string', description: 'Workspace path of the JSON or CSV source. Give this or source_collection.' },
+        source_file: { type: 'string', description: 'Workspace path of the JSON or CSV source. Give exactly one of source_file, source_collection or source_list.' },
         source_format: { type: 'string', enum: ['json', 'csv'], description: 'Format of source_file. Default: csv for a .csv path, json otherwise.' },
-        source_collection: { type: 'string', description: 'Data-store collection holding the source rows. Give this or source_file.' },
+        source_collection: { type: 'string', description: 'Data-store collection holding the source rows. Give exactly one of source_file, source_collection or source_list.' },
         source_filter: { type: 'object', description: 'Optional filter for source_collection, same syntax as data_store_query.' },
+        source_list: {
+          type: 'object',
+          description: 'For target_system "http": a list on target_host to take the targets from, instead of source_file or source_collection.',
+          properties: {
+            form: { type: 'string', enum: ['woocommerce'], description: 'The API\'s list form. Default woocommerce.' },
+            path: { type: 'string', description: 'The list\'s path, e.g. /wp-json/wc/v3/products.' },
+            filters: { type: 'object', description: 'Filter name → value, names of the form only (woocommerce: category, tag, status, sku, type, stock_status); values are 1–64 letters, digits, - or _.' },
+            id_field: { type: 'string', description: 'The top-level field of an element holding its id. Default id.' },
+            after: { type: 'object', description: 'The fields to set on every listed element (text, number, true/false or null); not the id field.' },
+          },
+          required: ['path', 'after'],
+        },
         atomic: { type: 'boolean', description: 'Write all targets or none (default false: targets are independent).' },
       },
       required: ['target_system'],
@@ -113,9 +160,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
     const ledger = agent.toolContext.bulkLedger;
     if (!ledger) return 'Bulk runs are not available on this instance.';
     try {
-      if ((input.source_file === undefined) === (input.source_collection === undefined)) {
-        throw new BulkSourceError('Give exactly one of source_file or source_collection.');
-      }
+      const sources = [input.source_file, input.source_collection, input.source_list].filter((v) => v !== undefined).length;
+      if (sources !== 1) throw new BulkSourceError('Give exactly one of source_file, source_collection or source_list.');
+      if (input.source_list !== undefined) return planList(input, agent, ledger);
       let rows: Record<string, unknown>[];
       if (input.source_file !== undefined) {
         const path = resolveBulkFilePath(input.source_file);
