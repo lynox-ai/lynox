@@ -38,6 +38,7 @@ import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfil
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
+import { isRequestShapingHeaderName } from '../../core/outbound-write.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -187,6 +188,9 @@ function validateProfile(profile: ApiProfile): string | null {
     const headerName: unknown = profile.auth.header_name;
     if (headerName !== undefined && (typeof headerName !== 'string' || !HTTP_HEADER_NAME.test(headerName))) {
       return 'Invalid auth.header_name: must be an HTTP header name, for example "X-Api-Key" (letters, digits and !#$%&\'*+-.^_`|~, no spaces, at most 64 characters).';
+    }
+    if (typeof headerName === 'string' && isRequestShapingHeaderName(headerName)) {
+      return 'Invalid auth.header_name: a credential cannot go in a header that changes the request\'s method, target or body type (a method override, Host, Forwarded, X-Forwarded-*, X-Original-*, X-Rewrite-*, Content-Type). Use the header the API documents for its key, for example "X-Api-Key".';
     }
     const queryParam: unknown = profile.auth.query_param;
     if (queryParam !== undefined && (typeof queryParam !== 'string' || !QUERY_PARAM_NAME.test(queryParam))) {

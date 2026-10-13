@@ -26,8 +26,17 @@ function rank(method: string): number {
   return method === 'DELETE' ? 2 : 1;
 }
 
-/** Header names a server may read as the request's method, compared case-insensitively. */
+/** Header names a server may read as the request's method, compared as `headerKey` reads them. */
 const OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override']);
+
+/**
+ * A header name the way a server may read it: trimmed, lower-case, and with `_` read as `-`.
+ * A CGI-style server (PHP-FPM, and Symfony and Laravel behind it) maps both to the same
+ * `HTTP_X_…` variable, so `X_HTTP_Method_Override` reaches it as the override header.
+ */
+function headerKey(raw: string): string {
+  return raw.trim().toLowerCase().replace(/_/g, '-');
+}
 
 /**
  * What an override may say: a method name from the registered set (RFC 9110 and the WebDAV
@@ -200,7 +209,7 @@ export type BodyReadings = string | readonly string[];
 function overrideCandidates(method: string, headers: Record<string, string>, url: string, body?: BodyReadings): string[] {
   const candidates: string[] = [];
   for (const [name, value] of Object.entries(headers)) {
-    if (OVERRIDE_HEADERS.has(name.trim().toLowerCase())) candidates.push(value);
+    if (OVERRIDE_HEADERS.has(headerKey(name))) candidates.push(value);
   }
   try {
     for (const [name, value] of new URL(url).searchParams) {
@@ -251,9 +260,20 @@ const RETARGETING_HEADERS = new Set(['host', 'x-host', 'forwarded']);
 const RETARGETING_FAMILIES = ['x-forwarded', 'x-original', 'x-rewrite'];
 
 function isRetargetingHeaderName(raw: string): boolean {
-  const name = raw.trim().toLowerCase();
+  const name = headerKey(raw);
   if (RETARGETING_HEADERS.has(name)) return true;
   return name !== 'x-forwarded-for' && RETARGETING_FAMILIES.some((family) => name.startsWith(family));
+}
+
+/**
+ * Whether a header name changes how a server reads the request rather than who sent it: a
+ * method override, a header that re-targets it, or the `Content-Type` that decides how its body
+ * is parsed. The gate reads all three before the engine attaches a profile's credential, so a
+ * credential slot of one of these names would change the request after it was checked.
+ */
+export function isRequestShapingHeaderName(raw: string): boolean {
+  const name = headerKey(raw);
+  return OVERRIDE_HEADERS.has(name) || isRetargetingHeaderName(name) || name === 'content-type';
 }
 
 /** The first header the request sets that re-targets it away from its URL, by its name. */

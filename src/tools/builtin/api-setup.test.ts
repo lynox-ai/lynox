@@ -754,6 +754,18 @@ describe('api_setup tool', () => {
       expect(result).not.toContain('evil');
     });
 
+    it.each([
+      ['header', 'X-HTTP-Method-Override'], ['header', 'X-Method-Override'], ['header', 'x-http-method'],
+      ['header', 'Host'], ['header', 'Forwarded'], ['header', 'X-Forwarded-Host'], ['header', 'X-Original-URL'],
+      ['header', 'X-Rewrite-URL'], ['header', 'Content-Type'], ['header', 'X_HTTP_Method_Override'], ['oauth2', 'X-HTTP-Method-Override'],
+    ] as const)('refuses a %s profile whose credential slot is %s, a header that shapes the request', async (type, header_name) => {
+      const result = await apiSetupTool.handler(
+        { action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type, header_name } } },
+        createMockAgent(new ApiStore()),
+      );
+      expect(result).toContain('a credential cannot go in a header that changes the request');
+    });
+
     it('accepts a header name HTTP allows, underscore included', async () => {
       const result = await apiSetupTool.handler(
         { action: 'create', profile: { ...SAMPLE_PROFILE, auth: { type: 'header', header_name: 'X_Api_Key' } } },
