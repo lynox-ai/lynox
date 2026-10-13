@@ -137,8 +137,41 @@ describe('a mandate\'s changes in the actor trail (real engine)', () => {
     const res = await subscribe(ownerCookie, 'https://fcm.googleapis.com/fcm/send/owner-change');
     await res.arrayBuffer();
     expect(res.status).toBe(201);
-    await new Promise((r) => setTimeout(r, 50));
+    // Long enough for an outcome row, had one been opened.
+    await new Promise((r) => setTimeout(r, 100));
     expect(rows().slice(before)).toEqual([]);
+  });
+
+  it('records the outcome of a change whose client left before the answer', async () => {
+    // A handler that acts after an await, as a hand start does. The client drops the connection
+    // while it waits; the change still happens, and the trail says it did.
+    const routes = inner().staticRoutes;
+    const real = routes.get('POST /api/push/subscribe');
+    if (real === undefined) throw new Error('fixture: no POST /api/push/subscribe');
+    let acted = false;
+    routes.set('POST /api/push/subscribe', async (...a: unknown[]) => {
+      await new Promise((r) => setTimeout(r, 150));
+      acted = true;
+      await real(...a);
+    });
+    try {
+      const ac = new AbortController();
+      inner().rateCounts.clear();
+      const pending = fetch(`${base}/api/push/subscribe`, {
+        method: 'POST', signal: ac.signal,
+        headers: { cookie: `lynox_session=${mandateCookie}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+        body: JSON.stringify({ subscription: { endpoint: 'https://fcm.googleapis.com/fcm/send/ida-left', keys: { p256dh: 'p256dh', auth: 'auth' } } }),
+      }).catch(() => null);
+      await new Promise((r) => setTimeout(r, 50));
+      ac.abort();
+      await pending;
+      for (let i = 0; i < 100 && !acted; i++) await new Promise((r) => setTimeout(r, 5));
+      const got = await newRows(2);
+      expect(acted).toBe(true);
+      expect(got.map((r) => r.phase)).toEqual(['attempt', 'done']);
+    } finally {
+      routes.set('POST /api/push/subscribe', real);
+    }
   });
 
   it('writes a read row, not a change, for a GET', async () => {
@@ -208,9 +241,10 @@ describe('a mandate\'s changes in the actor trail (real engine)', () => {
           headers: { cookie: `lynox_session=${mandateCookie}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
           body: '{}',
         });
-        await res.body?.cancel();
-        const want = r.stance?.kind === 'owner-only' ? 403 : 503;
-        if (res.status !== want) answered.push(`${r.method} ${r.path} → ${String(res.status)}`);
+        const text = await res.text();
+        // The trail's own refusal, not a handler's 503 (a missing service answers 503 too).
+        const ok = r.stance?.kind === 'owner-only' ? res.status === 403 : res.status === 503 && text.includes('cannot be recorded in the instance log');
+        if (!ok) answered.push(`${r.method} ${r.path} → ${String(res.status)}`);
       }
     });
     expect(answered).toEqual([]);

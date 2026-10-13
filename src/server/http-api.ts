@@ -2011,40 +2011,61 @@ export class LynoxHTTPApi {
     this._principalResolver = resolver;
   }
 
+  /** The attempt row of a request's change, kept until its outcome row is written. */
+  private readonly _openTrails = new WeakMap<IncomingMessage, AuditEntry>();
   /** What a request did beyond its action, set by its handler for the closing row of its trail. */
   private readonly _requestTrailNotes = new WeakMap<IncomingMessage, string>();
 
   /**
-   * A mandate's change (PRD §3.6, §7(c)): every request it makes other than GET or HEAD leaves
-   * an `attempt` row, written by the dispatcher before the handler runs, so a route is covered
-   * by being registered. The outcome row follows when the answer closes: `done` for a 2xx,
-   * `refused` for anything else, with the attempt's `correlation_id`. The action is the route as
-   * registered, the target the path; never the body or the query. The owner's requests leave no
-   * row. `false` when the attempt cannot be written: the dispatcher has answered 503 and the
-   * change is not made.
+   * Write the `attempt` row of a change before it is made, and keep it for `_closeTrail`.
+   * `false` when the row cannot be written; the caller refuses the change then.
    */
-  private _beganMandateChange(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string): boolean {
-    if (method === 'GET' || method === 'HEAD') return true;
-    const principal = this._principalOf(req);
-    if (!writesMandateTrail(principal)) return true;
-    const entry: AuditEntry = { principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname), phase: 'attempt', correlationId: newCorrelationId() };
+  private _openTrail(req: IncomingMessage, principal: RequestPrincipal, action: string, target: string): boolean {
+    const entry: AuditEntry = { principal, action, target, phase: 'attempt', correlationId: newCorrelationId() };
     try {
       const log = this.engine?.getAuditLog() ?? null;
       if (log === null) throw new Error('no audit log');
       log.record(entry);
     } catch {
-      errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
       return false;
     }
-    res.once('close', () => {
-      const done = res.headersSent && res.statusCode >= 200 && res.statusCode < 300;
-      // The note names what the request did beyond its action (a delete that stopped a run), on
-      // the closing row only; the attempt row keeps the bare action.
-      const note = this._requestTrailNotes.get(req);
-      const closing: AuditEntry = { ...entry, phase: done ? 'done' : 'refused', action: note === undefined ? entry.action : `${entry.action} ${note}` };
-      try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
-    });
+    this._openTrails.set(req, entry);
     return true;
+  }
+
+  /**
+   * Write the outcome row of an open trail, once its handler has finished: `done` when the
+   * handler answered 2xx, `refused` for any other answer or none (it threw before answering).
+   * Run after the handler, not when the connection closes: a client that leaves early does not
+   * decide the outcome, and the act it started is still recorded. For a streamed answer, `done`
+   * means the change was accepted and its stream began; what the run does later is in its own
+   * trail. A handler's note names what the request did beyond its action, on this row only.
+   */
+  private _closeTrail(req: IncomingMessage, res: ServerResponse): void {
+    const entry = this._openTrails.get(req);
+    if (entry === undefined) return;
+    this._openTrails.delete(req);
+    const done = res.headersSent && res.statusCode >= 200 && res.statusCode < 300;
+    const note = this._requestTrailNotes.get(req);
+    const closing: AuditEntry = { ...entry, phase: done ? 'done' : 'refused', action: note === undefined ? entry.action : `${entry.action} ${note}` };
+    try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
+  }
+
+  /**
+   * A mandate's change (PRD §3.6, §7(c)): every request it makes other than GET or HEAD opens a
+   * trail in the dispatcher before the handler runs, so a route is covered by being registered;
+   * the dispatcher closes it when the handler has finished (`_closeTrail`). The action is the
+   * route as registered, the target the path; never the body or the query. The owner's requests
+   * open none. `false` when the attempt cannot be written: this has answered 503 and the change
+   * is not made.
+   */
+  private _beganMandateChange(req: IncomingMessage, res: ServerResponse, method: string, routePath: string, pathname: string): boolean {
+    if (method === 'GET' || method === 'HEAD') return true;
+    const principal = this._principalOf(req);
+    if (!writesMandateTrail(principal)) return true;
+    if (this._openTrail(req, principal, `${method} ${routePath}`, requestPathTarget(pathname))) return true;
+    errorResponse(res, 503, 'This change cannot be recorded in the instance log right now, so it was not made.');
+    return false;
   }
 
   /**
@@ -3010,7 +3031,8 @@ export class LynoxHTTPApi {
     if (method === 'GET' && pathname === LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH) {
       if (this._rateLimit(req, res, clientIp)) return;
       const handler = this.staticRoutes.get(`GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`);
-      if (handler) { await handler(req, res, {}, null); return; }
+      // The handler opens a trail when a mandate's consent is about to be stored.
+      if (handler) { try { await handler(req, res, {}, null); } finally { this._closeTrail(req, res); } return; }
     }
 
     // CORS — restrict to allowed origins (or allow all for localhost-only mode)
@@ -3239,7 +3261,7 @@ export class LynoxHTTPApi {
       const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
       if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;
       if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
-      await staticHandler(req, res, {}, body);
+      try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
       return;
     }
 
@@ -3260,7 +3282,7 @@ export class LynoxHTTPApi {
         if (this._refusedByStance(req, res, route.stance)) return;
         if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
         if (!this._beganMandateChange(req, res, method, route.path, pathname)) return;
-        await route.handler(req, res, params, body);
+        try { await route.handler(req, res, params, body); } finally { this._closeTrail(req, res); }
         return;
       }
     }
@@ -10105,6 +10127,13 @@ export class LynoxHTTPApi {
       const current = apiStore.get(signed.profileId);
       if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
+        return;
+      }
+      // A mandate's consent writes tokens into the vault: a change, recorded like one (PRD §3.6,
+      // §7(c)). This route answers before dispatch, so it opens its trail itself; the caller
+      // closes it.
+      if (by.tag !== 'owner' && !this._openTrail(req, reader, `GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}`, `profile:${signed.profileId}`)) {
+        sendOAuthHtml(res, 503, 'This connection cannot be recorded in the instance log right now. Nothing was stored.');
         return;
       }
 

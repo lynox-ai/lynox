@@ -14712,6 +14712,46 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       expect(mockSecretSet).not.toHaveBeenCalled();
     });
 
+    describe('the actor trail of a mandate\'s consent', () => {
+      // The route answers before dispatch, so it opens its own trail; the caller closes it.
+      let recorded: Array<{ phase: string; action: string; target?: string; principal: { kind: string } }> = [];
+      let origLog: unknown;
+      beforeEach(() => {
+        recorded = [];
+        origLog = engineRef()['getAuditLog'];
+        engineRef()['getAuditLog'] = () => ({ record: (e: (typeof recorded)[number]) => { recorded.push(e); } });
+      });
+      afterEach(() => { engineRef()['getAuditLog'] = origLog; });
+
+      it('records attempt and done around the tokens it stores, naming the profile', async () => {
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        expect((await complete(cookie)).status).toBe(200);
+        expect(recorded.map((e) => [e.phase, e.action, e.target, e.principal.kind])).toEqual([
+          ['attempt', 'GET /api/oauth/callback', `profile:${PROFILE}`, 'mandate'],
+          ['done', 'GET /api/oauth/callback', `profile:${PROFILE}`, 'mandate'],
+        ]);
+      });
+
+      it('stores nothing when the attempt cannot be written', async () => {
+        engineRef()['getAuditLog'] = () => ({ record: () => { throw new Error('disk full'); } });
+        const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
+        store.register({ ...store.get(PROFILE)!, created_by: TAG });
+        mockSecretSet.mockClear();
+        const res = await complete(cookie);
+        expect(res.status).toBe(503);
+        expect(await res.text()).toContain('Nothing was stored');
+        expect(mockSecretSet).not.toHaveBeenCalled();
+        expect(store.get(PROFILE)?.oauth_grant?.connected_by).not.toBe(TAG);
+      });
+
+      it('records nothing for the owner\'s consent', async () => {
+        const { cookie } = await arrange({});
+        expect((await complete(cookie)).status).toBe(200);
+        expect(recorded).toEqual([]);
+      });
+    });
+
     it('control: the same mandate and profile complete while the mandate is live', async () => {
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
       store.register({ ...store.get(PROFILE)!, created_by: TAG });
