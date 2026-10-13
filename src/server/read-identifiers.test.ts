@@ -12,11 +12,13 @@ import { LynoxHTTPApi, READ_IDENTIFIERS } from './http-api.js';
  * its code, not of a request. Every name the file reads is either an identifier (declared at
  * its route) or named here as not one, so a new name fails until it is placed.
  *
- * What a text scan cannot see is made to fail rather than pass: a read in any form other than
- * `searchParams.get('<name>')` must be listed, and the scan must find every `user` GET route of
- * the real table. A literal read in code outside a registration (a handler held in a `const`, a
- * shared helper) is credited to the registration above it. For an identifier that fails closed:
- * a route that does not declare it is named.
+ * What a text scan cannot see is made to fail rather than pass:
+ * - a read of the query in any form other than `searchParams.get('<name>')`, and any use of
+ *   `req.url` other than `new URL(req.url ?? …)`, must be listed;
+ * - a literal read of an identifying name must sit in a `user` GET route that declares it, or
+ *   be listed: a read in a helper or a handler held in a `const` is credited to whatever
+ *   registration precedes it, and so is caught here wherever that is;
+ * - the scan must find exactly the `user` GET routes of the real table.
  */
 const NOT_IDENTIFYING = new Set([
   // Paging, ordering and windows.
@@ -34,6 +36,11 @@ const NOT_IDENTIFYING = new Set([
 const IDENTIFYING = new Set([...READ_IDENTIFIERS.values()].flat());
 /** Routes that read the query through a helper taking a variable name; each says which names. */
 const THROUGH_HELPER = new Map([['GET /api/bulk/runs/:id/targets', ['offset', 'limit']]]);
+/** Identifying names read outside a `user` GET route, by the registration they sit under. */
+const OUTSIDE_READS = [
+  // A delete names its file in the query; it is a change, recorded as one.
+  "addStatic('user', 'DELETE /api/files' path",
+];
 /** Registration keys written as a template, by what the template names. */
 const TEMPLATE_KEYS = new Map([['GET ${LynoxHTTPApi.PROFILE_OAUTH_CALLBACK_PATH}', 'GET /api/oauth/callback']]);
 const SOURCE = readFileSync(new URL('./http-api.ts', import.meta.url), 'utf8');
@@ -102,10 +109,37 @@ describe('the query identifiers of a read row, held to the handlers', () => {
     expect(unread).toEqual([]);
   });
 
-  it('knows every route that reads the query through a variable name', () => {
+  it('knows every route that reads the query through a variable name, and which names', () => {
     const dynamic = [...routes].filter(([, r]) => r.dynamic).map(([k]) => k);
     expect(dynamic).toEqual([...THROUGH_HELPER.keys()]);
-    for (const names of THROUGH_HELPER.values()) for (const n of names) expect(NOT_IDENTIFYING.has(n)).toBe(true);
+    for (const [key, names] of THROUGH_HELPER) {
+      for (const n of names) expect(NOT_IDENTIFYING.has(n)).toBe(true);
+      // The names the route hands its helper, read from its body: nothing beyond the listed ones.
+      const at = SOURCE.indexOf(`'${key.slice(4)}'`);
+      const body = SOURCE.slice(at, SOURCE.indexOf('parseDynamicRoute(', at + 1));
+      expect([...new Set([...body.matchAll(/num\('([^']+)'\)/g)].map((x) => x[1]!))].sort()).toEqual([...names].sort());
+    }
+  });
+
+  it('reads an identifying name only in a user GET route, or where it is listed', () => {
+    const regs = [...SOURCE.matchAll(/addStatic\('(?:user|admin)', [`'][A-Z]+ [^`']+[`']|parseDynamicRoute\('(?:user|admin)', '[A-Z]+', '[^']+'/g)];
+    const outside = [...SOURCE.matchAll(/searchParams\.get\('([^']+)'\)/g)]
+      .filter((m) => IDENTIFYING.has(m[1]!))
+      .map((m) => ({ name: m[1]!, under: regs.filter((r) => r.index! < m.index!).at(-1)?.[0] ?? '(before any route)' }))
+      .filter((x) => !/^addStatic\('user', [`']GET |^parseDynamicRoute\('user', 'GET'/.test(x.under))
+      .map((x) => `${x.under} ${x.name}`);
+    expect(outside).toEqual(OUTSIDE_READS);
+  });
+
+  it('takes the request URL apart in one form only', () => {
+    // `new URL(req.url ?? …)` leaves the query to `searchParams`, which the tests above read. A
+    // split on `?`, a regex over `req.url`, `.search` or `querystring` would read it unseen.
+    const other = SOURCE.split('\n')
+      .filter((l) => !/^\s*(\/\/|\*)/.test(l))
+      .filter((l) => /req\.url|\.search\b(?!\()|querystring/.test(l))
+      .filter((l) => !/new URL\(req\.url \?\? /.test(l))
+      .map((l) => l.trim());
+    expect(other).toEqual(["const url = req.url ?? '/';"]);
   });
 });
 

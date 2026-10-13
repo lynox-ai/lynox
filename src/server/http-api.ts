@@ -2007,8 +2007,8 @@ export class LynoxHTTPApi {
       const log = this.engine?.getAuditLog() ?? null;
       if (log === null) throw new Error('no audit log');
       const identifiers = (READ_IDENTIFIERS.get(`GET ${routePath}`) ?? [])
-                // An empty value names nothing; a route that reads it as "no filter" reads more.
-        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null || v === '' ? [] : [[name, v]]; });
+                // As sent, an empty value too: a route may read it as "no filter" and so read more.
+        .flatMap((name): Array<[string, string]> => { const v = query.get(name); return v === null ? [] : [[name, v]]; });
       log.record({ principal, action: `${method} ${routePath}`, target: requestPathTarget(pathname, identifiers), phase: 'read', correlationId: newCorrelationId() });
     } catch {
       errorResponse(res, 503, 'This read cannot be recorded in the instance log right now, so it was not answered.');

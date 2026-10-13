@@ -102,27 +102,44 @@ export function httpTarget(method: string, url: string): string {
   }
 }
 
-/** An escape of a character that never needs one (RFC 3986 unreserved). */
-const UNRESERVED_ESCAPE = /%(4[1-9A-F]|5[0-9A]|6[1-9A-F]|7[0-9A]|3[0-9]|2D|2E|5F|7E)/gi;
+/**
+ * Characters that would let a target pose as something it is not: the query and fragment marks,
+ * and every control, format and line or paragraph separator (bidi overrides among them). `%` is
+ * escaped too, except where it starts the `%2F` a path keeps.
+ */
+const ROW_SHAPING = /[?#\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|%(?!2F)/giu;
+
+/** Every escape undone except `%2F`, which in a path is a slash inside a segment, not between two. */
+function decodedKeepingSlash(raw: string): string {
+  return raw.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => run.split(/(%2F)/i).map((part) => {
+    if (/^%2F$/i.test(part) || part === '') return part;
+    try { return decodeURIComponent(part); } catch {
+      // Not UTF-8 as a whole: undo the ASCII escapes one by one, so a key does not hide behind
+      // one bad byte, and leave the rest as sent.
+      return part.replace(/%([0-7][0-9A-Fa-f])/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+    }
+  }).join(''));
+}
 
 /**
  * What a read row names as its target: the request's own path on this instance, plus the query
- * parameters the route declares as naming what it asked for (`path=`, `threadId=`), and no other
- * query value. Ids stay readable, unlike in `httpTarget`: which thread, file or contact was asked
- * for is what the row is for, and these are the instance's own names, not a third party's keys.
+ * parameters the route declares as naming what it was asked for (`path=`, `threadId=`), each as
+ * sent (an empty one too), and no other query value. Ids stay readable, unlike in `httpTarget`:
+ * which thread, file or contact was asked for is what the row is for, and these are the
+ * instance's own names, not a third party's keys.
  *
- * The row is written by the actor it records, so nothing it sends may change the row's shape.
- * Only escapes of letters, digits and `-._~` are undone, so a percent-encoded key is masked like
- * a plain one while `%3F`, `%26`, `%2F` and any non-ASCII stay escaped. A value is escaped the
- * same way (`/` kept for readability), so it cannot add a pair of its own.
+ * The row is written by the actor it records, so the order is: undo the escapes, mask the known
+ * secret shapes where they are visible, then escape what could change the row's shape (a `?`, a
+ * control or bidi character, and in a value `&` and `=`). A key cannot hide behind an escape, and
+ * a value cannot add a pair of its own. A double-encoded key (`%2573…`) is undone once only.
  */
 export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<readonly [string, string]> = []): string {
-  const unescape = (s: string): string => s.replace(UNRESERVED_ESCAPE, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
-  const query = identifiers
-    .map(([name, value]) => `${name}=${unescape(encodeURIComponent(value)).replace(/%2F/gi, '/')}`)
-    .join('&');
-  const path = unescape(pathname);
-  return maskSecretPatterns(query === '' ? path : `${path}?${query}`, { includeGeneric: true });
+  const escape = (s: string, extra: RegExp): string =>
+    s.replace(ROW_SHAPING, (c) => encodeURIComponent(c)).replace(extra, (c) => encodeURIComponent(c));
+  const mask = (s: string): string => maskSecretPatterns(s, { includeGeneric: true });
+  const path = escape(mask(decodedKeepingSlash(pathname)), /(?!)/g);
+  const query = identifiers.map(([name, value]) => `${name}=${escape(mask(value), /[&=]/g)}`).join('&');
+  return query === '' ? path : `${path}?${query}`;
 }
 
 /** The fixed text a mandate's act gets when its trail cannot be written. */

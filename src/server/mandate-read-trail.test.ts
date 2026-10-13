@@ -155,8 +155,9 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
   });
 
   it('keeps the shape of the row out of the actor\'s hands', async () => {
-    // A value cannot add a pair, an escaped `?` in the path stays a path, and an escaped
-    // control character stays escaped. An empty identifier names nothing and is left out.
+    // A value cannot add a pair, an escaped `?` in the path stays a path, a slash inside a
+    // segment stays escaped, and a bidi character stays escaped. An empty identifier is
+    // written as sent: the route may read it as "no filter".
     for (const path of [
       '/api/files/read?path=a%26hidden%3D1',
       '/api/threads/t1%3Fpath%3Dnotes%2Fx.txt',
@@ -168,10 +169,28 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     }
     expect(newReadRows().map((r) => r.target)).toEqual([
       '/api/files/read?path=a%26hidden%3D1',
-      '/api/threads/t1%3Fpath%3Dnotes%2Fx.txt',
+      '/api/threads/t1%3Fpath=notes%2Fx.txt',
       '/api/threads/a%E2%80%AEb',
-      '/api/history/runs?thread_id=t-9',
+      '/api/history/runs?sessionId=&thread_id=t-9',
     ]);
+  });
+
+  it('masks a credential where it is visible only once the escapes are undone', async () => {
+    // Masked before escaping: a userinfo URL in a value, a Bearer token behind an encoded space.
+    const token = 'abcdefghijklmnopqrstuvwxyz';
+    for (const path of [
+      '/api/files/read?path=https%3A%2F%2Fuser%3Ahunter2pass%40db.example',
+      `/api/threads/Bearer%20${token}`,
+      '/api/files/read?path=M%C3%A4rz%20Bericht.pdf',
+    ]) {
+      const res = await ask('GET', path, mandateCookie);
+      await res.arrayBuffer();
+    }
+    const got = newReadRows().map((r) => r.target ?? '');
+    expect(got[0]).not.toContain('hunter2pass');
+    expect(got[1]).not.toContain(token.slice(0, 20));
+    // An id stays readable, letters and spaces as they are.
+    expect(got[2]).toBe('/api/files/read?path=März Bericht.pdf');
   });
 
   it('masks an encoded key next to a malformed escape', async () => {
