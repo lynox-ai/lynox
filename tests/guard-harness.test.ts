@@ -342,6 +342,13 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     // Pinned to the refusal THIS reason names; exit 2 alone would also be "could not check".
     expectStrippedStderr: /no remote URL/,
   },
+  'lint-changed': {
+    kind: 'exempt',
+    reason:
+      'reads its range from the pushed refs, not a tree; without a commit to measure from it refuses (exit 2) instead of reporting clean. Its planted (a committed `!= null` fails), clean and starved cases run against real git and the real eslint config in tests/lint-changed.test.ts',
+    expectStrippedExit: 2,
+    expectStrippedStderr: /could not check/,
+  },
   'hex-guard': {
     kind: 'exempt',
     reason: 'staged-mode only, where an empty candidate set is the normal case (most commits stage no component)',
@@ -433,6 +440,8 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   'disclosure-vocabulary': { cmd: 'node', args: [join(repoRoot, 'scripts/disclosure-vocabulary-scan.mjs')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
   'push-lands-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/push-lands-guard.mjs'), 'hook'] },
+  // The by-hand form: in the stripped repo there is no commit, so no merge base with origin/main.
+  'lint-changed': { cmd: 'node', args: [join(repoRoot, 'scripts/lint-changed.mjs')] },
   'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },
   'gitleaks-config-canary': { cmd: 'bash', args: [join(repoRoot, 'scripts/gitleaks-config-canary.sh')] },
 };
