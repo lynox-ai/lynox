@@ -246,6 +246,22 @@ export function writeMethodsNamed(method: string, headers: Record<string, string
   return [...named].sort();
 }
 
+/**
+ * Everything the write gates read off a request's headers, as they read it: the method it is
+ * gated as, every write it names, and a header that re-targets it. A sender that adds headers
+ * after the gates ran (the engine attaching a profile's credential) compares this before and
+ * after, and refuses on any difference: the slot-name denylist (`isRequestShapingHeaderName`)
+ * keeps such a slot from being attached, and this keeps a name that list does not know yet from
+ * passing. A gate that starts to read a header through another function belongs in here too.
+ */
+export function gateReading(method: string, headers: Record<string, string>, url: string, body?: BodyReadings): string {
+  return JSON.stringify([
+    effectiveWriteMethod(method, headers, url, body),
+    writeMethodsNamed(method, headers, url, body),
+    retargetingHeader(headers)?.trim().toLowerCase() ?? null,
+  ]);
+}
+
 /** Headers a server or a proxy in front of it may route on instead of the URL, by name. */
 const RETARGETING_HEADERS = new Set(['host', 'x-host', 'forwarded']);
 

@@ -17,7 +17,7 @@
  * fields a write does not send is documented by none of them; that is what the one-target
  * probe before a wider approval is for (`BulkLedger.confirmProbe`).
  */
-import { effectiveWriteMethod, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
+import { effectiveWriteMethod, gateReading, isOutboundEffectWrite, normalizeWritePath, outboundEffectField } from './outbound-write.js';
 import { isMeasuredWriteForm } from './bulk-write-forms.js';
 import { BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES, BulkSourceError, type SourceRow } from './bulk-plan.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
@@ -371,7 +371,11 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     }
     const headers: Record<string, string> = { accept: 'application/json' };
     if (method !== 'GET') headers['content-type'] = 'application/json';
+    // Compared before and after the attach, as `http_request` does: a slot that changed what the
+    // contract was checked against halts the run instead of sending (`gateReading`).
+    const readBeforeAttach = gateReading(method, headers, url, payload);
     if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
+    if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'blocked' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     let res: Response;

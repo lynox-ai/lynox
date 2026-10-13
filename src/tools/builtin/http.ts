@@ -38,7 +38,7 @@ import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
@@ -2339,23 +2339,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // today. A profile that works now keeps working; `custom_endpoint_ack` only
     // exists since 2026-07-02 and the self→managed migration strips it on purpose,
     // so anything else would break live integrations on upgrade.
-    // Everything the gates above and below read off the headers, as they read it. The attach
-    // adds a header, and a slot named like a method override, a routing header or the body's
-    // type would change that reading after it was checked. `isRequestShapingHeaderName` keeps
-    // such a slot from being attached at all; this compares the two readings, so a name that
-    // list does not know yet fails closed instead of passing.
-    const gateReading = (): string => JSON.stringify([
-      effectiveWriteMethod(method, headers, input.url, gateBodyReadings(input.body, headers)),
-      writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)),
-      retargetingHeader(headers)?.trim().toLowerCase() ?? null,
-    ]);
-    const readBeforeAttach = gateReading();
+    // What the gates above read off the headers, and the redirect guard below reads again. The
+    // attach sets a header (replacing one of the same name), and a slot named like a method
+    // override, a routing header or the body's type would change that reading after it was
+    // checked; `gateReading` (`outbound-write.ts`) is compared before and after. It runs after
+    // the whole attach, so a slot past the denylist has had its vault read, and its token
+    // renewed, by the time the request is refused.
+    const readingNow = (): string => gateReading(method, headers, input.url, gateBodyReadings(input.body, headers));
+    const readBeforeAttach = readingNow();
     const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);
     // A refusal means nothing was sent — a failed call, not a quiet one. It is
     // phrased for the model (`Error: api_profile "x" is oauth2 but the vault has
     // no access_token …`), so it goes to the ledger verbatim.
     if (auth.refusal) blockedVerbatim(auth.refusal);
-    if (gateReading() !== readBeforeAttach) {
+    if (readingNow() !== readBeforeAttach) {
       blockedVerbatim(`Blocked: the credential the engine attached for ${new URL(input.url).hostname} changes the request's method, target or how its body is read, so nothing was sent. Fix the api_profile with api_setup action="update" to put the credential in the header the API documents for its key.`);
     }
     const attachedAuthSlot = auth.slot;

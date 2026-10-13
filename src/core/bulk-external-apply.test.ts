@@ -458,6 +458,32 @@ describe('applying an external run', () => {
     }
   });
 
+  // The contract granted a PATCH; a slot that turns it into a DELETE (or names another write, or
+  // re-targets it) after that check must not go out. The denylist keeps such a slot from being
+  // attached; this is the comparison behind it, for a name the list does not know yet.
+  it.each([
+    ['x-http-method-override', 'DELETE'],
+    ['x-method-override', 'PUT'],
+    ['x-forwarded-host', 'internal.example'],
+  ])('SECURITY: an attach that sets %s halts the write and sends nothing', async (name, value) => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = externalClient({
+        contract: mintBulkContract(HOST, [url(0)]),
+        hostPolicy: createToolContext({}),
+        ackHosts: undefined,
+        attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; headers[name] = value; return true; },
+        rateLimit: () => null,
+        scan: detectSecretInContent,
+      });
+      expect((await c.write(url(0), 'PATCH', { note: 'plain' })).kind).toBe('blocked');
+      expect(s.requests).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it('an undo that would write back a value that looks like a secret fails that target, and sends nothing for it', async () => {
     const s = shop();
     s.items.get('/products/0')!['note'] = `old ${LOOKS_LIKE_A_KEY}`;
