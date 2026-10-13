@@ -56,6 +56,19 @@ describe('renderProvenanceFact — structural marker (INV-1 / AC5)', () => {
     const fallback = renderProvenanceFact({ text: 'x' });
     expect(fallback).toContain('kind="agent_inferred"');
   });
+
+  it('shows a tier this build does not know as the lowest one, never as its raw text', () => {
+    // Read back from a TEXT column: a migration, a hand-edited row or a newer build can hold
+    // any string. A near-miss of a known tier must not read as that tier.
+    for (const raw of ['user_asserted ', 'User_Asserted', 'tool_verified\n', 'owner_asserted', '']) {
+      const out = renderProvenanceFact({ text: 'x', kind: raw as (typeof ALL_PROVENANCE_KINDS)[number] });
+      expect(out, JSON.stringify(raw)).toBe('<fact kind="external_unverified">x</fact>');
+    }
+    // Control: every known tier is shown as itself.
+    for (const kind of ALL_PROVENANCE_KINDS) {
+      expect(renderProvenanceFact({ text: 'x', kind })).toBe(`<fact kind="${kind}">x</fact>`);
+    }
+  });
 });
 
 describe('detectInjectionAttempt — provenance marker forgery (INV-1)', () => {

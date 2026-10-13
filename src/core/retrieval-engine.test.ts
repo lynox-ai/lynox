@@ -270,3 +270,40 @@ describe('RetrievalEngine — deleted memories must not keep surfacing their ent
     expect(resolved.map(e => e.id)).toContain(collectionId);
   });
 });
+
+describe('RetrievalEngine.formatContext — a stored tier it does not know', () => {
+  let tempDir: string;
+  let db: AgentMemoryDb;
+  let engine: RetrievalEngine;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-retrieval-tier-'));
+    const embedding = new LocalProvider();
+    db = new AgentMemoryDb(join(tempDir, 'test.db'));
+    db.setEmbeddingDimensions(embedding.dimensions);
+    engine = new RetrievalEngine(db, embedding, new EntityResolver(db, embedding), undefined, undefined);
+  });
+
+  afterAll(async () => {
+    db.close();
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const memory = (id: string, sourceType: string) => ({
+    id, text: `fact ${id}`, namespace: 'knowledge' as const, scopeType: 'context' as const, scopeId: 'c',
+    score: 0.9, finalScore: 0.9, source: 'vector' as const,
+    // The retrieval reader casts `memories.source_type` (TEXT, no CHECK) to the tier type.
+    sourceType: sourceType as 'user_asserted', sourceToolName: null, confidence: 0.5, createdAt: '2026-10-13T00:00:00Z',
+  });
+
+  it('marks a recalled fact with an unknown tier as the lowest tier, and a known one as itself', () => {
+    const out = engine.formatContext({
+      memories: [memory('a', 'user_asserted '), memory('b', 'user_asserted')],
+      entities: [], contextGraph: '',
+    });
+    expect(out).toMatch(/<fact kind="external_unverified"[^>]*>fact a<\/fact>/);
+    expect(out).toMatch(/<fact kind="user_asserted"[^>]*>fact b<\/fact>/);
+    expect(out).not.toContain('kind="user_asserted "');
+  });
+});
+
