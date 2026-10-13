@@ -172,6 +172,21 @@ export class RedirectRefusedAfterWrite extends Error {
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/**
+ * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
+ * Every profile on the host counts, a host two profiles share included, and the host is read
+ * without trailing root dots, which name the same host to DNS and a different key to the
+ * profile map.
+ */
+function presetProfilesOnHost(url: string, toolContext: ToolContext | undefined): ApiProfile[] {
+  const apiStore = toolContext?.apiStore;
+  if (!apiStore) return [];
+  const host = new URL(url).hostname.replace(/\.+$/, '');
+  return (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
+    .map((id) => (id === undefined ? undefined : apiStore.get(id)))
+    .filter((p): p is ApiProfile => p?.auth?.oauth?.preset_id !== undefined);
+}
+
 /** Write approvals denied in a tool batch, keyed by the batch's identity (`IAgent.approvalBatch`):
  *  a call of the same batch that waited on that question is refused without asking again. */
 const deniedInBatch = new WeakMap<object, Set<string>>();
@@ -2282,12 +2297,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // contract (so no grant opens it). Every profile on the host counts, a host two profiles
     // share included, and the host is read without trailing root dots, which name the same
     // host to DNS and a different key to the profile map.
+    const presetOnHost = isWriteMethod(gatedMethod) ? presetProfilesOnHost(input.url, toolContext) : [];
     if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
-      const apiStore = toolContext?.apiStore;
       const host = new URL(input.url).hostname.replace(/\.+$/, '');
-      const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
-        .map((id) => (id === undefined ? undefined : apiStore.get(id)));
-      const presetOnHost = onHost.filter((p) => p?.auth?.oauth?.preset_id !== undefined);
       if (presetOnHost.length > 0) {
         // Whose connection it is decides the way forward. The owner's account: a task the owner
         // approves runs with the owner's connection. This session's own: a task would run on a
@@ -2604,12 +2616,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
+    // A write to an account connected through a built-in provider (a profile with `preset_id`)
+    // is asked every time, and a DELETE there is never granted by a contract: one scope of such
+    // a provider can cover creating, changing, deleting, issuing and sending, so the question is
+    // what separates them. A contract still grants the other writes, which is what lets a
+    // scheduled run that holds one write at all; without one it is refused below.
+    const connectedAccount = presetOnHost.length > 0;
     const contractGrantsWrite =
       contract !== undefined &&
       !outboundEffect &&
+      !(connectedAccount && named.includes('DELETE')) &&
       named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
-    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && isOwnerPrincipal(agent.principal);
+    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
       const hostname = approvalHost;
@@ -2682,6 +2701,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const note = remembers ? pv``
               : outboundEffect ? pv` This sends or issues something and is asked every time.`
                 : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
+                  : connectedAccount ? pv` A write to a connected account is asked every time.`
                   : pv` In this session every write is asked.`;
             // What goes on the wire when an override names other methods: a server may run any of
             // them, so the question names them all.

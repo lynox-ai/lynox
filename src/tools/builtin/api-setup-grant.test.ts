@@ -757,14 +757,14 @@ describe('fetch_token — a profile connected through a provider preset', () => 
   it('refuses before the request when the stored profile names a scope the preset does not allow', async () => {
     // A profile can enter the store without passing a save, so the check runs here too.
     const store = new ApiStore();
-    store.register(bexioProfile({}, 'contact_edit'));
+    store.register(bexioProfile({}, 'bank_payment_edit'));
     const agent = makeAgent(store, vaultWithRefresh());
     const spy = vi.spyOn(globalThis, 'fetch');
 
     const result = await fetchToken(agent);
 
     expect(spy).not.toHaveBeenCalled();
-    expect(result).toContain('contact_edit');
+    expect(result).toContain('bank_payment_edit');
   });
 
   it('sends a recorded revocation back to connect, not to a pasted token', async () => {

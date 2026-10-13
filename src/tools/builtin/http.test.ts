@@ -1040,6 +1040,83 @@ describe('httpRequestTool', () => {
         });
       });
 
+      // A write to an account connected through a built-in provider is asked every time: one
+      // scope there can cover creating, changing, deleting, issuing and sending alike.
+      describe('the owner writing to an account connected through a preset', () => {
+        async function withProfile(presetId: string | undefined): Promise<void> {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            auth: {
+              type: 'oauth2',
+              vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: {
+                grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+                ...(presetId === undefined ? { token_url: 'https://example.com/oauth/token' } : { preset_id: presetId, preset_params: { shop: 'acme' } }),
+              },
+            },
+          });
+          testCtx.apiStore = store;
+        }
+        const post = { url: 'https://example.com/v1/report', method: 'POST', body: '{"amount":12}' };
+        const withDelete: CapabilityContract = { ...contract, httpMethods: ['POST', 'DELETE'] };
+
+        it('asks again for the second write in the same session, after an Allow', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler(post, makeAgent({ promptUser }));
+          await handler(post, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(2);
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          const question = flattenPrompt(promptUser.mock.calls[1]![0]);
+          expect(question).toContain('POST to example.com /v1/report');
+          expect(question).toContain('A write to a connected account is asked every time.');
+          expect(question).toContain('"amount": 12');
+        });
+
+        it('control: without a preset, the Allow holds for the next write', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler(post, makeAgent({ promptUser }));
+          await handler(post, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+        });
+
+        it('refuses a scheduled write without a contract, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await expect(handler(post, makeAgent())).rejects.toThrow(/requires user consent but no interactive prompt is available/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('does not let a contract grant a DELETE there, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await expect(handler({ url: 'https://example.com/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: withDelete })))
+            .rejects.toThrow(/requires user consent/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: the same contract grants the DELETE on an account without a preset', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler({ url: 'https://example.com/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: withDelete }));
+          expect(fetchMock).toHaveBeenCalled();
+        });
+      });
+
       describe('a redirect after a reviewed write', () => {
         const reviewed: CapabilityContract = {
           version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
