@@ -222,9 +222,11 @@ describe('percent-decoding as a server reads it (F-A, F-B)', () => {
   it('an invalid byte before an encoded secret does not hide it from the mask', () => {
     expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
     expect(bodyForQuestion(`x=%C3${enc('hunter2secret')}`, vault)).toEqual({ unshowable: 'escaped-secret' });
-    expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = \uFFFD[s]' });
-    expect(pathForQuestion(`https://h.example/a/%FF${enc('hunter2secret')}`, vault)).toBe('/a/\uFFFD[s]');
-    expect(bodyFieldNames(`%FF${enc('hunter2secret')}=1`, vault)).toBe('fields "\uFFFD[s]"');
+    expect(bodyForQuestion(`x=%FF${enc('hunter2secret')}`, vault, FORM)).toEqual({ text: 'x = ***' });
+    expect(pathForQuestion(`https://h.example/a/%FF${enc('hunter2secret')}`, vault)).toBe('/a/***');
+    // Starred, not masked: the Latin-1 reading holds the secret too, and a piece another
+    // reading turns into a secret is shown as `***`.
+    expect(bodyFieldNames(`%FF${enc('hunter2secret')}=1`, vault)).toBe('fields "***"');
   });
   it('positive control: an invalid byte before harmless text is shown as U+FFFD, nothing refused', () => {
     expect(bodyForQuestion(`x=%FF${enc('harmless')}`, vault, FORM)).toEqual({ text: 'x = \uFFFDharmless' });
@@ -241,6 +243,66 @@ describe('percent-decoding as a server reads it (F-A, F-B)', () => {
   it('positive control: encoded text that is no secret, and a plain secret, are shown in JSON', () => {
     expect(bodyForQuestion(JSON.stringify({ a: '100%25 sure', b: 'hunter2secret' }), vault)).toEqual({ text: '{\n  "a": "100%25 sure",\n  "b": "[s]"\n}' });
     expect(bodyForQuestion('{"a":"100%25 sure","n":1.0}', vault)).toEqual({ text: '{"a":"100%25 sure","n":1.0}' });
+  });
+});
+
+describe('a secret is not shown in any form a server may read it in', () => {
+  const enc = (t: string) => [...t].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+  const vault = (t: string) => t.replaceAll('hunter2secret', '[s]');
+  const twice = enc(enc('hunter2secret'));
+  it('encoded twice: the body is not shown, the path segment, query key and field name are starred', () => {
+    expect(bodyForQuestion(`x=${twice}`, vault, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(bodyForQuestion(JSON.stringify({ a: twice }), vault)).toEqual({ unshowable: 'escaped-secret' });
+    expect(pathForQuestion(`https://h.example/a/${twice}/b`, vault)).toBe('/a/***/b');
+    expect(pathForQuestion(`https://h.example/a?${twice}=1&b=2`, vault)).toBe('/a?***=…&b=…');
+    expect(bodyFieldNames(`${twice}=1&b=2`, vault)).toBe('fields "***", "b"');
+    expect(bodyForQuestion(`x=${twice}&b=2`, vault, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***\nb = 2' });
+    expect(pathForQuestion(`https://h.example/a/${enc(twice)}/b`, vault)).toBe('/a/***/b');
+  });
+  it('read as Latin-1: a non-ASCII secret is not shown', () => {
+    const latin = (t: string) => t.replaceAll('café-secret', '[s]');
+    expect(bodyForQuestion('x=caf%E9-secret', latin, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    expect(pathForQuestion('https://h.example/a/caf%E9-secret', latin)).toBe('/a/***');
+    expect(pathForQuestion('https://h.example/a?caf%E9-secret=1&b=2', latin)).toBe('/a?***=…&b=…');
+    expect(bodyFieldNames('caf%E9-secret=1&b=2', latin)).toBe('fields "***", "b"');
+    expect(bodyForQuestion('x=caf%E9-secret', latin, 'application/x-www-form-urlencoded')).toEqual({ text: 'x = ***' });
+  });
+  it('a secret holding `=` or `&`: masked whole before the query or form body is split', () => {
+    const sep = (t: string) => t.replaceAll('hunter=2secret', '[s]').replaceAll('hunter&2secret', '[s]');
+    expect(bodyFieldNames('hunter=2secret=1&b=2', sep)).toBe('fields "[s]", "b"');
+    expect(bodyFieldNames('hunter&2secret=1&b=2', sep)).toBe('fields "[s]", "b"');
+    expect(pathForQuestion('https://h.example/a?hunter=2secret=1&b=2', sep)).toBe('/a?[s]=…&b=…');
+    expect(pathForQuestion('https://h.example/a?hunter&2secret=1&b=2', sep)).toBe('/a?[s]=…&b=…');
+  });
+  it('read as ISO-8859-1 and as windows-1252: a byte in 0x80-0x9F is read both ways', () => {
+    const c1 = (t: string) => t.replaceAll('a\u0080b-secret', '[s]');
+    expect(pathForQuestion('https://h.example/a/a%80b-secret', c1)).toBe('/a/***');
+    expect(bodyForQuestion('x=a%80b-secret', c1, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+    const euro = (t: string) => t.replaceAll('pass€word', '[s]');
+    expect(pathForQuestion('https://h.example/a/pass%80word', euro)).toBe('/a/***');
+    expect(bodyForQuestion('x=pass%80word', euro, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+  });
+  it('a secret holding a `/`: masked whole before the split, and starred when only a reading across segments holds it', () => {
+    const slash = (t: string) => t.replaceAll('hunter/2secret', '[s]');
+    expect(pathForQuestion('https://h.example/x/hunter/2secret/y', slash)).toBe('/x/[s]/y');
+    expect(pathForQuestion('https://h.example/x/%2568unter/2secret', slash)).toBe('/***');
+  });
+  it('+ read as a space without percent-decoding: a secret holding a literal %XX is not shown', () => {
+    const literal = (t: string) => t.replaceAll('x%41 y', '[s]');
+    expect(bodyForQuestion('v=x%41+y', literal, 'text/plain')).toEqual({ unshowable: 'escaped-secret' });
+  });
+  it('positive control: encoded twice but harmless is shown, decoded once as before', () => {
+    const harmless = enc(enc('harmless'));
+    expect(pathForQuestion(`https://h.example/a/${harmless}`, vault)).toBe(`/a/${enc('harmless')}`);
+    expect(bodyFieldNames(`${harmless}=1`, vault)).toBe(`fields "${enc('harmless')}"`);
+    // A secret written plainly is masked, not starred, even beside an escape: it is masked
+    // before the further readings are taken, so they do not find it again.
+    expect(bodyFieldNames(JSON.stringify({ 'hunter2secret%41': 1, b: 2 }), vault)).toBe('fields "[s]%41", "b"');
+    expect(bodyForQuestion(`x=${harmless}`, vault, 'text/plain')).toEqual({ text: `x=${harmless}` });
+    expect(bodyForQuestion(`x=${harmless}`, vault, 'application/x-www-form-urlencoded')).toEqual({ text: `x = ${enc('harmless')}` });
+    expect(bodyForQuestion('x=caf%E9', (t) => t.replaceAll('café-secret', '[s]'), 'text/plain')).toEqual({ text: 'x=caf%E9' });
+    expect(pathForQuestion('https://h.example/x/%2568unter/y', (t) => t.replaceAll('hunter/2secret', '[s]'))).toBe('/x/%68unter/y');
+    expect(pathForQuestion('https://h.example/a?&a%20b=1&a+b=2&c', vault)).toBe('/a?a b=…&c=…');
   });
 });
 
