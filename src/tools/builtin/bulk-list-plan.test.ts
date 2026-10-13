@@ -80,6 +80,10 @@ describe('bulk_plan with source_list', () => {
     expect(ledger.listRuns()).toEqual([]);
   });
 
+  it('takes an argument set to null as not given, as the other sources do', async () => {
+    expect(await plan({ source_filter: null, source_format: null, target_collection: null })).toContain('List dry run recorded');
+  });
+
   it('passes the list check\'s refusal on, and records nothing', async () => {
     expect(await plan({ source_list: { path: PATH, filters: { orderby: 'price' }, after: { status: 'draft' } } }))
       .toBe('Error: source_list.filters may only use: category, tag, status, sku, type, stock_status.');

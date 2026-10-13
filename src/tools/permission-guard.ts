@@ -727,7 +727,7 @@ export function withListQuery(contract: CapabilityContract, constraints: ListQue
 }
 
 /** The longest query a list read sends; the engine's own page addresses stay far below it. */
-const LIST_QUERY_MAX = 512;
+export const LIST_QUERY_MAX = 512;
 const LIST_QUERY_NAME = /^[a-z][a-z0-9_]{0,31}$/;
 const LIST_QUERY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
 /** Names outside that alphabet a list read may still carry — each one a list form sets itself,

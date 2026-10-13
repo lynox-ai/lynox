@@ -152,6 +152,25 @@ describe('listFieldsValue', () => {
   });
 });
 
+describe('the longest page address', () => {
+  const long = (c: string): string => c.repeat(64);
+  const filters = { category: long('c'), tag: long('t'), status: long('s'), sku: long('k'), type: long('y'), stock_status: long('o') };
+
+  it('fits the query a list read may send, or the plan is refused', () => {
+    // Six 64-character filters and a 32-character id field: page 101 would be 514 characters.
+    expect(() => parse({ ...base, filters, id_field: 'f'.repeat(32) })).toThrow(/too long/);
+  });
+
+  it('is checked at its longest, not at page 1', () => {
+    // A 30-character id field puts page 101 at exactly 512: admitted; one more character is not.
+    const s = parse({ ...base, filters, id_field: 'f'.repeat(30) });
+    const query = (page: number): number => { const u = listPageUrl(HOST, s, page); return u.length - u.indexOf('?') - 1; };
+    expect(query(1)).toBe(510);
+    expect(query(maxListPages('woocommerce'))).toBe(512);
+    expect(() => parse({ ...base, filters, id_field: 'f'.repeat(31) })).toThrow(/too long/);
+  });
+});
+
 describe('limits', () => {
   it('lets a list take enough pages for the target cap and one more', () => {
     expect(maxListPages('woocommerce')).toBe(101);

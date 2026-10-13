@@ -22,6 +22,7 @@ import { isMailProviderTarget } from './bulk-mail-targets.js';
 import { urlScanForms } from './url-scan-forms.js';
 import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import { LIST_QUERY_MAX } from '../tools/permission-guard.js';
 
 /** One provider's list shape: the filters it documents, how it pages and how it orders. */
 export interface BulkListFormSpec {
@@ -161,6 +162,12 @@ export function parseListSource(host: string, input: unknown, method: BulkWriteM
   // The first page's address is what every page's address is, but for the page number.
   if (urlScanForms(listPageUrl(host, source, 1)).some((f) => scan(f) !== null)) {
     throw new BulkSourceError('The list address looks like it carries a credential.');
+  }
+  // The longest page address must be one the read grant admits, or the list would stop
+  // partway through at the page whose number made it too long.
+  const longest = listPageUrl(host, source, maxListPages(form));
+  if (longest.length - longest.indexOf('?') - 1 > LIST_QUERY_MAX) {
+    throw new BulkSourceError('source_list.filters and id_field make the list address too long.');
   }
   return source;
 }
