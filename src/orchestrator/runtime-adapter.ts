@@ -317,14 +317,13 @@ function boundedJson(value: unknown, max = 4000): string {
  * closure ⇒ race-safe for parallel STEPS (the global `channels.toolEnd` carries
  * no run id and would mis-attribute concurrent steps).
  *
- * `StreamEvent` carries no `tool_use_id` or duration, so a `tool_result` is
- * paired to its `tool_call` FIFO by name and self-timed. Limitation: when one
- * turn issues ≥2 calls of the SAME tool concurrently and their results complete
- * out of call-order, the recorded input↔output pairing for those same-named
- * calls may be swapped (the set of inputs/outputs is still correct, and
- * tokens/cost/status are unaffected — they come from `turn_end`). This is an
- * observability-only imperfection; an exact fix needs a `tool_use_id` on the
- * stream events, out of scope for this slice.
+ * A `tool_result` is paired to its `tool_call` by `toolUseId` AND name, and
+ * self-timed. Both, because an id alone is not unique everywhere: the
+ * OpenAI-compatible adapter falls back to `tool_<index>` per turn, and a call
+ * whose result is never streamed stays pending, so a later call of ANOTHER tool
+ * could carry the same id. With the name as well, a pairing is never worse than
+ * the name-only FIFO it replaces. An event without an id falls back to that FIFO,
+ * and only among calls that carried none.
  */
 export function createStepStreamHandler(opts: {
   onTokens: (inputDelta: number, outputDelta: number) => void;
@@ -336,7 +335,7 @@ export function createStepStreamHandler(opts: {
    *  calls are cheap re-checks, never a mis-attribution. */
   onToolActivity?: (() => void) | undefined;
 }): (event: StreamEvent) => void {
-  const pending: Array<{ name: string; input: unknown; start: number }> = [];
+  const pending: Array<{ name: string; input: unknown; start: number; toolUseId?: string | undefined }> = [];
   return (event: StreamEvent): void => {
     if (event.type === 'turn_end') {
       opts.onTokens(event.usage.input_tokens, event.usage.output_tokens);
@@ -348,9 +347,15 @@ export function createStepStreamHandler(opts: {
     const record = opts.recordToolCall;
     if (!record) return;
     if (event.type === 'tool_call' && !event.subAgent) {
-      pending.push({ name: event.name, input: event.input, start: Date.now() });
+      pending.push({ name: event.name, input: event.input, start: Date.now(), toolUseId: event.toolUseId });
     } else if (event.type === 'tool_result' && !event.subAgent) {
-      const idx = pending.findIndex(p => p.name === event.name);
+      // By id and name first. Results arrive in completion order, so pairing two
+      // calls of the same tool by name gave each row the other call's input. The
+      // name stays in the match because an id can repeat (see the doc above). The
+      // name alone is only a fallback for a call that carried no id, and it never
+      // takes a call that did: that one belongs to the result bearing its id.
+      let idx = event.toolUseId !== undefined ? pending.findIndex(p => p.toolUseId === event.toolUseId && p.name === event.name) : -1;
+      if (idx < 0) idx = pending.findIndex(p => p.name === event.name && p.toolUseId === undefined);
       const matched = idx >= 0 ? pending.splice(idx, 1)[0] : undefined;
       record({
         toolName: event.name,

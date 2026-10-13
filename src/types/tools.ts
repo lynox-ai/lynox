@@ -192,11 +192,13 @@ export type StreamEvent =
   | { type: 'text';        text: string;                           agent: string; subAgent?: string | undefined }
   | { type: 'thinking';    thinking: string;                       agent: string; subAgent?: string | undefined }
   | { type: 'thinking_done';                                       agent: string; subAgent?: string | undefined }
-  | { type: 'tool_call';   name: string; input: unknown;           agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
+  // `toolUseId` is the provider's id of the tool_use block. It pairs a result with its
+  // call when one turn holds several calls of the same tool (the step recorder reads it).
+  | { type: 'tool_call';   name: string; input: unknown;           agent: string; toolUseId?: string | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
-  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`

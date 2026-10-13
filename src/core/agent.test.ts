@@ -691,8 +691,13 @@ describe('Agent', () => {
         );
       }
 
-      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      const streamed: StreamEvent[] = [];
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], onStream: (e) => { streamed.push(e); } });
       await expect(agent.send('check the api')).rejects.toThrow(ToolLoopBreakError);
+      // The two escalated skips are streamed with the id of the call they answer.
+      expect(streamed
+        .filter((e): e is Extract<StreamEvent, { type: 'tool_result' }> => e.type === 'tool_result' && e.isError === true)
+        .map(e => e.toolUseId)).toEqual(['tu_3', 'tu_4']);
 
       // 3 dispatched executions (streak → limit) + 2 escalated skips = 5 model
       // turns, then the break — the model never gets a 6th turn to loop in.
@@ -1229,6 +1234,30 @@ describe('Agent', () => {
       expect(hasSparseHoles(rawMessages(agent))).toBe(false);
     });
 
+    it('each tool_result stream event carries the id of its tool_use', async () => {
+      const echo = makeTool('echo_tool', (input) => Promise.resolve(String((input as { v?: string }).v)));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'tu_one', name: 'echo_tool', input: { v: 'one' } },
+          { id: 'tu_two', name: 'echo_tool', input: { v: 'two' } },
+        ]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const events: StreamEvent[] = [];
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [echo],
+        onStream: (e) => { events.push(e); },
+      });
+      await agent.send('echo twice');
+
+      const results = events.filter(
+        (e): e is Extract<StreamEvent, { type: 'tool_result' }> => e.type === 'tool_result',
+      );
+      expect(results.map(r => [r.toolUseId, r.result]).sort()).toEqual([['tu_one', 'one'], ['tu_two', 'two']]);
+    });
+
     it('a tool whose handler never resolves is bounded by the per-tool timeout, not hung', async () => {
       vi.useFakeTimers();
       try {
@@ -1258,6 +1287,7 @@ describe('Agent', () => {
         );
         expect(timedOut, 'a timed-out tool must surface an is_error tool_result').toBeDefined();
         expect((timedOut as { result: string }).result).toContain('timed out');
+        expect(timedOut?.toolUseId).toBe('tu_hang');
       } finally {
         vi.useRealTimers();
       }
@@ -1696,13 +1726,17 @@ describe('Agent', () => {
         .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'bash', input: {} }]))
         .mockResolvedValueOnce(endTurnResponse('OK'));
 
+      const streamed: StreamEvent[] = [];
       const agent = new Agent({
         name: 'test',
         model: 'claude-sonnet-4-6',
         tools: [tool],
+        onStream: (e) => { streamed.push(e); },
         // no promptUser
       });
       await agent.send('Dangerous');
+      const refused = streamed.find((e): e is Extract<StreamEvent, { type: 'tool_result' }> => e.type === 'tool_result');
+      expect(refused?.toolUseId).toBe('tu_1');
 
       const messages = agent.getMessages();
       const toolResultsMsg = messages[2];
@@ -6180,6 +6214,7 @@ describe('ask_user with no question path ends the run as "needs input"', () => {
     expect(results[0]!.isError).toBe(true);
     expect(results[0]!.result).toContain('Needs input');
     expect(results[0]!.result).not.toContain('sk-live-SECRET');
+    expect((results[0] as { toolUseId?: string }).toolUseId).toBe(gatedCall.id);
   });
 
   it('ask_user\'s own result is streamed once, not again by the batch', async () => {

@@ -1617,6 +1617,46 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'first' });
   });
 
+  it('pairs by toolUseId when results arrive out of call order', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://a.example' }, agent: 'step', toolUseId: 'tu_a' });
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'https://b.example' }, agent: 'step', toolUseId: 'tu_b' });
+    // B finishes first.
+    h({ type: 'tool_result', name: 'http_request', result: 'from-b', agent: 'step', toolUseId: 'tu_b' });
+    h({ type: 'tool_result', name: 'http_request', result: 'from-a', agent: 'step', toolUseId: 'tu_a' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).url, c.outputJson])).toEqual([
+      ['https://b.example', 'from-b'],
+      ['https://a.example', 'from-a'],
+    ]);
+  });
+
+  it('a repeated id never pairs across tools (an unanswered call keeps its id)', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    // A call whose result is never streamed stays pending with its id …
+    h({ type: 'tool_call', name: 'http_request', input: { url: 'bad' }, agent: 'step', toolUseId: 'tool_0' });
+    // … and the next turn's first call carries the same per-turn fallback id.
+    h({ type: 'tool_call', name: 'bash', input: { command: 'ls' }, agent: 'step', toolUseId: 'tool_0' });
+    h({ type: 'tool_result', name: 'bash', result: 'listing', agent: 'step', toolUseId: 'tool_0' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ toolName: 'bash', outputJson: 'listing' });
+    expect(JSON.parse(calls[0]!.inputJson)).toEqual({ command: 'ls' });
+  });
+
+  it('the name fallback never takes a call that carried an id', () => {
+    const calls: Parameters<StepToolRecorder>[0][] = [];
+    const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
+    h({ type: 'tool_call', name: 'bash', input: { command: 'with-id' }, agent: 'step', toolUseId: 'tu_1' });
+    h(toolCall('bash', { command: 'without-id' }));
+    h(toolResult('bash', 'out-without-id'));
+    h({ type: 'tool_result', name: 'bash', result: 'out-with-id', agent: 'step', toolUseId: 'tu_1' });
+    expect(calls.map(c => [JSON.parse(c.inputJson).command, c.outputJson])).toEqual([
+      ['without-id', 'out-without-id'],
+      ['with-id', 'out-with-id'],
+    ]);
+  });
+
   it('does NOT record forwarded sub-agent events (only the step agent\'s own calls)', () => {
     const calls: Parameters<StepToolRecorder>[0][] = [];
     const h = createStepStreamHandler({ onTokens: () => {}, recordToolCall: (c) => calls.push(c) });
