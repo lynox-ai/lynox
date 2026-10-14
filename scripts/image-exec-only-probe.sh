@@ -31,7 +31,13 @@ bad() { echo "FAIL: $*" >&2; fail=1; }
 # image's USER, the runtime user.
 as_root() { docker exec -i --user 0 "$CONTAINER" sh -s; }
 
-[[ "$(docker exec "$CONTAINER" id -u)" != "0" ]] || { echo "probe error: the image runs as root" >&2; exit 2; }
+# The runtime user: the image's USER, read from the container, never assumed.
+# The engine (pid 1) must run as it, or the checks below would test a user
+# the engine does not have.
+rt=$(docker exec "$CONTAINER" id -u)
+[[ "$rt" != "0" ]] || { echo "probe error: the image runs as root" >&2; exit 2; }
+pid1_uid=$(docker exec "$CONTAINER" awk '/^Uid:/{print $2}' /proc/1/status)
+[[ "$pid1_uid" == "$rt" ]] || { echo "probe error: pid 1 runs as uid $pid1_uid, the image's user is $rt" >&2; exit 2; }
 
 # 1. Every program cannot be read by the runtime user. A program is an
 #    executable regular file that starts with the ELF magic and has no library
@@ -97,10 +103,10 @@ start_and_read() { # <want> <label> <user> <comm> <command…>
 # `exec` so the pid is the program itself, not the shell that started it. wget
 # talks to a local listener that never answers, so it is still waiting when it
 # is read, whatever the network around the container does.
-start_and_read DENIED "node" 1001 node "exec node -e 'setTimeout(()=>{},30000)'"
-start_and_read DENIED "sh" 1001 sh "exec sh -c 'sleep 30'"
-start_and_read DENIED "wget" 1001 wget "node -e 'require(\"net\").createServer(()=>{}).listen(39999);setTimeout(()=>process.exit(),30000)' & sleep 1; exec wget -q -O /dev/null --tries=1 --timeout=30 http://127.0.0.1:39999/"
-start_and_read DENIED "ffmpeg" 1001 ffmpeg "exec ffmpeg -nostdin -re -f lavfi -i anullsrc -t 30 -f null -"
+start_and_read DENIED "node" "$rt" node "exec node -e 'setTimeout(()=>{},30000)'"
+start_and_read DENIED "sh" "$rt" sh "exec sh -c 'sleep 30'"
+start_and_read DENIED "wget" "$rt" wget "node -e 'require(\"net\").createServer(()=>{}).listen(39999);setTimeout(()=>process.exit(),30000)' & sleep 1; exec wget -q -O /dev/null --tries=1 --timeout=30 http://127.0.0.1:39999/"
+start_and_read DENIED "ffmpeg" "$rt" ffmpeg "exec ffmpeg -nostdin -re -f lavfi -i anullsrc -t 30 -f null -"
 
 # 4. Every process in the container, not only the ones started above: none of
 #    the runtime user's processes, other than the reader itself, may let the
@@ -124,11 +130,15 @@ scan_env() {
 # running. root may read /bin/sleep, so that process is dumpable, and the scan
 # must list it. Without it, a scan that can read nothing would pass this check.
 ctl_pid=$(docker exec --user 0 "$CONTAINER" sh -c 'exec sleep 30 >/dev/null 2>&1 & echo $!')
-sleep 1
-ctl=$(scan_env 0)
+# The sleep may not have replaced its shell yet; look a few times.
+for _ in 1 2 3 4 5; do
+  sleep 1
+  ctl=$(scan_env 0)
+  printf '%s\n' "$ctl" | grep -q "^$ctl_pid sleep\$" && break
+done
 docker exec --user 0 "$CONTAINER" sh -c "kill $ctl_pid" >/dev/null 2>&1 || true
 printf '%s\n' "$ctl" | grep -q "^$ctl_pid sleep\$" || { echo "probe error: the scan as root did not find root's own sleep (pid $ctl_pid); the scan does not work" >&2; exit 2; }
-leaks=$(scan_env 1001)
+leaks=$(scan_env "$rt")
 checked=$(printf '%s\n' "$leaks" | sed -n 's/^checked=//p')
 readable_pids=$(printf '%s\n' "$leaks" | grep -v '^checked=' || true)
 (( checked >= 1 )) || { echo "probe error: found no process of the runtime user to check" >&2; exit 2; }
