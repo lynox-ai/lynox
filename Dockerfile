@@ -143,7 +143,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && \
     apt-get update && apt-get install -y --no-install-recommends \
-    wget ffmpeg libstdc++6
+    wget ffmpeg libstdc++6 tini
 
 # Whisper.cpp binaries + model
 COPY --from=whisper-build /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
@@ -172,6 +172,17 @@ RUN \
 RUN groupadd -g 1001 lynox && useradd -u 1001 -g lynox -m -s /bin/sh lynox \
     && mkdir -p /home/lynox/.lynox/memory /workspace /home/lynox/.cache/huggingface \
     && chown -R lynox:lynox /home/lynox/.lynox /workspace /home/lynox/.cache
+
+# Shell sidecar (PRD 152 v2 §4.1). The same image runs as the sidecar with
+# `/usr/bin/tini -- node /app/dist/shell-sidecar/exec-daemon.js` as uid 0 with only
+# CAP_SETUID/CAP_SETGID. Its calls run as pool uids whose only group is lynox-ws
+# (1002); the engine user is a member, so both reach the shared workspace, but a
+# pool uid is never in 1001 and cannot open the socket. /run/lynox-exec is the
+# socket volume's mount point: root 0755, so a fresh named volume starts that way
+# and the daemon creates its 0710 root:1001 directory inside. tini because a
+# killed call's children otherwise stay as zombies (measured: 33 without, 0 with).
+RUN groupadd -g 1002 lynox-ws && usermod -aG lynox-ws lynox \
+    && mkdir -p /run/lynox-exec && chown root:root /run/lynox-exec && chmod 0755 /run/lynox-exec
 
 WORKDIR /app
 
