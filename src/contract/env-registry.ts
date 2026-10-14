@@ -60,6 +60,7 @@ export type EnvValueKind =
   | 'network-policy' // allow-all|allow-list|deny-all|guarded
   | 'usd-amount' // stringified non-negative number
   | 'bool' // 'true' | '1'
+  | 'bool-off' // '0' | 'false' — a flag the CP pins OFF, against an engine default of on
   | 'url' // http(s) URL
   | 'json'; // serialized JSON object
 
@@ -184,6 +185,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'LYNOX_STRIPE_PORTAL_LOGIN_URL', valueKind: 'url', emitPolicy: 'when-non-default', engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' } },
   { name: 'LYNOX_KG_EXTRACTOR', valueKind: 'opaque', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'direct', readSite: 'src/core/knowledge-layer.ts' } },
   { name: 'LYNOX_FEATURE_UNIFIED_INBOX', valueKind: 'bool', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'unified-inbox', consumerSite: 'src/core/engine.ts' } } },
+  { name: 'LYNOX_FEATURE_PLUGINS', valueKind: 'bool-off', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'plugins', consumerSite: 'src/core/engine.ts' } }, note: 'Pinned OFF on every managed instance: managed instances load no plugins. The engine default stays on for self-hosters.' },
   { name: 'LYNOX_MIGRATION_TOKEN', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'direct', readSite: 'src/server/http-api.ts' }, note: 'Only when the instance receives a migration.' },
 
   // ── Outbound egress posture ───────────────────────────────────────────────

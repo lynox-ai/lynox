@@ -22,7 +22,7 @@ import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
-import { pruneWireSinks } from './wire-capture.js';
+import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
@@ -2086,8 +2086,12 @@ export class Engine {
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
 
-    // Load plugins (best-effort — never fail init, gated behind feature flag)
-    if (isFeatureEnabled('plugins')) {
+    // Load plugins (best-effort — never fail init, gated behind feature flag).
+    // An instance the control plane provisioned loads none, whatever the flag
+    // says: the control plane pins LYNOX_FEATURE_PLUGINS=0, and this still holds
+    // where that value is missing or spelled in a form the flag does not read.
+    // Any one marker of a provisioned instance is enough (`isProvisionedInstance`).
+    if (isFeatureEnabled('plugins') && !isProvisionedInstance()) {
       try {
         this.pluginManager = new PluginManager(this.userConfig);
         await this.pluginManager.loadPlugins();
