@@ -5,7 +5,7 @@ import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { pv } from '../../core/prompt-value.js';
+import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
 
@@ -245,6 +245,9 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
           if (refusal) return refusal;
         }
 
+        // Built once: the confirmation shows this object and the request sends it.
+        const eventUpdates = input.action === 'update_event' ? buildEventUpdates(input) : {};
+
         // Confirmation — fail-safe: block if no prompt available
         if (CONFIRM_ACTIONS.has(input.action) && !agent.promptUser) {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
@@ -264,7 +267,7 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
               confirmMsg = pv`Create event "${input.summary ?? '(untitled)'}"\nTime: ${input.start ?? '?'} – ${input.end ?? '?'}${attendeeStr}${input.attendees?.length ? '\nThis will send calendar invites.' : ''}`;
               break;
             }
-            case 'update_event': confirmMsg = pv`Update event ${input.event_id ?? '(unknown)'}?`; break;
+            case 'update_event': confirmMsg = describeEventUpdate(input.event_id, eventUpdates); break;
             case 'delete_event': confirmMsg = pv`Delete event ${input.event_id ?? '(unknown)'}? This cannot be undone.`; break;
           }
           const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
@@ -276,7 +279,7 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
         switch (input.action) {
           case 'list_events': return await handleListEvents(auth, input);
           case 'create_event': return await handleCreateEvent(auth, input);
-          case 'update_event': return await handleUpdateEvent(auth, input);
+          case 'update_event': return await handleUpdateEvent(auth, input, eventUpdates);
           case 'delete_event': return await handleDeleteEvent(auth, input);
           case 'free_busy': return await handleFreeBusy(auth, input);
           default: return `Error: Unknown action "${input.action}".`;
@@ -368,10 +371,12 @@ async function handleCreateEvent(auth: GoogleAuth, input: CalendarInput): Promis
   return `Event created.\nTitle: ${result.summary}\nTime: ${formatEventTime(result)}\nID: ${result.id}\nLink: ${result.htmlLink}`;
 }
 
-async function handleUpdateEvent(auth: GoogleAuth, input: CalendarInput): Promise<string> {
-  if (!input.event_id) return 'Error: "event_id" is required for action "update_event".';
-
-  const calendarId = input.calendar_id ?? 'primary';
+/**
+ * The PATCH body `update_event` sends. The confirmation and the request are both built from
+ * this one result, so what the person approves is what is sent — including fields that come
+ * in through the free-form `updates` object.
+ */
+export function buildEventUpdates(input: CalendarInput): Record<string, unknown> {
   const updates: Record<string, unknown> = {};
 
   // Apply updates from the updates field or individual fields
@@ -395,6 +400,37 @@ async function handleUpdateEvent(auth: GoogleAuth, input: CalendarInput): Promis
   if (input.attendees) {
     updates['attendees'] = input.attendees.map(email => ({ email }));
   }
+
+  return updates;
+}
+
+/** One line per field the update changes; guests are listed by address. */
+export function describeEventUpdate(eventId: string | undefined, updates: Record<string, unknown>): PromptText {
+  const head = pv`Update event ${eventId ?? '(unknown)'}`;
+  const keys = Object.keys(updates);
+  if (keys.length === 0) return pv`${head}? Nothing changes.`;
+  const lines = keys.map((key) => {
+    const value = updates[key];
+    if (key === 'attendees' && Array.isArray(value)) {
+      const guests = value.map((a: unknown) =>
+        typeof a === 'object' && a !== null && typeof (a as { email?: unknown }).email === 'string'
+          ? (a as { email: string }).email
+          : JSON.stringify(a));
+      return pv`Guests: ${guests.join(', ')}`;
+    }
+    return pv`${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`;
+  });
+  const guestsChange = keys.includes('attendees');
+  return joinPrompts(
+    [pv`${head} — these fields change:`, ...lines, ...(guestsChange ? [pv`Everyone listed under Guests can see this event.`] : [])],
+    '\n',
+  );
+}
+
+async function handleUpdateEvent(auth: GoogleAuth, input: CalendarInput, updates: Record<string, unknown>): Promise<string> {
+  if (!input.event_id) return 'Error: "event_id" is required for action "update_event".';
+
+  const calendarId = input.calendar_id ?? 'primary';
 
   const response = await calendarFetch(auth, `${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events/${input.event_id}`, {
     method: 'PATCH',
