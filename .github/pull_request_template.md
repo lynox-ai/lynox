@@ -58,7 +58,7 @@ gates the diff OWES, derived from the real file list, so leaving out a required
 - `review` — what the `code-review` round FOUND, which is the one thing `gates:` cannot
   say. `<n> <model> <round|rounds>, <result>`, where the result is `no findings` or
   `<N> findings, <breakdown>`; the breakdown is `all fixed` or counts that **sum to N**:
-  `3 fixed` · `2 fixed, 1 filed` · `3 fixed, 1 filed, 1 refuted`. A finding is fixed in
+  `3 fixed` · `2 fixed, 1 filed` · `3 fixed, 1 filed, 1 refuted`. A finding is fixed in <!-- public-repo-guard:allow — quotes the form -->
   this diff, **filed** as a register row, or **refuted** on inspection — the third slot
   exists because a format that cannot say "checked and rejected" forces a lie. The model
   is the one that RAN the round (your own, if you reviewed it yourself). Why it is
@@ -129,7 +129,7 @@ Still allowed, and deliberately: `no findings`, `<N> findings, all fixed`, and a
 defect is not a security finding, and hiding those would cost measurability for
 nothing.
 
-⚠ The example above USED to read `1 finding, 1 filed`, so a template reader
+⚠ The example above USED to read `1 finding, 1 filed`, so a template reader <!-- public-repo-guard:allow — quotes the form -->
 produced the very thing the rule forbids. If you are reading this in an old
 checkout, the field grammar changed under you and the check will say so.
 

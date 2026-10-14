@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -1726,5 +1726,65 @@ describe('a PUBLIC record does not count open findings', () => {
     const tpl = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8');
     expect(tpl).toContain('findings filed privately');
     expect(tpl).not.toMatch(/`security:[^`]*\d+ filed`/);
+  });
+});
+
+describe('a PUBLIC body does not count open findings in its prose either', () => {
+  // The witness, measured before this check existed: a valid record plus this sentence was green.
+  const COUNTED = 'The security round left 2 findings filed in the register.';
+  const withProse = (line: string) => record().replace('Something.', line);
+
+  it('REFUSES a count in the prose on a public repo — and on an unknown one', () => {
+    for (const visibility of ['public', 'unknown'] as const) {
+      const v = evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility });
+      expect(v.ok, visibility).toBe(false);
+      expect(v.errors.join('\n')).toContain('outside the record (line 3)');
+    }
+  });
+
+  it('never echoes the count into the log it writes', () => {
+    const v = evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility: 'public' });
+    expect(v.errors.join('\n')).not.toContain('2 findings');
+  });
+
+  it('accepts the prescribed number-free form, and the private repo', () => {
+    expect(evaluate({ body: withProse('Findings outside this change are filed privately.'), head: HEAD, files: CODE, visibility: 'public' }).ok).toBe(true);
+    expect(evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
+  });
+
+  it('applies on a docs-only diff without a record too — prose is published there as well', () => {
+    const v = evaluate({ body: `## Docs\n\n${COUNTED}\n`, head: HEAD, files: ['docs/x.md'], visibility: 'public' });
+    expect(v.ok).toBe(false);
+  });
+
+  it('leaves a bot body alone, like the field rule', () => {
+    expect(evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, author: 'dependabot[bot]', visibility: 'public' }).ok).toBe(true);
+  });
+
+  it('reads all three forms, and the calibrated exclusions stay out', () => {
+    for (const hit of ['2 findings filed', '1 filed', '3 security findings filed', '2 open findings', '4 offene Befunde', '2 gaps remain open', '3 findings are still open', '2 Befunde bleiben offen']) {
+      expect(proseOpenCountLines(hit), hit).toEqual([1]);
+    }
+    for (const miss of ['findings filed privately', '0 filed', 'core#1274 filed', 'v1.2 filed', 'the 3 issues filed by users', '9 of 17 deferred tools', '5 findings, all fixed', 'x2 filed']) {
+      expect(proseOpenCountLines(miss), miss).toEqual([]);
+    }
+  });
+
+  it('skips the record block itself — its fields have their own, stricter rule', () => {
+    const body = record({ review: '1 opus round, 2 findings, 1 fixed, 1 filed' });
+    expect(proseOpenCountLines(body)).toEqual([]);
+    // …and still sees prose after the block.
+    expect(proseOpenCountLines(`${body}\n${COUNTED}\n`)).toEqual([body.split('\n').length + 1]);
+  });
+
+  it('a line carrying the allow marker opts out, and only that line', () => {
+    const marker = ['public-repo-guard', 'allow'].join(':');
+    expect(proseOpenCountLines(`${COUNTED} <!-- ${marker} -->`)).toEqual([]);
+    expect(proseOpenCountLines(`${COUNTED} <!-- ${marker} -->\n${COUNTED}`)).toEqual([2]);
+  });
+
+  it('the shipped template passes its own rule', () => {
+    const template = readFileSync(fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)), 'utf8');
+    expect(proseOpenCountLines(template)).toEqual([]);
   });
 });
