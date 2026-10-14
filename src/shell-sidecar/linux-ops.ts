@@ -16,12 +16,18 @@ const QUEUE_DIRS = ['/dev/mqueue', '/dev/shm'];
 const SYSVIPC_KINDS = ['shm', 'msg', 'sem'] as const;
 const AS_UID_TIMEOUT_MS = 10_000;
 
+/**
+ * The sweep, run as the uid. `/tmp/calls` is 1733: the uid may not LIST it, so it cannot find
+ * its own entries there — root lists them (it owns the directory) and passes the paths as
+ * arguments (measured: a `find` as the uid deleted nothing). Paths are absolute, so none reads
+ * as an option; directories are opened up with `find -P`, which does not follow a symlink, before
+ * they are removed. /dev/mqueue and /dev/shm are 1777 and the uid lists them itself.
+ */
 const SWEEP_SCRIPT = [
   'u=$(id -u)',
   'ipcrm --all >/dev/null 2>&1',
-  `for d in ${QUEUE_DIRS.join(' ')}; do [ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -user "$u" -exec rm -rf {} + 2>/dev/null; done`,
-  `find ${CALLS_DIR} -mindepth 1 -maxdepth 1 -user "$u" -exec chmod -R u+rwx {} + 2>/dev/null`,
-  `find ${CALLS_DIR} -mindepth 1 -maxdepth 1 -user "$u" -exec rm -rf {} + 2>/dev/null`,
+  `for d in ${QUEUE_DIRS.join(' ')}; do [ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -user "$u" -exec rm -rf -- {} + 2>/dev/null; done`,
+  'for p in "$@"; do find -P "$p" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf -- "$p" 2>/dev/null; done',
   'true',
 ].join('\n');
 
@@ -30,9 +36,9 @@ function errCode(err: unknown): string | undefined {
 }
 
 /** Run a fixed script as `uid`; resolves when it ends or after a timeout (then it is killed). */
-export function runAsUid(uid: number, gid: number, script: string): Promise<void> {
+export function runAsUid(uid: number, gid: number, script: string, args: readonly string[] = []): Promise<void> {
   return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', script], { uid, gid, stdio: 'ignore', cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' } });
+    const child = spawn('/bin/sh', ['-c', script, 'lynox-sweep', ...args], { uid, gid, stdio: 'ignore', cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' } });
     const timer = setTimeout(() => { child.kill('SIGKILL'); }, AS_UID_TIMEOUT_MS);
     const done = (): void => { clearTimeout(timer); resolve(); };
     child.on('error', done);
@@ -106,7 +112,10 @@ export function linuxReleaseOps(poolGid: number): ReleaseOps {
   return {
     killPass: (uid) => runAsUid(uid, poolGid, 'kill -9 -1 2>/dev/null; true'),
     countProcesses: (uid) => countProcessesOf(uid),
-    sweep: (uid) => runAsUid(uid, poolGid, SWEEP_SCRIPT),
+    sweep: async (uid) => {
+      const mine = (await entriesOwnedBy(CALLS_DIR, uid)).filter((p) => !p.endsWith(' (unreadable)'));
+      await runAsUid(uid, poolGid, SWEEP_SCRIPT, mine);
+    },
     residue: async (uid) => [
       ...(await sysvipcOf(uid)),
       ...(await entriesOwnedBy(CALLS_DIR, uid)),

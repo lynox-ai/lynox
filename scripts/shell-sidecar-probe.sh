@@ -23,6 +23,8 @@ bad() { echo "FAIL: $*" >&2; fail=1; }
 ok() { echo "ok:   $*"; }
 
 cleanup() {
+  # PROBE_KEEP=1 leaves the container for inspection (remove it by hand afterwards).
+  if [[ "${PROBE_KEEP:-}" == 1 ]]; then echo "kept: container $C, volumes $ID-ws $ID-sock" >&2; return; fi
   docker rm -f "$C" >/dev/null 2>&1 || true
   docker volume rm "$ID-ws" "$ID-sock" >/dev/null 2>&1 || true
 }
@@ -150,7 +152,7 @@ sleep 0.5
 r=$(call 'echo fifth')
 [[ "$(field "$r" error)" == "no free uid in the pool" ]] && ok "fifth concurrent call refused, not shared" || bad "fifth call: $r"
 wait
-uids=$(for i in 1 2 3 4; do field "$(cat "/tmp/$ID-c$i")" stdout; rm -f "/tmp/$ID-c$i"; done | sort -u | wc -l)
+uids=$(for i in 1 2 3 4; do field "$(cat "/tmp/$ID-c$i")" stdout; rm -f "/tmp/$ID-c$i"; done | grep -E "^[0-9]+$" | sort -u | wc -l)
 [[ "$uids" == 4 ]] && ok "four concurrent calls, four uids" || bad "concurrent calls shared uids ($uids distinct)"
 
 [[ "$(docker exec "$C" sh -c 'cat /proc/1/comm')" == "tini" ]] && ok "pid 1 is tini" || bad "pid 1 is not tini"

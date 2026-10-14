@@ -105,7 +105,11 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
 
   let timedOut = false;
   let ended = false;
-  const stopCall = (): void => { void deps.killCall(uid); };
+  // A kill runs its passes AS the uid, and a pass kills every process of the uid — the release's
+  // sweep included, if the two overlapped (measured: the call dir survived, the uid was
+  // quarantined). So kills are chained, and the release starts only after the last one ended.
+  let killing: Promise<void> = Promise.resolve();
+  const stopCall = (): void => { killing = killing.then(() => deps.killCall(uid)).catch(() => {}); };
   const timer = setTimeout(() => { timedOut = true; stopCall(); }, req.timeoutMs);
   const onGone = (): void => { if (!ended) stopCall(); };
   socket.on('close', onGone);
@@ -136,7 +140,7 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
     socket.off('close', onGone);
     send(socket, frame);
     socket.end();
-    void finishUid(uid, deps);
+    void killing.then(() => finishUid(uid, deps));
   };
   child.on('error', (err) => settle({ t: 'exit', code: null, signal: null, timedOut, error: `spawn failed: ${err.message}` }));
   child.on('close', (code, signal) => settle({ t: 'exit', code, signal, timedOut }));

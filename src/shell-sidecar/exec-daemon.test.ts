@@ -10,7 +10,7 @@ import { parseFrame, MAX_RESPONSE_LINE_BYTES, type ExecFrame } from './protocol.
 import type { ReleaseOps } from './release.js';
 
 /** The daemon's wiring with a spawner that runs as the current user; kills go to the call's process group. */
-function harness(opts: { poolSize?: number; residue?: string[] } = {}) {
+function harness(opts: { poolSize?: number; residue?: string[]; killDelayMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'exec-daemon-'));
   const children = new Map<number, ChildProcess>();
   const events: string[] = [];
@@ -33,6 +33,9 @@ function harness(opts: { poolSize?: number; residue?: string[] } = {}) {
       events.push(`kill:${uid}`);
       const pid = children.get(uid)?.pid;
       if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch { /* gone */ } }
+      // A real kill loop goes on after the process is gone (two empty scans, more passes).
+      if (opts.killDelayMs) await new Promise((r) => setTimeout(r, opts.killDelayMs));
+      events.push(`kill-end:${uid}`);
     },
     newCallId: () => 'c1',
     callsDir: join(dir, 'calls'),
@@ -149,6 +152,15 @@ describe('exec daemon: ending a call early', () => {
     const f = frames(await call(h.sock, req({ cmd: 'sleep 5', timeoutMs: 200 })));
     expect(f.at(-1)).toMatchObject({ t: 'exit', timedOut: true, signal: 'SIGKILL' });
     expect(h.events).toContain('kill:20000');
+  });
+
+  it('starts the release only after the timeout’s kill has ended — its passes would kill the sweep', async () => {
+    const h = (current = harness({ killDelayMs: 300 }));
+    await h.ready;
+    await call(h.sock, req({ cmd: 'sleep 5', timeoutMs: 100 }));
+    await waitFor(() => h.events.includes('sweep:20000'));
+    expect(h.events.indexOf('kill-end:20000')).toBeGreaterThan(-1);
+    expect(h.events.indexOf('kill-end:20000')).toBeLessThan(h.events.indexOf('sweep:20000'));
   });
 
   it('kills when the client goes away', async () => {
