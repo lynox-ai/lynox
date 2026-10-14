@@ -5427,7 +5427,7 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
-    it.each(['managed', 'managed_pro', 'eu'])(
+    it.each(['managed', 'managed_pro', 'managed_max', 'eu'])(
       'GET on managed tier %s abstracts hard_limits and populates locks',
       async (mode) => {
         vi.stubEnv('LYNOX_MANAGED_MODE', mode);
@@ -10187,7 +10187,7 @@ describe('LynoxHTTPApi', () => {
     describe('managed-BYOK user-scope writes', () => {
       // --- PUT /api/secrets/:name --------------------------------------------
 
-      it.each(['managed', 'managed_pro', 'eu', 'starter'])(
+      it.each(['managed', 'managed_pro', 'managed_max', 'eu', 'starter'])(
         'PUT /api/secrets/ANTHROPIC_API_KEY accepts user-scope in mode=%s',
         async (mode) => {
           mockReloadCredentials.mockClear();
@@ -10239,7 +10239,7 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
-      it.each(['managed', 'managed_pro', 'eu', 'starter'])(
+      it.each(['managed', 'managed_pro', 'managed_max', 'eu', 'starter'])(
         'PUT /api/secrets/CALENDAR_FEED_MAIN ACCEPTS user-scope in mode=%s',
         async (mode) => {
           // Agent-invisible and customer-owned at the same time, which is the case the two
@@ -10342,7 +10342,7 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
-      it.each(['managed', 'managed_pro', 'eu', 'starter'])(
+      it.each(['managed', 'managed_pro', 'managed_max', 'eu', 'starter'])(
         'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (admin-only infra)',
         async (mode) => {
           // SMTP_PASSWORD matches `/^SMTP_/` in INFRA_ADMIN_ONLY_PATTERNS —

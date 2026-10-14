@@ -16,7 +16,7 @@ export type HookHost = Pick<Engine, 'getHooks' | 'getContext'>;
  * Gate + debit a metered request that does NOT flow through `Session.run()`.
  *
  * Voice TTS (`POST /api/speak`) and STT (`POST /api/transcribe`) proxy directly
- * to the provider on a lynox-supplied key (managed / managed_pro pool key), but
+ * to the provider on a lynox-supplied key (managed / managed_pro / managed_max pool key), but
  * — unlike an interactive chat turn or a saved-workflow run — they never fired
  * the managed-credit lifecycle. The consequences on a managed instance:
  *
@@ -35,7 +35,7 @@ export type HookHost = Pick<Engine, 'getHooks' | 'getContext'>;
  * billing tier set), but there the control plane reports `allowed: true` so the
  * gate passes, and the cost report is rejected as not-applicable so the debit
  * is a CP no-op — BYOK is never credit-gated or billed for voice. Only
- * managed / managed_pro actually gate + debit.
+ * managed / managed_pro / managed_max actually gate + debit.
  *
  * The managed hook keys billing off `LYNOX_MANAGED_INSTANCE_ID` (the container
  * == the tenant) and ignores the `RunContext` in `onBeforeRun`, so no tenant id

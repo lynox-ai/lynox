@@ -165,7 +165,7 @@
 		// right tile — without it an env-pinned Mistral tenant defaults to
 		// 'anthropic' and shows the wrong provider selected (staging-walk F1b).
 		active_provider?: { provider?: LLMProvider; api_base_url?: string };
-		// CP-managed flag from /api/config ('managed' | 'managed_pro' | 'eu' | …).
+		// CP-managed flag from /api/config (the canonical billing tier).
 		// Selects the env-override banner copy: managed users can't touch .env, so
 		// the self-host remediation is noise for them (staging-walk finding F2).
 		managed?: string;
@@ -776,7 +776,7 @@
 	let disclosureAccepted = $state(false);
 
 	function shouldShowDisclosure(provider: typeof activeProvider, url: string | undefined): boolean {
-		// CP-managed tenants (managed / managed_pro / eu) can't reach non-
+		// CP-managed tenants (managed / managed_pro / managed_max / eu) can't reach non-
 		// allowlisted endpoints via the UI (custom_provider_endpoints lock +
 		// curated tile list), so we never gate them. Self-host + Hosted-BYOK
 		// starter (BYOK) go through the gate per the comment intent.
@@ -962,7 +962,7 @@
 	// reload + backend 403s the save). Drives the read-only tile state below.
 	const providerEnvPinned = $derived(!!config.env_overrides?.provider);
 
-	// On CP-supplied managed tiers (managed / managed_pro) the provider is capped to
+	// On CP-supplied managed tiers (managed / managed_pro / managed_max) the provider is capped to
 	// the curated set {Anthropic, Mistral}: the backend `enforceManagedProviderConstraints`
 	// rejects anything else on save. Every BYOK/self-host preset carries a
 	// `base_url_default` (so `requires_base_url` is false), which means the

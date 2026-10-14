@@ -23,7 +23,7 @@
 	deliberately stops at the 2-click flow.
 
 	Tier-awareness audit (`managed` value from /api/config, canonical post-v1.8.0):
-	| Surface                  | null (self-host) | hosted (BYOK) | managed / managed_pro |
+	| Surface                  | null (self-host) | hosted (BYOK) | CP-key tiers          |
 	|--------------------------|------------------|---------------|-----------------------|
 	| Subscription tier label  | ✗ self_host_note | ✓             | ✓                     |
 	| Stripe portal CTA        | ✗                | ✓ if env set  | ✓ if env set          |
@@ -143,7 +143,7 @@
 			{/if}
 
 			{#if cpSuppliesLLMKey(managed)}
-				<!-- managed / managed_pro only — the tiers that carry an included
+				<!-- managed / managed_pro / managed_max only — the tiers that carry an included
 				     AI budget. The Stripe portal above manages the SUBSCRIPTION;
 				     it has no AI-budget view and no credit-pack top-up (packs are
 				     a separate one-time payment_intent). Without this CTA a

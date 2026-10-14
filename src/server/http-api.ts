@@ -369,7 +369,7 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
  *     api_base_url + cost-caps stay configurable (it's their key, their bill).
  *     Only the secret-store write needs the BYOK whitelist.
  *
- *  3. **Managed pool** — billing tier `managed|managed_pro|eu`.
+ *  3. **Managed pool** — billing tier `managed|managed_pro|managed_max|eu`.
  *     CP delivers the LLM. Provider, cost caps, MCP servers, OAuth ids,
  *     search/backup config, etc. are all CP-managed. Only UI preferences
  *     are user-writable.
@@ -3320,7 +3320,7 @@ export class LynoxHTTPApi {
     const userConfig = this.engine?.getUserConfig() ?? {};
     const managedMode = readEnvAlias('LYNOX_BILLING_TIER');
     // Only bypass the not-configured check for tiers where the CP supplies
-    // the LLM key (managed / managed_pro / eu-sovereign). The Hosted-BYOK
+    // the LLM key (managed / managed_pro / managed_max / eu-sovereign). The Hosted-BYOK
     // starter tier requires the CUSTOMER to bring their own key, so the
     // not-configured signal MUST still surface — pre-fix the status bar
     // showed "API OK" on managed-BYOK with empty vault while SetupBanner
@@ -6179,7 +6179,7 @@ export class LynoxHTTPApi {
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {
         provider,
-        // Emit the CANONICAL billing tier (hosted/managed/managed_pro). Legacy
+        // Emit the CANONICAL billing tier (hosted/managed/managed_pro/managed_max). Legacy
         // values — `starter` (→hosted) or `eu` (→managed) — still live in the
         // LYNOX_MANAGED_MODE env on pre-rename tenants that haven't been
         // re-synced; normalizing here means every Web UI consumer sees the
@@ -6402,7 +6402,7 @@ export class LynoxHTTPApi {
       // Canonical redaction: strips top-level secrets (with `${key}_configured`
       // markers for the UI) AND nested tier_set/model_profiles api_keys.
       const redacted = redactConfigForResponse(config);
-      // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro = CP-supplied LLM)
+      // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro/managed_max = CP-supplied LLM)
       const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {

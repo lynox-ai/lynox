@@ -70,7 +70,7 @@
 					const wasDismissed = localStorage.getItem('lynox-setup-dismissed');
 					showWizard = !wasDismissed;
 					dismissed = !!wasDismissed;
-					// Managed-pool tiers (`managed`, `managed_pro`, `managed_max`): the CP provides
+					// CP-key tiers (cpSuppliesLLMKey): the CP provides
 					// the LLM endpoint + key, customer just enters their Anthropic key
 					// → skip the picker, jump straight to credentials. Hosted (BYOK)
 					// and self-host both show the picker so the customer can pick

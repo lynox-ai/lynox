@@ -35,6 +35,8 @@ function sources(dir: string): string[] {
 const ENUMERATION =
 	/\b(?:managed|managedMode|managedTier)\s*[!=]==?\s*'(?:managed|managed_pro|managed_max|eu|starter)'/;
 
+const CP_ONLY_LITERAL = /(['"`])managed_(?:pro|max)\1/;
+
 describe('billing tier is asked through the contract, never spelled out', () => {
 	it('no component compares a tier value against a CP-key tier literal', () => {
 		const files = sources(ROOT);
@@ -50,10 +52,34 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 		expect(hits, 'use cpSuppliesLLMKey / normalizeBillingTier from utils/billing-tier').toEqual([]);
 	});
 
+	it('no component names a CP-key-only tier literal outside the contract', () => {
+		// `managed_pro` / `managed_max` mean nothing but a billing tier, so ANY standalone
+		// literal of them outside the contract is an enumeration of the tier set — a
+		// switch case, an `.includes([...])` array, a comparison on any variable name. The
+		// comparison check above cannot see those forms; this one does not care about the
+		// form. (`'managed'` and `'eu'` also name other things here — the hard_limits
+		// shape, an LLM region — so they stay with the narrower check.)
+		// The one allowed site is the label switch: it is exhaustive over BillingTier, so
+		// a new tier fails the compile there instead of slipping through.
+		const ALLOWED = new Set(['components/AccountBillingView.svelte']);
+		const hits: string[] = [];
+		for (const file of sources(ROOT)) {
+			const rel = file.slice(ROOT.length).replace(/^lib\//, '');
+			if (ALLOWED.has(rel)) continue;
+			readFileSync(file, 'utf-8').split('\n').forEach((line, i) => {
+				if (CP_ONLY_LITERAL.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
+			});
+		}
+		expect(hits, 'use cpSuppliesLLMKey / normalizeBillingTier from utils/billing-tier').toEqual([]);
+	});
+
 	it('the pattern catches the form it exists for', () => {
 		expect(ENUMERATION.test("managed = body.managed === 'managed' || body.managed === 'managed_pro';")).toBe(true);
 		expect(ENUMERATION.test("{#if managedMode !== 'managed_max'}")).toBe(true);
 		expect(ENUMERATION.test("{#if managed === 'hosted'}")).toBe(false);
+		expect(CP_ONLY_LITERAL.test("case 'managed_pro':")).toBe(true);
+		expect(CP_ONLY_LITERAL.test('if (["managed", "managed_max"].includes(tier))')).toBe(true);
+		expect(CP_ONLY_LITERAL.test("t('account.billing.tier.managed_pro')")).toBe(false);
 	});
 
 	it('every canonical tier has an account label in both locales', () => {
