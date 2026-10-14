@@ -223,6 +223,8 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     ['utf-16 without a semicolon before it', 'application/json,charset=utf-16', 'DELETE'],
     ['RFC 2231 form', "application/json; charset*=utf-16''", 'DELETE'],
     ['RFC 2231 numbered form', 'application/json; charset*0=utf-16', 'DELETE'],
+    ['RFC 2231 numbered form, two digits', 'application/json; charset*10=utf-16', 'DELETE'],
+    ['RFC 2231 numbered and extended form', "application/json; charset*0*=utf-16''", 'DELETE'],
     ['utf-16, then utf-8 in the same header', 'application/json; charset=utf-16; charset=utf-8', 'DELETE'],
     ['us-ascii', 'application/x-www-form-urlencoded; charset=us-ascii', 'DELETE'],
     ['ascii, which a decoder may read with the high bit dropped', 'application/x-www-form-urlencoded; charset=ascii', 'DELETE'],
