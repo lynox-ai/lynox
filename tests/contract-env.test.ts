@@ -33,6 +33,7 @@ import {
   type EnvRegistryRow,
   type EngineReadKind,
 } from '../src/contract/env-registry.js';
+import { ENV_ALIASES, type CanonicalEnvName } from '../src/core/env.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p: string): string => readFileSync(resolve(repoRoot, p), 'utf8');
@@ -260,7 +261,9 @@ const READ_PATTERNS: readonly RegExp[] = [
   /process\.env\[['"]([A-Z][A-Z0-9_]{2,})['"]\]/g,
   /\benv\.(LYNOX_[A-Z0-9_]+)/g, // SvelteKit `$env/dynamic/private` reads in web-ui
   /\benv\[['"](LYNOX_[A-Z0-9_]+)['"]\]/g,
-  /readEnvAlias\(['"]([A-Z][A-Z0-9_]{2,})['"]\)/g,
+  // `readEnvAlias('X')` or `readEnvAlias('X', env)`; it also reads X's legacy
+  // aliases, which collectReads adds from ENV_ALIASES.
+  /readEnvAlias\(['"]([A-Z][A-Z0-9_]{2,})['"][,)]/g,
   /envTier\(['"]([A-Z][A-Z0-9_]{2,})['"]\)/g,
   /envFloat\(['"]([A-Z][A-Z0-9_]{2,})['"]\)/g,
   // managed-hook's local int-env helper (reads process.env[name] internally).
@@ -287,9 +290,14 @@ function collectReads(): { reads: Map<string, string[]>; blind: string[] } {
         for (const m of src.matchAll(pattern)) {
           const name = m[1];
           if (!name) continue;
-          const sites = found.get(name) ?? [];
-          sites.push(rel);
-          found.set(name, sites);
+          const aliases = m[0].startsWith('readEnvAlias') && name in ENV_ALIASES
+            ? ENV_ALIASES[name as CanonicalEnvName]
+            : [];
+          for (const n of [name, ...aliases]) {
+            const sites = found.get(n) ?? [];
+            sites.push(rel);
+            found.set(n, sites);
+          }
         }
       }
       for (const [form, label] of BLIND_FORMS) {

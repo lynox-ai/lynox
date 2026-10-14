@@ -5,7 +5,7 @@ import type { LynoxUserConfig, ModelProfile, ModelTier, TierSet, TierSlot } from
 import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, modelIdExceedsMaxTier, profileNamed } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
-import { ENV_ALIASES, readEnvAlias, envTier } from './env.js';
+import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
@@ -176,11 +176,7 @@ export function setDataDir(dir: string | null): void {
  */
 export function lynoxDirFor(env: NodeJS.ProcessEnv): string {
   if (_dataDirOverride !== null) return _dataDirOverride;
-  for (const name of ['LYNOX_DATA_DIR', ...ENV_ALIASES.LYNOX_DATA_DIR]) {
-    const value = env[name];
-    if (value !== undefined && value !== '') return value;
-  }
-  return join(homedir(), LYNOX_DIR);
+  return readEnvAlias('LYNOX_DATA_DIR', env) ?? join(homedir(), LYNOX_DIR);
 }
 
 function getUserConfigDir(): string {
