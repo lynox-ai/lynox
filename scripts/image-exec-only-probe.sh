@@ -106,16 +106,29 @@ start_and_read DENIED "ffmpeg" 1001 ffmpeg "exec ffmpeg -nostdin -re -f lavfi -i
 #    the runtime user's processes, other than the reader itself, may let the
 #    runtime user read its environment. This includes the engine (pid 1) and
 #    whatever an init or a `docker exec` put there.
-leaks=$(docker exec "$CONTAINER" sh -c '
-  me=$$; n=0
-  for d in /proc/[0-9]*; do
-    p=${d#/proc/}; [ "$p" = "$me" ] && continue
-    u=$(awk "/^Uid:/{print \$2}" $d/status 2>/dev/null) || continue
-    [ "$u" = "$(id -u)" ] || continue
-    n=$((n+1))
-    { cat $d/environ; } >/dev/null 2>&1 && echo "$p $(cat $d/comm 2>/dev/null)"
-  done
-  echo "checked=$n"')
+# scan_env <user>: as <user>, every other process of <user> whose environment
+# that user can read, then `checked=<n>`, the number of processes looked at.
+scan_env() {
+  docker exec --user "$1" "$CONTAINER" sh -c '
+    me=$$; n=0
+    for d in /proc/[0-9]*; do
+      p=${d#/proc/}; [ "$p" = "$me" ] && continue
+      u=$(awk "/^Uid:/{print \$2}" $d/status 2>/dev/null) || continue
+      [ "$u" = "$(id -u)" ] || continue
+      n=$((n+1))
+      { cat $d/environ; } >/dev/null 2>&1 && echo "$p $(cat $d/comm 2>/dev/null)"
+    done
+    echo "checked=$n"'
+}
+# Control for the scan: the same scan as root, while a sleep root started is
+# running. root may read /bin/sleep, so that process is dumpable, and the scan
+# must list it. Without it, a scan that can read nothing would pass this check.
+ctl_pid=$(docker exec --user 0 "$CONTAINER" sh -c 'exec sleep 30 >/dev/null 2>&1 & echo $!')
+sleep 1
+ctl=$(scan_env 0)
+docker exec --user 0 "$CONTAINER" sh -c "kill $ctl_pid" >/dev/null 2>&1 || true
+printf '%s\n' "$ctl" | grep -q "^$ctl_pid sleep\$" || { echo "probe error: the scan as root did not find root's own sleep (pid $ctl_pid); the scan does not work" >&2; exit 2; }
+leaks=$(scan_env 1001)
 checked=$(printf '%s\n' "$leaks" | sed -n 's/^checked=//p')
 readable_pids=$(printf '%s\n' "$leaks" | grep -v '^checked=' || true)
 (( checked >= 1 )) || { echo "probe error: found no process of the runtime user to check" >&2; exit 2; }
