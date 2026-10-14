@@ -36,6 +36,7 @@ import {
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
+import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
 import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
@@ -2680,6 +2681,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
                 : `Blocked: the body of this ${gatedMethod} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`,
           );
         }
+        // What the write changes in a connected account, read from that account before the
+        // question: the document, the recipient by name, the amount (`preset-write-context.ts`).
+        // Fail-closed: a reading that fails refuses the write, nothing is sent.
+        const context = connectedAccount
+          ? await describeConnectedWrite(presetOnHost, gatedMethod, input.url, typeof sentBody === 'string' ? sentBody : undefined, { toolContext, agent, ackHosts: guardedAckHosts })
+          : null;
+        const contextBlock = context === null ? pv`` : onBoxBlock(mask(context));
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``
@@ -2725,7 +2733,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const sentNote = alsoNamed.length === 0 ? pv``
               : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${bodyBlock}`,
+              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
@@ -3142,6 +3150,74 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
  * of them would send the request without the credential the run was planned with.
  * No text is returned: the caller reports a fixed reason, never a profile's wording.
  */
+/** At most this many readings before one write's question (`preset-write-context.ts`). */
+const WRITE_CONTEXT_MAX_READS = 3;
+const WRITE_CONTEXT_READ_TIMEOUT_MS = 10_000;
+const WRITE_CONTEXT_READ_MAX_BYTES = 1_000_000;
+
+/**
+ * The lines that say what a write to a connected account changes there, or `null` when its
+ * provider has nothing to add. Reads with the stored credential on the write's own origin,
+ * through the same host policy, following no redirect; a reading that fails, or a write the
+ * table cannot describe, refuses the write (`blockedVerbatim`), so it is never asked without.
+ */
+async function describeConnectedWrite(
+  profiles: readonly ApiProfile[],
+  method: string,
+  url: string,
+  body: string | undefined,
+  deps: { toolContext: ToolContext | undefined; agent: import('../../types/index.js').IAgent; ackHosts: ReturnType<typeof resolveGuardedAckHosts> },
+): Promise<string | null> {
+  const presets = new Set(profiles.map((p) => p.auth?.oauth?.preset_id));
+  const host = new URL(url).hostname;
+  if (presets.size !== 1) {
+    blockedVerbatim(`Blocked: ${method} to ${host} was not asked: profiles of more than one provider share this host, so lynox cannot tell what the write changes. Nothing was sent.`);
+  }
+  const presetId = [...presets][0];
+  const context = presetId === undefined ? undefined : PRESET_WRITE_CONTEXT[presetId];
+  if (context === undefined) return null;
+  const origin = new URL(url).origin;
+  let reads = 0;
+  const read: PresetRead = async (path) => {
+    if (++reads > WRITE_CONTEXT_MAX_READS) throw new WriteContextRefused(`it needs more than ${WRITE_CONTEXT_MAX_READS} readings`);
+    const readUrl = `${origin}${path}`;
+    const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
+    if (limited) throw new WriteContextRefused(limited);
+    const headers: Record<string, string> = { accept: 'application/json' };
+    const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent);
+    if (auth.refusal) throw new WriteContextRefused(auth.refusal);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WRITE_CONTEXT_READ_TIMEOUT_MS);
+    try {
+      const { response } = await fetchWithValidatedRedirects(
+        readUrl, { method: 'GET', headers, signal: controller.signal }, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.toolContext,
+        () => false, auth.slot, (v) => deps.agent.secretStore?.containsSecret(v) ?? false,
+      );
+      if (!response.ok) {
+        const access = response.status === 401 || response.status === 403
+          ? '; the connection may lack read access there, which a scope on the profile grants' : '';
+        throw new WriteContextRefused(`reading ${path} answered ${response.status}${access}`);
+      }
+      const { text, truncated } = await readBodyLimited(response, WRITE_CONTEXT_READ_MAX_BYTES);
+      if (truncated) throw new WriteContextRefused(`reading ${path} answered more than ${WRITE_CONTEXT_READ_MAX_BYTES} bytes`);
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new WriteContextRefused(`reading ${path} answered no JSON object`);
+      return parsed as Record<string, unknown>;
+    } catch (err) {
+      if (err instanceof WriteContextRefused) throw err;
+      throw new WriteContextRefused(`reading ${path} failed`);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    return await context.describe(method, new URL(url), body, read);
+  } catch (err) {
+    const why = err instanceof WriteContextRefused ? err.message : 'its reading failed';
+    blockedVerbatim(`Blocked: ${method} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
+  }
+}
+
 export async function attachStoredCredential(
   url: string,
   headers: Record<string, string>,

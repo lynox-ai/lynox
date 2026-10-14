@@ -22,7 +22,7 @@ import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, i
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
@@ -352,6 +352,8 @@ function validateProfile(profile: ApiProfile): string | null {
         if ('refused' in requested) {
           return `Invalid auth.oauth.scope: the provider "${savedPreset.id}" does not allow ${requested.refused.join(', ')}. Allowed in addition to ${savedPreset.requiredScopes.join(' ') || 'nothing'}: ${savedPreset.allowedScopes.join(' ') || 'nothing'}.`;
         }
+        const unmet = presetScopeNeedUnmet(savedPreset, typeof o.scope === 'string' ? o.scope : undefined);
+        if (unmet !== null) return `Invalid auth.oauth.scope for the provider "${savedPreset.id}": ${unmet}`;
       }
     }
   }

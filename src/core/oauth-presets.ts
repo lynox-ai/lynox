@@ -77,6 +77,11 @@ export interface OAuthPreset {
    * written by the agent, so this list, not the profile, is the limit of what can be asked for.
    */
   readonly allowedScopes: readonly string[];
+  /**
+   * Scopes a profile must name alongside others: when it names any scope in `when`, it must
+   * also name one of `oneOf`. A profile that does not is refused when it is saved, with `why`.
+   */
+  readonly scopeNeeds?: readonly { readonly when: readonly string[]; readonly oneOf: readonly string[]; readonly why: string }[];
 }
 
 /**
@@ -130,6 +135,14 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       'bank_account_show', 'bank_payment_show', 'transaction_show', 'archive_show',
       'contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit',
     ],
+    // The question before a write names the contact it concerns (`preset-write-context.ts`),
+    // and reading a contact takes a contact scope: a write scope grants reading only its own
+    // resource (bexio's scope documentation).
+    scopeNeeds: [{
+      when: ['note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit'],
+      oneOf: ['contact_show', 'contact_edit'],
+      why: 'the question before each write names the contact it concerns, and reading a contact needs one of these',
+    }],
   },
 ]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));
@@ -314,6 +327,21 @@ export function presetScopeRequest(preset: OAuthPreset, profileScope: string | u
   const refused = asked.filter((s) => !preset.requiredScopes.includes(s) && !preset.allowedScopes.includes(s));
   if (refused.length > 0) return { refused: [...new Set(refused)] };
   return { scopes: [...new Set([...preset.requiredScopes, ...asked])] };
+}
+
+/**
+ * The first need of `preset` that the profile's scope leaves unmet, as a sentence for the
+ * person saving it, or `null` when every need is met.
+ */
+export function presetScopeNeedUnmet(preset: OAuthPreset, profileScope: string | undefined): string | null {
+  const asked = new Set((profileScope ?? '').split(/\s+/).filter((s) => s !== ''));
+  for (const need of preset.scopeNeeds ?? []) {
+    const named = need.when.filter((s) => asked.has(s));
+    if (named.length > 0 && !need.oneOf.some((s) => asked.has(s))) {
+      return `${named.join(', ')} needs ${need.oneOf.join(' or ')} as well: ${need.why}.`;
+    }
+  }
+  return null;
 }
 
 /** The ids a profile may name, for a message that lists what exists. */

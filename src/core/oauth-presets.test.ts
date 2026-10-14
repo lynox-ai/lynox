@@ -79,8 +79,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // copy in a test claiming to bind them.
     const module = await import('./oauth-presets.js');
     expect(Object.keys(module).sort()).toEqual(
-      // `presetScopeRequest` is a pure derivation, like `derivePresetEndpoints`: it reads a preset, it adds none.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf', 'presetScopeRequest'].sort(),
+      // `presetScopeRequest` and `presetScopeNeedUnmet` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeRequest'].sort(),
     );
   });
 
