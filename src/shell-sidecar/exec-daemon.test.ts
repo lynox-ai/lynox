@@ -51,7 +51,8 @@ function harness(opts: { poolSize?: number; residue?: string[]; killDelayMs?: nu
     await new Promise<void>((r) => server.close(() => r()));
     rmSync(dir, { recursive: true, force: true });
   };
-  return { deps, events, sock, ready, cleanup };
+  const connections = (): Promise<number> => new Promise((r, j) => server.getConnections((e, n) => (e ? j(e) : r(n))));
+  return { deps, events, sock, ready, cleanup, connections };
 }
 
 /** Send one raw request; collect raw lines until the daemon ends the stream. `hangUpAfterMs` drops the connection early. */
@@ -174,6 +175,39 @@ describe('exec daemon: transport', () => {
     });
 });
 
+describe('exec daemon: a client that stays but stops reading', () => {
+  it('releases the uid at the timeout even though the client never drains', async () => {
+    const h = (current = harness());
+    await h.ready;
+    const c = connect(h.sock);
+    c.on('error', () => {});
+    let got = 0;
+    c.on('data', (d) => { got += d.length; if (got > 64 * 1024) c.pause(); });
+    c.write(req({ cmd: 'yes & exit 0', timeoutMs: 500 }));
+    await waitFor(() => h.events.includes('kill:20000'), 3000);
+    await waitFor(() => h.deps.pool.stats().free === 2, 5000);
+    c.destroy();
+  });
+
+  it('closes a refused connection even when the client never closes its side', async () => {
+    const h = (current = harness());
+    await h.ready;
+    // The client half-closes nothing: without the daemon's own destroy, `end` would wait for a
+    // FIN that never comes and the server would hold the connection.
+    const c = connect({ path: h.sock, allowHalfOpen: true });
+    c.on('error', () => {});
+    let refusal = '';
+    c.on('data', (d) => { refusal += d.toString('utf8'); });
+    c.write(req({ cmd: 'ls', cwd: '/' }));
+    await waitFor(() => refusal.includes('unknown field'));
+    expect(await h.connections()).toBe(1);
+    const end = Date.now() + 3000;
+    while ((await h.connections()) > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+    expect(await h.connections()).toBe(0);
+    c.destroy();
+  });
+});
+
 describe('exec daemon: refusals', () => {
   it('refuses a bad request without taking a uid', async () => {
     const h = (current = harness());
@@ -260,6 +294,7 @@ describe('the call wrapper', () => {
     expect(() => callNproc('0')).toThrow(/at least 1/);
     expect(() => callNproc('-3')).toThrow();
     expect(() => callNproc('2.5')).toThrow();
+    expect(() => callNproc('0x10')).toThrow();
   });
 
   it('applies a process limit when one is given, and refuses one that is not a number', () => {

@@ -122,14 +122,20 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
   // quarantined). So kills are chained, and the release starts only after the last one ended.
   let killing: Promise<void> = Promise.resolve();
   const stopCall = (): void => { killing = killing.then(() => deps.killCall(uid)).catch(() => {}); };
-  const timer = setTimeout(() => { timedOut = true; stopCall(); }, req.timeoutMs);
-  // Once the client is gone, `drain` never comes. Node resumes a paused stdio stream once, on
-  // the direct child's exit; if the call's shell has already exited and something it left
-  // behind still writes, that resume is spent and the stream would stay paused past the kill
-  // — no 'close', the uid busy for good. So read on, into nothing.
-  const onGone = (): void => {
+  // Once a call is over — timed out, or its client gone — its output goes nowhere, and the
+  // streams are read on into nothing. Node resumes a paused stdio stream only once, on the
+  // direct child's exit; if the call's shell has already exited and something it left behind
+  // still writes, that resume is spent, and a stream paused for a slow (or vanished) client
+  // would stay paused past the kill — no 'close', the uid busy for good.
+  let discard = false;
+  const drainToNowhere = (): void => {
+    discard = true;
     child.stdout?.resume();
     child.stderr?.resume();
+  };
+  const timer = setTimeout(() => { timedOut = true; drainToNowhere(); stopCall(); }, req.timeoutMs);
+  const onGone = (): void => {
+    drainToNowhere();
     if (!ended) stopCall();
   };
   socket.on('close', onGone);
@@ -138,6 +144,7 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
     if (!stream) return;
     const dec = new StringDecoder('utf8');
     const emit = (text: string): void => {
+      if (discard) return;
       for (let i = 0; i < text.length; i += OUT_CHUNK_CHARS) {
         // Never pause for a client that is gone: a write to a destroyed socket returns false
         // too, and every chunk would pause the stream again after `onGone` resumed it.
@@ -258,7 +265,8 @@ function intFromEnv(name: string, raw: string | undefined, fallback?: number): n
 /** The per-call process limit for the wrapper: '' = none. 0 would let no call fork at all. */
 export function callNproc(raw: string | undefined): string {
   if (raw === undefined || raw === '') return '';
-  const n = intFromEnv('LYNOX_EXEC_CALL_NPROC', raw);
+  if (!/^[0-9]+$/.test(raw)) throw new Error('LYNOX_EXEC_CALL_NPROC must be a whole number of at least 1, or unset');
+  const n = Number(raw);
   if (n < 1) throw new Error('LYNOX_EXEC_CALL_NPROC must be at least 1, or unset');
   return String(n);
 }
