@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages, REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages, REASONING_SUPPRESSION_MAX_TOKENS, fireworksCacheIsolationKey } from './openai-adapter.js';
 import { modelCapability } from '../types/models.js';
 import { setDataDir } from './config.js';
 import { StreamProcessor } from './stream.js';
@@ -1625,6 +1625,62 @@ describe('OpenAIAdapter', () => {
     });
   });
 
+  describe('fireworks prompt cache isolation', () => {
+    async function sentBody(baseURL: string, model: string): Promise<Record<string, unknown>> {
+      let capturedBody = '';
+      const originalFetch = global.fetch;
+      global.fetch = (async (_url: string | URL, init?: { body?: string }) => {
+        capturedBody = (init?.body as string) ?? '';
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              const enc = new TextEncoder();
+              controller.enqueue(enc.encode(sseChunk({
+                id: 'f-1', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 5, completion_tokens: 1 },
+              })));
+              controller.enqueue(enc.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        );
+      }) as typeof global.fetch;
+      try {
+        const adapter = new OpenAIAdapter({ baseURL, apiKey: 'test', modelId: model });
+        await adapter.beta.messages.stream({
+          model, max_tokens: 50, messages: [{ role: 'user', content: 'x' }],
+        } as Parameters<typeof adapter.beta.messages.stream>[0]).finalMessage();
+        return JSON.parse(capturedBody) as Record<string, unknown>;
+      } finally {
+        global.fetch = originalFetch;
+      }
+    }
+
+    it('sends the instance isolation key to api.fireworks.ai', async () => {
+      const body = await sentBody('https://api.fireworks.ai/inference/v1', 'accounts/fireworks/models/glm-5p2');
+      expect(body['prompt_cache_isolation_key']).toBe(fireworksCacheIsolationKey());
+      expect(body['prompt_cache_isolation_key']).toMatch(/^[0-9a-f]{32}$/);
+    });
+
+    it.each([
+      ['Mistral', 'https://api.mistral.ai/v1'],
+      ['OpenAI', 'https://api.openai.com/v1'],
+      ['another fireworks.ai host', 'https://xapi.fireworks.ai/inference/v1'],
+      ['a lookalike host', 'https://api.fireworks.ai.evil.com/inference/v1'],
+    ])('sends no isolation key to %s', async (_name, baseURL) => {
+      const body = await sentBody(baseURL, 'some-model');
+      expect(body).not.toHaveProperty('prompt_cache_isolation_key');
+      // Control: the request body was captured at all.
+      expect(body['model']).toBe('some-model');
+    });
+
+    it('is stable per instance and is not the salt Mistral sees', () => {
+      expect(fireworksCacheIsolationKey()).toBe(fireworksCacheIsolationKey());
+      expect(fireworksCacheIsolationKey()).not.toContain(getCacheKeySalt());
+    });
+  });
+
   describe('cache-key salt persistence', () => {
     let tmpLynoxDir: string;
     let originalLynoxDir: string | undefined;
@@ -1644,6 +1700,24 @@ describe('OpenAIAdapter', () => {
         process.env['LYNOX_DIR'] = originalLynoxDir;
       }
       try { fs.rmSync(tmpLynoxDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    });
+
+    it('gives two instances (two data dirs, two salts) two different Fireworks isolation keys', () => {
+      const first = fireworksCacheIsolationKey();
+      const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lynox-test-'));
+      try {
+        _resetCacheKeySaltMemo();
+        process.env['LYNOX_DIR'] = otherDir;
+        const second = fireworksCacheIsolationKey();
+        expect(second).toMatch(/^[0-9a-f]{32}$/);
+        expect(second).not.toBe(first);
+        // Control: back on the first instance's dir, its key is the same as before.
+        _resetCacheKeySaltMemo();
+        process.env['LYNOX_DIR'] = tmpLynoxDir;
+        expect(fireworksCacheIsolationKey()).toBe(first);
+      } finally {
+        fs.rmSync(otherDir, { recursive: true, force: true });
+      }
     });
 
     it('creates a 16-hex-char salt file with 0600 perms on first call', () => {
