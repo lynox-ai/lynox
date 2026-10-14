@@ -1123,15 +1123,56 @@ describe('httpRequestTool', () => {
 
         // The question shows a query by its keys and no header, so neither may carry a value to a
         // connected account: the customer text says each write is shown with everything sent.
-        it('refuses a query value, before the question, and nothing is sent', async () => {
+        it.each([
+          ['a percent-encoded query value', 'https://example.com/v1/report?note=pay%20900'],
+          ['a query value with a character outside letters, digits and _', 'https://example.com/v1/report?amount=9.00'],
+          ['a percent-encoded path', 'https://example.com/v1/report/pay%20900'],
+          ['a path longer than the question shows', `https://example.com/v1/${'a'.repeat(160)}`],
+        ])('refuses %s, before the question, and nothing is sent', async (_label, url) => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          const out = await visible({ ...post, url: 'https://example.com/v1/report?amount=900' }, makeAgent({ promptUser }));
-          expect(out).toContain('writes to a connected account with values in the query, which the approval question does not show. Nothing was sent. Put the values in the body');
+          const out = await visible({ ...post, url }, makeAgent({ promptUser }));
+          expect(out).toContain('writes to a connected account with a path or query the approval question cannot show as sent');
+          expect(out).toContain('Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.');
           expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        // bexio's search reads `limit`, `offset` and `order_by` from the query only.
+        it('asks a plain query with its values shown on the instance, and sends it', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, url: 'https://example.com/v1/report?limit=10&offset=500&order_by=name_desc' }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          const asked = promptUser.mock.calls[0]![0];
+          expect(flattenPrompt(asked)).toContain('The query is sent as ?limit=10&offset=500&order_by=name_desc');
+          // The copy that leaves the box keeps the keys only.
+          expect(flattenPrompt(offBoxPrompt(asked))).not.toContain('offset=500');
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it('refuses a profile that names its own header for the token, and nothing is sent', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            auth: {
+              type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], header_name: 'X-Pay-900',
+              oauth: { grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' } },
+            },
+          });
+          testCtx.apiStore = store;
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const out = await visible(post, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }));
+          expect(out).toContain('whose profile names its own header for the token');
           expect(fetchMock).not.toHaveBeenCalled();
         });
 
@@ -1163,9 +1204,14 @@ describe('httpRequestTool', () => {
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await handler({ ...post, headers: { 'Content-Type': 'application/json;charset=UTF-8', Accept: 'application/json' } }, makeAgent({ promptUser }));
+          await handler({ ...post, headers: { 'CoNtEnT-TyPe': '  APPLICATION/json ;\t CharSet=UTF-8 ', Accept: 'application/json' } }, makeAgent({ promptUser }));
           expect(promptUser).toHaveBeenCalledTimes(1);
           expect(fetchMock).toHaveBeenCalledTimes(1);
+          // Sent as the list spells them: letter case and spacing are not a channel either.
+          const sent = fetchMock.mock.calls[0]![1] as { headers: Record<string, string> };
+          expect(sent.headers['content-type']).toBe('application/json; charset=utf-8');
+          expect(sent.headers['accept']).toBe('application/json');
+          expect(Object.keys(sent.headers).filter((k) => k !== k.toLowerCase())).toEqual([]);
         });
 
         it('control: without a preset, a query value and a header are asked and sent as before', async () => {

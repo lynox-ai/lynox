@@ -164,6 +164,8 @@ const MARK: MandateStance = { kind: 'mark' };
 const OWN: MandateStance = { kind: 'own' };
 /** The connect route, which the consent page posts its confirmation to (see the dispatch). */
 const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
+/** The query parameter the consent page's form carries: the scopes it was shown for. */
+const CONSENT_SCOPES_PARAM = 'shown_scopes';
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
@@ -1340,16 +1342,23 @@ function sendOAuthHtml(res: ServerResponse, status: number, message: string): vo
 /**
  * The page before a provider connect that asks for write access: the preset's customer text as
  * approved, the write scopes this link asks for, and a button that posts back to the same
- * address. No script and no field: the button is the confirmation. Not cached, for the same
- * reason as the pages above.
+ * address. No script and no field: the button is the confirmation. The address carries every
+ * scope the page was shown for, so a confirmation is refused when the profile asks for other
+ * scopes by the time it arrives (`CONSENT_SCOPES_PARAM`). Not cached, for the same reason as
+ * the pages above.
  */
-function sendConsentPage(res: ServerResponse, consent: { readonly lang: string; readonly paragraphs: readonly string[]; readonly writeScopes: readonly string[] }): void {
+function sendConsentPage(
+  res: ServerResponse,
+  consent: { readonly lang: string; readonly paragraphs: readonly string[]; readonly writeScopes: readonly string[] },
+  scopes: readonly string[],
+): void {
+  const action = `?${new URLSearchParams({ [CONSENT_SCOPES_PARAM]: scopes.join(' ') }).toString()}`;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(
-    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization</title></head><body>`
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorization</title></head><body>`
     + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
     + `<p>Write access this connection asks for: ${escapeHtml(consent.writeScopes.join(', '))}</p>`
-    + `<form method="post"><button type="submit">Continue</button></form>`
+    + `<form method="post" action="${escapeHtml(action)}"><button type="submit">Continue</button></form>`
     + `</body></html>`,
   );
 }
@@ -10063,7 +10072,14 @@ export class LynoxHTTPApi {
 
       // Last, so the page appears only for a connect that would otherwise go ahead.
       if (decision.consent && !confirmed) {
-        sendConsentPage(res, decision.consent);
+        sendConsentPage(res, decision.consent, decision.scopes);
+        return;
+      }
+      // The confirmation holds for the scopes the page showed. A profile changed in between
+      // (an update that adds a write scope) would otherwise send the person to a grant the
+      // page never named.
+      if (decision.consent && new URL(req.url ?? '', 'http://x').searchParams.get(CONSENT_SCOPES_PARAM) !== decision.scopes.join(' ')) {
+        sendOAuthHtml(res, 409, 'This connection asks for other access than the page you confirmed showed. Open the link again and read the page. Nothing was sent to the provider.');
         return;
       }
 

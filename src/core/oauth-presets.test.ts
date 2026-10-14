@@ -366,3 +366,14 @@ describe('derivation happens at use, from the register alone', () => {
     });
   });
 });
+
+// The page before a connect appears for the scopes in `writeScopes`, which is a second list next
+// to `allowedScopes`. A write scope added to one and not the other would skip the page.
+describe('the bexio customer text covers every write scope the preset allows', () => {
+  it('names exactly the scopes that write (`_edit`), no more and no fewer', () => {
+    const bexio = OAUTH_PRESETS.get('bexio')!;
+    const writing = bexio.allowedScopes.filter((s) => s.endsWith('_edit'));
+    expect(writing.length).toBeGreaterThan(0);
+    expect([...(bexio.consentNotice?.writeScopes ?? [])].sort()).toEqual([...writing].sort());
+  });
+});

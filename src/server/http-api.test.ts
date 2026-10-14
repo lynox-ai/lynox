@@ -4531,7 +4531,9 @@ describe('LynoxHTTPApi', () => {
         mockSecretResolve.mockReturnValue(null);
       }
     }
-    const confirm = { method: 'POST', contentType: 'application/x-www-form-urlencoded', body: '' };
+    // What the page's form posts to: the scopes it was shown for, in the order the link asks.
+    const SHOWN = '?shown_scopes=openid+offline_access+contact_show+kb_invoice_edit+note_edit';
+    const confirm = { method: 'POST', contentType: 'application/x-www-form-urlencoded', body: '', query: SHOWN };
 
     it('holds the approved wording in the preset, byte for byte', async () => {
       const { OAUTH_PRESETS } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
@@ -4544,7 +4546,8 @@ describe('LynoxHTTPApi', () => {
       for (const p of APPROVED) expect(r.text).toContain(`<p>${p}</p>`);
       expect(r.text).toContain('<div lang="de">');
       expect(r.text).toContain('Write access this connection asks for: kb_invoice_edit, note_edit</p>');
-      expect(r.text).toContain('<form method="post"><button type="submit">Continue</button></form>');
+      expect(r.text).toContain(`<form method="post" action="${SHOWN}"><button type="submit">Continue</button></form>`);
+      expect(r.text).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
       expect(r.state).toBeNull();
       expect(r.location).toBe('');
     });
@@ -4571,6 +4574,8 @@ describe('LynoxHTTPApi', () => {
       ['a sibling host', 'same-site', 'https://sibling.example'],
       ['no page at all (typed or opened from outside)', 'none', undefined],
     ])('refuses a confirmation from %s, and starts nothing', async (_label, site, origin) => {
+      // The first two are refused by the dispatcher already (`ambientCrossSiteRefusal`); `none`
+      // passes it and only the route's own same-origin check refuses it.
       const r = await open(WRITING, { ...confirm, site, ...(origin === undefined ? {} : { origin }) });
       expect(r.status).toBe(403);
       expect(r.state).toBeNull();
@@ -4578,6 +4583,18 @@ describe('LynoxHTTPApi', () => {
     });
 
     // `{}` is valid JSON, so only the empty-body rule refuses it; a form field is refused as JSON.
+    // The profile can change between the page and the click (an update adding a write scope).
+    it.each([
+      ['fewer scopes than the link now asks for', '?shown_scopes=openid+offline_access+contact_show+note_edit'],
+      ['no record of what it showed', ''],
+    ])('refuses a confirmation of a page that showed %s, and starts nothing', async (_label, query) => {
+      const r = await open(WRITING, { ...confirm, query });
+      expect(r.status).toBe(409);
+      expect(r.text).toContain('asks for other access than the page you confirmed showed');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
+    });
+
     it.each([['a form field', 'confirmed=1'], ['a JSON body', '{}']])('refuses a confirmation that carries %s, and starts nothing', async (_label, body) => {
       const r = await open(WRITING, { ...confirm, body });
       expect(r.status).toBe(400);
