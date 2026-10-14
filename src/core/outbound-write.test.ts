@@ -229,6 +229,9 @@ describe('a body the gate cannot read is gated as a DELETE', () => {
     ['us-ascii', 'application/x-www-form-urlencoded; charset=us-ascii', 'DELETE'],
     ['ascii, which a decoder may read with the high bit dropped', 'application/x-www-form-urlencoded; charset=ascii', 'DELETE'],
     ['iso-8859-1', 'application/x-www-form-urlencoded; charset=iso-8859-1', 'POST'],
+    ['latin1', 'application/x-www-form-urlencoded; charset=latin1', 'POST'],
+    ['windows-1252', 'application/x-www-form-urlencoded; charset=windows-1252', 'POST'],
+    ['utf8, without the hyphen', 'application/json; charset=utf8', 'POST'],
   ] as const)('charset %s', (_k, contentType, want) => {
     expect(effectiveWriteMethod('POST', { 'Content-Type': contentType }, U, '{"a":1}')).toBe(want);
   });
