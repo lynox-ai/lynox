@@ -78,7 +78,8 @@ import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import { CP_ADMIN_PRINCIPAL, OWNER_PRINCIPAL, isOwnerPrincipal, ownedBy, principalFromTag, principalHasEnded, principalTag, unhandledPrincipal, type RequestPrincipal } from '../core/request-principal.js';
-import { newCorrelationId, requestPathTarget, type AuditEntry, type AuditPhase } from '../core/audit-log.js';
+import { newCorrelationId, requestOutcomePhase, requestPathTarget, type AuditEntry } from '../core/audit-log.js';
+import { CpRefusalTally, CpTrail, cpExportOnAuditFailure, cpExportTarget, cpRequestTarget } from '../core/cp-trail.js';
 import { UndecryptableTextError } from '../core/engine-db.js';
 import {
   PERSON_ERASURE_CONFIRM, erasePerson, previewPersonErasure,
@@ -1947,6 +1948,13 @@ export class LynoxHTTPApi {
   /** The requests the auth block admitted as the control plane's admin bearer (`cp-admin`). */
   private readonly _cpAdminRequests = new WeakSet<IncomingMessage>();
 
+  /** The control plane's trail in the instance log (cp-trail.ts), and each request's open pair. */
+  private readonly _cpTrail = new CpTrail(() => this.engine?.getAuditLog() ?? null);
+  private readonly _cpRefusals = new CpRefusalTally();
+  private readonly _cpRequestTrails = new WeakMap<IncomingMessage, { readonly entry: AuditEntry; ended: boolean }>();
+  /** The answer of `cpExportOnAuditFailure`, read through a field so a test can give the other one. */
+  private _cpExportPolicy: () => 'deliver' | 'refuse' = cpExportOnAuditFailure;
+
   /**
    * Who a request acts as (request-principal.ts): the mandate its session cookie
    * carries, the control plane for its admin bearer on an instance it provisioned
@@ -2054,7 +2062,7 @@ export class LynoxHTTPApi {
     if (entry === undefined) return;
     this._openTrails.delete(req);
     const status = res.headersSent ? res.statusCode : 0;
-    const phase: AuditPhase = status >= 200 && status < 300 ? 'done' : status === 0 || status >= 500 ? 'failed' : 'refused';
+    const phase = requestOutcomePhase(status);
     const note = this._requestTrailNotes.get(req);
     const closing: AuditEntry = { ...entry, phase, action: note === undefined ? entry.action : `${entry.action} ${note}` };
     try { this.engine?.getAuditLog()?.record(closing); } catch { /* the attempt row stands alone */ }
@@ -2102,6 +2110,57 @@ export class LynoxHTTPApi {
       return false;
     }
     return true;
+  }
+
+  /**
+   * The control plane's pair of rows (PRD cp-admin-line §3.3): `attempt` here, before the route
+   * runs, and its outcome exactly once, by the rule of a mandate's trail (`requestOutcomePhase`):
+   * written by the dispatcher when its dispatch is over, whichever way it ends. As there, a client
+   * that leaves early does not decide the outcome.
+   * The actor is `cp-admin` for the admin
+   * bearer, and `cp-migration` for the migration token on an instance the control plane
+   * provisioned. Unlike a mandate's trail, a row that cannot be written does not stop the act
+   * (cp-trail.ts says what happens to it). `false` when this has answered and the route must not run.
+   */
+  private _beginCpTrail(req: IncomingMessage, res: ServerResponse, method: string, pathname: string, authScope: RequestScope, body: unknown): boolean {
+    const actor = authScope === 'cp-admin'
+      ? { principal: CP_ADMIN_PRINCIPAL }
+      : this._authOrigin.get(req) === 'migration' && isProvisionedInstance()
+        ? { principal: OWNER_PRINCIPAL, actorKind: 'cp-migration' as const }
+        : null;
+    if (actor === null) return true;
+    const route = `${method} ${pathname}`;
+    const exportTarget = route === 'GET /api/export' ? cpExportTarget(req.headers['x-lynox-cp-request']) : null;
+    const entry: AuditEntry = {
+      ...actor,
+      // The registered routes are fixed paths; a migration path no route matches is the caller's.
+      action: `${method} ${requestPathTarget(pathname)}`,
+      target: exportTarget?.value ?? cpRequestTarget(route, body),
+      phase: 'attempt',
+      correlationId: newCorrelationId(),
+      requestId: randomUUID(),
+    };
+    const written = this._cpTrail.write(entry);
+    this._cpRequestTrails.set(req, { entry, ended: false });
+    if (exportTarget !== null) {
+      if (!written && this._cpExportPolicy() === 'refuse') {
+        errorResponse(res, 503, 'The export cannot be recorded in the instance log right now, so it was not delivered.', 'audit_unavailable');
+        // Answered here, outside the dispatch that would close the pair.
+        this._endCpTrail(req, 503);
+        return false;
+      }
+      // The class only: the caller sent the header, so the class tells it nothing it did not know.
+      res.setHeader('X-Lynox-Audit-Target', exportTarget.kind);
+    }
+    return true;
+  }
+
+  /** The outcome row of the control plane's pair, with its status; the first call wins. `0`: no answer. */
+  private _endCpTrail(req: IncomingMessage, status: number): void {
+    const open = this._cpRequestTrails.get(req);
+    if (open === undefined || open.ended) return;
+    open.ended = true;
+    this._cpTrail.write({ ...open.entry, phase: requestOutcomePhase(status), action: status === 0 ? open.entry.action : `${open.entry.action} ${String(status)}` });
   }
 
   /**
@@ -3195,6 +3254,10 @@ export class LynoxHTTPApi {
       // what it may reach, not by a list of what it may not (PRD cp-admin-line §3.1).
       if (authScope === 'cp-admin') {
         if (routeScope !== 'admin' || !this._reachableByCpAdmin(method, pathname)) {
+          // Charged first, so a caller that keeps asking is stopped before it writes rows.
+          if (this._rateLimit(req, res, clientIp)) return;
+          // The path as the caller sent it, masked where it holds a secret's shape.
+          for (const row of this._cpRefusals.refuse(`${method} ${requestPathTarget(pathname)}`, new Date())) this._cpTrail.write(row, false);
           errorResponse(res, 403, 'The control plane reaches only the routes registered for it');
           return;
         }
@@ -3258,45 +3321,53 @@ export class LynoxHTTPApi {
       ? 'no-secret'
       : (this._authOrigin.get(req) ?? '').startsWith('cookie:') ? 'cookie' : 'none';
 
-    // Route dispatch — also try GET handler for HEAD requests (RFC 9110 §9.3.2)
-    const routeKey = `${method} ${pathname}`;
-    const staticHandler = this.staticRoutes.get(routeKey)
-      ?? (method === 'HEAD' ? this.staticRoutes.get(`GET ${pathname}`) : undefined);
-    if (staticHandler) {
-      const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
-      const stance = this.staticRouteStances.get(stanceKey);
-      if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
-      if (this._refusedByStance(req, res, stance)) return;
-      const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
-      if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;
-      if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
-      try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
-      return;
-    }
+    if (!this._beginCpTrail(req, res, method, pathname, authScope, body)) return;
 
-    const dispatchMethod = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
-    for (const route of this.dynamicRoutes) {
-      if (!dispatchMethod.includes(route.method)) continue;
-      const match = route.pattern.exec(pathname);
-      if (match) {
-        const params: Record<string, string> = {};
-        for (let i = 0; i < route.paramNames.length; i++) {
-          const name = route.paramNames[i];
-          const value = match[i + 1];
-          if (name !== undefined && value !== undefined) {
-            params[name] = value;
-          }
-        }
-        if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
-        if (this._refusedByStance(req, res, route.stance)) return;
-        if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
-        if (!this._beganMandateChange(req, res, method, route.path, pathname)) return;
-        try { await route.handler(req, res, params, body); } finally { this._closeTrail(req, res); }
+    // The control plane's pair closes once the dispatch is over, on every path out of it:
+    // the handler's end, an answer the dispatcher gives itself, or a throw.
+    try {
+      // Route dispatch — also try GET handler for HEAD requests (RFC 9110 §9.3.2)
+      const routeKey = `${method} ${pathname}`;
+      const staticHandler = this.staticRoutes.get(routeKey)
+        ?? (method === 'HEAD' ? this.staticRoutes.get(`GET ${pathname}`) : undefined);
+      if (staticHandler) {
+        const stanceKey = this.staticRoutes.has(routeKey) ? routeKey : `GET ${pathname}`;
+        const stance = this.staticRouteStances.get(stanceKey);
+        if (this._refusedAsAmbientCrossSite(req, res, method, stance, ambient, trustProxy)) return;
+        if (this._refusedByStance(req, res, stance)) return;
+        const routePath = stanceKey.slice(stanceKey.indexOf(' ') + 1);
+        if (!this._recordedMandateRead(req, res, method, routePath, pathname, url.searchParams)) return;
+        if (!this._beganMandateChange(req, res, method, routePath, pathname)) return;
+        try { await staticHandler(req, res, {}, body); } finally { this._closeTrail(req, res); }
         return;
       }
-    }
 
-    errorResponse(res, 404, 'Not found');
+      const dispatchMethod = method === 'HEAD' ? ['HEAD', 'GET'] : [method];
+      for (const route of this.dynamicRoutes) {
+        if (!dispatchMethod.includes(route.method)) continue;
+        const match = route.pattern.exec(pathname);
+        if (match) {
+          const params: Record<string, string> = {};
+          for (let i = 0; i < route.paramNames.length; i++) {
+            const name = route.paramNames[i];
+            const value = match[i + 1];
+            if (name !== undefined && value !== undefined) {
+              params[name] = value;
+            }
+          }
+          if (this._refusedAsAmbientCrossSite(req, res, method, route.stance, ambient, trustProxy)) return;
+          if (this._refusedByStance(req, res, route.stance)) return;
+          if (!this._recordedMandateRead(req, res, method, route.path, pathname, url.searchParams)) return;
+          if (!this._beganMandateChange(req, res, method, route.path, pathname)) return;
+          try { await route.handler(req, res, params, body); } finally { this._closeTrail(req, res); }
+          return;
+        }
+      }
+
+      errorResponse(res, 404, 'Not found');
+    } finally {
+      this._endCpTrail(req, res.headersSent ? res.statusCode : 0);
+    }
   }
 
   // ── Provider status (cached) ──────────────────────────────────────────────
@@ -11243,7 +11314,7 @@ export class LynoxHTTPApi {
     // ── GDPR Data Export & Erasure ─────────────────────────────────
 
     // GET /api/export — GDPR Art. 15 (Right of Access) + Art. 20 (Data Portability)
-    this.addCpAdminRoute('GET /api/export', async (_req, res) => {
+    this.addCpAdminRoute('GET /api/export', async (req, res) => {
       const exportData: Record<string, unknown> = {
         exported_at: new Date().toISOString(),
         version: PKG_VERSION,
@@ -11543,7 +11614,13 @@ export class LynoxHTTPApi {
         exportData['config'] = {};
       }
 
-      jsonResponse(res, 200, exportData);
+      // For the control plane, the act is the handover: its `done` row is written before the
+      // body leaves, so a connection that drops while it streams does not erase it — and after
+      // the body is made, so an export that cannot be serialised is not recorded as handed over.
+      const json = JSON.stringify(exportData);
+      this._endCpTrail(req, 200);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(json) });
+      res.end(json);
     });
 
     // DELETE /api/data — GDPR Art. 17 (Right to Erasure)

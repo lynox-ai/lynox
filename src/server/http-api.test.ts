@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, o
 import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
-import { request as httpRequest, type Server } from 'node:http';
+import { request as httpRequest, ServerResponse, type Server } from 'node:http';
+import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
@@ -25,6 +26,7 @@ import { secretsForProfile } from '../core/profile-secret-view.js';
 import type { ApiProfile } from '../core/api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { AuditLog } from '../core/audit-log.js';
+import { CpRefusalTally, CpTrail } from '../core/cp-trail.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwnership } from '../core/bulk-ledger.js';
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
@@ -17039,6 +17041,299 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
         });
       } finally { holder._authOrigin = original; }
       expect(seen.at(-1)).toBe('migration');
+    });
+  });
+
+  // PRD cp-admin-line §3.3: the control plane's trail in the instance log. On an instance of its
+  // own, with a log of its own and a trail that starts empty for every test.
+  describe('the control plane\'s trail (PRD cp-admin-line §3.3)', () => {
+    let fresh: LynoxHTTPApi;
+    let freshBase = '';
+    let dir = '';
+    let edb: EngineDb;
+    let logAvailable = true;
+    let warned: string[] = [];
+    beforeAll(async () => {
+      fresh = new LynoxHTTPApi();
+      await fresh.init();
+      await fresh.start(0);
+      freshBase = `http://127.0.0.1:${portOf(fresh)}`;
+      for (let i = 0; i < 20; i++) {
+        try { const r = await fetch(`${freshBase}/health`); if (r.ok) break; } catch { /* not ready */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    });
+    afterAll(async () => { await fresh.shutdown(); });
+    let origLog: unknown;
+    const engine = (): Record<string, unknown> => (fresh as unknown as { engine: Record<string, unknown> }).engine;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'lynox-cp-trail-http-'));
+      edb = new EngineDb(join(dir, 'engine.db'), 'test-vault-key');
+      const log = new AuditLog(edb.getDb());
+      logAvailable = true;
+      origLog = engine()['getAuditLog'];
+      engine()['getAuditLog'] = () => (logAvailable ? log : null);
+      warned = [];
+      (fresh as unknown as { _cpTrail: CpTrail })._cpTrail = new CpTrail(() => (logAvailable ? log : null), (line) => { warned.push(line); });
+      (fresh as unknown as { _cpRefusals: CpRefusalTally })._cpRefusals = new CpRefusalTally();
+    });
+    afterEach(() => {
+      engine()['getAuditLog'] = origLog;
+      edb.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const rows = (): Array<Record<string, unknown>> => edb.getDb().prepare('SELECT * FROM audit_log ORDER BY id').all() as Array<Record<string, unknown>>;
+    const brief = (): string[][] => rows().map((r) => [String(r['actor_kind']), String(r['action']), String(r['phase']), String(r['target'])]);
+    const JOB = '0123456789abcdef0123456789abcdef';
+
+    it('writes an attempt before the route and its outcome once, joined by one correlation and request id', async () => {
+      await withEnv(MANAGED, async () => {
+        expect((await as(ADMIN, CP_ROUTE, {}, freshBase)).status).toBe(200);
+      });
+      expect(brief()).toEqual([
+        ['cp-admin', `GET ${CP_ROUTE}`, 'attempt', 'null'],
+        ['cp-admin', `GET ${CP_ROUTE} 200`, 'done', 'null'],
+      ]);
+      const [a, d] = rows();
+      expect(d!['correlation_id']).toBe(a!['correlation_id']);
+      expect(a!['request_id']).toMatch(/^[0-9a-f-]{36}$/);
+      expect(d!['request_id']).toBe(a!['request_id']);
+      expect(a!['recorded_at']).toBe(a!['ts']);
+    });
+
+    it('records a refusal by the route as refused, with its status and the class of the flag', async () => {
+      await withEnv(MANAGED, async () => {
+        const res = await as(ADMIN, '/api/admin/google/revoke', { method: 'POST', body: JSON.stringify({ delete_drive_backups: 'TEST-CHOSEN' }) }, freshBase);
+        expect(res.status).toBe(400);
+      });
+      expect(brief()).toEqual([
+        ['cp-admin', 'POST /api/admin/google/revoke', 'attempt', 'delete_drive_backups=other'],
+        ['cp-admin', 'POST /api/admin/google/revoke 400', 'refused', 'delete_drive_backups=other'],
+      ]);
+    });
+
+    it('names the mandates a revoke lists', async () => {
+      const orig = engine()['getMandateEnds'];
+      engine()['getMandateEnds'] = () => null;
+      try {
+        await withEnv(MANAGED, async () => {
+          const res = await as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: ['TEST-M-1', 'TEST-M-2'] }) }, freshBase);
+          expect(res.status).toBe(503);
+        });
+      } finally { engine()['getMandateEnds'] = orig; }
+      expect(brief().map((r) => r[3])).toEqual(['2 mandate(s): TEST-M-1,TEST-M-2', '2 mandate(s): TEST-M-1,TEST-M-2']);
+    });
+
+    it('writes the export\'s done row before the body leaves, and no second outcome after it', async () => {
+      const order: string[] = [];
+      const log = engine()['getAuditLog'] as () => AuditLog;
+      const real = log();
+      const record = real.record.bind(real);
+      const spyRecord = vi.spyOn(real, 'record').mockImplementation((e) => { order.push(`row:${e.phase}`); record(e); });
+      const end = ServerResponse.prototype.end;
+      const spyEnd = vi.spyOn(ServerResponse.prototype, 'end').mockImplementation(function (this: ServerResponse, ...args: unknown[]) {
+        order.push('end');
+        return (end as (...a: unknown[]) => ServerResponse).apply(this, args);
+      });
+      try {
+        await withEnv(MANAGED, async () => {
+          const res = await as(ADMIN, '/api/export', { headers: { 'X-Lynox-CP-Request': JOB } }, freshBase);
+          expect(res.status).toBe(200);
+          expect(res.headers.get('x-lynox-audit-target')).toBe('request-id');
+          await res.json();
+        });
+      } finally { spyEnd.mockRestore(); spyRecord.mockRestore(); }
+      expect(order).toEqual(['row:attempt', 'row:done', 'end']);
+      expect(brief()).toEqual([
+        ['cp-admin', 'GET /api/export', 'attempt', `request ${JOB}`],
+        ['cp-admin', 'GET /api/export 200', 'done', `request ${JOB}`],
+      ]);
+    });
+
+    it('exports without a job id, or with a malformed one, and says only which class it saw', async () => {
+      await withEnv(MANAGED, async () => {
+        for (const [header, kind] of [[undefined, 'no-request-id'], ['TEST-NOT-AN-ID', 'invalid-request-id']] as const) {
+          const res = await as(ADMIN, '/api/export', header === undefined ? {} : { headers: { 'X-Lynox-CP-Request': header } }, freshBase);
+          expect(res.status).toBe(200);
+          expect(res.headers.get('x-lynox-audit-target')).toBe(kind);
+          await res.json();
+        }
+      });
+      expect(brief().map((r) => r[3])).toEqual(['no-request-id', 'no-request-id', 'invalid-request-id', 'invalid-request-id']);
+    });
+
+    it('delivers the export while the log cannot be written, and writes its rows with the next row that can be', async () => {
+      logAvailable = false;
+      await withEnv(MANAGED, async () => {
+        const res = await as(ADMIN, '/api/export', { headers: { 'X-Lynox-CP-Request': JOB } }, freshBase);
+        expect(res.status).toBe(200);
+        expect(res.headers.get('x-lynox-audit-target')).toBe('request-id');
+        await res.json();
+      });
+      expect(rows()).toEqual([]);
+      await new Promise((r) => setTimeout(r, 5));
+      logAvailable = true;
+      await withEnv(MANAGED, async () => { expect((await as(ADMIN, CP_ROUTE, {}, freshBase)).status).toBe(200); });
+      const all = rows();
+      expect(all.map((r) => [r['action'], r['phase']])).toEqual([
+        ['GET /api/export', 'attempt'], ['GET /api/export 200', 'done'],
+        [`GET ${CP_ROUTE}`, 'attempt'], [`GET ${CP_ROUTE} 200`, 'done'],
+      ]);
+      // The two late rows say so; the others do not.
+      expect(all.map((r) => r['recorded_at'] !== r['ts'])).toEqual([true, true, false, false]);
+    });
+
+    it('refuses the export with audit_unavailable when the switch says so, and closes its pair', async () => {
+      const holder = fresh as unknown as { _cpExportPolicy: () => 'deliver' | 'refuse'; _cpTrail: CpTrail };
+      const policy = holder._cpExportPolicy;
+      holder._cpExportPolicy = () => 'refuse';
+      logAvailable = false;
+      try {
+        await withEnv(MANAGED, async () => {
+          const res = await as(ADMIN, '/api/export', { headers: { 'X-Lynox-CP-Request': JOB } }, freshBase);
+          expect(res.status).toBe(503);
+          expect(((await res.json()) as { code?: string }).code).toBe('audit_unavailable');
+        });
+        // Both rows kept for later: the attempt and its outcome.
+        expect(holder._cpTrail.pendingCount()).toBe(2);
+      } finally { holder._cpExportPolicy = policy; }
+      logAvailable = true;
+      await withEnv(MANAGED, async () => { expect((await as(ADMIN, CP_ROUTE, {}, freshBase)).status).toBe(200); });
+      expect(brief().slice(0, 2).map((r) => [r[1], r[2]])).toEqual([['GET /api/export', 'attempt'], ['GET /api/export 503', 'failed']]);
+    });
+
+    it('records the control plane\'s refusal on a route not registered for it, after the rate limit', async () => {
+      await withEnv(MANAGED, async () => {
+        expect((await as(ADMIN, USER_ROUTE, {}, freshBase)).status).toBe(403);
+        expect((await as(ADMIN, USER_ROUTE, {}, freshBase)).status).toBe(403);
+      });
+      // The second in the same minute is counted, not written.
+      expect(brief()).toEqual([['cp-admin', `GET ${USER_ROUTE} 403`, 'refused', 'not registered for the control plane']]);
+      const counts = (fresh as unknown as { rateCounts: Map<string, { count: number; resetAt: number }> }).rateCounts;
+      const saved = new Map([...counts].map(([k, v]) => [k, { ...v }]));
+      try {
+        for (const e of counts.values()) e.count = 1_000_000;
+        await withEnv(MANAGED, async () => {
+          expect((await as(ADMIN, '/api/TEST-other-route', {}, freshBase)).status).toBe(429);
+        });
+      } finally { for (const [k, v] of saved) counts.set(k, v); }
+      expect(rows()).toHaveLength(1);
+    });
+
+    it('does not record an export that cannot be serialised as handed over', async () => {
+      const stringify = JSON.stringify;
+      const spy = vi.spyOn(JSON, 'stringify').mockImplementation(function (this: unknown, ...args: Parameters<typeof JSON.stringify>) {
+        const v = args[0] as Record<string, unknown> | null;
+        if (v !== null && typeof v === 'object' && 'exported_at' in v) throw new RangeError('TEST: Invalid string length');
+        return stringify.apply(JSON, args);
+      });
+      try {
+        await withEnv(MANAGED, async () => {
+          const res = await as(ADMIN, '/api/export', { headers: { 'X-Lynox-CP-Request': JOB } }, freshBase);
+          expect(res.status).toBe(500);
+          await res.text();
+        });
+      } finally { spy.mockRestore(); }
+      // The handler threw before it answered: no status, and `failed`, as in a mandate's trail.
+      expect(brief().map((r) => [r[1], r[2]])).toEqual([['GET /api/export', 'attempt'], ['GET /api/export', 'failed']]);
+    });
+
+    it('masks a secret\'s shape in a refused path, and does not keep a refusal\'s row', async () => {
+      // Built at run time: no key-shaped literal in the source.
+      const key = ['sk', 'ant', 'api03', 'A'.repeat(40)].join('-');
+      await withEnv(MANAGED, async () => {
+        expect((await as(ADMIN, `/api/${key}`, {}, freshBase)).status).toBe(403);
+      });
+      expect(rows()).toHaveLength(1);
+      expect(String(rows()[0]!['action'])).not.toContain(key);
+      expect(String(rows()[0]!['action'])).toMatch(/^GET \/api\/.+ 403$/);
+      // With the log down, the refusal is not kept for later.
+      logAvailable = false;
+      await withEnv(MANAGED, async () => {
+        expect((await as(ADMIN, '/api/TEST-other-refused', {}, freshBase)).status).toBe(403);
+      });
+      expect((fresh as unknown as { _cpTrail: CpTrail })._cpTrail.pendingCount()).toBe(0);
+      // Control: its row was attempted, and named as not kept.
+      expect(warned).toEqual([expect.stringContaining('row not written and not kept')]);
+    });
+
+    it('records the migration token on a provisioned instance as the control plane, and not on a self-hosted one', async () => {
+      const token = randomBytes(32).toString('hex');
+      const handshake = (): Promise<Response> => fetch(`${freshBase}/api/migration/handshake`, {
+        method: 'POST', body: '{}', headers: { 'x-migration-token': token, 'Content-Type': 'application/json' },
+      });
+      // Past the door and into the handler, which turns the empty handshake down.
+      await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: undefined }, async () => {
+        expect((await handshake()).status).toBe(400);
+      });
+      expect(brief()).toEqual([
+        ['cp-migration', 'POST /api/migration/handshake', 'attempt', 'null'],
+        ['cp-migration', 'POST /api/migration/handshake 400', 'refused', 'null'],
+      ]);
+      // Self-hosted: into the handler too (its own 404 says so), and no row.
+      await withEnv({ ...SELF_HOSTED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: undefined }, async () => {
+        const res = await handshake();
+        expect(res.status).toBe(404);
+        expect(((await res.json()) as { error: string }).error).toBe('Migration import only available on managed instances');
+      });
+      expect(rows()).toHaveLength(2);
+    });
+
+    it('records an answer the dispatcher gives itself, a 404 on a migration path no route has', async () => {
+      const token = randomBytes(32).toString('hex');
+      await withEnv({ ...MANAGED, LYNOX_MIGRATION_TOKEN: token, LYNOX_VAULT_KEY: undefined }, async () => {
+        const res = await fetch(`${freshBase}/api/migration/TEST-no-such-route`, { headers: { 'x-migration-token': token } });
+        expect(res.status).toBe(404);
+        await res.text();
+      });
+      expect(brief()).toEqual([
+        ['cp-migration', 'GET /api/migration/TEST-no-such-route', 'attempt', 'null'],
+        ['cp-migration', 'GET /api/migration/TEST-no-such-route 404', 'refused', 'null'],
+      ]);
+    });
+
+    it('leaves no row and no header for the owner\'s export', async () => {
+      // The admin secret on a self-hosted instance is the owner's.
+      await withEnv(SELF_HOSTED, async () => {
+        const res = await as(ADMIN, '/api/export', { headers: { 'X-Lynox-CP-Request': JOB } }, freshBase);
+        expect(res.status).toBe(200);
+        expect(res.headers.get('x-lynox-audit-target')).toBeNull();
+        await res.json();
+      });
+      expect(rows()).toEqual([]);
+    });
+
+    // A client that leaves early does not decide the outcome, as in a mandate's trail: the row is
+    // written by the dispatcher when its dispatch is over, from the answer, and only once.
+    it('does not let a closed connection decide the outcome; the end of the dispatch does, once', () => {
+      const f = fresh as unknown as { _beginCpTrail: (...a: unknown[]) => boolean; _endCpTrail: (req: unknown, status: number) => void };
+      const req = { headers: {} };
+      const res = Object.assign(new EventEmitter(), { headersSent: false, statusCode: 200, setHeader: () => {} });
+      expect(f._beginCpTrail.call(fresh, req, res, 'GET', CP_ROUTE, 'cp-admin', null)).toBe(true);
+      res.emit('close');
+      res.emit('finish');
+      expect(brief().map((r) => r[2])).toEqual(['attempt']);
+      f._endCpTrail.call(fresh, req, 200);
+      f._endCpTrail.call(fresh, req, 500);
+      expect(brief()).toEqual([
+        ['cp-admin', `GET ${CP_ROUTE}`, 'attempt', 'null'],
+        ['cp-admin', `GET ${CP_ROUTE} 200`, 'done', 'null'],
+      ]);
+    });
+
+    it('records a 5xx as failed and another refusal as refused', async () => {
+      const orig = engine()['getMandateEnds'];
+      engine()['getMandateEnds'] = () => null;
+      try {
+        await withEnv(MANAGED, async () => {
+          expect((await as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: ['TEST-M-1'] }) }, freshBase)).status).toBe(503);
+          expect((await as(ADMIN, '/api/admin/mandates/revoke', { method: 'POST', body: JSON.stringify({ revoked_mandate_ids: 'TEST-M-1' }) }, freshBase)).status).toBe(400);
+        });
+      } finally { engine()['getMandateEnds'] = orig; }
+      expect(brief().filter((r) => r[2] !== 'attempt').map((r) => [r[1], r[2]])).toEqual([
+        ['POST /api/admin/mandates/revoke 503', 'failed'],
+        ['POST /api/admin/mandates/revoke 400', 'refused'],
+      ]);
     });
   });
 });

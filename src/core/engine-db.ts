@@ -1105,6 +1105,12 @@ const MIGRATIONS: string[] = [
      minted_at     TEXT NOT NULL DEFAULT (datetime('now'))
    );
    CREATE INDEX IF NOT EXISTS idx_connection_grants_connection ON connection_grants(connection_id);`,
+
+  // v34 (control-plane trail, PRD cp-admin-line §3.3): when a row was written, beside `ts`, when
+  // its act happened. The same for every row but one written late, after the log could not be
+  // written at the time; `recorded_at ≠ ts` marks that one. NULL on rows from before.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (34);
+   ALTER TABLE audit_log ADD COLUMN recorded_at TEXT;`,
 ];
 
 /**
