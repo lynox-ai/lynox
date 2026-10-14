@@ -37,6 +37,19 @@ const ENUMERATION =
 
 const CP_ONLY_LITERAL = /(['"`])managed_(?:pro|max)\1/;
 
+const ACCOUNT_VIEW = 'components/AccountBillingView.svelte';
+
+/**
+ * Line indices [start, end] of the account view's `tierLabel` derived — the block
+ * that holds the label switch. Both the case-line exemption and the `never` check
+ * are bound to it, so a second switch elsewhere in the file gets neither.
+ */
+function labelBlock(lines: string[]): [number, number] {
+	const start = lines.findIndex((l) => /^\s*const tierLabel = \$derived\.by\(/.test(l));
+	const end = start < 0 ? -1 : lines.findIndex((l, i) => i > start && /^\t\}\);\s*$/.test(l));
+	return [start, end];
+}
+
 describe('billing tier is asked through the contract, never spelled out', () => {
 	it('no component compares a tier value against a CP-key tier literal', () => {
 		const files = sources(ROOT);
@@ -61,17 +74,24 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 		// shape, an LLM region — so they stay with the narrower check.)
 		// The one allowed form is a `case` line of the account label switch: its `never`
 		// default makes it exhaustive over BillingTier, so a new tier fails the compile
-		// there. Only the case LINES are exempt — anything else in that file is checked.
-		const ALLOWED_CASE_FILE = 'components/AccountBillingView.svelte';
+		// there. Only case lines INSIDE that block are exempt — anything else in that
+		// file, a second switch included, is checked.
 		const CASE_LINE = /^\s*case\s+(['"`])managed_(?:pro|max)\1\s*:/;
 		const hits: string[] = [];
+		let blockFound = false;
 		for (const file of sources(ROOT)) {
 			const rel = file.slice(ROOT.length).replace(/^lib\//, '');
-			readFileSync(file, 'utf-8').split('\n').forEach((line, i) => {
-				if (rel === ALLOWED_CASE_FILE && CASE_LINE.test(line)) return;
+			const lines = readFileSync(file, 'utf-8').split('\n');
+			const [start, end] = rel === ACCOUNT_VIEW ? labelBlock(lines) : [-1, -1];
+			if (rel === ACCOUNT_VIEW) blockFound = start >= 0 && end > start;
+			lines.forEach((line, i) => {
+				if (i > start && i < end && CASE_LINE.test(line)) return;
 				if (CP_ONLY_LITERAL.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
 			});
 		}
+		// Positive control: without the block the exemption silently exempts nothing,
+		// which fails above anyway — but say why.
+		expect(blockFound, `${ACCOUNT_VIEW}: tierLabel block not found`).toBe(true);
 		expect(hits, 'use cpSuppliesLLMKey / normalizeBillingTier from utils/billing-tier').toEqual([]);
 	});
 
@@ -85,8 +105,14 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 	});
 
 	it('the account label switch is exhaustive by a never default, not by convention', () => {
-		const src = readFileSync(fileURLToPath(new URL('./components/AccountBillingView.svelte', import.meta.url)), 'utf-8');
-		expect(src).toMatch(/const \w+: never = managed;/);
+		const lines = readFileSync(fileURLToPath(new URL('./components/AccountBillingView.svelte', import.meta.url)), 'utf-8').split('\n');
+		const [start, end] = labelBlock(lines);
+		expect(start >= 0 && end > start, 'tierLabel block not found').toBe(true);
+		// Bound to the block: a `never` line in a comment or in another switch of the
+		// file does not make THIS switch exhaustive.
+		const block = lines.slice(start, end + 1).filter((l) => !/^\s*\/\//.test(l)).join('\n');
+		expect(block).toMatch(/switch \(managed\)/);
+		expect(block).toMatch(/default: \{\s*const \w+: never = managed;/);
 	});
 
 	it('every canonical tier has an account label in both locales', () => {
