@@ -148,6 +148,15 @@ while true; do
 done
 
 # ─────────────────────────────────────────────────────────────────────
+# Image: no process is dumpable
+# ─────────────────────────────────────────────────────────────────────
+
+step "Check that every program in the image is execute-only"
+CONTAINER_ID=$(docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" ps -q lynox)
+[[ -n "$CONTAINER_ID" ]] || die "no running lynox container in $PROJECT_NAME"
+bash "$CORE_DIR/scripts/image-exec-only-probe.sh" "$CONTAINER_ID"
+
+# ─────────────────────────────────────────────────────────────────────
 # Playwright
 # ─────────────────────────────────────────────────────────────────────
 
