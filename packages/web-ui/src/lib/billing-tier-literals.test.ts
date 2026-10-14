@@ -39,15 +39,37 @@ const CP_ONLY_LITERAL = /(['"`])managed_(?:pro|max)\1/;
 
 const ACCOUNT_VIEW = 'components/AccountBillingView.svelte';
 
+/** Blanks `//` and block comments, keeping every newline, so line numbers still match. */
+function stripComments(src: string): string {
+	return src
+		.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+		.replace(/(^|[^:])\/\/[^\n]*/g, (m, pre: string) => pre + ' '.repeat(m.length - pre.length));
+}
+
 /**
- * Line indices [start, end] of the account view's `tierLabel` derived — the block
- * that holds the label switch. Both the case-line exemption and the `never` check
- * are bound to it, so a second switch elsewhere in the file gets neither.
+ * The account view's label switch, found on comment-free source: the one
+ * `switch (managed) {` in the file, closed by brace depth. `caseLines` are the lines
+ * that sit DIRECTLY in it (depth 1), so a switch nested inside gets no exemption.
+ * `null` when the file has no such switch or more than one — the caller fails loud.
  */
-function labelBlock(lines: string[]): [number, number] {
-	const start = lines.findIndex((l) => /^\s*const tierLabel = \$derived\.by\(/.test(l));
-	const end = start < 0 ? -1 : lines.findIndex((l, i) => i > start && /^\t\}\);\s*$/.test(l));
-	return [start, end];
+function labelSwitch(src: string): { open: number; close: number; caseLines: Set<number>; body: string } | null {
+	const lines = stripComments(src).split('\n');
+	const opens = lines.flatMap((l, i) => (/\bswitch \(managed\) \{/.test(l) ? [i] : []));
+	if (opens.length !== 1) return null;
+	const open = opens[0]!;
+	const caseLines = new Set<number>();
+	let depth = 0;
+	for (let i = open; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (depth === 1 && /^\s*case\b/.test(line)) caseLines.add(i);
+		for (const ch of line) {
+			if (ch === '{') depth++;
+			else if (ch === '}' && --depth === 0) {
+				return { open, close: i, caseLines, body: lines.slice(open, i + 1).join('\n') };
+			}
+		}
+	}
+	return null;
 }
 
 describe('billing tier is asked through the contract, never spelled out', () => {
@@ -74,24 +96,24 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 		// shape, an LLM region — so they stay with the narrower check.)
 		// The one allowed form is a `case` line of the account label switch: its `never`
 		// default makes it exhaustive over BillingTier, so a new tier fails the compile
-		// there. Only case lines INSIDE that block are exempt — anything else in that
-		// file, a second switch included, is checked.
-		const CASE_LINE = /^\s*case\s+(['"`])managed_(?:pro|max)\1\s*:/;
+		// there. Only the case LABEL of a line directly in that switch is exempt — the
+		// rest of such a line, a nested switch and anything else in the file are checked.
+		const CASE_LABEL = /^\s*case\s+(['"`])managed_(?:pro|max)\1\s*:/;
 		const hits: string[] = [];
-		let blockFound = false;
+		let switchFound = false;
 		for (const file of sources(ROOT)) {
 			const rel = file.slice(ROOT.length).replace(/^lib\//, '');
-			const lines = readFileSync(file, 'utf-8').split('\n');
-			const [start, end] = rel === ACCOUNT_VIEW ? labelBlock(lines) : [-1, -1];
-			if (rel === ACCOUNT_VIEW) blockFound = start >= 0 && end > start;
-			lines.forEach((line, i) => {
-				if (i > start && i < end && CASE_LINE.test(line)) return;
-				if (CP_ONLY_LITERAL.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
+			const src = readFileSync(file, 'utf-8');
+			const sw = rel === ACCOUNT_VIEW ? labelSwitch(src) : null;
+			if (rel === ACCOUNT_VIEW) switchFound = sw !== null;
+			src.split('\n').forEach((line, i) => {
+				const checked = sw?.caseLines.has(i) ? line.replace(CASE_LABEL, '') : line;
+				if (CP_ONLY_LITERAL.test(checked)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
 			});
 		}
-		// Positive control: without the block the exemption silently exempts nothing,
-		// which fails above anyway — but say why.
-		expect(blockFound, `${ACCOUNT_VIEW}: tierLabel block not found`).toBe(true);
+		// Without the switch nothing is exempt and the case lines show up as hits below;
+		// this says why.
+		expect(switchFound, `${ACCOUNT_VIEW}: exactly one \`switch (managed) {\` expected`).toBe(true);
 		expect(hits, 'use cpSuppliesLLMKey / normalizeBillingTier from utils/billing-tier').toEqual([]);
 	});
 
@@ -105,14 +127,11 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 	});
 
 	it('the account label switch is exhaustive by a never default, not by convention', () => {
-		const lines = readFileSync(fileURLToPath(new URL('./components/AccountBillingView.svelte', import.meta.url)), 'utf-8').split('\n');
-		const [start, end] = labelBlock(lines);
-		expect(start >= 0 && end > start, 'tierLabel block not found').toBe(true);
-		// Bound to the block: a `never` line in a comment or in another switch of the
-		// file does not make THIS switch exhaustive.
-		const block = lines.slice(start, end + 1).filter((l) => !/^\s*\/\//.test(l)).join('\n');
-		expect(block).toMatch(/switch \(managed\)/);
-		expect(block).toMatch(/default: \{\s*const \w+: never = managed;/);
+		const sw = labelSwitch(readFileSync(fileURLToPath(new URL('./components/AccountBillingView.svelte', import.meta.url)), 'utf-8'));
+		expect(sw, 'exactly one `switch (managed) {` expected').not.toBeNull();
+		// Bound to that switch, on comment-free source: a `never` line in a comment or
+		// in another place of the file does not make THIS switch exhaustive.
+		expect(sw!.body).toMatch(/default: \{\s*const \w+: never = managed;/);
 	});
 
 	it('every canonical tier has an account label in both locales', () => {
