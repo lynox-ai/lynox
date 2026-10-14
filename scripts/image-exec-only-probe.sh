@@ -71,31 +71,64 @@ fi
 # 3. The property itself. Each case starts a process with the marker in its
 #    environment, then a second `docker exec` (a different process of the same
 #    user, as a shell child of the engine would be) reads its environment.
-#    READABLE means the marker was found, DENIED that the read failed.
-read_env() { # <user> <pid>
-  docker exec --user "$1" "$CONTAINER" sh -c "if { tr '\\0' '\\n' < /proc/$2/environ; } 2>/dev/null | grep -q '^$MARKER='; then echo READABLE; elif { cat /proc/$2/environ; } >/dev/null 2>&1; then echo NO-MARKER; else echo DENIED; fi"
+#    READABLE means the marker was found, DENIED that the read failed. Before
+#    reading, the process must still be alive and be the program the case
+#    names: a pid that is gone also fails the read, and would pass as DENIED.
+read_env() { # <user> <pid> <comm>
+  docker exec --user "$1" "$CONTAINER" sh -c "
+    c=\$(cat /proc/$2/comm 2>/dev/null) || { echo GONE; exit; }
+    [ \"\$c\" = '$3' ] || { echo \"WRONG-PROCESS:\$c\"; exit; }
+    if { tr '\\0' '\\n' < /proc/$2/environ; } 2>/dev/null | grep -q '^$MARKER='; then echo READABLE
+    elif { cat /proc/$2/environ; } >/dev/null 2>&1; then echo NO-MARKER
+    else echo DENIED; fi"
 }
-start_and_read() { # <want> <label> <user> <command…>
-  local want=$1 label=$2 user=$3; shift 3
+start_and_read() { # <want> <label> <user> <comm> <command…>
+  local want=$1 label=$2 user=$3 comm=$4; shift 4
   local pid
   pid=$(docker exec --user "$user" -e "$MARKER=1" "$CONTAINER" sh -c "$* >/dev/null 2>&1 & echo \$!")
-  sleep 1
-  local got; got=$(read_env "$user" "$pid")
-  docker exec --user 0 "$CONTAINER" kill "$pid" >/dev/null 2>&1 || true
+  sleep 2
+  local got; got=$(read_env "$user" "$pid" "$comm")
+  docker exec --user 0 "$CONTAINER" sh -c "kill $pid" >/dev/null 2>&1 || true
+  case "$got" in
+    GONE|WRONG-PROCESS:*) echo "probe error: $label → $got (pid $pid); the case did not run as meant" >&2; exit 2 ;;
+  esac
   if [[ "$got" == "$want" ]]; then echo "ok: $label → $got"; else bad "$label → $got, want $want"; fi
 }
-# `exec` so the pid is the program itself, not the shell that started it.
-start_and_read DENIED "node" 1001 "exec node -e 'setTimeout(()=>{},30000)'"
-start_and_read DENIED "sh" 1001 "exec sh -c 'sleep 30'"
-start_and_read DENIED "wget" 1001 "exec wget -q -O /dev/null --tries=1 --timeout=30 http://10.255.255.1/"
-start_and_read DENIED "ffmpeg" 1001 "exec ffmpeg -nostdin -re -f lavfi -i anullsrc -t 30 -f null -"
-# The engine itself, which carries the instance's environment.
-got=$(docker exec "$CONTAINER" sh -c 'cat /proc/1/environ >/dev/null 2>&1 && echo READABLE || echo DENIED')
-if [[ "$got" == "DENIED" ]]; then echo "ok: the engine (pid 1) → DENIED"; else bad "the engine (pid 1) → $got, want DENIED"; fi
+# `exec` so the pid is the program itself, not the shell that started it. wget
+# talks to a local listener that never answers, so it is still waiting when it
+# is read, whatever the network around the container does.
+start_and_read DENIED "node" 1001 node "exec node -e 'setTimeout(()=>{},30000)'"
+start_and_read DENIED "sh" 1001 sh "exec sh -c 'sleep 30'"
+start_and_read DENIED "wget" 1001 wget "node -e 'require(\"net\").createServer(()=>{}).listen(39999);setTimeout(()=>process.exit(),30000)' & sleep 1; exec wget -q -O /dev/null --tries=1 --timeout=30 http://127.0.0.1:39999/"
+start_and_read DENIED "ffmpeg" 1001 ffmpeg "exec ffmpeg -nostdin -re -f lavfi -i anullsrc -t 30 -f null -"
 
-# 4. Positive control: the same start and the same reader, as root, the owner
+# 4. Every process in the container, not only the ones started above: none of
+#    the runtime user's processes, other than the reader itself, may let the
+#    runtime user read its environment. This includes the engine (pid 1) and
+#    whatever an init or a `docker exec` put there.
+leaks=$(docker exec "$CONTAINER" sh -c '
+  me=$$; n=0
+  for d in /proc/[0-9]*; do
+    p=${d#/proc/}; [ "$p" = "$me" ] && continue
+    u=$(awk "/^Uid:/{print \$2}" $d/status 2>/dev/null) || continue
+    [ "$u" = "$(id -u)" ] || continue
+    n=$((n+1))
+    { cat $d/environ; } >/dev/null 2>&1 && echo "$p $(cat $d/comm 2>/dev/null)"
+  done
+  echo "checked=$n"')
+checked=$(printf '%s\n' "$leaks" | sed -n 's/^checked=//p')
+readable_pids=$(printf '%s\n' "$leaks" | grep -v '^checked=' || true)
+(( checked >= 1 )) || { echo "probe error: found no process of the runtime user to check" >&2; exit 2; }
+pid1=$(docker exec "$CONTAINER" cat /proc/1/comm)
+if [[ -n "$readable_pids" ]]; then
+  bad "the runtime user can read the environment of: $(printf '%s\n' "$readable_pids" | tr '\n' ',' )"
+else
+  echo "ok: none of the runtime user's $checked other processes, pid 1 ($pid1) among them, lets it read its environment"
+fi
+
+# 5. Positive control: the same start and the same reader, as root, the owner
 #    of the binaries. root may read /bin/sleep, so the process is dumpable and
 #    the reader (also root) must find the marker.
-start_and_read READABLE "sleep started and read by its owner, root (control)" 0 "exec sleep 30"
+start_and_read READABLE "sleep started and read by its owner, root (control)" 0 sleep "exec sleep 30"
 
 exit "$fail"
