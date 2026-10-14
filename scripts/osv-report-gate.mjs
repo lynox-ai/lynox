@@ -48,8 +48,9 @@
  * ONE SCAN PER LOCKFILE, one pair per scan. A single osv-scanner call over two
  * lockfiles exits 128 only when BOTH yield no packages, so an empty second
  * lockfile beside a readable first one scanned green. Scanned separately, each
- * lockfile carries its own exit code into the checks below, and the verdict is
- * the union: every pair must be a completed scan, and nothing in any may block.
+ * lockfile fails on its own: a scan that wrote no report (127, 128) is refused
+ * under its name and exit code, and the verdict is the union — every pair must
+ * be a completed scan, and nothing in any may block.
  *
  * Exits 0 when nothing blocks, 1 otherwise.
  */
@@ -228,9 +229,8 @@ export function main(argv) {
     console.error('osv-report-gate: --report <path> is required');
     return 1;
   }
-  // Paired by position. A count mismatch would pair a report with another
-  // scan's exit code — or with none, which the check below would then refuse
-  // for the wrong report. Refused here, by name.
+  // Paired by position. More codes than reports is refused here; a report
+  // left without a code is refused below, by `evaluate`, under its own name.
   if (rcs.length > reports.length) {
     console.error(`osv-report-gate: ${rcs.length} --rc for ${reports.length} --report; each report takes exactly one`);
     return 1;
@@ -246,16 +246,20 @@ export function main(argv) {
   const blocking = [];
   const below = [];
   for (const [i, report] of reports.entries()) {
+    const rc = rcs[i];
     let doc;
     try {
       doc = JSON.parse(readFileSync(report, 'utf8'));
     } catch (err) {
       // A report that cannot be read is the loudest failure this gate has, and it
       // is the one the old `|| true` reached by accident. It is now the rule.
-      console.error(`::error::osv-report-gate: cannot read ${report}: ${String(err)}`);
-      return 1;
+      // It is also what a 127 or 128 looks like in practice — the scanner writes
+      // no report then — so the exit code goes into the reason, and the other
+      // scans are still judged rather than dropped from the output.
+      const code = rc === undefined || Number.isNaN(rc) ? '' : ` (osv-scanner exited ${rc})`;
+      errors.push(`cannot read ${report}${code}: ${String(err)}`);
+      continue;
     }
-    const rc = rcs[i];
     const one = evaluate({ doc, rc: rc === undefined || Number.isNaN(rc) ? undefined : rc });
     // With one report the reasons read as before; with several, each says which scan it is about.
     errors.push(...one.errors.map((e) => (reports.length > 1 ? `${report}: ${e}` : e)));

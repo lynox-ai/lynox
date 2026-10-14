@@ -350,6 +350,19 @@ describe('one scan per lockfile: several --report/--rc pairs', () => {
     expect(r.stderr, 'with several scans, the reason names which').toContain('osv-1.json');
   });
 
+  it('FAILS when the second scan wrote no report — what 127 and 128 really look like', () => {
+    // osv-scanner 2.5.1 writes no report on 127 or 128. The reason names the file and the code,
+    // and the first scan is still judged rather than dropped from the output.
+    const dir = mkdtempSync(join(tmpdir(), 'osv-gate-'));
+    const a = join(dir, 'a.json');
+    writeFileSync(a, JSON.stringify(MALICIOUS_REPORT));
+    const r = spawnSync(process.execPath, [SCRIPT, '--report', a, '--rc', '1', '--report', join(dir, 'never-written.json'), '--rc', '128'], { encoding: 'utf8' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('cannot read');
+    expect(r.stderr).toContain('never-written.json (osv-scanner exited 128)');
+    expect(r.stderr, 'the first report is still judged').toContain('MAL-2023-8697');
+  });
+
   it('FAILS on a blocking finding in any report, and counts across all of them', () => {
     expect(runPairs([[CLEAN, '0'], [MALICIOUS_REPORT, '1']]).status).toBe(1);
     expect(runPairs([[MALICIOUS_REPORT, '1'], [CLEAN, '0']]).status).toBe(1);
