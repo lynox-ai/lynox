@@ -10188,6 +10188,39 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('POST /api/vault/rotate re-keys the vault in the configured data dir, and nothing under ~/.lynox', async () => {
+      const { SecretVault } = await import('../core/secret-vault.js');
+      const dataDir = mkdtempSync(join(tmpdir(), 'vault-rotate-data-'));
+      const home = mkdtempSync(join(tmpdir(), 'vault-rotate-home-'));
+      const oldKey = 'old-vault-key-0123456789';
+      const newKey = 'new-vault-key-0123456789';
+      const seeded = new SecretVault({ path: join(dataDir, 'vault.db'), masterKey: oldKey });
+      seeded.set('SOME_TOKEN', 'kept-across-rotation');
+      seeded.close();
+      // HOME too: the old route built `homedir()/.lynox/vault.db`, and a test that hit the
+      // developer's real home would re-key their vault.
+      const saved = { data: process.env['LYNOX_DATA_DIR'], home: process.env['HOME'], key: process.env['LYNOX_VAULT_KEY'] };
+      process.env['LYNOX_DATA_DIR'] = dataDir;
+      process.env['HOME'] = home;
+      process.env['LYNOX_VAULT_KEY'] = oldKey;
+      try {
+        const res = await jsonFetch('/api/vault/rotate', { method: 'POST', body: JSON.stringify({ newKey }) });
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as { rotated: number }).rotated).toBe(1);
+        const rotated = new SecretVault({ path: join(dataDir, 'vault.db'), masterKey: newKey });
+        try {
+          expect(rotated.get('SOME_TOKEN')).toBe('kept-across-rotation');
+        } finally { rotated.close(); }
+        expect(existsSync(join(home, '.lynox'))).toBe(false);
+      } finally {
+        for (const [name, value] of [['LYNOX_DATA_DIR', saved.data], ['HOME', saved.home], ['LYNOX_VAULT_KEY', saved.key]] as const) {
+          if (value === undefined) delete process.env[name]; else process.env[name] = value;
+        }
+        rmSync(dataDir, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     // ── Security-event aggregates (abuse detection) ─────────────────────
     it('GET /api/security/events/aggregate requires a bearer token (401 without)', async () => {
       const res = await fetch(`${baseUrl}/api/security/events/aggregate`);

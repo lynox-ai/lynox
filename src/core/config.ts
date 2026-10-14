@@ -5,7 +5,7 @@ import type { LynoxUserConfig, ModelProfile, ModelTier, TierSet, TierSlot } from
 import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId, modelIdExceedsMaxTier, profileNamed } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
-import { readEnvAlias, envTier } from './env.js';
+import { ENV_ALIASES, readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
@@ -168,14 +168,23 @@ export function setDataDir(dir: string | null): void {
   _dataDirOverride = dir;
 }
 
-/** The `--data-dir` override, or `null` — for resolvers that read their own env. */
-export function getDataDirOverride(): string | null {
-  return _dataDirOverride;
+/**
+ * The data directory, resolved from the env passed in: the `--data-dir` override, then
+ * `LYNOX_DATA_DIR` (canonical) with the legacy `LYNOX_DIR` accepted forever, then `~/.lynox`.
+ * The ONE copy of the rule — code that builds `~/.lynox` itself writes somewhere the engine
+ * does not read once the data dir is moved. `getLynoxDir()` is this over `process.env`.
+ */
+export function lynoxDirFor(env: NodeJS.ProcessEnv): string {
+  if (_dataDirOverride !== null) return _dataDirOverride;
+  for (const name of ['LYNOX_DATA_DIR', ...ENV_ALIASES.LYNOX_DATA_DIR]) {
+    const value = env[name];
+    if (value !== undefined && value !== '') return value;
+  }
+  return join(homedir(), LYNOX_DIR);
 }
 
 function getUserConfigDir(): string {
-  // `LYNOX_DATA_DIR` (canonical) with the legacy `LYNOX_DIR` accepted forever.
-  return _dataDirOverride ?? readEnvAlias('LYNOX_DATA_DIR') ?? join(homedir(), LYNOX_DIR);
+  return lynoxDirFor(process.env);
 }
 
 function getProjectConfigDir(): string {

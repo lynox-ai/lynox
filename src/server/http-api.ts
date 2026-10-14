@@ -12238,11 +12238,10 @@ export class LynoxHTTPApi {
         return;
       }
       try {
-        const { resolve } = await import('node:path');
-        const { homedir } = await import('node:os');
-        const { SecretVault } = await import('../core/secret-vault.js');
-        const vaultPath = resolve(homedir(), '.lynox', 'vault.db');
-        const count = SecretVault.rotateVault(vaultPath, currentKey, newKey);
+        // The vault the engine opens, in the configured data dir: re-keying any other file
+        // and answering "update the key and restart" leaves the real vault on the old key.
+        const { SecretVault, getVaultDbPath } = await import('../core/secret-vault.js');
+        const count = SecretVault.rotateVault(getVaultDbPath(), currentKey, newKey);
         jsonResponse(res, 200, { rotated: count, message: 'Update LYNOX_VAULT_KEY and restart' });
       } catch (err: unknown) {
         errorResponse(res, 500, err instanceof Error ? err.message : 'Rotation failed');

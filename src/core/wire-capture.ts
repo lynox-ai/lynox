@@ -16,10 +16,9 @@
  * no Anthropic-SDK dependency and is reusable by the eval's wire-replay consumer.
  */
 import { existsSync, mkdirSync, writeFileSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
-import { getDataDirOverride } from './config.js';
+import { lynoxDirFor } from './config.js';
 import { maskSecretPatterns } from './secret-store.js';
 
 /** One captured outbound request. `userMessage` is REDACTED (see `redactWireUserMessage`). */
@@ -174,15 +173,12 @@ function defaultSinkDir(env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * Resolve the data dir the way `getLynoxDir()` does, reading the env passed in. The
- * `--data-dir` override comes first: without it an instance started with one wrote its
- * captures into `~/.lynox`, where the erasure of its data dir never looked.
+ * The data dir as `getLynoxDir()` resolves it, reading the env passed in. The `--data-dir`
+ * override counts: without it an instance started with one wrote its captures into
+ * `~/.lynox`, where the erasure of its data dir never looked.
  */
 function dataDir(env: NodeJS.ProcessEnv): string {
-  const override = getDataDirOverride();
-  if (override !== null) return override;
-  const fromEnv = env['LYNOX_DATA_DIR'] ?? env['LYNOX_DIR'];
-  return fromEnv && fromEnv.length > 0 ? fromEnv : join(homedir(), '.lynox');
+  return lynoxDirFor(env);
 }
 
 /**

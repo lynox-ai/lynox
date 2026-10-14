@@ -11,10 +11,9 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { randomUUID, randomBytes } from 'node:crypto';
 
-import { readEnvAlias } from './env.js';
+import { getLynoxDir } from './config.js';
 import { modelCapability } from '../types/models.js';
 
 import type {
@@ -33,7 +32,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 // route to the same cache partition → cross-tenant key collision.
 //
 // Salt source: persistent UUID at <data-dir>/.cache-salt, where <data-dir> is
-// LYNOX_DATA_DIR (canonical; legacy LYNOX_DIR still accepted) or ~/.lynox.
+// what getLynoxDir() resolves (--data-dir, LYNOX_DATA_DIR / legacy LYNOX_DIR, ~/.lynox).
 // Per-tenant because one engine process == one tenant == one data dir.
 // 16 hex chars → 64-bit collision space.
 // Fallback for read-only-FS: in-memory crypto.randomBytes (still
@@ -51,9 +50,9 @@ const SALT_HEX_RE = /^[0-9a-f]{16}$/;
 
 export function getCacheKeySalt(): string {
   if (_cacheKeySaltMemo) return _cacheKeySaltMemo;
-  // Canonical `LYNOX_DATA_DIR` with the legacy `LYNOX_DIR` accepted forever, so
-  // the cache-salt co-locates with the rest of the instance data directory.
-  const lynoxDir = readEnvAlias('LYNOX_DATA_DIR') ?? path.join(os.homedir(), '.lynox');
+  // The instance data directory, `--data-dir` included, so the cache-salt
+  // co-locates with the rest of the instance's data.
+  const lynoxDir = getLynoxDir();
   const saltPath = path.join(lynoxDir, '.cache-salt');
   try {
     if (fs.existsSync(saltPath)) {

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages, REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
 import { modelCapability } from '../types/models.js';
+import { setDataDir } from './config.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
@@ -1674,6 +1675,21 @@ describe('OpenAIAdapter', () => {
       } finally {
         delete process.env['LYNOX_DATA_DIR'];
         try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    });
+
+    // An instance started with `--data-dir` sets the override and no env var; the salt used to
+    // land in the env's dir (or `~/.lynox`) instead of the instance's data dir.
+    it('follows a --data-dir override over the env for the salt dir', () => {
+      const overrideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lynox-override-'));
+      setDataDir(overrideDir);
+      try {
+        getCacheKeySalt();
+        expect(fs.existsSync(path.join(overrideDir, '.cache-salt'))).toBe(true);
+        expect(fs.existsSync(path.join(tmpLynoxDir, '.cache-salt'))).toBe(false);
+      } finally {
+        setDataDir(null);
+        try { fs.rmSync(overrideDir, { recursive: true, force: true }); } catch { /* ignore */ }
       }
     });
 
