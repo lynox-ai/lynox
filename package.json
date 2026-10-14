@@ -142,6 +142,7 @@
     "eslint": "^10.1.0",
     "eslint-plugin-svelte": "3.23.0",
     "google-auth-library": "^10.6.2",
+    "semver": "^7.8.5",
     "svelte": "^5.55.7",
     "svelte-eslint-parser": "1.8.1",
     "tsx": "^4.0.0",

@@ -364,6 +364,16 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     // from "crashed", which is the whole claim the exemption makes.
     expectStrippedStderr: /--report <path> is required/,
   },
+  // CI-ONLY, in the test job. Planted (a resolution under its floor, on copies of both real
+  // trees), clean (the real trees) and the fail-closed paths live in
+  // tests/override-applied-guard.test.ts.
+  'override-applied-guard': {
+    kind: 'exempt',
+    reason:
+      'reads fixed trees (package.json + pnpm-lock.yaml), not a set it enumerates; pointed at a directory without them it refuses instead of reporting clean, and a lockfile that resolves nothing while overrides exist is an error',
+    expectStrippedExit: 1,
+    expectStrippedStderr: /does not exist — refusing to report clean/,
+  },
   // CI-ONLY, in the gitleaks jobs. Its planted/clean pair cannot run in this suite:
   // it needs the gitleaks binary, which only those jobs install. It plants its own
   // value on every run there, so what this harness can add is the stripped door.
@@ -443,6 +453,9 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   // The by-hand form: in the stripped repo there is no commit, so no merge base with origin/main.
   'lint-changed': { cmd: 'node', args: [join(repoRoot, 'scripts/lint-changed.mjs')] },
   'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },
+  // `--dir .` is the stripped directory itself: without it the guard reads the REAL repository,
+  // which is clean, and the probe would measure the repo instead of the refusal.
+  'override-applied-guard': { cmd: 'node', args: [join(repoRoot, 'scripts/override-applied-guard.mjs'), '--dir', '.'] },
   'gitleaks-config-canary': { cmd: 'bash', args: [join(repoRoot, 'scripts/gitleaks-config-canary.sh')] },
 };
 
