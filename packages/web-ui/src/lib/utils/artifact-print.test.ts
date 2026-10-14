@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseHTML } from 'linkedom';
 
-import { injectPrintScaffold } from './artifact-print.js';
+import { buildPrintDocument, injectPrintScaffold } from './artifact-print.js';
 
 /**
  * ⚠ ASSERTIONS IN THIS FILE HAVE MOVED AND THEN CHANGED DIRECTION. Named so the
@@ -213,5 +213,39 @@ describe('injectPrintScaffold — the precondition the offset shape smuggled in'
 		expect((out.match(/window\.print\(\)/g) ?? []).length).toBe(1);
 		expect(out).toContain('@page{margin:1.5cm}');
 		expect(out.startsWith(FRAGMENT_WITH_FAKE_CLOSE)).toBe(true);
+	});
+});
+
+describe('buildPrintDocument — the print document runs no script but its own', () => {
+	// The document opens from a blob: URL in the app's origin, where the app's policy allows inline
+	// script. Its own policy comes first and admits only the scaffold's nonce; measured in Chrome,
+	// an artifact's `<script>` and `onerror` then do not run, and the scaffold does.
+	const POLICY = /^<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-([0-9a-f]+)'; object-src 'none'; base-uri 'none'; form-action 'none'">/;
+
+	it('starts with a script policy whose nonce only the scaffold carries', () => {
+		const out = buildPrintDocument('<html><body><script>alert(1)</script><p>x</p></body></html>');
+		const nonce = POLICY.exec(out)?.[1];
+		expect(nonce, 'the document does not start with its script policy').toBeDefined();
+		expect(out.match(/nonce="[^"]*"/g)).toEqual([`nonce="${nonce}"`]);
+		expect(out).toContain(`<scr` + `ipt nonce="${nonce}">window.addEventListener("load"`);
+	});
+
+	it('keeps a leading doctype first, so the document does not fall into quirks mode', () => {
+		const out = buildPrintDocument('<!DOCTYPE html>\n<html><body><p>x</p></body></html>');
+		expect(out.startsWith('<!DOCTYPE html>')).toBe(true);
+		expect(POLICY.test(out.slice('<!DOCTYPE html>'.length))).toBe(true);
+		expect(out.match(/<!DOCTYPE/gi)).toHaveLength(1);
+	});
+
+	it('puts the policy first when the doctype is not the first thing the parser reads', () => {
+		for (const lead of ['\u00a0', '\ufeff', 'x']) {
+			expect(POLICY.test(buildPrintDocument(`${lead}<!DOCTYPE html><html><body>x</body></html>`)), JSON.stringify(lead)).toBe(true);
+		}
+	});
+
+	it('uses a new nonce for every document, always 32 hex digits', () => {
+		const nonces = Array.from({ length: 64 }, () => POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1]);
+		for (const n of nonces) expect(n).toMatch(/^[0-9a-f]{32}$/);
+		expect(new Set(nonces).size).toBe(64);
 	});
 });
