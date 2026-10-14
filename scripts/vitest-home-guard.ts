@@ -7,7 +7,7 @@
  */
 import { homedir } from 'node:os';
 import { getLynoxDir } from '../src/core/config.js';
-import { readRunHomeFacts, runHomeViolation } from './test-run-home.js';
+import { HOME_GUARD_RAN, readRunHomeFacts, runHomeViolation } from './test-run-home.js';
 
 const violation = runHomeViolation(readRunHomeFacts(homedir(), getLynoxDir()));
 if (violation !== null) {
@@ -17,3 +17,4 @@ if (violation !== null) {
       'globalSetup (scripts/vitest-global-setup.ts) redirects HOME first.',
   );
 }
+(globalThis as Record<symbol, unknown>)[HOME_GUARD_RAN] = true;

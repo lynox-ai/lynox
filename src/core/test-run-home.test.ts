@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { RUN_MARKER_ENV, RUN_MARKER_FILE } from '../../scripts/test-run-tmpdir.js';
 import {
-  RUN_HOME_DIR, redirectHomeForRun, runHomeViolation, type RunHomeFacts,
+  HOME_GUARD_RAN, RUN_HOME_DIR, redirectHomeForRun, runHomeViolation, type RunHomeFacts,
 } from '../../scripts/test-run-home.js';
 
 describe('the suite runs with its own home', () => {
@@ -21,6 +21,10 @@ describe('the suite runs with its own home', () => {
     expect(getLynoxDir()).toBe(join(tmpdir(), RUN_HOME_DIR, '.lynox'));
     expect(process.env.LYNOX_DATA_DIR).toBeUndefined();
     expect(process.env.LYNOX_DIR).toBeUndefined();
+  });
+
+  it('the guard ran in this worker, so the project still has it in its setupFiles', () => {
+    expect((globalThis as Record<symbol, unknown>)[HOME_GUARD_RAN]).toBe(true);
   });
 });
 

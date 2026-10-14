@@ -28,6 +28,14 @@ import { RUN_MARKER_ENV, RUN_MARKER_FILE } from './test-run-tmpdir.js';
 export const RUN_HOME_DIR = 'home';
 
 /**
+ * Set on `globalThis` by the guard once it has let a worker through, so a test can tell that the
+ * guard ran at all: without it, removing the guard from a project's `setupFiles` leaves every test
+ * green, because the redirect alone already makes the home right. A registered symbol, so a test
+ * can read it without importing this file.
+ */
+export const HOME_GUARD_RAN = Symbol.for('lynox.test.homeGuardRan');
+
+/**
  * Point `HOME` at a directory inside the run root and remove the data-dir variables. Returns the
  * home. Called from `globalSetup`, after the run root exists: the variables reach the worker
  * processes the same way `TMPDIR` does.
