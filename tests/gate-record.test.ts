@@ -240,6 +240,28 @@ describe('gate-record — which gates a diff requires', () => {
     expect(requiredGates(['src/tools/registry.ts']).has('security')).toBe(false);
   });
 
+  it('demands it for the web UI login code, not only for src/', () => {
+    // One file per entry, so removing any one entry fails here: the template test derives
+    // its tokens from the list and stays green either way.
+    for (const file of [
+      'packages/web-ui/src/lib/server/auth.ts',
+      'packages/web-ui/src/lib/server/public-paths.ts',
+      'packages/web-ui/src/hooks.server.ts',
+      'packages/web-ui/src/routes/auth/passkey/+server.ts',
+      'packages/web-ui/src/routes/login/+page.server.ts',
+      'packages/web-ui/src/routes/logout/+page.server.ts',
+      'packages/web-ui/src/routes/app/settings/account/mobile/+page.server.ts',
+      // The root page mints an owner session in demo mode (`cookies.set('lynox_session', …)`).
+      'packages/web-ui/src/routes/+page.server.ts',
+    ]) {
+      expect(requiredGates([file]).has('security'), file).toBe(true);
+    }
+    // The edge, named: the root layout only reads the demo flags and sets no cookie, so it
+    // stays below the floor, and so does a settings page outside `account/`.
+    expect(requiredGates(['packages/web-ui/src/routes/+layout.server.ts']).has('security')).toBe(false);
+    expect(requiredGates(['packages/web-ui/src/routes/app/settings/mobile/+page.ts']).has('security')).toBe(false);
+  });
+
   it('anchors that entry at src/ — a settings PAGE about integrations is not one', () => {
     // The control for the line above: without the `^src/` anchor the widened entry
     // would swallow the web UI too. This path exists in the repository today.
@@ -384,17 +406,27 @@ describe('gate-record — the shipped template does not answer its own questions
    * entry nobody documents turns this red.
    */
   it('names every path the security map enforces', () => {
-    /** The literal head of a regex, before its first metacharacter. */
-    const literal = (re: RegExp): string =>
-      re.source
-        .replace(/^\^/, '')
-        .replace(/\\(.)/g, '$1')
-        .split(/[.*+?^$(){}|[\]]/)[0] ?? '';
+    /** The literal head of a regex, up to its first UNESCAPED metacharacter: `\+` and
+     *  `\.` are part of the path (`routes/+page.server.ts`), an unescaped `$` or `(` is not. */
+    const literal = (re: RegExp): string => {
+      const src = re.source.replace(/^\^/, '');
+      let out = '';
+      for (let i = 0; i < src.length; i++) {
+        if (src[i] === '\\') { out += src[++i] ?? ''; continue; }
+        if ('.*+?^$(){}|[]'.includes(src[i]!)) break;
+        out += src[i];
+      }
+      return out;
+    };
     const tokens = (SECURITY_PATHS as RegExp[]).map((re) => {
       const lit = literal(re);
-      // A single-file entry (`src/core/output-guard.ts`) is named by its basename in
-      // the prose; a directory entry (`src/server/`) is named in full.
-      return lit.endsWith('/') ? lit : (lit.split('/').pop() ?? lit);
+      // A single-file entry (`src/core/output-guard.ts`) is named by its basename without
+      // the extension in the prose; a directory entry (`src/server/`) is named in full. A
+      // basename too plain to be documentation on its own (`hooks.server.ts`,
+      // `+page.server.ts`) is named by its full path instead.
+      if (lit.endsWith('/')) return lit;
+      const base = (lit.split('/').pop() ?? lit).replace(/\..*$/, '');
+      return base.includes('-') ? base : lit;
     });
     expect(tokens.length).toBe(SECURITY_PATHS.length);
     // The extractor is the suspect, and "non-empty" was not enough: `/^s/` yields
@@ -404,6 +436,10 @@ describe('gate-record — the shipped template does not answer its own questions
     // hyphenated module name.
     const specific = (t: string) => t.split('/').filter(Boolean).length >= 2 || t.includes('-');
     expect(tokens.filter((t) => !specific(t))).toEqual([]);
+    // The same accident one level down: an extractor that stops at the `+` of
+    // `routes/+page.server.ts` yields `packages/web-ui/src/routes/`, which the prose for
+    // `routes/auth/` already contains. A token that is a prefix of another documents nothing.
+    expect(tokens.filter((t) => tokens.some((u) => u !== t && u.startsWith(t)))).toEqual([]);
     for (const t of tokens) expect(TEMPLATE, t).toContain(t);
   });
 
