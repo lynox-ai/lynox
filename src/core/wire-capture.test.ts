@@ -235,7 +235,7 @@ describe('wireSinkDir', () => {
     }
   });
 
-  // The engine's own rule, not a copy of it: an empty LYNOX_DATA_DIR is unset, so the legacy
+  // `getLynoxDir`'s rule, not a copy of it: an empty LYNOX_DATA_DIR is unset, so the legacy
   // LYNOX_DIR applies, as it does for the engine's data dir.
   it('reads the data-dir variables exactly as getLynoxDir does', () => {
     expect(wireSinkDir({ LYNOX_DATA_DIR: '', LYNOX_DIR: '/legacy/lx' })).toBe('/legacy/lx/wire-sink');

@@ -1760,7 +1760,7 @@ describe('Config', () => {
   });
 });
 
-// The one copy of the data-dir rule (`getLynoxDir`, the wire capture, the cache salt and the
+// The data-dir rule (`getLynoxDir`, the wire capture, the cache salt and the
 // vault rotation all resolve through it).
 describe('lynoxDirFor', () => {
   it('takes the --data-dir override first, then LYNOX_DATA_DIR, then the legacy LYNOX_DIR, then ~/.lynox', async () => {

@@ -171,9 +171,8 @@ export function setDataDir(dir: string | null): void {
 /**
  * The data directory, resolved from the env passed in: the `--data-dir` override, then
  * `LYNOX_DATA_DIR` (canonical) with the legacy `LYNOX_DIR` accepted forever, then `~/.lynox`.
- * The engine's copy of the rule: engine code asks this instead of building `~/.lynox` itself,
- * which writes somewhere the engine does not read once the data dir is moved. `getLynoxDir()`
- * is this over `process.env`.
+ * Code asks this instead of building `~/.lynox` itself, which writes somewhere the engine does
+ * not read once the data dir is moved. `getLynoxDir()` is this over `process.env`.
  */
 export function lynoxDirFor(env: NodeJS.ProcessEnv): string {
   if (_dataDirOverride !== null) return _dataDirOverride;
