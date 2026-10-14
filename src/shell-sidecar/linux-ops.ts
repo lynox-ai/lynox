@@ -35,12 +35,17 @@ function errCode(err: unknown): string | undefined {
   return err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : undefined;
 }
 
-/** Run a fixed script as `uid`; resolves when it ends or after a timeout (then it is killed). */
+/**
+ * Run a fixed script as `uid`; resolves when it ends, or after a timeout. Root here cannot
+ * signal the uid's processes (no CAP_KILL), so a script still running after the timeout is
+ * left to the next kill loop — which is why every step is followed by a scan, never trusted.
+ */
 export function runAsUid(uid: number, gid: number, script: string, args: readonly string[] = []): Promise<void> {
   return new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', script, 'lynox-sweep', ...args], { uid, gid, stdio: 'ignore', cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' } });
-    const timer = setTimeout(() => { child.kill('SIGKILL'); }, AS_UID_TIMEOUT_MS);
-    const done = (): void => { clearTimeout(timer); resolve(); };
+    let settled = false;
+    const done = (): void => { if (settled) return; settled = true; clearTimeout(timer); resolve(); };
+    const timer = setTimeout(done, AS_UID_TIMEOUT_MS);
     child.on('error', done);
     child.on('close', done);
   });

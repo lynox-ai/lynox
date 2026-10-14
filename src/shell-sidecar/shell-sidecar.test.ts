@@ -15,9 +15,9 @@ describe('exec protocol: request', () => {
     expect(r).toEqual({ ok: true, value: { cmd: 'echo hi', timeoutMs: 5000, env: { LANG: 'C' } } });
   });
 
-  it('caps the timeout: unset, zero and negative mean the default, above the ceiling means the ceiling', () => {
+  it('caps the timeout: unset and negative mean the default, zero ("no limit") and above the ceiling mean the ceiling', () => {
     expect(capTimeout(undefined)).toBe(DEFAULT_BASH_TIMEOUT_MS);
-    expect(capTimeout(0)).toBe(DEFAULT_BASH_TIMEOUT_MS);
+    expect(capTimeout(0)).toBe(MAX_EXEC_TIMEOUT_MS);
     expect(capTimeout(-1)).toBe(DEFAULT_BASH_TIMEOUT_MS);
     expect(capTimeout(Number.POSITIVE_INFINITY)).toBe(DEFAULT_BASH_TIMEOUT_MS);
     expect(capTimeout(MAX_EXEC_TIMEOUT_MS + 1)).toBe(MAX_EXEC_TIMEOUT_MS);
@@ -126,6 +126,8 @@ describe('linux scans', () => {
     // effective uid 20000 but real uid 0: not the pool uid's process
     proc('11', 'Name:\tx\nUid:\t0\t20000\t20000\t20000\n');
     proc('12', 'Name:\tbroken\n');
+    // a status that cannot be read (here: a directory, EISDIR) is not proof of absence
+    mkdirSync(join(root, '13', 'status'), { recursive: true });
     mkdirSync(join(root, 'self'));
     mkdirSync(join(root, 'sysvipc'));
     writeFileSync(join(root, 'sysvipc', 'shm'),
@@ -139,9 +141,9 @@ describe('linux scans', () => {
 
   it('counts processes by REAL uid, and a status it cannot parse as alive', async () => {
     const root = fakeProc();
-    expect(await countProcessesOf(20000, root)).toBe(2);
-    expect(await countProcessesOf(0, root)).toBe(3);
-    expect(await countProcessesOf(20001, root)).toBe(1);
+    expect(await countProcessesOf(20000, root)).toBe(3);
+    expect(await countProcessesOf(0, root)).toBe(4);
+    expect(await countProcessesOf(20001, root)).toBe(2);
   });
 
   it('finds the uid’s SysV objects by the header’s uid column', async () => {

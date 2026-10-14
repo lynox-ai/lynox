@@ -27,13 +27,15 @@ export const DEFAULT_SOCKET_PATH = '/run/lynox-exec/s/exec.sock';
 export const DEFAULT_WORKSPACE = '/workspace';
 /** Output characters per frame. JSON escaping can grow a character to six bytes; 16Ki × 6 stays under the line cap. */
 export const OUT_CHUNK_CHARS = 16 * 1024;
+/** How long a connection may take to send its request line. */
+export const REQUEST_DEADLINE_MS = 30_000;
 
 /**
  * What runs as the pool uid. The command is an argument, never part of this script; the
  * call dir is created by the uid itself (root may not chown) under a 1733 root dir, and the
  * directory change happens as the uid, so nothing a previous call left is followed as root.
  */
-const CALL_WRAPPER = 'umask 077; mkdir "$HOME" || exit 125; cd "$1" || exit 125; umask 002; shift; exec /bin/sh -c "$1"';
+const CALL_WRAPPER = 'umask 077; mkdir "$HOME" || exit 125; cd "$1" || exit 125; if [ -n "$2" ]; then ulimit -p "$2" || exit 125; fi; umask 002; shift 2; exec /bin/sh -c "$1"';
 
 export interface DaemonDeps {
   pool: UidPool;
@@ -45,6 +47,9 @@ export interface DaemonDeps {
   newCallId(): string;
   callsDir: string;
   log(line: string): void;
+  /** Every uid is quarantined: nothing can run until the sidecar restarts. `main` exits. */
+  exhausted(): void;
+  requestDeadlineMs?: number;
 }
 
 function send(socket: Socket, frame: ExecFrame): boolean {
@@ -58,23 +63,28 @@ function refuse(socket: Socket, error: string): void {
 }
 
 /** Read exactly one request line, bounded. */
-function readRequestLine(socket: Socket, onLine: (line: string | null) => void): void {
-  let buf = '';
+function readRequestLine(socket: Socket, onLine: (line: string | null) => void, deadlineMs: number): void {
+  // Bytes, decoded once the line is whole: a character split across two chunks would
+  // otherwise turn into two replacement characters, and a different command would run.
+  let buf = Buffer.alloc(0);
   let done = false;
   const finish = (line: string | null): void => {
     if (done) return;
     done = true;
+    clearTimeout(timer);
     socket.off('data', onData);
     socket.off('end', onEnd);
     onLine(line);
   };
   const onData = (chunk: Buffer): void => {
-    buf += chunk.toString('utf8');
-    const nl = buf.indexOf('\n');
-    if (nl >= 0) return finish(buf.slice(0, nl));
-    if (Buffer.byteLength(buf) > MAX_REQUEST_BYTES) finish(null);
+    buf = Buffer.concat([buf, chunk]);
+    const nl = buf.indexOf(0x0a);
+    if (nl >= 0) return finish(nl <= MAX_REQUEST_BYTES ? buf.subarray(0, nl).toString('utf8') : null);
+    if (buf.length > MAX_REQUEST_BYTES) finish(null);
   };
-  const onEnd = (): void => finish(buf.length > 0 ? buf : null);
+  const onEnd = (): void => finish(buf.length > 0 ? buf.toString('utf8') : null);
+  // A connection that never finishes its line holds no uid, but it holds a socket.
+  const timer = setTimeout(() => finish(null), deadlineMs);
   socket.on('data', onData);
   socket.on('end', onEnd);
 }
@@ -88,7 +98,7 @@ export function handleConnection(socket: Socket, deps: DaemonDeps): void {
     const uid = deps.pool.acquire();
     if (uid === null) return refuse(socket, 'no free uid in the pool');
     runCall(socket, uid, parsed.value, deps);
-  });
+  }, deps.requestDeadlineMs ?? REQUEST_DEADLINE_MS);
 }
 
 function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps): void {
@@ -119,7 +129,11 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
     const dec = new StringDecoder('utf8');
     const emit = (text: string): void => {
       for (let i = 0; i < text.length; i += OUT_CHUNK_CHARS) {
-        if (!send(socket, { t, d: text.slice(i, i + OUT_CHUNK_CHARS) }) && !stream.isPaused()) {
+        // Never pause for a client that is gone: `drain` will not come, and a write to a
+        // destroyed socket also returns false, so every chunk would pause the stream again and
+        // the uid would stay busy for good. (A stream paused before the client left still
+        // reaches 'close' once the kill ends its writers — measured, Node 22.)
+        if (!send(socket, { t, d: text.slice(i, i + OUT_CHUNK_CHARS) }) && !socket.destroyed && !stream.isPaused()) {
           stream.pause();
           socket.once('drain', () => stream.resume());
         }
@@ -147,15 +161,18 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
 }
 
 async function finishUid(uid: number, deps: DaemonDeps): Promise<void> {
+  let reason: string;
   try {
     const r = await releaseUid(uid, deps.ops);
     if (r.ok) { deps.pool.release(uid); return; }
-    deps.pool.quarantine(uid);
-    deps.log(`QUARANTINE ${r.reason}`);
+    reason = r.reason;
   } catch (err: unknown) {
-    deps.pool.quarantine(uid);
-    deps.log(`QUARANTINE uid ${uid}: release threw: ${err instanceof Error ? err.message : String(err)}`);
+    reason = `uid ${uid}: release threw: ${err instanceof Error ? err.message : String(err)}`;
   }
+  try { deps.pool.quarantine(uid); } catch { /* not busy: nothing to take out */ }
+  deps.log(`QUARANTINE ${reason}`);
+  const { free, busy } = deps.pool.stats();
+  if (free === 0 && busy === 0) deps.exhausted();
 }
 
 /** Before the first call: every pool uid released, and nothing at all left in the calls dir (S6). */
@@ -240,17 +257,23 @@ export async function main(): Promise<void> {
   if (poolGid === 0 || poolGid === engineGid) throw new Error('LYNOX_EXEC_POOL_GID must be set to the lynox-ws group, never 0 or the engine group');
   const pool = new UidPool(intFromEnv('LYNOX_EXEC_POOL_FIRST_UID', process.env['LYNOX_EXEC_POOL_FIRST_UID'], DEFAULT_POOL_FIRST_UID), intFromEnv('LYNOX_EXEC_POOL_SIZE', process.env['LYNOX_EXEC_POOL_SIZE'], DEFAULT_POOL_SIZE));
   const ops = linuxReleaseOps(poolGid);
+  // RLIMIT_NPROC counts per uid and user namespace, not per container: off until measured on a
+  // host without and with userns-remap (sec-infra) — on a shared namespace it would let one
+  // container's calls hold another's back.
+  const nproc = process.env['LYNOX_EXEC_CALL_NPROC'] ? String(intFromEnv('LYNOX_EXEC_CALL_NPROC', process.env['LYNOX_EXEC_CALL_NPROC'])) : '';
   const deps: DaemonDeps = {
     pool,
     ops,
     // libuv drops the supplementary groups when uid/gid are set, so the call holds only poolGid.
-    spawnCall: (uid, cmd, env) => spawn('/bin/sh', ['-c', CALL_WRAPPER, 'lynox-call', workspace, cmd], {
+    spawnCall: (uid, cmd, env) => spawn('/bin/sh', ['-c', CALL_WRAPPER, 'lynox-call', workspace, nproc, cmd], {
       uid, gid: poolGid, cwd: '/', env, stdio: ['ignore', 'pipe', 'pipe'], detached: true,
     }),
     killCall: async (uid) => { await killUntilEmpty(uid, ops); },
     newCallId: () => randomBytes(12).toString('hex'),
     callsDir: CALLS_DIR,
     log: (line) => process.stderr.write(`[exec-daemon] ${line}\n`),
+    // A restart (the template restarts the sidecar) ends whatever kept every uid busy.
+    exhausted: () => { process.stderr.write('[exec-daemon] fatal: every pool uid is quarantined\n'); process.exit(1); },
   };
   prepareCallsDir(CALLS_DIR);
   await startupSweep(deps);

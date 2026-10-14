@@ -36,7 +36,7 @@ describe('exec client', () => {
   it('collects both streams and the exit, and sends a capped timeout', async () => {
     const d = (current = fakeDaemon((s) => { s.write('{"t":"out","d":"a"}\n{"t":"err","d":"b"}\n{"t":"out","d":"c"}\n'); s.end(exit0); }));
     await d.ready;
-    const r = await execViaSidecar(d.sock, { cmd: 'x', timeoutMs: 0, env: { A: '1' } }, 1024);
+    const r = await execViaSidecar(d.sock, { cmd: 'x', timeoutMs: undefined, env: { A: '1' } }, 1024);
     expect(r).toEqual({ stdout: 'ac', stderr: 'b', code: 0, signal: null, timedOut: false, limitMs: 120_000 });
     expect(d.requests[0]).toEqual({ cmd: 'x', timeoutMs: 120_000, env: { A: '1' } });
   });

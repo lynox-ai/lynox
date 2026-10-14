@@ -10,7 +10,7 @@ import { parseFrame, MAX_RESPONSE_LINE_BYTES, type ExecFrame } from './protocol.
 import type { ReleaseOps } from './release.js';
 
 /** The daemon's wiring with a spawner that runs as the current user; kills go to the call's process group. */
-function harness(opts: { poolSize?: number; residue?: string[]; killDelayMs?: number } = {}) {
+function harness(opts: { poolSize?: number; residue?: string[]; killDelayMs?: number; requestDeadlineMs?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'exec-daemon-'));
   const children = new Map<number, ChildProcess>();
   const events: string[] = [];
@@ -40,6 +40,8 @@ function harness(opts: { poolSize?: number; residue?: string[]; killDelayMs?: nu
     newCallId: () => 'c1',
     callsDir: join(dir, 'calls'),
     log: (line) => events.push(`log:${line}`),
+    exhausted: () => events.push('exhausted'),
+    ...(opts.requestDeadlineMs !== undefined ? { requestDeadlineMs: opts.requestDeadlineMs } : {}),
   };
   const server: Server = createServer((s) => handleConnection(s, deps));
   const sock = join(dir, 'exec.sock');
@@ -118,6 +120,55 @@ describe('exec daemon: one call', () => {
   });
 });
 
+describe('exec daemon: transport', () => {
+  it('runs the command as sent when a character of it is split across two chunks', async () => {
+    const h = (current = harness());
+    await h.ready;
+    const line = Buffer.from(req({ cmd: "printf %s 'ä'" }));
+    const cut = line.indexOf(Buffer.from('ä')) + 1; // inside the two bytes of ä
+    const lines = await new Promise<string[]>((resolve, reject) => {
+      const c = connect(h.sock);
+      let buf = '';
+      c.on('data', (d) => { buf += d.toString('utf8'); });
+      c.on('close', () => resolve(buf.split('\n').filter((l) => l.length > 0)));
+      c.on('error', reject);
+      c.write(line.subarray(0, cut));
+      setTimeout(() => c.write(line.subarray(cut)), 100);
+    });
+    expect(frames(lines).filter((x) => x.t === 'out').map((x) => (x as { d: string }).d).join('')).toBe('ä');
+  });
+
+  it('drops a connection that never finishes its request line', async () => {
+    const h = (current = harness({ requestDeadlineMs: 150 }));
+    await h.ready;
+    const lines = await new Promise<string[]>((resolve, reject) => {
+      const c = connect(h.sock);
+      let buf = '';
+      c.on('data', (d) => { buf += d.toString('utf8'); });
+      c.on('close', () => resolve(buf.split('\n').filter((l) => l.length > 0)));
+      c.on('error', reject);
+      c.write('{"cmd":"echo never ending');
+    });
+    expect(frames(lines)).toEqual([{ t: 'exit', code: null, signal: null, timedOut: false, error: 'request missing or too large' }]);
+    expect(h.events.filter((e) => e.startsWith('spawn:'))).toEqual([]);
+  });
+
+  it('releases the uid when the client drops while output is held back', async () => {
+    const h = (current = harness());
+    await h.ready;
+    await new Promise<void>((resolve) => {
+      const c = connect(h.sock);
+      let got = 0;
+      c.on('data', (d) => { got += d.length; if (got > 64 * 1024) { c.pause(); setTimeout(() => c.destroy(), 300); } });
+      c.on('close', () => resolve());
+      c.on('error', () => resolve());
+      c.write(req({ cmd: 'yes' }));
+    });
+    await waitFor(() => h.events.includes('kill:20000'));
+    await waitFor(() => h.deps.pool.stats().free === 2, 5000);
+  });
+});
+
 describe('exec daemon: refusals', () => {
   it('refuses a bad request without taking a uid', async () => {
     const h = (current = harness());
@@ -177,6 +228,18 @@ describe('exec daemon: ending a call early', () => {
     await call(h.sock, req({ cmd: 'true' }));
     await waitFor(() => h.deps.pool.stats().quarantined === 1);
     expect(h.events.some((e) => e.startsWith('log:QUARANTINE uid 20000'))).toBe(true);
+  });
+});
+
+describe('exec daemon: exhausted pool', () => {
+  it('ends the daemon once every uid is quarantined, and not before', async () => {
+    const h = (current = harness({ poolSize: 2, residue: ['shm 1'] }));
+    await h.ready;
+    await call(h.sock, req({ cmd: 'true' }));
+    await waitFor(() => h.deps.pool.stats().quarantined === 1);
+    expect(h.events).not.toContain('exhausted');
+    await call(h.sock, req({ cmd: 'true' }));
+    await waitFor(() => h.events.includes('exhausted'));
   });
 });
 

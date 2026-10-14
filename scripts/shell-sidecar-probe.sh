@@ -155,6 +155,14 @@ wait
 uids=$(for i in 1 2 3 4; do field "$(cat "/tmp/$ID-c$i")" stdout; rm -f "/tmp/$ID-c$i"; done | grep -E "^[0-9]+$" | sort -u | wc -l)
 [[ "$uids" == 4 ]] && ok "four concurrent calls, four uids" || bad "concurrent calls shared uids ($uids distinct)"
 
+# --- argv: a non-dumpable process still shows its cmdline (sec-infra, F4) ----------
+# A pool uid reads the command line of every process that is not its own. Nothing there may
+# carry a secret; the control is that it does see tini's and the daemon's.
+r=$(call 'me=$(id -u); for p in /proc/[0-9]*; do u=$(awk "/^Uid:/{print \$2}" $p/status 2>/dev/null); [ "$u" = "$me" ] && continue; tr "\0" " " < $p/cmdline 2>/dev/null; echo; done')
+argv=$(field "$r" stdout)
+grep -q "tini -- node /app/dist/shell-sidecar/exec-daemon.js" <<<"$argv" && ok "control: a pool uid reads tini's and the daemon's argv" || bad "argv control: $argv"
+grep -Eiq "(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=" <<<"$argv" && bad "a secret-looking value in a visible argv: $(grep -Ei '(KEY|TOKEN|SECRET|PASSWORD)[A-Z_]*=' <<<"$argv" | head -2)" || ok "no secret-looking value in any argv a pool uid can read"
+
 [[ "$(docker exec "$C" sh -c 'cat /proc/1/comm')" == "tini" ]] && ok "pid 1 is tini" || bad "pid 1 is not tini"
 docker logs "$C" 2>&1 | grep -q QUARANTINE && bad "daemon quarantined a uid: $(docker logs "$C" 2>&1 | grep QUARANTINE | head -3)" || ok "no uid quarantined"
 

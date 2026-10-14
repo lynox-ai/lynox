@@ -258,7 +258,13 @@ export const SELF_HOST_ONLY: readonly string[] = [
   'LYNOX_BALANCED_MODEL',
   // The shell sidecar's exec daemon (src/shell-sidecar/exec-daemon.ts): read by the
   // SIDECAR process from its compose template, never sent to the engine.
-  'LYNOX_EXEC_*',
+  'LYNOX_EXEC_SOCKET_PATH',
+  'LYNOX_EXEC_WORKSPACE',
+  'LYNOX_EXEC_ENGINE_GID',
+  'LYNOX_EXEC_POOL_GID',
+  'LYNOX_EXEC_POOL_FIRST_UID',
+  'LYNOX_EXEC_POOL_SIZE',
+  'LYNOX_EXEC_CALL_NPROC',
 ];
 
 /**
