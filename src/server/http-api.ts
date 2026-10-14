@@ -396,16 +396,13 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 // instance reports the old or the renamed (`hosted`) tier.
 
 /**
- * Managed-pool effective defaults for fields that are NOT in the user-config
- * file but ARE locked by the engine. The Web UI reads provider via
- * `/api/secrets/status` (which defaults `provider: 'anthropic'` when absent
- * from the config file) and re-sends it on every save, so a strict diff
- * against `loadConfig()` would 403 every save. Treat these resends as no-ops
- * by overlaying the managed defaults before the comparison.
+ * Managed-pool defaults for locked fields the user-config file may not carry.
+ * The strict-diff loop on PUT /api/config compares a resent value against
+ * this default, so a no-op resend does not 403.
  *
- * Today no save reaches this overlay: `provider` is in
- * MANAGED_USER_WRITABLE_CONFIG, so the strict-diff loop skips it before the
- * lookup, and `enforceManagedProviderConstraints` caps its value instead.
+ * Its only entry is unreachable today: `provider` is in
+ * MANAGED_USER_WRITABLE_CONFIG, so the loop skips it before the lookup, and
+ * `enforceManagedProviderConstraints` caps its value instead.
  */
 const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
   provider: 'anthropic',
