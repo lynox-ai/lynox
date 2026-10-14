@@ -8,10 +8,9 @@
  * `docs/pnpm-lock.yaml` with one resolution set below its floor: the guard exits 1, both installs
  * exit 0 and keep the version, `pnpm update --depth Infinity <name>` lifts it.
  *
- * Ported from the private repo's guard and its suite, where every case below the first block
- * exists because a specific mutant survived an earlier version. Two things are new here and have
- * their own block: the rules come from the lockfile header, and the declared overrides must equal
- * it. The other risk is the false positive — a checker that flags a version a scoped selector
+ * Most cases below the first two blocks exist because a specific mutant survived an earlier
+ * version of this checker. The second block covers where the rules come from: the lockfile
+ * header, which the declared overrides must equal. The other risk is the false positive — a checker that flags a version a scoped selector
  * legitimately explains fires on correct input, and gets deleted rather than fixed — so "does it
  * stay quiet where it must" is tested as hard as "does it fire".
  */
@@ -181,14 +180,36 @@ describe('declared against recorded — what this port adds', () => {
     expect(r.out).toContain('vite@8.0.1 is resolved');
   }, PROCESS_TEST_TIMEOUT_MS);
 
-  it('reads overrides declared in pnpm-workspace.yaml too', () => {
-    // pnpm 10 accepts them there. Read only package.json and moving them would be invisible.
-    const args = writeTree({}, ['vite@8.2.2'], { recorded: { vite: '>=8.0.16' } });
+  it('REFUSES overrides in pnpm-workspace.yaml rather than guessing how pnpm combines them', () => {
+    // Read only package.json and moving them there would be invisible; merge them and the advice
+    // printed for a mismatch cannot fix it (pnpm does not combine the two that way).
+    const args = writeTree({ vite: '>=8.0.16' }, ['vite@8.2.2']);
     writeFileSync(join(fixture, 'pnpm-workspace.yaml'), "packages: []\noverrides:\n  vite: '>=8.0.16'\n");
     const r = runGuard(args);
-    expect(r.code, r.out).toBe(0);
-    expect(r.out).toContain('clean ✓ (1 overrides, 1 resolved');
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('pnpm-workspace.yaml declares `overrides:`');
   }, PROCESS_TEST_TIMEOUT_MS);
+
+  it('a pnpm-workspace.yaml WITHOUT overrides is fine — the real docs tree has one', () => {
+    const args = writeTree({ vite: '>=8.0.16' }, ['vite@8.2.2']);
+    writeFileSync(join(fixture, 'pnpm-workspace.yaml'), 'packages: []\n');
+    expect(runGuard(args).code).toBe(0);
+  }, PROCESS_TEST_TIMEOUT_MS);
+
+  it('REFUSES package.json `resolutions`, which pnpm also folds into overrides', () => {
+    writeTree({ vite: '>=8.0.16' }, ['vite@8.2.2']);
+    const pkg = JSON.parse(readFileSync(join(fixture, 'package.json'), 'utf-8')) as Record<string, unknown>;
+    writeFileSync(join(fixture, 'package.json'), JSON.stringify({ ...pkg, resolutions: { vite: '8.2.2' } }));
+    const r = runGuard(['--dir', fixture]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('package.json declares `resolutions`');
+  }, PROCESS_TEST_TIMEOUT_MS);
+
+  it('a `$name` back-reference is compared by key only — pnpm writes the resolved specifier', () => {
+    // Measured: `"@x/sdk": "$@x/sdk"` is recorded as the dependency's own range, e.g. `^0.98.0`.
+    expect(compareDeclared({ foo: '$foo' }, { foo: '^1.2.0' })).toEqual([]);
+    expect(compareDeclared({ foo: '$foo' }, {})).toEqual([{ key: 'foo', declared: '$foo', recorded: null }]);
+  });
 
   it('a lockfile that is not YAML is an error, not a pass and not a stack trace', () => {
     writeFileSync(join(fixture, 'package.json'), JSON.stringify({ name: 'f' }));
@@ -283,10 +304,18 @@ describe('override-applied-guard', () => {
     expect(r.out).toContain('does not exist');
   }, PROCESS_TEST_TIMEOUT_MS);
 
-  it('rejects --dir without a value instead of passing', () => {
-    const r = runGuard(['--dir']);
-    expect(r.code).not.toBe(0);
-    expect(r.out).toContain('usage:');
+  it('rejects --dir without a value, and any other argument, instead of falling back to the defaults', () => {
+    for (const args of [['--dir'], ['--dir=docs'], ['--dirs', 'docs'], ['--dir', 'docs', 'extra']]) {
+      const r = runGuard(args);
+      expect(r.code, args.join(' ')).toBe(2);
+      expect(r.out).toContain('usage:');
+    }
+  }, PROCESS_TEST_TIMEOUT_MS);
+
+  it('resolves --dir against the working directory, not the repository', () => {
+    // From `docs/`, `--dir .` means docs — not the root tree the script happens to live above.
+    const out = execFileSync('node', [GUARD, '--dir', '.'], { cwd: join(REPO, 'docs'), encoding: 'utf-8' });
+    expect(out).toContain(`${join(REPO, 'docs', 'pnpm-lock.yaml')}]: clean ✓`);
   }, PROCESS_TEST_TIMEOUT_MS);
 
   it('runs when invoked through a symlink', () => {

@@ -14,21 +14,24 @@
  *     unapplied with nothing reporting it.
  *
  * So a lockfile can record a floor and resolve below it, and pass every
- * install. This file is the detector. The same guard has run in the private
- * repo since 2026-08-24; this is a port with two changes, both named below.
+ * install. This file is the detector.
  *
- * ── Change 1: the rules come from the LOCKFILE, and declared must equal recorded
+ * ── The rules come from the LOCKFILE, and declared must equal recorded ───────
  *
- * The private repo's guard reads the rules from package.json. Here the rules are
- * the lockfile's own `overrides:` header — what pnpm says it applied — and the
- * declared set (package.json `pnpm.overrides` plus `pnpm-workspace.yaml`
- * `overrides:`) must equal it key for key. Two reasons:
+ * The rules are the lockfile's own `overrides:` header — what pnpm says it
+ * applied — and package.json `pnpm.overrides` must equal it key for key,
+ * because `docs/` has its own lockfile and no CI job installs it with
+ * `--frozen-lockfile` before this runs: nothing else checks that its header
+ * still matches what docs/package.json declares.
  *
- *   · pnpm 10 accepts overrides in either file. Reading only package.json would
- *     go quiet the day someone moves them, with a `clean ✓` over zero rules.
- *   · `docs/` has its own lockfile and no CI job installs it with
- *     `--frozen-lockfile` before this runs, so nothing else checks that its
- *     header still matches what docs/package.json declares.
+ * Two other places pnpm takes overrides from are REFUSED rather than modelled:
+ * `overrides:` in pnpm-workspace.yaml and package.json `resolutions`. How pnpm
+ * combines them with `pnpm.overrides` is not what a plain merge would suggest
+ * (measured on 10.34.5: with both files declaring, `pnpm config list` showed
+ * only the workspace set while a re-resolve still wrote the package.json set
+ * into the header). Neither is used here; a guard that guessed their semantics
+ * would print advice that cannot fix what it reports. Move them into
+ * `pnpm.overrides` instead.
  *
  * ── The rule, and why it is bounded rather than exact ────────────────────────
  *
@@ -55,7 +58,7 @@
  * where every rule legitimately decides nothing (`nanoid@3` against a resolved
  * nanoid 5) is common and correct.
  *
- * ── Change 2: the pairs ──────────────────────────────────────────────────────
+ * ── The trees ────────────────────────────────────────────────────────────────
  *
  * The workspace root and `docs/`. Both are real trees that something installs:
  * the root in every CI job, `docs/` in the docs build and deploy.
@@ -121,13 +124,15 @@ export function readRecordedOverrides(lockText) {
 /**
  * Declared against recorded, key for key. Every difference is reported: a key
  * declared but not recorded, recorded but not declared, or recorded with a
- * different value. Values are compared as strings, which is how pnpm writes them.
+ * different value. Values are compared as strings, which is how pnpm writes them
+ * — except a `$name` back-reference, which pnpm replaces with the referenced
+ * dependency's specifier before it writes the header. Only its key is compared.
  */
 export function compareDeclared(declared, recorded) {
   const diffs = [];
   for (const [k, v] of Object.entries(declared)) {
     if (!Object.hasOwn(recorded, k)) diffs.push({ key: k, declared: String(v), recorded: null });
-    else if (String(recorded[k]) !== String(v)) diffs.push({ key: k, declared: String(v), recorded: String(recorded[k]) });
+    else if (!String(v).startsWith('$') && String(recorded[k]) !== String(v)) diffs.push({ key: k, declared: String(v), recorded: String(recorded[k]) });
   }
   for (const [k, v] of Object.entries(recorded)) {
     if (!Object.hasOwn(declared, k)) diffs.push({ key: k, declared: null, recorded: String(v) });
@@ -300,16 +305,19 @@ export function evaluate({ overrides, resolved }) {
   };
 }
 
-/** The declared overrides of a tree: package.json `pnpm.overrides` and pnpm-workspace.yaml `overrides:`. */
-function readDeclared(dir) {
+/**
+ * The declared overrides of a tree: package.json `pnpm.overrides`. The two other
+ * sources pnpm reads are refused with a reason (see the header), never merged.
+ */
+export function readDeclared(dir) {
   const pkg = JSON.parse(readFileSync(resolve(dir, 'package.json'), 'utf8'));
-  const declared = { ...(pkg?.pnpm?.overrides ?? {}) };
+  const refused = [];
+  if (pkg?.resolutions !== undefined) refused.push('package.json declares `resolutions`');
   const ws = resolve(dir, 'pnpm-workspace.yaml');
-  if (existsSync(ws)) {
-    const o = parseYaml(readFileSync(ws, 'utf8'))?.overrides;
-    if (o !== null && typeof o === 'object') Object.assign(declared, o);
+  if (existsSync(ws) && parseYaml(readFileSync(ws, 'utf8'))?.overrides != null) {
+    refused.push('pnpm-workspace.yaml declares `overrides:`');
   }
-  return declared;
+  return { declared: { ...(pkg?.pnpm?.overrides ?? {}) }, refused };
 }
 
 function readTree(tree) {
@@ -321,7 +329,7 @@ function readTree(tree) {
   }
   const lockText = readFileSync(lockPath, 'utf8');
   try {
-    return { recorded: readRecordedOverrides(lockText), declared: readDeclared(dir), resolved: readResolved(lockText) };
+    return { recorded: readRecordedOverrides(lockText), ...readDeclared(dir), resolved: readResolved(lockText) };
   } catch (e) {
     // A file that does not parse is a finding, not a stack trace — and never a pass.
     return { error: `${dir}: could not read the tree (${e instanceof Error ? e.message.split('\n')[0] : String(e)})` };
@@ -331,14 +339,14 @@ function readTree(tree) {
 function main() {
   const argv = process.argv.slice(2);
   let trees = DEFAULT_TREES;
-  const dirFlag = argv.indexOf('--dir');
-  if (dirFlag !== -1) {
-    const dir = argv[dirFlag + 1];
-    if (dir === undefined) {
+  if (argv.length > 0) {
+    // Exactly `--dir <path>` or nothing: a misspelled flag must not quietly fall back to the defaults.
+    if (argv.length !== 2 || argv[0] !== '--dir') {
       console.error('usage: override-applied-guard.mjs [--dir <directory with package.json and pnpm-lock.yaml>]');
       process.exit(2);
     }
-    trees = [{ label: dir, dir }];
+    // Relative to where it is run, like any path on a command line.
+    trees = [{ label: argv[1], dir: resolve(process.cwd(), argv[1]) }];
   }
 
   let failed = false;
@@ -351,6 +359,12 @@ function main() {
       continue;
     }
 
+    for (const why of read.refused) {
+      console.error(
+        `::error::override-applied-guard [${tree.label}]: ${why}. This guard does not model how pnpm combines that ` +
+          'with `pnpm.overrides`, so it refuses rather than guess. Move the entries into `pnpm.overrides` in package.json.',
+      );
+    }
     const diffs = compareDeclared(read.declared, read.recorded);
     for (const d of diffs) {
       console.error(
@@ -397,7 +411,7 @@ function main() {
     if (narrower.length > 0) notes.push(`${narrower.length} version(s) accepted only by a narrower selector`);
     if (unversioned.length > 0) notes.push(`${unversioned.length} resolution(s) carry no comparable version`);
     const suffix = notes.length > 0 ? ` — ${notes.join('; ')}` : '';
-    const ok = r.ok && diffs.length === 0;
+    const ok = r.ok && diffs.length === 0 && read.refused.length === 0;
     if (ok) {
       // The lockfile PATH is in the line, not just the label: a verdict has to
       // name what it read, or a pair re-pointed at the wrong file passes unseen.
