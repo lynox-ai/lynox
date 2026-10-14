@@ -1465,35 +1465,27 @@ describe('vault slot derivation — one function, and it must stay injective at 
 
       expect(result.ok).toBe(false);
       expect(result.ok === false && result.reason).toMatch(/client secret under CRM_ACCESS_TOKEN, the name its own tokens are written to/);
-      expect(result.ok === false && result.reason).toMatch(/Nothing was saved\. Store the client secret with ask_secret under a name of its own and point auth\.oauth\.client_secret_key at that name\./);
+      expect(result.ok === false && result.reason).toMatch(/Nothing was saved\. Store the client secret under a name of its own and point auth\.oauth\.client_secret_key at that name\./);
       expect(store.get('crm')).toBeUndefined();
     });
 
     // Moving the field leaves whatever the vault already holds under the token name, and
-    // the profile reads that name again once registered. One answer per shape.
+    // the profile reads that name again once registered. The refusal says so for the half
+    // it names, and prescribes no step: which one overwrites it depends on the profile.
     const reasonFor = (p: ApiProfile): string => {
       const result = new ApiStore().save(p);
       return result.ok === false ? result.reason : '';
     };
-    const withGrant = (p: ApiProfile, grant: 'refresh_token' | 'client_credentials'): ApiProfile =>
-      ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, grant_type: grant } } }) as ApiProfile;
 
-    it('on the access name, says to run fetch_token before any request', () => {
+    it('on the access name, says the name may still hold it and is read as the access token', () => {
       const reason = reasonFor(withClient('crm', 'CRM_ID', 'CRM_ACCESS_TOKEN'));
-      expect(reason).toContain('Then run fetch_token before any request to this API: until a token is written there, CRM_ACCESS_TOKEN may still hold the client secret');
-      expect(reason).not.toContain('refresh token under');
+      expect(reason).toContain('Until an access token is written to CRM_ACCESS_TOKEN, it may still hold the client secret, and wherever this profile reads that name, it takes the value as its access token.');
+      expect(reason).not.toMatch(/fetch_token|connect|ask_secret/);
     });
 
-    it('on the refresh name of a refresh-token profile, says to store the refresh token there first', () => {
-      const reason = reasonFor(withGrant(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'), 'refresh_token'));
-      expect(reason).toContain('Then store this API\'s refresh token under CRM_REFRESH_TOKEN with ask_secret before fetch_token');
-      expect(reason).not.toContain('run fetch_token before any request');
-    });
-
-    it('on the refresh name of a client-credentials profile, adds no step: that exchange never sends it', () => {
-      const reason = reasonFor(withGrant(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'), 'client_credentials'));
-      expect(reason).toMatch(/point auth\.oauth\.client_id_key at that name\.$/);
-      expect(reason).not.toContain(' Then ');
+    it('on the refresh name, says the same for the refresh token', () => {
+      const reason = reasonFor(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'));
+      expect(reason).toContain('Until a refresh token is written to CRM_REFRESH_TOKEN, it may still hold the client id, and wherever this profile reads that name, it takes the value as its refresh token.');
     });
 
     it('control: save admits the same profile with client slots of its own', () => {
@@ -1517,6 +1509,8 @@ describe('vault slot derivation — one function, and it must stay injective at 
       const said = warn.mock.calls.map((c) => String(c[0])).join('');
       expect(said).toMatch(/client id under CRM_REFRESH_TOKEN/);
       expect(said).toMatch(/Nothing was deleted/);
+      // The order the steps can be taken in: move the field, save, and only then can a token land.
+      expect(said).toMatch(/store the client id under a name of its own and point auth\.oauth\.client_id_key at that name, then save the corrected profile with api_setup update\. Until a refresh token/);
       warn.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     });
