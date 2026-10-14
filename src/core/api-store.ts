@@ -1542,13 +1542,10 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping ${file} on import: invalid id ${JSON.stringify(profile.id)}\n`);
           continue;
         }
-        // The import upserts by id like every api write, so a file named after another kind's
-        // connection would overwrite that row. It stays a file, as the invalid ones do.
-        const held = store.get(profile.id);
-        if (held !== undefined && held.kind !== 'api') {
-          process.stderr.write(`[lynox:api-store] Skipping ${file} on import: a ${held.kind} connection already uses the id ${JSON.stringify(profile.id)}\n`);
-          continue;
-        }
+        // Not checked for another kind's row, unlike every other api write: the import runs
+        // once, its sentinel ends it, and a skipped file would never be read again — the user's
+        // API would be gone for good. The only other kind it can meet is the Google row, which
+        // nothing reads yet and which yields an id an api profile holds (see engine.ts).
         rows.push(profileToConnectionRow(migrateV1Profile(profile)));
       } catch (err: unknown) {
         // Malformed content (bad JSON) is a permanent skip — retrying won't help.

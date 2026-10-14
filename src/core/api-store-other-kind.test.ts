@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -8,8 +8,8 @@ import { GrantLedger } from './grant-ledger.js';
 import { ApiStore, type ApiProfile } from './api-store.js';
 
 // `connections.id` is one key across every kind. These pin that no api write turns another
-// kind's row into an api row: a save refuses, the engine's own writes fail into their logs,
-// and the flat-file import leaves the colliding file a file.
+// kind's row into an api row: a save refuses and the engine's own writes fail into their logs.
+// The one-shot flat-file import is the exception, pinned below.
 describe('an api write under another kind\'s id', () => {
   let dir: string;
   let db: EngineDb;
@@ -81,17 +81,17 @@ describe('an api write under another kind\'s id', () => {
     expect(ledger.forConnection('shop')).toHaveLength(before);
   });
 
-  it('the flat-file import skips a file under another kind\'s id and imports the rest', () => {
+  it('the flat-file import keeps a user\'s API over the Google row, which nothing reads yet', () => {
     conn.upsert(googleRow);
     const apis = join(dir, 'apis');
     mkdirSync(apis);
     writeFileSync(join(apis, 'google.json'), JSON.stringify(bearer('google')));
     writeFileSync(join(apis, 'shop.json'), JSON.stringify(bearer('shop')));
 
-    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(1);
+    // The import runs once; a file it skipped would never be read again.
+    expect(new ApiStore().importFromDirectoryIfNeeded(apis, conn)).toBe(2);
 
-    expect(row('google')).toEqual({ kind: 'google', configJson: googleRow.configJson });
+    expect(row('google')?.kind).toBe('api');
     expect(row('shop')?.kind).toBe('api');
-    expect(existsSync(join(apis, 'google.json'))).toBe(true);
   });
 });
