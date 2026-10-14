@@ -6,6 +6,14 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
+// A test hook past the slot-name denylist: with `pastDenylist` set, the attach lets a slot named
+// like a header the gate reads through, as a name the list does not know yet would be.
+const shapingSlots = vi.hoisted(() => ({ pastDenylist: false }));
+vi.mock('../../core/outbound-write.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/outbound-write.js')>();
+  return { ...actual, isRequestShapingHeaderName: (name: string) => !shapingSlots.pastDenylist && actual.isRequestShapingHeaderName(name) };
+});
+
 import dns from 'node:dns/promises';
 import { httpRequestTool, detectSecretInContent, egressSecretRefusal, mailSecretRefusal, MAX_REQUESTS_PER_SESSION, httpTimeoutMessage, isWriteMethod, undoClassFor } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
@@ -4397,6 +4405,36 @@ describe('httpRequestTool', () => {
       expect(reads).toEqual([]);
       expect(fetchMock).not.toHaveBeenCalled();
       expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    // The denylist is the first barrier; the second compares the gate's reading of the request
+    // before and after the attach, so a name the list does not know yet fails closed. The JSON
+    // body holds a form override in a string: read as JSON it is a POST, read as a form, which
+    // the Content-Type slot makes it, a DELETE.
+    // Each part of the reading has a case only it sees: a value that is not a method changes
+    // only the gated method (to none), and a weaker override next to a DELETE only the set of
+    // writes the request names.
+    it.each([
+      ['X-HTTP-Method-Override', 'DELETE', 'GET', {}],
+      ['X-HTTP-Method-Override', 'not a method', 'GET', {}],
+      ['X-Method-Override', 'PUT', 'POST', { 'X-HTTP-Method-Override': 'DELETE' }],
+      ['X-Forwarded-Host', 'internal.example', 'POST', {}],
+      ['Content-Type', 'application/x-www-form-urlencoded', 'POST', {}],
+    ])('SECURITY: a %s slot past the denylist still sends nothing (%s on a %s)', async (slot, value, method, extra) => {
+      shapingSlots.pastDenylist = true;
+      try {
+        const store = await storeWith({ type: 'header', header_name: slot, vault_keys: ['BEXIO_API_TOKEN'] });
+        mockDnsPublic();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+        const result = await visible(
+          { url: 'https://api.bexio.com/3.0/users/me', method, body: method === 'GET' ? undefined : '{"note":"a&_method=DELETE&b"}', headers: { 'Content-Type': 'application/json', ...extra } },
+          { ...(agentWith(store, { BEXIO_API_TOKEN: value }) as object), principal: OWNER_PRINCIPAL, promptUser: vi.fn().mockResolvedValue('Allow'), governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never,
+        );
+        expect(result).toContain('the credential the engine attached for api.bexio.com changes the request');
+        expect(lastPinnedInputs).toHaveLength(0);
+      } finally {
+        shapingSlots.pastDenylist = false;
+      }
     });
 
     it('a header profile with an ordinary slot still attaches on a GET', async () => {
