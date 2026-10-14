@@ -1125,10 +1125,11 @@ export class ApiStore {
   }
 
   /**
-   * Every write of an api row goes through here, so none of them can overwrite another kind's
-   * row: a save refuses before this is reached (see `_persist`), and the engine's own writes
-   * (a grant outside a save, a renewal its readers follow) throw into the handlers that already
-   * log a failed write.
+   * The store's own writes of an api row go through here, so none of them can overwrite another
+   * kind's row: a save refuses before this is reached (see `_persist`), and the engine's own
+   * writes (a grant outside a save, a renewal its readers follow) throw into the handlers that
+   * already log a failed write. Two writes do not: the one-shot flat-file import, on purpose (see
+   * there), and the static re-gate, which rewrites only rows it read as kind api.
    */
   private _writeRow(profile: ApiProfile): void {
     if (!this.connStore) return;
