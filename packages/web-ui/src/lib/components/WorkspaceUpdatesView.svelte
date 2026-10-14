@@ -5,6 +5,7 @@
 	hidden and a minimal notice shown instead.
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -25,7 +26,7 @@
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as ConfigResponse;
 			updateCheck = body.update_check;
-			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			managed = cpSuppliesLLMKey(body.managed);
 			loaded = true;
 		} catch (e) {
 			addToast(e instanceof Error ? e.message : t('system.load_failed'), 'error', 5000);

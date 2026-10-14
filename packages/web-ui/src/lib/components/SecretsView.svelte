@@ -14,6 +14,7 @@
 	below explains the boundary, not "everything is blocked".
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
@@ -97,7 +98,7 @@
 			}
 			if (configRes.ok) {
 				const cfg = (await configRes.json()) as { managed?: string };
-				managed = cfg.managed === 'managed' || cfg.managed === 'managed_pro' || cfg.managed === 'eu';
+				managed = cpSuppliesLLMKey(cfg.managed);
 			}
 		} catch {
 			error = t('common.load_failed');

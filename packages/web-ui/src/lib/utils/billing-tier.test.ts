@@ -20,13 +20,14 @@ describe('web-ui billing-tier shim', () => {
 		for (const [legacy, canonical] of Object.entries(LEGACY_BILLING_TIER_ALIASES)) {
 			expect(normalizeBillingTier(legacy)).toBe(canonical);
 			expect(isHostedInstance(legacy)).toBe(true);
-			expect(cpSuppliesLLMKey(legacy)).toBe(canonical === 'managed' || canonical === 'managed_pro');
+			expect(cpSuppliesLLMKey(legacy)).toBe(canonical === 'managed' || canonical === 'managed_pro' || canonical === 'managed_max');
 		}
 	});
 
 	it('cpSuppliesLLMKey is true exactly for the CP-key tiers', () => {
 		expect(cpSuppliesLLMKey('managed')).toBe(true);
 		expect(cpSuppliesLLMKey('managed_pro')).toBe(true);
+		expect(cpSuppliesLLMKey('managed_max')).toBe(true);
 		expect(cpSuppliesLLMKey('hosted')).toBe(false); // BYOK
 	});
 

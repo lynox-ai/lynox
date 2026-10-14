@@ -370,7 +370,7 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
  *     api_base_url + cost-caps stay configurable (it's their key, their bill).
  *     Only the secret-store write needs the BYOK whitelist.
  *
- *  3. **Managed pool** — billing tier `managed|managed_pro|eu`.
+ *  3. **Managed pool** — billing tier `managed|managed_pro|managed_max|eu`.
  *     CP delivers the LLM. Provider, cost caps, MCP servers, OAuth ids,
  *     search/backup config, etc. are all CP-managed. Only UI preferences
  *     are user-writable.
@@ -397,16 +397,13 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 // instance reports the old or the renamed (`hosted`) tier.
 
 /**
- * Managed-pool effective defaults for fields that are NOT in the user-config
- * file but ARE locked by the engine. The Web UI reads provider via
- * `/api/secrets/status` (which defaults `provider: 'anthropic'` when absent
- * from the config file) and re-sends it on every save, so a strict diff
- * against `loadConfig()` would 403 every save. Treat these resends as no-ops
- * by overlaying the managed defaults before the comparison.
+ * Managed-pool defaults for locked fields the user-config file may not carry.
+ * The strict-diff loop on PUT /api/config compares a resent value against
+ * this default, so a no-op resend does not 403.
  *
- * `eu` tier hides the SetupBanner outright (UI ~L55-59) so the only practical
- * caller of this code path is the `managed`/`managed_pro` SetupBanner, where
- * provider is always 'anthropic'.
+ * Its only entry is unreachable today: `provider` is in
+ * MANAGED_USER_WRITABLE_CONFIG, so the loop skips it before the lookup, and
+ * `enforceManagedProviderConstraints` caps its value instead.
  */
 const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
   provider: 'anthropic',
@@ -3391,7 +3388,7 @@ export class LynoxHTTPApi {
     const userConfig = this.engine?.getUserConfig() ?? {};
     const managedMode = readEnvAlias('LYNOX_BILLING_TIER');
     // Only bypass the not-configured check for tiers where the CP supplies
-    // the LLM key (managed / managed_pro / eu-sovereign). The Hosted-BYOK
+    // the LLM key (managed / managed_pro / managed_max / eu-sovereign). The Hosted-BYOK
     // starter tier requires the CUSTOMER to bring their own key, so the
     // not-configured signal MUST still surface — pre-fix the status bar
     // showed "API OK" on managed-BYOK with empty vault while SetupBanner
@@ -6250,7 +6247,7 @@ export class LynoxHTTPApi {
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
       jsonResponse(res, 200, {
         provider,
-        // Emit the CANONICAL billing tier (hosted/managed/managed_pro). Legacy
+        // Emit the CANONICAL billing tier (hosted/managed/managed_pro/managed_max). Legacy
         // values — `starter` (→hosted) or `eu` (→managed) — still live in the
         // LYNOX_MANAGED_MODE env on pre-rename tenants that haven't been
         // re-synced; normalizing here means every Web UI consumer sees the
@@ -6473,7 +6470,7 @@ export class LynoxHTTPApi {
       // Canonical redaction: strips top-level secrets (with `${key}_configured`
       // markers for the UI) AND nested tier_set/model_profiles api_keys.
       const redacted = redactConfigForResponse(config);
-      // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro = CP-supplied LLM)
+      // Expose managed tier so the Web UI can adapt its settings UI ('hosted' = BYOK, managed/managed_pro/managed_max = CP-supplied LLM)
       const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
       const isManagedTier = cpSuppliesLLMKey(tier);
       if (tier) {
@@ -6914,7 +6911,7 @@ export class LynoxHTTPApi {
           return;
         }
       }
-      // Managed-pool tiers (managed / managed_pro / eu): CP locks provider +
+      // Managed-pool tiers (cpSuppliesLLMKey): CP locks provider +
       // cost-caps + integrations. Starter BYOK is NOT gated here — customer
       // owns their LLM, owns their config. The Web UI re-sends every field on
       // every save (PRD-SETTINGS-REFACTOR Principle 6), so we can't reject
@@ -6941,12 +6938,10 @@ export class LynoxHTTPApi {
         const attempted: string[] = [];
         for (const [field, value] of Object.entries(update)) {
           if (MANAGED_USER_WRITABLE_CONFIG.has(field)) continue;
-          // Managed pool: provider is forced to 'anthropic' (CP key); the UI
-          // resends it on every save (read from /api/secrets/status, which
-          // defaults the field). A strict diff against loadConfig() would
-          // 403 because the field isn't physically in the config file —
-          // overlay the managed default before comparing so the no-op
-          // resend passes.
+          // A locked field the config file does not carry is compared against
+          // its managed default (MANAGED_EFFECTIVE_DEFAULTS), so a no-op
+          // resend passes. `provider`, the one such default, is allowlisted
+          // above and never gets here.
           const effective = fileConfig[field] ?? MANAGED_EFFECTIVE_DEFAULTS[field];
           if (JSON.stringify(value) !== JSON.stringify(effective)) {
             attempted.push(field);

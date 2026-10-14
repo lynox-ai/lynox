@@ -1222,6 +1222,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'account.billing.tier.hosted': { de: 'Hosted (BYOK)', en: 'Hosted (BYOK)' },
 	'account.billing.tier.managed': { de: 'Managed', en: 'Managed' },
 	'account.billing.tier.managed_pro': { de: 'Managed Pro', en: 'Managed Pro' },
+	'account.billing.tier.managed_max': { de: 'Managed Max', en: 'Managed Max' },
 	'account.billing.self_host_note': { de: 'Self-Host: kein Abo vorhanden. Diese Seite ist für Managed-Plans gedacht.', en: 'Self-host: no subscription. This page is for Managed plans.' },
 	'account.billing.portal_description': { de: 'Im Stripe Customer Portal kannst du Karte ändern, Rechnungen herunterladen, Plan wechseln oder kündigen.', en: 'In the Stripe customer portal you can change your card, download invoices, switch plan, or cancel.' },
 	'account.billing.portal_cta': { de: 'Abo verwalten', en: 'Manage subscription' },

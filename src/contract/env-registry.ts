@@ -53,7 +53,7 @@ import type { BillingTier } from './vocab.js';
 /** The value-vocabulary an emitted var carries. */
 export type EnvValueKind =
   | 'opaque' // free-form (secrets, ids, ports, locales) — not vocab-checked
-  | 'billing-tier' // hosted|managed|managed_pro (+ legacy starter|eu)
+  | 'billing-tier' // hosted|managed|managed_pro|managed_max (+ legacy starter|eu)
   | 'model-tier' // fast|balanced|deep (+ legacy haiku|sonnet|opus)
   | 'account-tier' // standard|pro
   | 'llm-provider' // anthropic|openai|vertex|custom
@@ -117,8 +117,8 @@ export interface EnvRegistryRow {
   note?: string;
 }
 
-const ALL_TIERS: BillingTier[] = ['hosted', 'managed', 'managed_pro'];
-const MANAGED_TIERS: BillingTier[] = ['managed', 'managed_pro'];
+const ALL_TIERS: BillingTier[] = ['hosted', 'managed', 'managed_pro', 'managed_max'];
+const MANAGED_TIERS: BillingTier[] = ['managed', 'managed_pro', 'managed_max'];
 
 export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   // ── Base secrets (all tiers) ──────────────────────────────────────────────
@@ -139,7 +139,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Tier / account / billing axis ─────────────────────────────────────────
   { name: 'LYNOX_BILLING_TIER', valueKind: 'billing-tier', emitPolicy: 'always', requiredForTier: ALL_TIERS, legacyReadAliases: ['LYNOX_MANAGED_MODE'], engineConsumed: { kind: 'env-alias', readSite: 'src/server/http-api.ts', alsoReadAt: ['src/core/engine.ts'] }, note: 'Canonical name; the engine reads it first and falls back to the legacy LYNOX_MANAGED_MODE alias forever.' },
-  { name: 'LYNOX_ACCOUNT_TIER', valueKind: 'account-tier', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'pro only for managed_pro. Since D8 the deep-gate is a pass-through — kept as the managed-vs-managed_pro label; max_tier is the sole cost cap.' },
+  { name: 'LYNOX_ACCOUNT_TIER', valueKind: 'account-tier', emitPolicy: 'always', requiredForTier: ALL_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'pro for managed_pro and managed_max. Since D8 the deep-gate is a pass-through — kept as the standard-vs-pro label; max_tier is the sole cost cap.' },
 
   // ── Model-tier axis (cost band) ───────────────────────────────────────────
   { name: 'LYNOX_DEFAULT_MODEL_TIER', valueKind: 'model-tier', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, legacyReadAliases: ['LYNOX_DEFAULT_TIER'], engineConsumed: { kind: 'env-alias', readSite: 'src/core/config.ts' }, note: 'The everyday SEED, not a lock — applied only when config.json has no default_tier; the user pick wins thereafter.' },

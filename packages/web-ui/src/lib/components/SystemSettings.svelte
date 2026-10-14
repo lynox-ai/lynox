@@ -4,6 +4,7 @@
 	Self-host / BYOK only; managed shows a minimal "managed" notice.
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -36,7 +37,7 @@
 			config = {
 				update_check: body.update_check,
 			};
-			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
 				const vaultBody = (await vaultRes.json()) as { configured: boolean };
 				vaultConfigured = vaultBody.configured;

@@ -23,7 +23,7 @@
 	deliberately stops at the 2-click flow.
 
 	Tier-awareness audit (`managed` value from /api/config, canonical post-v1.8.0):
-	| Surface                  | null (self-host) | hosted (BYOK) | managed / managed_pro |
+	| Surface                  | null (self-host) | hosted (BYOK) | CP-key tiers          |
 	|--------------------------|------------------|---------------|-----------------------|
 	| Subscription tier label  | ✗ self_host_note | ✓             | ✓                     |
 	| Stripe portal CTA        | ✗                | ✓ if env set  | ✓ if env set          |
@@ -72,14 +72,20 @@
 
 	const tierLabel = $derived.by(() => {
 		// `managed===null` is filtered by the template before this derived
-		// renders, so the four cases are exhaustive in practice. Keep a typed
-		// switch with no default — TS narrows the union and a future tier id
-		// addition (e.g. PRD-OPENAI-NATIVE `native` tier) will fail to compile.
+		// renders. The `never` default makes the switch exhaustive for the
+		// compiler: a tier added to the contract without a case here fails to
+		// compile (this package does not set noImplicitReturns, so a switch
+		// without it would just return undefined).
 		switch (managed) {
 			case 'hosted':       return t('account.billing.tier.hosted');
 			case 'managed':      return t('account.billing.tier.managed');
 			case 'managed_pro':  return t('account.billing.tier.managed_pro');
+			case 'managed_max':  return t('account.billing.tier.managed_max');
 			case null:           return '—';
+			default: {
+				const unhandled: never = managed;
+				return String(unhandled);
+			}
 		}
 	});
 
@@ -142,7 +148,7 @@
 			{/if}
 
 			{#if cpSuppliesLLMKey(managed)}
-				<!-- managed / managed_pro only — the tiers that carry an included
+				<!-- managed / managed_pro / managed_max only — the tiers that carry an included
 				     AI budget. The Stripe portal above manages the SUBSCRIPTION;
 				     it has no AI-budget view and no credit-pack top-up (packs are
 				     a separate one-time payment_intent). Without this CTA a

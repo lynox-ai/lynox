@@ -123,8 +123,8 @@ export function fileRootPin(dir: string): RootFolderPin {
  *
  * ⚠ The boundary is who HOSTS, not the word "managed". BYOK (`hosted`, the cheapest tier)
  * runs on lynox hosts too and gets the same CP backups; only the LLM key is the customer's.
- * A check written against `managed`/`managed_pro` would leave the redundant path open for
- * BYOK. `LYNOX_BILLING_TIER` is emitted to all three CP tiers and absent on self-host, which
+ * A check written against the CP-key tiers would leave the redundant path open for
+ * BYOK. `LYNOX_BILLING_TIER` is emitted to every CP tier and absent on self-host, which
  * is the same signal the managed hook uses.
  *
  * It delegates to `isProvisionedInstance`, which this repo already uses to answer exactly this

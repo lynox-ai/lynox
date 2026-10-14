@@ -554,9 +554,8 @@ let contextBudget = $state<ContextBudget | null>(null);
 // compact affordance + a one-time agent suggestion.
 let compactionOffer = $state<number | null>(null);
 // Hosting tier of this instance. `null` = not yet probed; any non-null
-// string = probe completed. Values mirror LYNOX_MANAGED_MODE: 'managed',
-// 'managed_pro', 'eu' = instance-supplied LLM; 'starter', 'hosted', '' =
-// customer-supplied LLM (BYOK / self-hosted).
+// string = probe completed. The engine sends the canonical billing tier
+// (normalized) or null on self-host, mapped to '' below; cpSuppliesLLMKey decides who brings the key.
 let managedTier = $state<string | null>(null);
 let managedProbePromise: Promise<void> | null = null;
 

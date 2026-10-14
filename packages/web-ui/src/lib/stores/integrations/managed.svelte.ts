@@ -25,7 +25,7 @@ export function isManaged(): boolean {
 
 /**
  * `true` only when the control plane supplies the LLM credential (managed /
- * managed_pro / eu-sovereign). The Hosted-BYOK starter tier is `isManaged()`
+ * managed_pro / managed_max / eu-sovereign). The Hosted-BYOK starter tier is `isManaged()`
  * but the CUSTOMER brings their own LLM key, so UI surfaces that gate on
  * "key already provided" must distinguish.
  *
