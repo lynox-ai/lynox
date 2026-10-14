@@ -2217,11 +2217,16 @@ ${draftJson}
       // The route asks this too; asked here as well, so the tool never hands out a link the
       // route would then refuse.
       const connectPreset = OAUTH_PRESETS.get(profile.auth.oauth?.preset_id ?? '');
+      // The write scopes of a preset with a customer text that this link asks for: the route
+      // shows that text and these scopes on a page first (`consentNotice`).
+      let pageWrites: string[] = [];
       if (connectPreset) {
         const requested = presetScopeRequest(connectPreset, profile.auth.oauth?.scope);
         if ('refused' in requested) {
           return `Error: profile "${id}" asks for scopes its provider preset does not allow: ${requested.refused.join(', ')}. Remove them with api_setup update.`;
         }
+        const notice = connectPreset.consentNotice;
+        pageWrites = notice ? requested.scopes.filter((s) => notice.writeScopes.includes(s)) : [];
       }
       // The same question the start route asks, from the same function — so a
       // link is not handed out that the route will then refuse. While only the
@@ -2272,7 +2277,10 @@ ${draftJson}
       if (grant?.origin === 'callback' && (grant.state === 'connected' || grant.state === 'no-refresh')) {
         return `"${id}" is already connected. Show the user this link only if they want to authorize again: ${link}\n\nA new authorization replaces the stored token, so anything running against the old one stops working the moment it is used.`;
       }
-      return `Show the user this link and let them click it: ${link}\n\nIt opens ${endpoints.host}, where they authorize this engine. They come back to this instance, and the connection is stored for you — do not ask them to paste a token, and do not build this link yourself.`;
+      const opens = pageWrites.length === 0
+        ? `It opens ${endpoints.host}`
+        : `It first shows a page on this instance with what lynox may do there and the write access this link asks for (${pageWrites.join(', ')}); they read it and continue to ${endpoints.host}`;
+      return `Show the user this link and let them click it: ${link}\n\n${opens}, where they authorize this engine. They come back to this instance, and the connection is stored for you — do not ask them to paste a token, and do not build this link yourself.`;
     }
 
     if (input.action === 'delete') {

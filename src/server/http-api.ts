@@ -162,6 +162,8 @@ const ownerOnly = (what: string): MandateStance => ({ kind: 'owner-only', what }
 const MARK: MandateStance = { kind: 'mark' };
 /** A mandate may act on what it set up or last changed itself; the handler checks it. */
 const OWN: MandateStance = { kind: 'own' };
+/** The connect route, which the consent page posts its confirmation to (see the dispatch). */
+const CONNECT_CONFIRM_PATH = /^\/api\/oauth\/connect\/[^/]+$/;
 /** A mandate may, for this reason. */
 const free = (why: string): MandateStance => ({ kind: 'free', why });
 /** A GET that only reads. */
@@ -1332,6 +1334,23 @@ function sendOAuthHtml(res: ServerResponse, status: number, message: string): vo
   res.end(
     `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization</title></head>`
     + `<body><p>${escapeHtml(message)}</p><p>You can close this tab.</p></body></html>`,
+  );
+}
+
+/**
+ * The page before a provider connect that asks for write access: the preset's customer text as
+ * approved, the write scopes this link asks for, and a button that posts back to the same
+ * address. No script and no field: the button is the confirmation. Not cached, for the same
+ * reason as the pages above.
+ */
+function sendConsentPage(res: ServerResponse, consent: { readonly lang: string; readonly paragraphs: readonly string[]; readonly writeScopes: readonly string[] }): void {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Authorization</title></head><body>`
+    + `<div lang="${escapeHtml(consent.lang)}">${consent.paragraphs.map((p) => `<p>${escapeHtml(p)}</p>`).join('')}</div>`
+    + `<p>Write access this connection asks for: ${escapeHtml(consent.writeScopes.join(', '))}</p>`
+    + `<form method="post"><button type="submit">Continue</button></form>`
+    + `</body></html>`,
   );
 }
 
@@ -3289,7 +3308,12 @@ export class LynoxHTTPApi {
     let body: unknown = null;
     if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
       const ct = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
-      if (ct && ct !== 'application/json') {
+      // The consent page before a provider connect confirms with a plain HTML form, and a form
+      // cannot send JSON. Let through only that: this one path, and an empty body, which is read
+      // as null below; any other body is refused there. The route refuses a POST that is not
+      // same-origin on its own.
+      const emptyFormConfirm = method === 'POST' && ct === 'application/x-www-form-urlencoded' && CONNECT_CONFIRM_PATH.test(pathname);
+      if (ct && ct !== 'application/json' && !emptyFormConfirm) {
         errorResponse(res, 415, 'Content-Type must be application/json');
         return;
       }
@@ -3309,6 +3333,10 @@ export class LynoxHTTPApi {
       }
       if (ct === '' && body !== null) {
         errorResponse(res, 415, 'Content-Type must be application/json');
+        return;
+      }
+      if (emptyFormConfirm && body !== null) {
+        errorResponse(res, 400, 'Invalid request body');
         return;
       }
     }
@@ -9913,9 +9941,19 @@ export class LynoxHTTPApi {
     // identically today — it is wrong because it is a second definition of the
     // same set, and a second definition drifts from the first without a compile
     // error to say so. Neither belongs here; only the first is an exploit.
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', async (req, res, params) => {
+    //
+    // A link that asks for a write scope of a preset with a customer text (`consentNotice`) is
+    // answered with a page first: the text, the write access asked for, and a button. Only the
+    // button's POST mints the state cookie and sends the person on. A GET never does, whatever
+    // the link carries, because the model hands out the link and could add to it; a form POST
+    // comes from this page in the person's browser, and one from another site is refused.
+    const connectStart = async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>, confirmed: boolean): Promise<void> => {
       const id = params['id'] ?? '';
       const httpSecret = process.env['LYNOX_HTTP_SECRET'] ?? '';
+      if (confirmed && singleHeader(req.headers['sec-fetch-site']) !== 'same-origin') {
+        sendOAuthHtml(res, 403, 'This confirmation has to come from the page this instance showed. Open the link again and confirm there. Nothing was sent to the provider.');
+        return;
+      }
 
       // Resolved here and not earlier. The obligation on this route is that
       // authentication happens BEFORE the profile id is resolved, because the
@@ -10023,6 +10061,12 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // Last, so the page appears only for a connect that would otherwise go ahead.
+      if (decision.consent && !confirmed) {
+        sendConsentPage(res, decision.consent);
+        return;
+      }
+
       const authorize = buildAuthorizeUrl(decision, {
         clientId, redirectUri: profileOAuthRedirectUri(), state, challenge, method,
       });
@@ -10030,7 +10074,9 @@ export class LynoxHTTPApi {
       LynoxHTTPApi._appendSetCookie(res, LynoxHTTPApi._buildProfileOAuthSetCookie(signed));
       res.writeHead(302, { Location: authorize, 'Cache-Control': 'no-store' });
       res.end();
-    }, OWN));
+    };
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, false), OWN));
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/oauth/connect/:id', (req, res, params) => connectStart(req, res, params, true), OWN));
 
     // The CALLBACK half. Unauthenticated by construction, and every input it
     // takes is listed here with the mechanism that bounds it — or with the

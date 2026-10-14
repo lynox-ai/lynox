@@ -4474,6 +4474,141 @@ describe('LynoxHTTPApi', () => {
     });
   });
 
+  // A link that asks bexio for a write scope shows the approved customer text first, and only the
+  // page's own button sends the person on.
+  describe('/api/oauth/connect/:id shows the customer text before a write scope', () => {
+    // The approved wording, copied byte for byte. A difference here is a text that was not
+    // approved; change it only with a new approval.
+    const APPROVED = [
+      'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+      'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
+      'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+    ];
+    const WRITING = 'openid offline_access contact_show kb_invoice_edit note_edit';
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
+
+    async function open(
+      scope: string,
+      req: { method?: string; query?: string; site?: string; contentType?: string; body?: string; origin?: string } = {},
+    ): Promise<{ status: number; text: string; state: string | null; location: string }> {
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'books', name: 'Books', base_url: 'https://api.bexio.com/3.0', description: 'd',
+        auth: { type: 'oauth2', vault_keys: ['BOOKS_CLIENT_ID', 'BOOKS_CLIENT_SECRET'], oauth: { preset_id: 'bexio', client_id_key: 'BOOKS_CLIENT_ID', client_secret_key: 'BOOKS_CLIENT_SECRET', scope } },
+        custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-stored' : null));
+      const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+      mockDerivePresetEndpoints.mockImplementation((id: string, params: Record<string, unknown> | undefined) => presets.derivePresetEndpoints(id, params));
+      const priorSecret = process.env['LYNOX_HTTP_SECRET'];
+      process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+      try {
+        const token = webUiLoginSession(TEST_SECRET, null)!.token;
+        const res = await fetch(`${baseUrl}/api/oauth/connect/books${req.query ?? ''}`, {
+          method: req.method ?? 'GET',
+          redirect: 'manual',
+          headers: {
+            cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': req.site ?? 'same-origin', 'Sec-Fetch-Dest': 'document',
+            ...(req.contentType === undefined ? {} : { 'Content-Type': req.contentType }),
+            ...(req.origin === undefined ? {} : { Origin: req.origin }),
+          },
+          ...(req.body === undefined ? {} : { body: req.body }),
+        });
+        const set = res.headers.getSetCookie().find((c) => c.startsWith('lynox_profile_oauth_state='));
+        return { status: res.status, text: await res.text(), state: set ?? null, location: res.headers.get('location') ?? '' };
+      } finally {
+        mockDerivePresetEndpoints.mockReset();
+        if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
+        else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    }
+    const confirm = { method: 'POST', contentType: 'application/x-www-form-urlencoded', body: '' };
+
+    it('holds the approved wording in the preset, byte for byte', async () => {
+      const { OAUTH_PRESETS } = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
+      expect(OAUTH_PRESETS.get('bexio')?.consentNotice?.paragraphs).toEqual(APPROVED);
+    });
+
+    it('answers a link with a write scope with the page: the text, the write scopes asked for, a button, and no cookie', async () => {
+      const r = await open(WRITING);
+      expect(r.status).toBe(200);
+      for (const p of APPROVED) expect(r.text).toContain(`<p>${p}</p>`);
+      expect(r.text).toContain('<div lang="de">');
+      expect(r.text).toContain('Write access this connection asks for: kb_invoice_edit, note_edit</p>');
+      expect(r.text).toContain('<form method="post"><button type="submit">Continue</button></form>');
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
+    });
+
+    it('shows the page to a link that carries something meant to skip it', async () => {
+      const r = await open(WRITING, { query: '?confirmed=1&continue=true' });
+      expect(r.status).toBe(200);
+      expect(r.text).toContain(APPROVED[0]);
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
+    });
+
+    it('sends the person on after the page\'s button: the cookie, and the write scopes in the link', async () => {
+      const r = await open(WRITING, confirm);
+      expect(r.status).toBe(302);
+      expect(r.state).not.toBeNull();
+      const link = new URL(r.location);
+      expect(link.host).toBe('auth.bexio.com');
+      expect(link.searchParams.get('scope')?.split(' ')).toEqual(expect.arrayContaining(['kb_invoice_edit', 'note_edit']));
+    });
+
+    it.each([
+      ['another site', 'cross-site', 'https://elsewhere.example'],
+      ['a sibling host', 'same-site', 'https://sibling.example'],
+      ['no page at all (typed or opened from outside)', 'none', undefined],
+    ])('refuses a confirmation from %s, and starts nothing', async (_label, site, origin) => {
+      const r = await open(WRITING, { ...confirm, site, ...(origin === undefined ? {} : { origin }) });
+      expect(r.status).toBe(403);
+      expect(r.state).toBeNull();
+      expect(r.location).toBe('');
+    });
+
+    // `{}` is valid JSON, so only the empty-body rule refuses it; a form field is refused as JSON.
+    it.each([['a form field', 'confirmed=1'], ['a JSON body', '{}']])('refuses a confirmation that carries %s, and starts nothing', async (_label, body) => {
+      const r = await open(WRITING, { ...confirm, body });
+      expect(r.status).toBe(400);
+      expect(r.state).toBeNull();
+    });
+
+    it('control: a form posted anywhere else is still refused as not JSON', async () => {
+      const token = webUiLoginSession(TEST_SECRET, null)!.token;
+      const priorSecret = process.env['LYNOX_HTTP_SECRET'];
+      process.env['LYNOX_HTTP_SECRET'] = TEST_SECRET;
+      try {
+        const res = await fetch(`${baseUrl}/api/sessions`, {
+          method: 'POST',
+          headers: { cookie: `lynox_session=${token}`, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: '',
+        });
+        expect(res.status).toBe(415);
+      } finally {
+        if (priorSecret === undefined) delete process.env['LYNOX_HTTP_SECRET'];
+        else process.env['LYNOX_HTTP_SECRET'] = priorSecret;
+      }
+    });
+
+    it('control: a read-only link goes straight to bexio, as before', async () => {
+      const r = await open('openid offline_access contact_show');
+      expect(r.status).toBe(302);
+      expect(r.state).not.toBeNull();
+      expect(new URL(r.location).host).toBe('auth.bexio.com');
+    });
+  });
+
   // The settings page deletes profiles through this route, not through the tool,
   // so it has to take the same tokens with a profile the tool does — and no more.
   describe('DELETE /api/api-profiles/:id', () => {
@@ -16027,6 +16162,7 @@ describe('mandate stance of every user route', () => {
       'POST /api/llm/test free',
       'POST /api/mail/accounts/test free',
       'POST /api/mail/autodiscover free',
+      'POST /api/oauth/connect/stance-probe own',
       'POST /api/onboarding/derive-domain free',
       'POST /api/onboarding/knowledge/start own',
       'POST /api/push/subscribe own',

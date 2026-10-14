@@ -150,6 +150,42 @@ describe('the start route decides everything before it mints anything', () => {
     expect(decision.scopes).toEqual(['openid', 'read_orders']);
   });
 
+  describe('the customer text of a preset that has one', () => {
+    const WITH_TEXT = presetRegisterOf([{
+      id: 'example-shop', label: 'Example Shop', host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
+      authorizePath: '/admin/oauth/authorize', tokenPath: '/admin/oauth/access_token',
+      params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
+      requiredScopes: ['openid'], allowedScopes: ['read_orders', 'write_orders', 'write_notes'],
+      consentNotice: { lang: 'de', writeScopes: ['write_orders', 'write_notes'], paragraphs: ['Erster Absatz.', 'Zweiter Absatz.'] },
+    }]);
+    const asking = (scope: string, register = WITH_TEXT): ReturnType<typeof decideConnect> => {
+      const p = profile();
+      return decide({ ...good, profile: { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, scope } } } }, register);
+    };
+
+    it('comes with the decision when the link asks for a write scope, naming only the ones asked for', () => {
+      const decision = asking('read_orders write_orders');
+      expect(isRefusal(decision)).toBe(false);
+      if (isRefusal(decision)) return;
+      expect(decision.consent).toEqual({ lang: 'de', paragraphs: ['Erster Absatz.', 'Zweiter Absatz.'], writeScopes: ['write_orders'] });
+    });
+
+    it('control: a read-only link carries none', () => {
+      const decision = asking('read_orders');
+      expect(isRefusal(decision)).toBe(false);
+      if (isRefusal(decision)) return;
+      expect(decision).not.toHaveProperty('consent');
+    });
+
+    it('control: a preset without a text carries none, whatever the link asks for', () => {
+      const { consentNotice: _text, ...withoutText } = WITH_TEXT.get('example-shop')!;
+      const decision = asking('read_orders write_orders', presetRegisterOf([withoutText]));
+      expect(isRefusal(decision)).toBe(false);
+      if (isRefusal(decision)) return;
+      expect(decision).not.toHaveProperty('consent');
+    });
+  });
+
   it('lets an address-bar open through, which sends site=none', () => {
     expect(isRefusal(decide({ ...good, fetchSite: 'none' }))).toBe(false);
   });

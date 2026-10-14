@@ -82,6 +82,17 @@ export interface OAuthPreset {
    * also name one of `oneOf`. A profile that does not is refused when it is saved, with `why`.
    */
   readonly scopeNeeds?: readonly { readonly when: readonly string[]; readonly oneOf: readonly string[]; readonly why: string }[];
+  /**
+   * A customer text the person reads before being sent to the provider, when the link asks for
+   * any of `writeScopes`. It is binding, so it is shown from here, as approved, and nowhere
+   * else: on a page of the connect route, which sends the person on only after they confirm it
+   * there (`server/http-api.ts`). Not in the answer to the model, because the model retells.
+   */
+  readonly consentNotice?: {
+    readonly lang: string;
+    readonly writeScopes: readonly string[];
+    readonly paragraphs: readonly string[];
+  };
 }
 
 /**
@@ -143,6 +154,17 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       oneOf: ['contact_show', 'contact_edit'],
       why: 'the question before each write names the contact it concerns, and reading a contact needs one of these',
     }],
+    // Customer text, approved 2026-10-14. A change to a word needs a new approval; the test that
+    // holds this text byte for byte is the reminder.
+    consentNotice: {
+      lang: 'de',
+      writeScopes: ['contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit'],
+      paragraphs: [
+        'lynox kann in bexio Kontakte, Notizen, Aufgaben, Offerten und Rechnungen anlegen und ändern, wenn du es beim Verbinden erlaubst. Ohne deine Erlaubnis liest lynox nur. Jeden Schreibschritt zeigt es dir vorher mit allem, was lynox an bexio schickt, und er geschieht erst nach deinem Ja. Das gilt auch, wenn lynox eine Zahlung auf einer Rechnung erfasst oder eine Rechnung storniert.',
+        'Die eine Ausnahme ist ein Sammellauf: Du siehst vorher die Liste aller Änderungen und bestätigst den Lauf einmal. Ein Sammellauf ändert nur, was wir bei bexio vorher getestet haben, heute nur bestehende Kontakte. Löschen, verschicken oder ausstellen kann er nicht.',
+        'Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.',
+      ],
+    },
   },
 ]);
 const BACKING = new Map(REGISTER_ENTRIES.map((p) => [p.id, Object.freeze(p)] as const));

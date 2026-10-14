@@ -82,6 +82,42 @@ describe('a bexio profile that writes documents, notes or tasks can read the con
   });
 });
 
+// The connect route shows the approved text and the write scopes before it sends anyone to bexio;
+// the link the model hands out says so, and names the write scopes, so a scope an update added is
+// not news to the person on bexio's page.
+describe('connect tells the model about the page before bexio', () => {
+  let originBefore: string | undefined;
+  beforeEach(() => { originBefore = process.env['ORIGIN']; process.env['ORIGIN'] = 'https://tenant.lynox.example'; });
+  afterEach(() => { if (originBefore === undefined) delete process.env['ORIGIN']; else process.env['ORIGIN'] = originBefore; });
+  const connect = (scope: string): Promise<string> => {
+    const store = new ApiStore();
+    store.register({
+      ...bexioProfile(scope),
+      custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
+    });
+    // The client pair is in the vault, as it is before a connect: `secret:NAME` resolves.
+    const agent = {
+      ...(agentWith(store) as object),
+      secretStore: {
+        extractSecretNames: (input: unknown): string[] => [...JSON.stringify(input).matchAll(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g)].map((m) => m[1]!),
+        resolveSecretRefs: (input: unknown): unknown => JSON.parse(JSON.stringify(input).replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, 'fixture-value')) as unknown,
+      },
+    } as never;
+    return apiSetupTool.handler({ action: 'connect', id: 'bexio-api' }, agent) as Promise<string>;
+  };
+
+  it('names the page and the write scopes the link asks for', async () => {
+    const reply = await connect('contact_show kb_invoice_edit');
+    expect(reply).toContain('It first shows a page on this instance with what lynox may do there and the write access this link asks for (kb_invoice_edit); they read it and continue to auth.bexio.com, where they authorize this engine.');
+  });
+
+  it('control: a read-only link opens bexio, as before', async () => {
+    const reply = await connect('contact_show');
+    expect(reply).toContain('It opens auth.bexio.com, where they authorize this engine.');
+    expect(reply).not.toContain('first shows a page');
+  });
+});
+
 describe('view tells the model which bexio scopes exist', () => {
   it('lists the write scopes as allowed, and no scope outside the preset', async () => {
     const store = new ApiStore();

@@ -1121,6 +1121,64 @@ describe('httpRequestTool', () => {
           expect(flattenPrompt(promptUser.mock.calls[0]![0])).toContain('is too large to show; its field names are listed.');
         });
 
+        // The question shows a query by its keys and no header, so neither may carry a value to a
+        // connected account: the customer text says each write is shown with everything sent.
+        it('refuses a query value, before the question, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const out = await visible({ ...post, url: 'https://example.com/v1/report?amount=900' }, makeAgent({ promptUser }));
+          expect(out).toContain('writes to a connected account with values in the query, which the approval question does not show. Nothing was sent. Put the values in the body');
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('refuses a header the question does not show, named, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const out = await visible({ ...post, headers: { 'Content-Type': 'application/json', 'X-Note': 'pay 900' } }, makeAgent({ promptUser }));
+          expect(out).toContain('sets headers the approval question does not show (x-note). Nothing was sent.');
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('refuses a content-type outside the list: a media type can carry a value too', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const out = await visible({ ...post, headers: { 'content-type': 'application/x-pay-900' } }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }));
+          expect(out).toContain('sets headers the approval question does not show (content-type).');
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: a clean body with content-type and accept from the list is asked and sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, headers: { 'Content-Type': 'application/json;charset=UTF-8', Accept: 'application/json' } }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it('control: without a preset, a query value and a header are asked and sent as before', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, url: 'https://example.com/v1/report?amount=900', headers: { 'X-Note': 'pay 900' } }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
         it('holds: a scheduled write without a contract is refused, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();

@@ -71,6 +71,11 @@ export interface ConnectTarget {
   readonly host: string;
   /** What the authorize link asks for: the preset's required scopes plus the profile's. */
   readonly scopes: readonly string[];
+  /**
+   * The preset's customer text, when the link asks for one of its write scopes, with the write
+   * scopes it asks for. The route shows it and sends the person on only after they confirm.
+   */
+  readonly consent?: { readonly lang: string; readonly paragraphs: readonly string[]; readonly writeScopes: readonly string[] };
 }
 
 /**
@@ -195,7 +200,15 @@ export function decideConnect(
     };
   }
 
-  return { ...endpoints, scopes: scope.scopes };
+  // Read from the preset of the link, so the page shows exactly the write access this link asks
+  // for, and appears whenever it asks for any.
+  const notice = preset?.consentNotice;
+  const writes = notice ? scope.scopes.filter((s) => notice.writeScopes.includes(s)) : [];
+  return {
+    ...endpoints,
+    scopes: scope.scopes,
+    ...(notice && writes.length > 0 ? { consent: { lang: notice.lang, paragraphs: notice.paragraphs, writeScopes: writes } } : {}),
+  };
 }
 
 /** What the start route adds to the target's authorize URL. */

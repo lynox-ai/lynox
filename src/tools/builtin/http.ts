@@ -174,6 +174,16 @@ export class RedirectRefusedAfterWrite extends Error {
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /**
+ * The headers a write to a connected account may set, and the values each may have. A fixed
+ * list and not a media-type pattern: a subtype or a charset is free text, and free text is room
+ * for a value the question does not show.
+ */
+const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['content-type', new Set(['application/json', 'application/json; charset=utf-8', 'application/x-www-form-urlencoded', 'application/x-www-form-urlencoded; charset=utf-8'])],
+  ['accept', new Set(['application/json', '*/*'])],
+]);
+
+/**
  * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
  * Every profile on the host counts, a host two profiles share included. Trailing root dots name
  * the same host to DNS and a different key to the profile map, which keeps a profile's host as
@@ -2322,6 +2332,26 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           ? `Blocked: ${gatedMethod} to ${host} writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.`
           : `Blocked: ${gatedMethod} to ${host} writes to an account the owner connected, which this session may not do. ` +
             'Propose the change as a task instead (task_create); it runs once the owner approves it.');
+      }
+    }
+
+    // A write to a connected account carries its data in the path and the body, which the
+    // question shows, and nowhere else. The question shows a query by its keys only and no
+    // header at all, so a query value or a header the request sets would reach the provider
+    // unseen, and the customer text says each write is shown with everything lynox sends there.
+    // A `content-type` or `accept` from a fixed list is let through (`UNSHOWN_HEADER_VALUES`): it
+    // names a format, and a list leaves no room for a value. The credential is the engine's own,
+    // attached below. Checked before it is attached, so a refused write renews no token.
+    if (presetOnHost.length > 0) {
+      const host = new URL(input.url).hostname.replace(/\.+$/, '');
+      if (new URL(input.url).search !== '') {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account with values in the query, which the approval question does not show. Nothing was sent. Put the values in the body, or leave the query out.`);
+      }
+      const unshown = Object.entries(input.headers ?? {})
+        .filter(([k, v]) => !UNSHOWN_HEADER_VALUES.get(k.trim().toLowerCase())?.has(v.trim().toLowerCase().replace(/\s*;\s*/g, '; ')))
+        .map(([k]) => k.trim().toLowerCase());
+      if (unshown.length > 0) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
       }
     }
 
