@@ -198,6 +198,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
 
   // ── Denylist (must never be emitted) ──────────────────────────────────────
   { name: 'LYNOX_LAZY_TOOLS_ENABLED', valueKind: 'bool', emitPolicy: 'denylist', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Parked feature (rafael 2026-07-22): the lazy-tools path does not work and is deferred — the engine read exists, but the CP must never emit/enable it fleet-side.' },
+  { name: 'LYNOX_SHELL_EXEC_SOCKET', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'direct', readSite: 'src/tools/builtin/bash.ts' }, note: 'Path of the shell sidecar\'s exec socket (PRD 152 v2 §4.1). Set = bash runs in the sidecar, with NO fallback to running it in the engine; set but empty is an error. It must come with the sidecar itself (the compose template that adds the sidecar sets it), never from the env emit alone: an engine told to use a sidecar that does not exist has no bash at all. Unset = bash runs in the engine as before (self-host, local). An OLDER engine ignores it and keeps running bash in its own container.' },
   { name: 'LYNOX_FALLBACK_PROFILE', valueKind: 'opaque', emitPolicy: 'denylist', engineConsumed: { kind: 'none' }, note: 'Phantom — never emitted, never read. The worker profile name lives in LYNOX_WORKER_PROFILE.' },
   { name: 'LYNOX_LLM_MODE', valueKind: 'opaque', emitPolicy: 'denylist', engineConsumed: { kind: 'none' }, note: 'Retired eu-sovereign toggle (2026-06-13). Engine no longer reads it.' },
   { name: 'LYNOX_MAIN_MODEL', valueKind: 'opaque', emitPolicy: 'denylist', engineConsumed: { kind: 'none' }, note: 'Retired eu-branch orphan (engine never read it).' },
@@ -255,6 +256,9 @@ export const SELF_HOST_ONLY: readonly string[] = [
   'LYNOX_WEBUI_HANDLER',
   'LYNOX_MANAGED_FLUSH_INTERVAL_MS',
   'LYNOX_BALANCED_MODEL',
+  // The shell sidecar's exec daemon (src/shell-sidecar/exec-daemon.ts): read by the
+  // SIDECAR process from its compose template, never sent to the engine.
+  'LYNOX_EXEC_*',
 ];
 
 /**

@@ -215,8 +215,8 @@ export function listenForEngine(server: Server, socketPath: string, engineGid: n
   });
 }
 
-function intFromEnv(name: string, fallback?: number): number {
-  const raw = process.env[name];
+/** `raw` is passed as a literal `process.env['NAME']` read, so the contract's read sweep sees every name. */
+function intFromEnv(name: string, raw: string | undefined, fallback?: number): number {
   if (raw === undefined || raw === '') {
     if (fallback === undefined) throw new Error(`${name} must be set`);
     return fallback;
@@ -231,10 +231,10 @@ export async function main(): Promise<void> {
   if (process.pid === 1) throw new Error('the exec daemon must not be pid 1: run it under the image init (tini)');
   const socketPath = process.env['LYNOX_EXEC_SOCKET_PATH'] || DEFAULT_SOCKET_PATH;
   const workspace = process.env['LYNOX_EXEC_WORKSPACE'] || DEFAULT_WORKSPACE;
-  const engineGid = intFromEnv('LYNOX_EXEC_ENGINE_GID', 1001);
-  const poolGid = intFromEnv('LYNOX_EXEC_POOL_GID');
+  const engineGid = intFromEnv('LYNOX_EXEC_ENGINE_GID', process.env['LYNOX_EXEC_ENGINE_GID'], 1001);
+  const poolGid = intFromEnv('LYNOX_EXEC_POOL_GID', process.env['LYNOX_EXEC_POOL_GID']);
   if (poolGid === 0 || poolGid === engineGid) throw new Error('LYNOX_EXEC_POOL_GID must be set to the lynox-ws group, never 0 or the engine group');
-  const pool = new UidPool(intFromEnv('LYNOX_EXEC_POOL_FIRST_UID', DEFAULT_POOL_FIRST_UID), intFromEnv('LYNOX_EXEC_POOL_SIZE', DEFAULT_POOL_SIZE));
+  const pool = new UidPool(intFromEnv('LYNOX_EXEC_POOL_FIRST_UID', process.env['LYNOX_EXEC_POOL_FIRST_UID'], DEFAULT_POOL_FIRST_UID), intFromEnv('LYNOX_EXEC_POOL_SIZE', process.env['LYNOX_EXEC_POOL_SIZE'], DEFAULT_POOL_SIZE));
   const ops = linuxReleaseOps(poolGid);
   const deps: DaemonDeps = {
     pool,
