@@ -1115,6 +1115,29 @@ export class ApiStore {
   }
 
   /**
+   * Another kind's connection under `id`, or null. `connections.id` is one key across every
+   * kind, so an upsert of an api row would turn another kind's row into an api row: its
+   * config replaced, its kind rewritten, and nothing left to say what was there.
+   */
+  private _otherKindAt(id: string): string | null {
+    const held = this.connStore?.get(id);
+    return held !== undefined && held.kind !== 'api' ? held.kind : null;
+  }
+
+  /**
+   * Every write of an api row goes through here, so none of them can overwrite another kind's
+   * row: a save refuses before this is reached (see `_persist`), and the engine's own writes
+   * (a grant outside a save, a renewal its readers follow) throw into the handlers that already
+   * log a failed write.
+   */
+  private _writeRow(profile: ApiProfile): void {
+    if (!this.connStore) return;
+    const kind = this._otherKindAt(profile.id);
+    if (kind !== null) throw new Error(`a ${kind} connection already uses the id ${JSON.stringify(profile.id)}`);
+    this.connStore.upsert(profileToConnectionRow(profile));
+  }
+
+  /**
    * The grant ledger (PRD connection-attribution A1). Wired beside the ConnectionStore; while
    * it is null — the degraded no-engine.db path — no grant is minted and a save keeps
    * whatever grant the stored profile had.
@@ -1244,7 +1267,7 @@ export class ApiStore {
       const check: unknown = p.oauth_grant?.fingerprint_check;
       const next = withGrant(p, p.oauth_grant?.grant_id, { fingerprints: moved, foreign: storedForeign(p), check: typeof check === 'string' ? check : undefined });
       try {
-        this.connStore?.upsert(profileToConnectionRow(next));
+        this._writeRow(next);
         this.profiles.set(p.id, next);
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Renewed credential for ${JSON.stringify(p.id)} not recorded, compared next boot: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -1265,7 +1288,7 @@ export class ApiStore {
     try {
       ledger.transaction(() => {
         const next = withGrant(current, ledger.mint(id, 'api', reason), this._credentialsOf(current, { prevForeign: storedForeign(current) }));
-        this.connStore?.upsert(profileToConnectionRow(next));
+        this._writeRow(next);
         this.profiles.set(id, next);
       });
       return true;
@@ -1517,6 +1540,13 @@ export class ApiStore {
         }
         if (!PROFILE_ID_PATTERN.test(profile.id)) {
           process.stderr.write(`[lynox:api-store] Skipping ${file} on import: invalid id ${JSON.stringify(profile.id)}\n`);
+          continue;
+        }
+        // The import upserts by id like every api write, so a file named after another kind's
+        // connection would overwrite that row. It stays a file, as the invalid ones do.
+        const held = store.get(profile.id);
+        if (held !== undefined && held.kind !== 'api') {
+          process.stderr.write(`[lynox:api-store] Skipping ${file} on import: a ${held.kind} connection already uses the id ${JSON.stringify(profile.id)}\n`);
           continue;
         }
         rows.push(profileToConnectionRow(migrateV1Profile(profile)));
@@ -1812,10 +1842,12 @@ export class ApiStore {
   }
 
   private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean): { ok: true; isNew: boolean } | { ok: false; reason: string } {
+    const other = this._otherKindAt(profile.id);
+    if (other !== null) return { ok: false, reason: `A ${other} connection already uses the id "${profile.id}". Save this API under another id.` };
     const refusal = this._admit(profile, 'save');
     if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
-      this.connStore.upsert(profileToConnectionRow(profile));
+      this._writeRow(profile);
     } else if (apisDir) {
       mkdirSync(apisDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
