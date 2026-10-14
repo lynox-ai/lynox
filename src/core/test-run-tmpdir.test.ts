@@ -15,7 +15,13 @@ import {
   RUN_ROOT_PREFIX, RUN_MARKER_FILE, RUN_MARKER_ENV, summariseRunRoot, redirectTmpdirForRun,
 } from '../../scripts/test-run-tmpdir.js';
 
+// The hook also points `HOME` into the root it creates (`test-run-home.ts`); a test that calls it
+// has to put this run's home back, or the rest of the file runs with a home that was removed.
+const RUN_HOME = process.env.HOME;
+
 const restoreEnv = (tmp: string | undefined, token: string | undefined): void => {
+  if (RUN_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = RUN_HOME;
   if (tmp === undefined) delete process.env.TMPDIR;
   else process.env.TMPDIR = tmp;
   if (token === undefined) delete process.env[RUN_MARKER_ENV];

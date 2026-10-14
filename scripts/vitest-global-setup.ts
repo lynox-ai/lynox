@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { redirectTmpdirForRun, summariseRunRoot } from './test-run-tmpdir.js';
+import { redirectHomeForRun } from './test-run-home.js';
 import { sweepStaleVitestTmp } from './vitest-tmp-cleanup.js';
 
 /** packages/web-ui/tsconfig.json extends ./.svelte-kit/tsconfig.json
@@ -32,6 +33,9 @@ export default function setup(): () => void {
   // directory that goes away instead of into the shared `/tmp`. See `test-run-tmpdir.ts` for why
   // this is a redirect rather than a helper the test files call.
   const runRoot = redirectTmpdirForRun();
+  // And one home inside it, so no test reaches the machine's real `~/.lynox` (see
+  // `test-run-home.ts`). After `svelte-kit sync` above, which still runs with the real home.
+  redirectHomeForRun(runRoot);
 
   return () => {
     const outcome = summariseRunRoot(runRoot);

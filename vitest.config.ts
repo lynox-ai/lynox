@@ -17,6 +17,10 @@ const BROWSER_COMPILE_TESTS = 'packages/*/src/**/*.svelte.test.ts';
 // `globalSetup` once per project: its temp-root accounting nests and its count goes wrong.
 const SHARED = { testTimeout: 10_000, pool: 'forks' as const };
 
+// Before every test file in both projects: a worker whose home is not this run's own refuses to
+// run, so no test opens the machine's real `~/.lynox` (`scripts/test-run-home.ts`).
+const HOME_GUARD = './scripts/vitest-home-guard.ts';
+
 export default defineConfig({
   test: {
     // Runs once per run, here at the root: the projects below do not inherit it.
@@ -37,6 +41,7 @@ export default defineConfig({
           name: 'node',
           include: ['src/**/*.test.ts', 'tests/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
           exclude: [...EXCLUDE, BROWSER_COMPILE_TESTS],
+          setupFiles: [HOME_GUARD],
         },
       },
       {
@@ -54,7 +59,7 @@ export default defineConfig({
           include: [BROWSER_COMPILE_TESTS],
           exclude: EXCLUDE,
           environment: 'jsdom',
-          setupFiles: ['./scripts/vitest-browser-compile-setup.ts'],
+          setupFiles: [HOME_GUARD, './scripts/vitest-browser-compile-setup.ts'],
         },
       },
     ],
