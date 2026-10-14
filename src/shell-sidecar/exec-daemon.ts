@@ -146,9 +146,8 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
     const emit = (text: string): void => {
       if (discard) return;
       for (let i = 0; i < text.length; i += OUT_CHUNK_CHARS) {
-        // Never pause for a client that is gone: a write to a destroyed socket returns false
-        // too, and every chunk would pause the stream again after `onGone` resumed it.
-        if (!send(socket, { t, d: text.slice(i, i + OUT_CHUNK_CHARS) }) && !socket.destroyed && !stream.isPaused()) {
+        // A pause here is undone, and never repeated, once the call is over (`drainToNowhere`).
+        if (!send(socket, { t, d: text.slice(i, i + OUT_CHUNK_CHARS) }) && !stream.isPaused()) {
           stream.pause();
           socket.once('drain', () => stream.resume());
         }
