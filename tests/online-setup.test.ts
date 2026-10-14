@@ -67,7 +67,7 @@ describe('getApiKey reads the config fallback', () => {
       // Not a silent skip: it says where it looked, the variable and the config file by path.
       const text = said.mock.calls.map((c) => String(c[0])).join('');
       expect(text).toContain('online tests: SKIPPED, no API key');
-      expect(text).toContain('ANTHROPIC_API_KEY: unset');
+      expect(text).toContain('ANTHROPIC_API_KEY: unset or empty');
       expect(text).toContain(`${join(home, '.lynox', 'config.json')} has none of anthropic_api_key, api_key`);
     } finally {
       said.mockRestore();

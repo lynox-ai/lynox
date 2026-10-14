@@ -45,7 +45,9 @@ export const REAL_HOME_ENV = 'LYNOX_TEST_REAL_HOME';
  * The developer's own home, for the opt-in harnesses ONLY (online tests, `LYNOX_EVAL`), which read
  * an API key from the developer's `~/.lynox/config.json`. With `HOME` redirected they would find
  * none and skip without a word. Nothing in the normal suite may use this: the point of the
- * redirect is that the normal suite cannot reach that directory.
+ * redirect is that the normal suite cannot reach that directory. A harness whose file the normal
+ * suite also loads (tests/eval is not excluded, only skipped) reads through `evalOperatorConfig`,
+ * which reads nothing without `LYNOX_EVAL=1`.
  */
 export function operatorHome(): string {
   return process.env[REAL_HOME_ENV] ?? homedir();
@@ -81,9 +83,19 @@ export function reportMissingKey(harness: string, envNames: readonly string[], c
   const cfg = readOperatorConfig();
   const where = cfg.problem === null ? `${cfg.path} has none of ${configFields.join(', ')}` : `${cfg.path}: ${cfg.problem}`;
   process.stderr.write(
-    `\n⚠ ${harness}: SKIPPED, no API key. Looked in the environment (${envNames.join(', ')}: unset) ` +
+    `\n⚠ ${harness}: SKIPPED, no API key. Looked in the environment (${envNames.join(', ')}: unset or empty) ` +
       `and in the developer config (${where}).\n\n`,
   );
+}
+
+/**
+ * The developer config for the knowledge eval: read only with `LYNOX_EVAL=1`, else `{}`. The eval's
+ * file is loaded by every normal run (it resolves its provider at module load and only then skips),
+ * so an unconditional read would reach the developer's real `~/.lynox` from the normal suite.
+ */
+export function evalOperatorConfig(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+  if (env['LYNOX_EVAL'] !== '1') return {};
+  return readOperatorConfig().config ?? {};
 }
 
 /**

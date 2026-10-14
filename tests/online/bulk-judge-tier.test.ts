@@ -88,8 +88,14 @@ const asked = MODE === 'smoke' || MODE === 'full';
 // Every picked model needs its key. A name in LYNOX_E2_MODELS that matches no candidate fails the run.
 const describeE2 = asked && ANTHROPIC_KEY && MODELS.every((m) => KEYS[m.family]) ? describe : describe.skip;
 // Asked for and still skipped is a failed lookup, not "nothing to run": say where it looked.
-if (asked && !(ANTHROPIC_KEY && MODELS.every((m) => KEYS[m.family]))) {
-  reportMissingKey('bulk-judge e2', ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'FIREWORKS_API_KEY'], ['anthropic_api_key', 'mistral_api_key', 'fireworks_api_key']);
+// Only the families that are missing, so the message names what is actually absent.
+const missingFamilies = [...new Set<Family>(['anthropic', ...MODELS.map((m) => m.family)])].filter((f) => !KEYS[f]);
+if (asked && missingFamilies.length > 0) {
+  reportMissingKey(
+    `bulk-judge e2 (${missingFamilies.join(', ')})`,
+    missingFamilies.map((f) => `${f.toUpperCase()}_API_KEY`),
+    missingFamilies.map((f) => `${f}_api_key`),
+  );
 }
 
 function outDir(): string {

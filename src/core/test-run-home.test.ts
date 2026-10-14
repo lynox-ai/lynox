@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { RUN_MARKER_ENV, RUN_MARKER_FILE } from '../../scripts/test-run-tmpdir.js';
 import {
-  HOME_GUARD_RAN, REAL_HOME_ENV, RUN_HOME_DIR, evalResultsDir, operatorHome, readOperatorConfig,
+  HOME_GUARD_RAN, REAL_HOME_ENV, RUN_HOME_DIR, evalOperatorConfig, evalResultsDir, operatorHome, readOperatorConfig,
   redirectHomeForRun, runHomeViolation, type RunHomeFacts,
 } from '../../scripts/test-run-home.js';
 
@@ -85,6 +85,22 @@ describe('the opt-in harnesses reach the developer’s own home, and only they',
     expect(process.env[REAL_HOME_ENV]).toBeTruthy();
     expect(operatorHome()).toBe(process.env[REAL_HOME_ENV]);
     expect(operatorHome()).not.toBe(homedir());
+  });
+
+  it('evalOperatorConfig reads nothing without LYNOX_EVAL=1, though the eval file loads in every run', () => {
+    const home = mkdtempSync(join(tmpdir(), 'operator-home-eval-'));
+    vi.stubEnv(REAL_HOME_ENV, home);
+    try {
+      mkdirSync(join(home, '.lynox'));
+      writeFileSync(join(home, '.lynox', 'config.json'), '{"anthropic_api_key":"k"}');
+      expect(evalOperatorConfig({})).toEqual({});
+      expect(evalOperatorConfig({ LYNOX_EVAL: '0' })).toEqual({});
+      // Control: the same config IS read when the eval was asked for.
+      expect(evalOperatorConfig({ LYNOX_EVAL: '1' })).toEqual({ anthropic_api_key: 'k' });
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('readOperatorConfig says why there is no config, by path', () => {
