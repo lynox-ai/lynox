@@ -259,7 +259,7 @@ export function gateReading(method: string, headers: Record<string, string>, url
   return JSON.stringify([
     effectiveWriteMethod(method, headers, url, body),
     writeMethodsNamed(method, headers, url, body),
-    retargetingHeader(headers)?.trim().toLowerCase() ?? null,
+    retargetingHeader(headers) ?? null,
   ]);
 }
 
