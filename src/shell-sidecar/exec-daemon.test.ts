@@ -220,9 +220,20 @@ describe('exec daemon: refusals', () => {
   it('refuses an oversize request line that does end in a newline', async () => {
     const h = (current = harness());
     await h.ready;
-    // Just over the limit, so the buffer stays at or under it until the chunk with the newline.
-    const line = req({ cmd: 'x'.repeat(MAX_REQUEST_BYTES) }).slice(0, MAX_REQUEST_BYTES + 8) + '"}\n';
-    const f = frames(await call(h.sock, line));
+    // Just over the limit, sent in two writes: the first fills the buffer exactly to the limit
+    // (not over it, so the reader keeps waiting), the second brings the rest and the newline.
+    // One write would leave the split to the kernel, and a read ending just past the limit
+    // would take the other refusal.
+    const line = Buffer.from(req({ cmd: 'x'.repeat(MAX_REQUEST_BYTES) }).slice(0, MAX_REQUEST_BYTES + 8) + '"}\n');
+    const lines = await new Promise<string[]>((resolve, reject) => {
+      const c = connect(h.sock);
+      let buf = '';
+      c.on('data', (d) => { buf += d.toString('utf8'); });
+      c.on('close', () => resolve(buf.split('\n').filter((l) => l.length > 0)));
+      c.on('error', reject);
+      c.write(line.subarray(0, MAX_REQUEST_BYTES), () => setTimeout(() => c.write(line.subarray(MAX_REQUEST_BYTES)), 100));
+    });
+    const f = frames(lines);
     expect(f).toEqual([{ t: 'exit', code: null, signal: null, timedOut: false, error: 'request too large' }]);
     expect(h.events.filter((e) => e.startsWith('spawn:'))).toEqual([]);
   });
