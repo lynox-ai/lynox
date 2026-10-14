@@ -1453,7 +1453,7 @@ describe('vault slot derivation — one function, and it must stay injective at 
 
     it('names nothing for client slots of their own, or for another profile\'s token names', () => {
       expect(clientSlotOnDerivedName(withClient('crm', 'CRM_ID', 'CRM_SECRET'))).toBeNull();
-      // Another id's derived name is a different question (it is not this profile's write).
+      // Only this profile's own token names count here.
       expect(clientSlotOnDerivedName(withClient('crm', 'CRM_ID', 'SHOP_ACCESS_TOKEN'))).toBeNull();
       const bearer = { ...profile('crm'), auth: { type: 'bearer', vault_keys: ['CRM_ACCESS_TOKEN'] } } as unknown as ApiProfile;
       expect(clientSlotOnDerivedName(bearer)).toBeNull();
@@ -1465,8 +1465,35 @@ describe('vault slot derivation — one function, and it must stay injective at 
 
       expect(result.ok).toBe(false);
       expect(result.ok === false && result.reason).toMatch(/client secret under CRM_ACCESS_TOKEN, the name its own tokens are written to/);
-      expect(result.ok === false && result.reason).toMatch(/Nothing was saved\. Point auth\.oauth\.client_secret_key at a name of its own/);
+      expect(result.ok === false && result.reason).toMatch(/Nothing was saved\. Store the client secret with ask_secret under a name of its own and point auth\.oauth\.client_secret_key at that name\./);
       expect(store.get('crm')).toBeUndefined();
+    });
+
+    // Moving the field leaves whatever the vault already holds under the token name, and
+    // the profile reads that name again once registered. One answer per shape.
+    const reasonFor = (p: ApiProfile): string => {
+      const result = new ApiStore().save(p);
+      return result.ok === false ? result.reason : '';
+    };
+    const withGrant = (p: ApiProfile, grant: 'refresh_token' | 'client_credentials'): ApiProfile =>
+      ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, grant_type: grant } } }) as ApiProfile;
+
+    it('on the access name, says to run fetch_token before any request', () => {
+      const reason = reasonFor(withClient('crm', 'CRM_ID', 'CRM_ACCESS_TOKEN'));
+      expect(reason).toContain('Then run fetch_token before any request to this API: until a token is written there, CRM_ACCESS_TOKEN may still hold the client secret');
+      expect(reason).not.toContain('refresh token under');
+    });
+
+    it('on the refresh name of a refresh-token profile, says to store the refresh token there first', () => {
+      const reason = reasonFor(withGrant(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'), 'refresh_token'));
+      expect(reason).toContain('Then store this API\'s refresh token under CRM_REFRESH_TOKEN with ask_secret before fetch_token');
+      expect(reason).not.toContain('run fetch_token before any request');
+    });
+
+    it('on the refresh name of a client-credentials profile, adds no step: that exchange never sends it', () => {
+      const reason = reasonFor(withGrant(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'), 'client_credentials'));
+      expect(reason).toMatch(/point auth\.oauth\.client_id_key at that name\.$/);
+      expect(reason).not.toContain(' Then ');
     });
 
     it('control: save admits the same profile with client slots of its own', () => {

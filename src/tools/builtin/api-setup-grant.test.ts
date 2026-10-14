@@ -1160,6 +1160,18 @@ describe('fetch_token — what a successful exchange records', () => {
       expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
     });
 
+    it('advises leaving the name out when the profile reads its refresh token from a name of its own', async () => {
+      const store = new ApiStore();
+      const base = crmProfile();
+      store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT_OWN' } } });
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT_OWN: 'rt-1' });
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain(`Leave output_secret_name out, so the access token goes to "${ACCESS}"`);
+      expect(result).not.toContain('Leaving output_secret_name out does not help');
+    });
+
     it('does not advise leaving the name out when the default is where the profile reads its refresh token', async () => {
       const store = new ApiStore();
       const base = crmProfile();

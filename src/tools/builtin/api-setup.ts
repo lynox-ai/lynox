@@ -2544,9 +2544,7 @@ ${draftJson}
       // not fix gets its own answer — a profile that reads its refresh token from
       // that very name — because there, following "leave it out" walks into the
       // next refusal. (An id whose derived names are protected was refused above.)
-      // The one shape where leaving output_secret_name out cannot help: the profile reads its
-      // refresh token from the very name its access token defaults to. Shared by every refusal
-      // below that would otherwise advise leaving the name out.
+      // The answer for that shape, shared with the client-slot refusal below.
       const refreshOnDerivedAdvice = `Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${grantType === 'refresh_token'
         ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
         : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`}`;

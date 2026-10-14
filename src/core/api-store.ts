@@ -735,6 +735,10 @@ export function protectedDerivedSlot(profile: ApiProfile): string | null {
  * profile's host as a bearer token until then. Asked here, beside
  * {@link protectedDerivedSlot}, so every one of those paths is covered by the one
  * gate a profile passes before any of them can see it.
+ *
+ * What the gate does not do is clean the vault: a credential already stored under
+ * the token name stays there after the field is moved, and the profile reads that
+ * name again once it is registered. The refusal says which step overwrites it.
  */
 export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_id_key' | 'client_secret_key'; name: string } | null {
   if (profile.auth?.type !== 'oauth2') return null;
@@ -1275,10 +1279,23 @@ export class ApiStore {
     const clientOnToken = clientSlotOnDerivedName(profile);
     if (clientOnToken !== null) {
       const { field, name } = clientOnToken;
+      const what = field === 'client_id_key' ? 'client id' : 'client secret';
+      // Moving the field is not the whole way out: the vault may already hold the
+      // credential under the token name, and the profile reads that name again as soon
+      // as it is registered. Which step clears it depends on which half it is.
+      // A client-credentials exchange (fetch_token's default grant) never sends the
+      // refresh half, so a value left there is not sent and needs no step.
+      const sendsRefresh = (profile.auth?.type === 'oauth2' ? profile.auth.oauth?.grant_type : undefined) === 'refresh_token';
+      const clear = name === accessTokenKey(profile.id)
+        ? ` Then run fetch_token before any request to this API: until a token is written there, ${name} may still hold the ${what}, and a request would send it.`
+        : sendsRefresh
+          ? ` Then store this API's refresh token under ${name} with ask_secret before fetch_token: until then ${name} may still hold the ${what}, and the exchange would send it as the refresh token.`
+          : '';
+      const move = `Store the ${what} with ask_secret under a name of its own and point auth.oauth.${field} at that name.${clear}`;
       if (mode === 'load') {
-        return `profile "${profile.id}" keeps its OAuth ${field === 'client_id_key' ? 'client id' : 'client secret'} under ${name}, the name its own tokens are written to, so it is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use this API again, point auth.oauth.${field} at a name of its own with api_setup update.`;
+        return `profile "${profile.id}" keeps its OAuth ${what} under ${name}, the name its own tokens are written to, so it is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use this API again: ${move} (api_setup update takes the corrected profile.)`;
       }
-      return `profile "${profile.id}" keeps its OAuth ${field === 'client_id_key' ? 'client id' : 'client secret'} under ${name}, the name its own tokens are written to — the first token would replace it. Nothing was saved. Point auth.oauth.${field} at a name of its own.`;
+      return `profile "${profile.id}" keeps its OAuth ${what} under ${name}, the name its own tokens are written to — the first token would replace it. Nothing was saved. ${move}`;
     }
 
     const hostname = hostOf(profile);
