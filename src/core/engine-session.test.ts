@@ -672,14 +672,32 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(engine.getPluginManager()).not.toBeNull();
     });
 
-    // The flag is on here: the instance id alone must keep plugins off.
+    // The flag is on here: the instance id alone must keep plugins off. Which
+    // markers count is `isProvisionedInstance`'s own test (wire-capture).
     it('builds no plugin manager on an instance the control plane provisioned', async () => {
+      const before = process.env['LYNOX_MANAGED_INSTANCE_ID'];
       process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-test';
       try {
         const { engine } = await createEngineAndSession();
         expect(engine.getPluginManager()).toBeNull();
       } finally {
-        delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+        if (before === undefined) delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+        else process.env['LYNOX_MANAGED_INSTANCE_ID'] = before;
+      }
+    });
+
+    // A billing tier without an instance id stops init at the managed hook, and
+    // that hook runs after plugins load — so the plugin step must already refuse.
+    it('builds no plugin manager on a half-provisioned instance that then fails to start', async () => {
+      const before = process.env['LYNOX_BILLING_TIER'];
+      process.env['LYNOX_BILLING_TIER'] = 'hosted';
+      try {
+        const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+        await expect(engine.init()).rejects.toThrow(/Managed hook/);
+        expect(engine.getPluginManager()).toBeNull();
+      } finally {
+        if (before === undefined) delete process.env['LYNOX_BILLING_TIER'];
+        else process.env['LYNOX_BILLING_TIER'] = before;
       }
     });
 

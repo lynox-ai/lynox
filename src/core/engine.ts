@@ -21,7 +21,7 @@ import { ToolRegistry } from '../tools/registry.js';
 import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
-import { pruneWireSinks } from './wire-capture.js';
+import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
@@ -2071,10 +2071,8 @@ export class Engine {
     // An instance the control plane provisioned loads none, whatever the flag
     // says: the control plane pins LYNOX_FEATURE_PLUGINS=0, and this still holds
     // where that value is missing or spelled in a form the flag does not read.
-    // The instance id is the mark: every such instance carries it, and one with
-    // a billing tier but no id does not start (the managed hook below throws).
-    const cpProvisioned = Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
-    if (isFeatureEnabled('plugins') && !cpProvisioned) {
+    // Any one marker of a provisioned instance is enough (`isProvisionedInstance`).
+    if (isFeatureEnabled('plugins') && !isProvisionedInstance()) {
       try {
         this.pluginManager = new PluginManager(this.userConfig);
         await this.pluginManager.loadPlugins();
