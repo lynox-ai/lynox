@@ -172,6 +172,32 @@ export class RedirectRefusedAfterWrite extends Error {
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/**
+ * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
+ * Every profile on the host counts, a host two profiles share included. Trailing root dots name
+ * the same host to DNS and a different key to the profile map, which keeps a profile's host as
+ * its `base_url` spells it; so the host is looked up as written, without the dots, and with one,
+ * and a profile found under any of them counts.
+ */
+function presetProfilesOnHost(url: string, toolContext: ToolContext | undefined): ApiProfile[] {
+  return toolContext?.apiStore ? connectedAccountProfiles(url, toolContext.apiStore) : [];
+}
+
+/** {@link presetProfilesOnHost} against a store: the profiles that make `url`'s host a connected account. */
+export function connectedAccountProfiles(url: string, apiStore: NonNullable<ToolContext['apiStore']>): ApiProfile[] {
+  const raw = new URL(url).hostname;
+  const bare = raw.replace(/\.+$/, '');
+  const ids = new Set<string>();
+  for (const host of new Set([raw, bare, `${bare}.`])) {
+    for (const id of apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id]) {
+      if (id !== undefined) ids.add(id);
+    }
+  }
+  return [...ids]
+    .map((id) => apiStore.get(id))
+    .filter((p): p is ApiProfile => p?.auth?.oauth?.preset_id !== undefined);
+}
+
 /** Write approvals denied in a tool batch, keyed by the batch's identity (`IAgent.approvalBatch`):
  *  a call of the same batch that waited on that question is refused without asking again. */
 const deniedInBatch = new WeakMap<object, Set<string>>();
@@ -2282,12 +2308,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // contract (so no grant opens it). Every profile on the host counts, a host two profiles
     // share included, and the host is read without trailing root dots, which name the same
     // host to DNS and a different key to the profile map.
+    const presetOnHost = isWriteMethod(gatedMethod) ? presetProfilesOnHost(input.url, toolContext) : [];
     if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
-      const apiStore = toolContext?.apiStore;
       const host = new URL(input.url).hostname.replace(/\.+$/, '');
-      const onHost = !apiStore ? [] : (apiStore.getHostConflict(host) ?? [apiStore.getByHostname(host)?.id])
-        .map((id) => (id === undefined ? undefined : apiStore.get(id)));
-      const presetOnHost = onHost.filter((p) => p?.auth?.oauth?.preset_id !== undefined);
       if (presetOnHost.length > 0) {
         // Whose connection it is decides the way forward. The owner's account: a task the owner
         // approves runs with the owner's connection. This session's own: a task would run on a
@@ -2604,12 +2627,22 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
+    // A write to an account connected through a built-in provider (a profile with `preset_id`)
+    // is asked every time, and no contract grants one: one scope of such a provider can cover
+    // creating, changing, cancelling, booking a payment, issuing and sending, and a provider
+    // changes a document's state with a POST to a path of its own, so neither the method nor a
+    // path list separates them. The question does. A run that can ask (a worker task, a
+    // workflow with a question channel) writes there after an Allow; a run with no one to ask
+    // does not write there through this tool. A bulk run writes there only in a measured form,
+    // after the person approved the run as a whole (`bulk-external.ts`).
+    const connectedAccount = presetOnHost.length > 0;
     const contractGrantsWrite =
       contract !== undefined &&
       !outboundEffect &&
+      !connectedAccount &&
       named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
-    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && isOwnerPrincipal(agent.principal);
+    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
       const hostname = approvalHost;
@@ -2630,13 +2663,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
         // names only (`onBoxBlock`). Shown whole or not at all: a body over the limit is never
-        // shown cut short. In a mandate's session a write whose body cannot be shown is refused,
-        // with the way out that fits it; the owner is asked with the field names, as before.
+        // shown cut short. In a mandate's session, and for a write to an account connected through
+        // a built-in provider, a write whose body cannot be shown is refused, with the way out that
+        // fits it: there the values (amounts, recipients) are what the approval is about. Otherwise
+        // the owner is asked with the field names, as before.
         const sentBody = repairedBody?.body ?? input.body;
         const bodyGoesOut = typeof sentBody === 'string' && sentBody !== '' && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD';
         const bodySize = bodyGoesOut ? sentBytes(sentBody) : 0;
         const shown = bodyGoesOut && bodySize <= SHOWN_BODY_MAX_BYTES ? bodyForQuestion(sentBody, mask, Object.entries(headers).filter(([k]) => k.trim().toLowerCase() === 'content-type').map(([, v]) => v).join(', ')) : undefined;
-        if (bodyGoesOut && !isOwnerPrincipal(agent.principal) && (shown === undefined || 'unshowable' in shown)) {
+        if (bodyGoesOut && (!isOwnerPrincipal(agent.principal) || connectedAccount) && (shown === undefined || 'unshowable' in shown)) {
           blockedVerbatim(
             shown !== undefined
               ? `Blocked: the body of this ${gatedMethod} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
@@ -2682,6 +2717,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const note = remembers ? pv``
               : outboundEffect ? pv` This sends or issues something and is asked every time.`
                 : gatedMethod === 'DELETE' ? pv` A DELETE is asked every time.`
+                  : connectedAccount ? pv` A write to a connected account is asked every time.`
                   : pv` In this session every write is asked.`;
             // What goes on the wire when an override names other methods: a server may run any of
             // them, so the question names them all.
@@ -2779,7 +2815,9 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             return hop !== null &&
               contractGrants('http_request', { url: nextUrl, method: hop }, contract) &&
               writeMethodsNamed(redirectMethod, headers, nextUrl, hopBody).every((m) => contractGrants('http_request', { url: nextUrl, method: m }, contract)) &&
-              !isOutboundEffectWrite(nextUrl, hop);
+              !isOutboundEffectWrite(nextUrl, hop) &&
+              // No contract grants a write to a connected account, on a hop either.
+              (!isWriteMethod(hop) || presetProfilesOnHost(nextUrl, toolContext).length === 0);
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {

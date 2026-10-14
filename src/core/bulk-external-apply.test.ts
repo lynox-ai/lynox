@@ -111,7 +111,7 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null } = {}): ExternalClient {
+function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
@@ -123,6 +123,7 @@ function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLim
     },
     rateLimit: opts.rateLimit ?? (() => null),
     scan: opts.scan ?? detectSecretInContent,
+    connectedAccount: opts.connectedAccount ?? (() => false),
   });
 }
 
@@ -448,6 +449,7 @@ describe('applying an external run', () => {
         attach: async (_u, headers) => { headers['authorization'] = `Bearer ${LOOKS_LIKE_A_KEY}`; return true; },
         rateLimit: () => null,
         scan: detectSecretInContent,
+        connectedAccount: () => false,
       });
       expect((await c.write(url(0), 'PATCH', { note: 'plain' })).kind).not.toBe('secret');
       expect(s.requests.map((r) => [r.method, r.auth])).toEqual([['PATCH', `Bearer ${LOOKS_LIKE_A_KEY}`]]);
@@ -722,6 +724,55 @@ describe('applying an external run', () => {
         ['GET', `Bearer ${TOKEN}`], ['PUT', `Bearer ${TOKEN}`], ['GET', `Bearer ${TOKEN}`],
       ]);
     } finally {
+      restore();
+    }
+  });
+
+  it('the worker\'s own client reads the store: an unmeasured write to a connected account is not sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      // PUT, not the default: the worker takes the verb from the run's contract.
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], client(), 'PUT');
+      const apiStore = new ApiStore();
+      apiStore.register({
+        id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
+        // A bearer credential the worker can attach, on a profile that names a built-in provider:
+        // the check reads only `preset_id`, and the reads before the write still go out.
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'], oauth: { preset_id: 'example-shop' } } as never,
+        custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      const triggers = new TriggerStore(engineDb);
+      expect(triggers.getDue().map((t) => [t.effect, t.bulk_run_id])).toEqual([['bulk_apply', runId]]);
+      const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+        triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+        triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+      });
+      const engine = {
+        getTaskManager: () => ({
+          getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+          claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
+          getTrigger: (id: string) => triggers.getById(id), recordTaskRun,
+        }),
+        getBulkLedger: () => ledger,
+        getDataStore: () => null,
+        getApiStore: () => apiStore,
+        getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
+        getToolContext: () => createToolContext({}),
+        getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+        getUserConfig: () => ({}),
+      } as unknown as Engine;
+      const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
+      // The run was approved under this file's stand-in, which counts every form on HOST as
+      // measured; the worker now reads the real table, where `/products/0` is not a measured form.
+      formFixture.measured = false;
+      s.requests.length = 0;
+      await loop.tick();
+      await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+      expect(s.requests.filter((r) => r.method !== 'GET')).toEqual([]);
+      expect(s.items.get('/products/0')!['price']).not.toBe('15.00');
+    } finally {
+      formFixture.measured = true;
       restore();
     }
   });
@@ -1225,6 +1276,60 @@ describe('an unmeasured write form', () => {
       const measured = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(ledger.getStatus(measured)).toMatchObject({ writeForm: 'measured', probeConfirmed: false });
       expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('a run writes to a connected account only in a measured form', () => {
+  const BEXIO = 'api.bexio.com';
+  const payment = `https://${BEXIO}/2.0/kb_invoice/7/payment`;
+  const contact = `https://${BEXIO}/2.0/contact/7`;
+  function bexioClient(connected: boolean): { c: ExternalClient; sent: string[]; restore: () => void } {
+    vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
+    const sent: string[] = [];
+    const restore = setPinnedTransportForTests(async (input: PinnedTransportInput) => {
+      sent.push(`${input.method} ${new URL(input.url).pathname}`);
+      return new Response(null, { status: 204 });
+    });
+    const c = externalClient({
+      contract: mintBulkContract(BEXIO, [payment, contact], 'POST'),
+      hostPolicy: createToolContext({}),
+      ackHosts: undefined,
+      attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; return true; },
+      rateLimit: () => null,
+      scan: detectSecretInContent,
+      connectedAccount: () => connected,
+    });
+    return { c, sent, restore };
+  }
+
+  it('does not send an unmeasured write (booking a payment), whatever the run\'s approval', async () => {
+    const { c, sent, restore } = bexioClient(true);
+    try {
+      expect((await c.write(payment, 'POST', { amount: 10 })).kind).toBe('not_granted');
+      expect(sent).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('control: sends the measured form there', async () => {
+    const { c, sent, restore } = bexioClient(true);
+    try {
+      expect((await c.write(contact, 'POST', { name_1: 'Muster' })).kind).not.toBe('not_granted');
+      expect(sent).toEqual(['POST /2.0/contact/7']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('control: an account without a built-in provider gets the unmeasured write as before', async () => {
+    const { c, sent, restore } = bexioClient(false);
+    try {
+      await c.write(payment, 'POST', { amount: 10 });
+      expect(sent).toEqual(['POST /2.0/kb_invoice/7/payment']);
     } finally {
       restore();
     }

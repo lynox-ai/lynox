@@ -128,21 +128,32 @@ describe('the bexio preset', () => {
     expect(bexio?.requiredScopes).toContain('offline_access');
   });
 
-  it('allows exactly the decided read scopes', () => {
+  it('allows exactly the decided read scopes and five write scopes', () => {
     // The exact list, not a shape check: a regex for `_edit` or `payroll` would
     // let an administrative scope without either through. Widening this list is
-    // a decision (write scopes and payroll records were deliberately left out).
+    // a decision (accounting, bank payments and payroll records were deliberately left out).
     expect([...(bexio?.allowedScopes ?? [])].sort()).toEqual([
-      'archive_show', 'article_show', 'bank_account_show', 'bank_payment_show', 'contact_show', 'email',
+      'archive_show', 'article_show', 'bank_account_show', 'bank_payment_show', 'contact_edit', 'contact_show', 'email',
       'kb_article_order_show', 'kb_bill_show', 'kb_credit_voucher_show', 'kb_delivery_show', 'kb_expense_show',
-      'kb_invoice_show', 'kb_offer_show', 'kb_order_show', 'lead_show', 'note_show', 'profile', 'project_show',
-      'task_show', 'transaction_show',
+      'kb_invoice_edit', 'kb_invoice_show', 'kb_offer_edit', 'kb_offer_show', 'kb_order_show', 'lead_show', 'note_edit',
+      'note_show', 'profile', 'project_show', 'task_edit', 'task_show', 'transaction_show',
     ]);
     expect(bexio?.requiredScopes).toEqual(['openid', 'offline_access']);
   });
 
   it('refuses an administrative scope a profile might name', () => {
     expect(presetScopeRequest(bexio!, 'contact_show superadmin')).toEqual({ refused: ['superadmin'] });
+  });
+
+  it('refuses the write scopes that were left out', () => {
+    expect(presetScopeRequest(bexio!, 'contact_edit accounting bank_payment_edit kb_bill_edit'))
+      .toEqual({ refused: ['accounting', 'bank_payment_edit', 'kb_bill_edit'] });
+  });
+
+  it('asks for a write scope only when the profile names it', () => {
+    expect(presetScopeRequest(bexio!, undefined)).toEqual({ scopes: ['openid', 'offline_access'] });
+    expect(presetScopeRequest(bexio!, 'contact_show kb_invoice_show')).toEqual({ scopes: ['openid', 'offline_access', 'contact_show', 'kb_invoice_show'] });
+    expect(presetScopeRequest(bexio!, 'contact_show contact_edit')).toEqual({ scopes: ['openid', 'offline_access', 'contact_show', 'contact_edit'] });
   });
 });
 

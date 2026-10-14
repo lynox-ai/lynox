@@ -114,14 +114,21 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // bexio issues a refresh token only for `offline_access`; without it the access token
     // cannot be renewed. `openid` is the protocol scope of its OpenID Connect endpoint.
     requiredScopes: ['openid', 'offline_access'],
-    // Read access to business records only, and only scopes the discovery document lists.
-    // Write scopes are a separate decision, and so are payroll records.
+    // Read access to business records, and only scopes the discovery document lists. Five
+    // write scopes, for contacts, notes, tasks, offers and invoices, and no others: accounting,
+    // bank payments and payroll stay out. A scope is asked for only when the profile names it
+    // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
+    // account is asked on its own (`http_request`), and no contract grants one, because one of
+    // these scopes covers creating, changing, cancelling, booking a payment, issuing and sending
+    // alike. The exception is a bulk run in one of its measured forms, which the person approves
+    // as a whole before it starts (`bulk-external.ts`).
     allowedScopes: [
       'email', 'profile',
       'contact_show', 'lead_show', 'note_show', 'task_show', 'project_show', 'article_show',
       'kb_offer_show', 'kb_order_show', 'kb_delivery_show', 'kb_invoice_show', 'kb_credit_voucher_show',
       'kb_bill_show', 'kb_expense_show', 'kb_article_order_show',
       'bank_account_show', 'bank_payment_show', 'transaction_show', 'archive_show',
+      'contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit',
     ],
   },
 ]);

@@ -88,6 +88,7 @@ function client(contract: NonNullable<ReturnType<typeof parseBulkContract>>): Ex
     attach: async (_u, headers) => { headers['authorization'] = 'Basic fixture'; return true; },
     rateLimit: () => profileLimit,
     scan: detectSecretInContent,
+    connectedAccount: () => false,
   });
 }
 

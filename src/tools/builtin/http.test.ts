@@ -1006,14 +1006,14 @@ describe('httpRequestTool', () => {
           expect(asMandate).toBe(asOwner);
         });
 
-        it('control: the owner\'s same write goes out', async () => {
+        it('control: the owner\'s same write goes out once the owner allows it', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           await handler(
             { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
-            makeAgent({ capabilityContract: contract }),
+            makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }),
           );
           expect(fetchMock).toHaveBeenCalled();
         });
@@ -1036,6 +1036,164 @@ describe('httpRequestTool', () => {
             { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
             makeAgent({ capabilityContract: contract, principal: mandate }),
           );
+          expect(fetchMock).toHaveBeenCalled();
+        });
+      });
+
+      // A write to an account connected through a built-in provider is asked every time: one
+      // scope there can cover creating, changing, deleting, issuing and sending alike.
+      describe('the owner writing to an account connected through a preset', () => {
+        async function withProfile(presetId: string | undefined, baseUrl = 'https://example.com/v1'): Promise<void> {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: baseUrl, description: 'Shop API',
+            auth: {
+              type: 'oauth2',
+              vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: {
+                grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET',
+                ...(presetId === undefined ? { token_url: 'https://example.com/oauth/token' } : { preset_id: presetId, preset_params: { shop: 'acme' } }),
+              },
+            },
+          });
+          testCtx.apiStore = store;
+        }
+        const post = { url: 'https://example.com/v1/report', method: 'POST', body: '{"amount":12}' };
+        const withDelete: CapabilityContract = { ...contract, httpMethods: ['POST', 'DELETE'] };
+
+        it('asks again for the second write in the same session, after an Allow', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler(post, makeAgent({ promptUser }));
+          await handler(post, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(2);
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          const question = flattenPrompt(promptUser.mock.calls[1]![0]);
+          expect(question).toContain('POST to example.com /v1/report');
+          expect(question).toContain('A write to a connected account is asked every time.');
+          expect(question).toContain('"amount": 12');
+        });
+
+        it('control: without a preset, the Allow holds for the next write', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler(post, makeAgent({ promptUser }));
+          await handler(post, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+        });
+
+        // One byte over what an approval question shows whole: the values would not be shown.
+        const overLimit = (): string => { const b = `{"note":"${'one position, '.repeat(Math.ceil(SHOWN_BODY_MAX_BYTES / 14))}"}`; expect(sentBytes(b)).toBeGreaterThan(SHOWN_BODY_MAX_BYTES); return b; };
+
+        it('refuses a body the question cannot show whole, with the way out, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const out = await visible({ ...post, body: overLimit() }, makeAgent({ promptUser }));
+          expect(out).toContain(`is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes`);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: without a preset, the same body is asked with its field names', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await visible({ ...post, body: overLimit() }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(flattenPrompt(promptUser.mock.calls[0]![0])).toContain('is too large to show; its field names are listed.');
+        });
+
+        it('holds: a scheduled write without a contract is refused, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await expect(handler(post, makeAgent())).rejects.toThrow(/requires user consent but no interactive prompt is available/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('does not let a contract grant a DELETE there, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await expect(handler({ url: 'https://example.com/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: withDelete })))
+            .rejects.toThrow(/requires user consent/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('grants no write by contract there: a state change by POST is not sent unattended', async () => {
+          // A provider changes a document's state with a POST to a path of its own (cancel, book a
+          // payment). A contract that grants POST on those paths does not open them.
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const invoices: CapabilityContract = { ...contract, pathPatterns: ['/v1/kb_invoice/*/*'] };
+          for (const action of ['cancel', 'payment']) {
+            await expect(handler({ url: `https://example.com/v1/kb_invoice/7/${action}`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: invoices })))
+              .rejects.toThrow(/requires user consent/);
+          }
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: the same contract grants the POST on an account without a preset', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const invoices: CapabilityContract = { ...contract, pathPatterns: ['/v1/kb_invoice/*/*'] };
+          await handler({ url: 'https://example.com/v1/kb_invoice/7/cancel', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: invoices }));
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it.each([
+          ['a base_url that ends in a dot', 'https://example.com./v1', 'https://example.com/v1/report'],
+          ['a request host that ends in a dot', 'https://example.com/v1', 'https://example.com./v1/report'],
+        ])('counts the account as connected with %s', async (_label, baseUrl, url) => {
+          await withProfile('example-shop', baseUrl);
+          mockDnsPublic();
+          vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, url }, makeAgent({ promptUser }));
+          await handler({ ...post, url }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(2);
+        });
+
+        // A hop to another origin keeps its method only without a body (a body turns it into a
+        // bodyless GET), so the write that can reach the account by redirect is a DELETE.
+        it.each([
+          ['example-shop', 1],
+          [undefined, 2],
+        ] as const)('a contract-granted DELETE redirected onto the account follows the hop only without a preset (preset %s: %i requests)', async (presetId, calls) => {
+          await withProfile(presetId);
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://example.com/v1/report' } }))
+            .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'example.com'] };
+          await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+          expect(fetchMock).toHaveBeenCalledTimes(calls);
+          expect((fetchMock.mock.calls.at(-1)![1] as RequestInit).method).toBe('DELETE');
+        });
+
+        it('control: the same contract grants the DELETE on an account without a preset', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          await handler({ url: 'https://example.com/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: withDelete }));
           expect(fetchMock).toHaveBeenCalled();
         });
       });
