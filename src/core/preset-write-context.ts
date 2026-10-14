@@ -148,15 +148,15 @@ function parsedBody(body: string | undefined): Record<string, unknown> | undefin
 
 const bexio: PresetWriteContext = {
   async describe(method, url, body, read) {
-    // A path that carries percent-encoding at all is refused: bexio's paths never need it, and
-    // the raw and the decoded form could name two different resources. Every form whose routing
-    // is ambiguous (`normalizeWritePath`) carries one by the time the URL parser is done, since it
-    // encodes spaces, controls and non-ASCII and resolves literal dot segments. The rest is
-    // matched as a server may route it: case and empty segments folded, matrix parameters cut.
-    if (url.pathname.includes('%')) {
+    // Matched on the path as a server may route it: decoded once, case and empty segments
+    // folded, matrix parameters cut. Refused when it carries percent-encoding at all (bexio's
+    // paths never need it, and the raw and the decoded form could name two resources) or when
+    // its routing is ambiguous: a dot segment with a matrix parameter (`..;`) passes the URL
+    // parser untouched and climbs a segment only for a server that cuts the parameter first.
+    const { path, ambiguous } = normalizeWritePath(url.pathname);
+    if (ambiguous || url.pathname.includes('%')) {
       throw new WriteContextRefused('the path is percent-encoded or its routing is ambiguous. Write it plainly');
     }
-    const { path } = normalizeWritePath(url.pathname);
     const segments = path.split('/').filter((s) => s !== '');
     if (segments[0] !== '2.0' || segments[1] === undefined) return null;
     const resource = segments[1];

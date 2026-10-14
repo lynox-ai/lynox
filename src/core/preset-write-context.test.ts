@@ -192,6 +192,15 @@ describe('a bexio write whose question cannot show it is refused, before any rea
   });
 
   it.each([
+    ['a dot segment with a parameter that climbs out of an order', '/2.0/kb_order/..;/kb_invoice/7/cancel'],
+    ['a dot segment with a parameter', '/2.0/.;x/kb_invoice/7/cancel'],
+  ])('a path with %s: refused, nothing is read', async (_label, path) => {
+    const { message, reads } = await refusal('POST', path, undefined);
+    expect(message).toContain('percent-encoded or its routing is ambiguous');
+    expect(reads).toEqual([]);
+  });
+
+  it.each([
     ['an invalid currency_id', { contact_id: 17, currency_id: '1/x' }],
     ['an unsummable position', { contact_id: 17, currency_id: 1, positions: [{ type: 'KbPositionSubposition' }] }],
     ['an invalid contact_id after a valid currency', { contact_id: 'x', currency_id: 1 }],
