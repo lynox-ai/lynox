@@ -4,7 +4,8 @@ import { createServer, connect, type Server } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleConnection, startupSweep, type DaemonDeps } from './exec-daemon.js';
+import { handleConnection, startupSweep, CALL_WRAPPER, callNproc, type DaemonDeps } from './exec-daemon.js';
+import { spawnSync } from 'node:child_process';
 import { UidPool } from './pool.js';
 import { parseFrame, MAX_RESPONSE_LINE_BYTES, type ExecFrame } from './protocol.js';
 import type { ReleaseOps } from './release.js';
@@ -153,20 +154,24 @@ describe('exec daemon: transport', () => {
     expect(h.events.filter((e) => e.startsWith('spawn:'))).toEqual([]);
   });
 
-  it('releases the uid when the client drops while output is held back', async () => {
-    const h = (current = harness());
-    await h.ready;
-    await new Promise<void>((resolve) => {
-      const c = connect(h.sock);
-      let got = 0;
-      c.on('data', (d) => { got += d.length; if (got > 64 * 1024) { c.pause(); setTimeout(() => c.destroy(), 300); } });
-      c.on('close', () => resolve());
-      c.on('error', () => resolve());
-      c.write(req({ cmd: 'yes' }));
+  // Two shapes: the call's own shell still writes, or it has exited and a process it left in
+  // the background writes. Node resumes a paused stdio stream once, on the direct child's exit —
+  // in the second shape that has already happened, and only the daemon's own resume ends it.
+  it.each([['the call itself writes', 'yes'], ['a background process writes after the call exited', 'yes & exit 0']])(
+    'releases the uid when the client drops while output is held back: %s', async (_shape, cmd) => {
+      const h = (current = harness());
+      await h.ready;
+      await new Promise<void>((resolve) => {
+        const c = connect(h.sock);
+        let got = 0;
+        c.on('data', (d) => { got += d.length; if (got > 64 * 1024) { c.pause(); setTimeout(() => c.destroy(), 300); } });
+        c.on('close', () => resolve());
+        c.on('error', () => resolve());
+        c.write(req({ cmd }));
+      });
+      await waitFor(() => h.events.includes('kill:20000'));
+      await waitFor(() => h.deps.pool.stats().free === 2, 5000);
     });
-    await waitFor(() => h.events.includes('kill:20000'));
-    await waitFor(() => h.deps.pool.stats().free === 2, 5000);
-  });
 });
 
 describe('exec daemon: refusals', () => {
@@ -228,6 +233,38 @@ describe('exec daemon: ending a call early', () => {
     await call(h.sock, req({ cmd: 'true' }));
     await waitFor(() => h.deps.pool.stats().quarantined === 1);
     expect(h.events.some((e) => e.startsWith('log:QUARANTINE uid 20000'))).toBe(true);
+  });
+});
+
+describe('the call wrapper', () => {
+  // The real wrapper, run as the current user: the harness spawner above skips it.
+  function wrap(nproc: string, cmd: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'wrapper-'));
+    try {
+      const home = join(dir, 'call');
+      const r = spawnSync('/bin/sh', ['-c', CALL_WRAPPER, 'lynox-call', dir, nproc, cmd], { env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
+      return { status: r.status, out: r.stdout.trim() };
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  it('runs the command in the workspace, in a private HOME it made itself', () => {
+    const r = wrap('', 'echo "$(pwd)|$(stat -c %a "$HOME")|$1"');
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/\/wrapper-[^|]+\|700\|$/);
+  });
+
+  it('takes a process limit from the env only when it is a whole number of at least 1', () => {
+    expect(callNproc(undefined)).toBe('');
+    expect(callNproc('')).toBe('');
+    expect(callNproc('256')).toBe('256');
+    expect(() => callNproc('0')).toThrow(/at least 1/);
+    expect(() => callNproc('-3')).toThrow();
+    expect(() => callNproc('2.5')).toThrow();
+  });
+
+  it('applies a process limit when one is given, and refuses one that is not a number', () => {
+    expect(wrap('7', 'ulimit -p').out).toBe('7');
+    expect(wrap('1;id', 'echo ran').status).toBe(125);
   });
 });
 

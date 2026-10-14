@@ -35,7 +35,7 @@ export const REQUEST_DEADLINE_MS = 30_000;
  * call dir is created by the uid itself (root may not chown) under a 1733 root dir, and the
  * directory change happens as the uid, so nothing a previous call left is followed as root.
  */
-const CALL_WRAPPER = 'umask 077; mkdir "$HOME" || exit 125; cd "$1" || exit 125; if [ -n "$2" ]; then ulimit -p "$2" || exit 125; fi; umask 002; shift 2; exec /bin/sh -c "$1"';
+export const CALL_WRAPPER = 'umask 077; mkdir "$HOME" || exit 125; cd "$1" || exit 125; if [ -n "$2" ]; then ulimit -p "$2" || exit 125; fi; umask 002; shift 2; exec /bin/sh -c "$1"';
 
 export interface DaemonDeps {
   pool: UidPool;
@@ -60,6 +60,8 @@ function send(socket: Socket, frame: ExecFrame): boolean {
 function refuse(socket: Socket, error: string): void {
   send(socket, { t: 'exit', code: null, signal: null, timedOut: false, error });
   socket.end();
+  // `end` waits for the client's FIN; a client that never sends one keeps the descriptor.
+  setTimeout(() => socket.destroy(), 1000).unref();
 }
 
 /** Read exactly one request line, bounded. */
@@ -121,7 +123,15 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
   let killing: Promise<void> = Promise.resolve();
   const stopCall = (): void => { killing = killing.then(() => deps.killCall(uid)).catch(() => {}); };
   const timer = setTimeout(() => { timedOut = true; stopCall(); }, req.timeoutMs);
-  const onGone = (): void => { if (!ended) stopCall(); };
+  // Once the client is gone, `drain` never comes. Node resumes a paused stdio stream once, on
+  // the direct child's exit; if the call's shell has already exited and something it left
+  // behind still writes, that resume is spent and the stream would stay paused past the kill
+  // — no 'close', the uid busy for good. So read on, into nothing.
+  const onGone = (): void => {
+    child.stdout?.resume();
+    child.stderr?.resume();
+    if (!ended) stopCall();
+  };
   socket.on('close', onGone);
 
   const pipe = (stream: NodeJS.ReadableStream | null, t: 'out' | 'err'): void => {
@@ -129,10 +139,8 @@ function runCall(socket: Socket, uid: number, req: ExecRequest, deps: DaemonDeps
     const dec = new StringDecoder('utf8');
     const emit = (text: string): void => {
       for (let i = 0; i < text.length; i += OUT_CHUNK_CHARS) {
-        // Never pause for a client that is gone: `drain` will not come, and a write to a
-        // destroyed socket also returns false, so every chunk would pause the stream again and
-        // the uid would stay busy for good. (A stream paused before the client left still
-        // reaches 'close' once the kill ends its writers — measured, Node 22.)
+        // Never pause for a client that is gone: a write to a destroyed socket returns false
+        // too, and every chunk would pause the stream again after `onGone` resumed it.
         if (!send(socket, { t, d: text.slice(i, i + OUT_CHUNK_CHARS) }) && !socket.destroyed && !stream.isPaused()) {
           stream.pause();
           socket.once('drain', () => stream.resume());
@@ -247,6 +255,14 @@ function intFromEnv(name: string, raw: string | undefined, fallback?: number): n
   return n;
 }
 
+/** The per-call process limit for the wrapper: '' = none. 0 would let no call fork at all. */
+export function callNproc(raw: string | undefined): string {
+  if (raw === undefined || raw === '') return '';
+  const n = intFromEnv('LYNOX_EXEC_CALL_NPROC', raw);
+  if (n < 1) throw new Error('LYNOX_EXEC_CALL_NPROC must be at least 1, or unset');
+  return String(n);
+}
+
 export async function main(): Promise<void> {
   if (process.getuid?.() !== 0) throw new Error('the exec daemon runs as uid 0 (with only CAP_SETUID/CAP_SETGID)');
   if (process.pid === 1) throw new Error('the exec daemon must not be pid 1: run it under the image init (tini)');
@@ -260,7 +276,7 @@ export async function main(): Promise<void> {
   // RLIMIT_NPROC counts per uid and user namespace, not per container: off until measured on a
   // host without and with userns-remap (sec-infra) — on a shared namespace it would let one
   // container's calls hold another's back.
-  const nproc = process.env['LYNOX_EXEC_CALL_NPROC'] ? String(intFromEnv('LYNOX_EXEC_CALL_NPROC', process.env['LYNOX_EXEC_CALL_NPROC'])) : '';
+  const nproc = callNproc(process.env['LYNOX_EXEC_CALL_NPROC']);
   const deps: DaemonDeps = {
     pool,
     ops,
