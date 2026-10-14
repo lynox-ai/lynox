@@ -188,6 +188,19 @@ COPY --from=build-webui --chown=lynox:lynox /app/packages/web-ui/package.json /a
 COPY --chown=lynox:lynox entrypoint-webui.sh /entrypoint-webui.sh
 RUN chmod +x /entrypoint-webui.sh
 
+# Every program in the image is execute-only for the runtime user, so no
+# process in the container is dumpable. The kernel marks a process started from
+# a binary its user cannot read as not dumpable, and another process of the
+# same user then cannot read its /proc/<pid>/environ or memory. That covers the
+# engine and anything it or `docker exec` starts, whatever environment each one
+# carries. A program is an executable ELF file without a library name; owned by
+# root, because its owner could read it whatever the mode. Libraries stay
+# readable: the loader maps them. Last, after every COPY, so a binary a
+# dependency brings is covered too. scripts/image-exec-only-probe.sh checks
+# the built image (smoke).
+RUN find / -xdev -type f -perm /111 ! -name '*.so' ! -name '*.so.*' ! -name '*.node' \
+      -exec sh -c 'for f; do head -c4 "$f" | grep -q ELF && chown root:root "$f" && chmod go-r "$f"; done; true' sh {} +
+
 USER lynox
 
 # Git SHA the engine was built from. Surfaced via /api/health so UpdateManager
