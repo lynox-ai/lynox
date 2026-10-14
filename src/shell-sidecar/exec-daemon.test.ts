@@ -217,6 +217,14 @@ describe('exec daemon: refusals', () => {
     expect(h.events.filter((e) => e.startsWith('spawn:'))).toEqual([]);
   });
 
+  it('refuses an oversize request line that does end in a newline', async () => {
+    const h = (current = harness());
+    await h.ready;
+    const f = frames(await call(h.sock, req({ cmd: 'x'.repeat(600 * 1024) })));
+    expect(f).toEqual([{ t: 'exit', code: null, signal: null, timedOut: false, error: 'request too large' }]);
+    expect(h.events.filter((e) => e.startsWith('spawn:'))).toEqual([]);
+  });
+
   it('refuses an oversize request line', async () => {
     const h = (current = harness());
     await h.ready;

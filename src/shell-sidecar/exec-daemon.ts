@@ -81,7 +81,8 @@ function readRequestLine(socket: Socket, onLine: (line: string | null) => void, 
   const onData = (chunk: Buffer): void => {
     buf = Buffer.concat([buf, chunk]);
     const nl = buf.indexOf(0x0a);
-    if (nl >= 0) return finish(nl <= MAX_REQUEST_BYTES ? buf.subarray(0, nl).toString('utf8') : null);
+    // The line's size is the parser's to refuse (`parseRequest`); decoding never makes it shorter.
+    if (nl >= 0) return finish(buf.subarray(0, nl).toString('utf8'));
     if (buf.length > MAX_REQUEST_BYTES) finish(null);
   };
   const onEnd = (): void => finish(buf.length > 0 ? buf.toString('utf8') : null);
