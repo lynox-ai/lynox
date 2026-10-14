@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll, beforeEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, readdirSync, utimesSync, lutimesSync, lstatSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { sha256Short } from './utils.js';
 import { setDataDir } from './config.js';
 import {
@@ -217,8 +217,10 @@ describe('wireSinkDir', () => {
     // (and, worse, a world-writable arming marker) made "is capture on?" a
     // question any process on the box could answer yes to.
     expect(wireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink');
-    expect(wireSinkDir({})).not.toContain(tmpdir());
-    expect(wireSinkDir({})).toContain('.lynox');
+    // Not in the shared temp dir itself. (The suite's own home lies inside its temp root, so
+    // "anywhere under tmpdir()" would also refuse the right answer.)
+    expect(dirname(wireSinkDir({}))).not.toBe(tmpdir());
+    expect(wireSinkDir({})).toBe(join(homedir(), '.lynox', 'wire-sink'));
   });
 
   // An instance started with `--data-dir` sets the override and no env var; the capture
@@ -302,7 +304,8 @@ describe('raw-body sink (eval / wire-replay path)', () => {
 
   it('rawWireSinkDir defaults under the data dir, or uses the override', () => {
     expect(rawWireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink-raw');
-    expect(rawWireSinkDir({})).not.toContain(tmpdir());
+    expect(dirname(rawWireSinkDir({}))).not.toBe(tmpdir());
+    expect(rawWireSinkDir({})).toBe(join(homedir(), '.lynox', 'wire-sink-raw'));
     expect(rawWireSinkDir({ LYNOX_DEBUG_WIRE_RAW_SINK: '/x/raw' })).toBe('/x/raw');
   });
 
