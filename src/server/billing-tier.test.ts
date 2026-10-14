@@ -25,6 +25,7 @@ describe('src/server/billing-tier.ts shim', () => {
   it('cpSuppliesLLMKey is true exactly for the CP-key tiers', () => {
     expect(cpSuppliesLLMKey('managed')).toBe(true);
     expect(cpSuppliesLLMKey('managed_pro')).toBe(true);
+    expect(cpSuppliesLLMKey('managed_max')).toBe(true);
     expect(cpSuppliesLLMKey('hosted')).toBe(false); // BYOK
     expect(cpSuppliesLLMKey('eu')).toBe(true); // legacy alias of managed
     expect(cpSuppliesLLMKey('starter')).toBe(false); // legacy alias of hosted

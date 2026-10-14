@@ -38,8 +38,8 @@ describe('driveBackupAllowed — the boundary is who hosts, not the tier name', 
 
   it('refuses it on every CP tier, BYOK included', () => {
     // `hosted` is the one that matters: it is BYOK, it is the cheapest, and it is the tier a
-    // "managed only" check would have missed. All three are CP-hosted and CP-backed-up.
-    for (const tier of ['hosted', 'managed', 'managed_pro']) {
+    // "managed only" check would have missed. All four are CP-hosted and CP-backed-up.
+    for (const tier of ['hosted', 'managed', 'managed_pro', 'managed_max']) {
       for (const k of KEYS) set(k, undefined);
       set('LYNOX_BILLING_TIER', tier);
       expect(driveBackupAllowed(), `tier ${tier} must not upload to Drive`).toBe(false);

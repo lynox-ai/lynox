@@ -19,6 +19,7 @@
 	| Effective-limits pills | ✓ pills   | ✓ pills | ✓ tier-label pill |
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -75,7 +76,7 @@
 				max_session_cost_usd: body.max_session_cost_usd,
 				max_http_requests_per_hour: body.max_http_requests_per_hour,
 			};
-			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			managed = cpSuppliesLLMKey(body.managed);
 			hardLimits = body.capabilities?.hard_limits ?? null;
 			loaded = true;
 		} catch (e) {

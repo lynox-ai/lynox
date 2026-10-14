@@ -98,8 +98,8 @@ describe('billing-tier canonical spec (src/contract/vocab.ts is the single sourc
   // SEMANTIC spec itself — the wire values the CP emits — so a contract edit
   // that changes them fails CI until it is made deliberately, in this file, in
   // the same commit.
-  it('canonical tiers are exactly hosted/managed/managed_pro', () => {
-    expect([...CANONICAL_BILLING_TIERS].sort()).toEqual(['hosted', 'managed', 'managed_pro'].sort());
+  it('canonical tiers are exactly hosted/managed/managed_pro/managed_max', () => {
+    expect([...CANONICAL_BILLING_TIERS].sort()).toEqual(['hosted', 'managed', 'managed_pro', 'managed_max'].sort());
   });
   it('legacy aliases are exactly starter→hosted and eu→managed', () => {
     expect(LEGACY_BILLING_TIER_ALIASES).toEqual({ starter: 'hosted', eu: 'managed' });

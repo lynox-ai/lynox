@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { t } from '../i18n.svelte.js';
 	import { clearError } from '../stores/chat.svelte.js';
 	import { onMount } from 'svelte';
@@ -60,27 +61,21 @@
 					if (data.api_base_url) openaiUrl = data.api_base_url;
 					if (data.openai_model_id) openaiModel = data.openai_model_id;
 				}
+				// Canonical tier or null: the engine normalizes legacy ids (`eu` → `managed`,
+				// `starter` → `hosted`) before it answers, so no legacy value reaches this.
 				managedMode = data.managed ?? null;
-
-				// EU instances have pre-configured keys — never show wizard
-				if (managedMode === 'eu') {
-					apiKeyMissing = false;
-					loaded = true;
-					return;
-				}
 
 				apiKeyMissing = !data.configured['api_key'];
 				if (apiKeyMissing) {
 					const wasDismissed = localStorage.getItem('lynox-setup-dismissed');
 					showWizard = !wasDismissed;
 					dismissed = !!wasDismissed;
-					// Managed-pool tiers (`managed`, `managed_pro`): the CP provides
+					// Managed-pool tiers (`managed`, `managed_pro`, `managed_max`): the CP provides
 					// the LLM endpoint + key, customer just enters their Anthropic key
-					// → skip the picker, jump straight to credentials. `eu` is
-					// already handled above (banner not shown at all). Starter (BYOK)
+					// → skip the picker, jump straight to credentials. Hosted (BYOK)
 					// and self-host both show the picker so the customer can pick
 					// Anthropic / Mistral / Custom freely.
-					if (managedMode === 'managed' || managedMode === 'managed_pro') {
+					if (cpSuppliesLLMKey(managedMode)) {
 						selectedProvider = 'anthropic';
 						step = 'credentials';
 					}
@@ -433,7 +428,7 @@
 
 					<!-- Actions -->
 					<div class="flex items-center justify-between pt-1">
-						{#if managedMode !== 'managed' && managedMode !== 'managed_pro'}
+						{#if !cpSuppliesLLMKey(managedMode)}
 							<!-- Self-host AND Hosted-BYOK (starter) both surface the picker
 							     above this step, so the user has a real provider choice
 							     to go back to. Pre-fix, starter users were treated like

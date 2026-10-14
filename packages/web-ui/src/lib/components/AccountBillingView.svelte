@@ -72,13 +72,14 @@
 
 	const tierLabel = $derived.by(() => {
 		// `managed===null` is filtered by the template before this derived
-		// renders, so the four cases are exhaustive in practice. Keep a typed
+		// renders, so the five cases are exhaustive in practice. Keep a typed
 		// switch with no default — TS narrows the union and a future tier id
 		// addition (e.g. PRD-OPENAI-NATIVE `native` tier) will fail to compile.
 		switch (managed) {
 			case 'hosted':       return t('account.billing.tier.hosted');
 			case 'managed':      return t('account.billing.tier.managed');
 			case 'managed_pro':  return t('account.billing.tier.managed_pro');
+			case 'managed_max':  return t('account.billing.tier.managed_max');
 			case null:           return '—';
 		}
 	});

@@ -5,6 +5,7 @@
 	never own these secrets and see a minimal notice instead.
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -29,7 +30,7 @@
 			]);
 			if (!configRes.ok) throw new Error(`HTTP ${configRes.status}`);
 			const body = (await configRes.json()) as ConfigResponse;
-			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			managed = cpSuppliesLLMKey(body.managed);
 			if (vaultRes.ok) {
 				const vaultBody = (await vaultRes.json()) as { configured: boolean };
 				vaultConfigured = vaultBody.configured;

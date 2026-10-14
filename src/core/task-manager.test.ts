@@ -41,7 +41,7 @@ describe('admittedTriggerTier', () => {
   afterEach(() => { vi.unstubAllEnvs(); });
 
   it('drops a stored tier on a managed pool tier and keeps it everywhere else', () => {
-    for (const tier of ['managed', 'managed_pro']) {
+    for (const tier of ['managed', 'managed_pro', 'managed_max']) {
       vi.stubEnv('LYNOX_BILLING_TIER', tier);
       expect(admittedTriggerTier('deep'), tier).toBeUndefined();
     }

@@ -17,7 +17,7 @@
 
 // === Billing tier (hosting plan) — NOT the model tier ===
 
-export type BillingTier = 'hosted' | 'managed' | 'managed_pro';
+export type BillingTier = 'hosted' | 'managed' | 'managed_pro' | 'managed_max';
 
 /** Legacy tier aliases still accepted at input boundaries (pre-rename envs). */
 export const LEGACY_BILLING_TIER_ALIASES: Record<string, BillingTier> = {
@@ -29,6 +29,7 @@ export const CANONICAL_BILLING_TIERS: ReadonlySet<string> = new Set<BillingTier>
   'hosted',
   'managed',
   'managed_pro',
+  'managed_max',
 ]);
 
 /** Canonical tier for any tier string (canonical or legacy); undefined if unknown/self-host. */
@@ -47,10 +48,10 @@ export function isHostedInstance(value: string | undefined | null): boolean {
   return normalizeBillingTier(value) !== undefined;
 }
 
-/** True only when the control plane supplies the LLM key (managed / managed_pro). */
+/** True only when the control plane supplies the LLM key (managed / managed_pro / managed_max). */
 export function cpSuppliesLLMKey(value: string | undefined | null): boolean {
   const t = normalizeBillingTier(value);
-  return t === 'managed' || t === 'managed_pro';
+  return t === 'managed' || t === 'managed_pro' || t === 'managed_max';
 }
 
 // === Tier presets (which MODEL sits behind each band) ===

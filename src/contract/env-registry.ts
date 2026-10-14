@@ -117,8 +117,8 @@ export interface EnvRegistryRow {
   note?: string;
 }
 
-const ALL_TIERS: BillingTier[] = ['hosted', 'managed', 'managed_pro'];
-const MANAGED_TIERS: BillingTier[] = ['managed', 'managed_pro'];
+const ALL_TIERS: BillingTier[] = ['hosted', 'managed', 'managed_pro', 'managed_max'];
+const MANAGED_TIERS: BillingTier[] = ['managed', 'managed_pro', 'managed_max'];
 
 export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   // ── Base secrets (all tiers) ──────────────────────────────────────────────

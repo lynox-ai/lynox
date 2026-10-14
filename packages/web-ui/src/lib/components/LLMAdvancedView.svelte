@@ -28,6 +28,7 @@
 	  → hidden when `providerLocked` OR when Mistral capability is not wired.
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -133,7 +134,7 @@
 				llm_mode: body.llm_mode,
 			};
 			locks = body.locks ?? {};
-			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			managed = cpSuppliesLLMKey(body.managed);
 			activeModel = body.active_model ?? null;
 			loaded = true;
 		} catch (e) {

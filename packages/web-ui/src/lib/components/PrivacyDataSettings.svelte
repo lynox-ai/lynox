@@ -4,6 +4,7 @@
 	(Phase 5/6 swaps in synchronous DELETE /api/privacy/account).
 -->
 <script lang="ts">
+	import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -26,7 +27,7 @@
 			const res = await fetch(`${getApiBase()}/config`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const body = (await res.json()) as { managed?: string; bugsink_enabled?: boolean; bugsink_dsn_configured?: boolean; debug_wire_capture?: boolean; env_overrides?: { debug_wire_capture?: boolean } };
-			managed = body.managed === 'managed' || body.managed === 'managed_pro' || body.managed === 'eu';
+			managed = cpSuppliesLLMKey(body.managed);
 			bugsinkEnabled = body.bugsink_enabled !== false;
 			bugsinkDsnConfigured = body.bugsink_dsn_configured === true;
 			// The server surfaces the EFFECTIVE value (env override applied), so this
