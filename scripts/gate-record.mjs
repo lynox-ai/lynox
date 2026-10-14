@@ -507,7 +507,8 @@ function openCountRefusal(field, visibility) {
  * bodies: 0 hits, while 50 of them say "filed" in the number-free form this repo prescribes.
  * What it leaves out, and why, is the calibration:
  *   · `0` — `0 filed` means nothing is open;
- *   · a `#`, `.` or word character before the number — `core#1274 filed` is a PR that filed;
+ *   · a `#`, `.`, `-` or word character before the number — `core#1274 filed` is a PR that filed,
+ *     and with paragraphs joined, a date or `step 2` ending one line must not meet the next;
  *   · `deferred` and `issues`, which hit "9 of 17 deferred tools" and "the 3 issues filed by users".
  * ⚠ A COPY of a rule that lives in the private repo, now slightly wider, so the two can drift.
  * Bounded, not exact: a count in words ("two remain") passes, as it does in the fields, and so do
@@ -518,10 +519,10 @@ function openCountRefusal(field, visibility) {
  */
 const PROSE_OPEN_NOUN = String.raw`(?:findings?|Befunde?|defects?|gaps?|Lücken?)`;
 const PROSE_OPEN_COUNT = new RegExp([
-  String.raw`(?<![#\w.])[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?(?:${PROSE_OPEN_NOUN}\s+)?(?:(?:were|was|are|is|have\s+been|has\s+been|got)\s+)?filed\b`,
+  String.raw`(?<![#\w.-])[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?(?:${PROSE_OPEN_NOUN}\s+)?(?:(?:were|was|are|is|have\s+been|has\s+been|got)\s+)?filed\b`,
   String.raw`\bfiled\s+[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?${PROSE_OPEN_NOUN}`,
-  String.raw`(?<![#\w.])[1-9]\d*\s+(?:open|offene[nr]?)\s+${PROSE_OPEN_NOUN}\b`,
-  String.raw`(?<![#\w.])[1-9]\d*\s+${PROSE_OPEN_NOUN}\s+(?:(?:are|is|sind|ist)\s+)?(?:(?:remain|remains|left|still|stay|stays|bleib\w*|noch)\s+)*(?:open|offen|unresolved|ungelöst)\b`,
+  String.raw`(?<![#\w.-])[1-9]\d*\s+(?:open|offene[nr]?)\s+${PROSE_OPEN_NOUN}\b`,
+  String.raw`(?<![#\w.-])[1-9]\d*\s+${PROSE_OPEN_NOUN}\s+(?:(?:are|is|sind|ist)\s+)?(?:(?:remain|remains|left|still|stay|stays|bleib\w*|noch)\s+)*(?:open|offen|unresolved|ungelöst)\b`,
 ].join('|'), 'i');
 /** A line that quotes the form on purpose (a PR about this check) opts out, as in public-repo-guard. */
 const PROSE_ALLOW = ['public-repo-guard', 'allow'].join(':');
@@ -539,7 +540,12 @@ export function proseOpenCountLines(body) {
   // around the number (`**2**`, `_2_`, `` `2` ``, a link) is taken out before matching.
   let para = [];
   const flush = () => {
-    const text = para.map((p) => p.text).join(' ')
+    // A trailing `\` is a hard break; inline HTML and `&nbsp;` render as text around the number;
+    // zero-width characters render as nothing. All of them would otherwise split a count.
+    const text = para.map((p) => p.text.replace(/\\$/, '')).join(' ')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;|&#160;|&#xa0;/gi, ' ')
+      .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
       .replace(/\]\([^)]*\)/g, '')
       .replace(/[*_`[\]]/g, '');
     if (para.length > 0 && PROSE_OPEN_COUNT.test(text)) hits.push(para[0].n);
@@ -1010,7 +1016,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
   // a review count with no security gate named, reasoning that an open CODE defect counted in
   // public breaks no rule. The rule is wider: no open gap is named in public text, security or not.
   //
-  // The record's PROSE is outside this script; the private repo's public-text-check reads it.
+  // The record's PROSE is read by `proseOpenCountLines` above, with a narrower pattern.
   // Bounded, not exact: a count in words ("two remain") passes.
   if (visibility !== 'private') {
     for (const [field, raw] of Object.entries(f)) {

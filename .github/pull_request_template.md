@@ -125,9 +125,9 @@ whenever security is in play at all, because the same findings are routinely
 counted in both halves and the two numbers are then one set, not two.
 
 Still allowed, and deliberately: `no findings`, `<N> findings, all fixed`, and a
-`<N> filed` in `review:` on a diff with no security dimension — a filed CODE
-defect is not a security finding, and hiding those would cost measurability for
-nothing.
+breakdown of `fixed` and `refuted` counts. A `filed` count is refused in `review:`
+too, security or not — no open gap is named in public text. The same holds for
+the prose around the record: the check reads the whole body.
 
 ⚠ The example above USED to read `1 finding, 1 filed`, so a template reader <!-- public-repo-guard:allow — quotes the form -->
 produced the very thing the rule forbids. If you are reading this in an old

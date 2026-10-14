@@ -1790,6 +1790,16 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
     for (const text of ['**2** findings filed', '_2_ open findings', '`2` findings filed', '[2 findings](https://x) filed', 'left\n2\nfindings filed', 'two lines: 2 findings\nwere filed']) {
       expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
     }
+    // What GitHub renders as text around the number: inline HTML, an entity, a hard break, a
+    // zero-width character.
+    for (const text of ['left <b>2</b> findings filed', 'left 2&nbsp;findings filed', 'left 2\\\nfindings filed', 'left 2\u200B findings filed']) {
+      expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
+    }
+    // …but a date ending one line does not meet the next one's words. (A bare `step 2` ending a
+    // line still would — joined, it IS a count, and nothing in the text says otherwise.)
+    for (const text of ['Merged 2026-10-14\nfindings filed privately', 'tag v2.15.4\nfindings filed privately']) {
+      expect(proseOpenCountLines(text), JSON.stringify(text)).toEqual([]);
+    }
     // A blank line ends the paragraph: the number and the noun are then two statements.
     expect(proseOpenCountLines('we found 2\n\nfindings filed privately')).toEqual([]);
   });
