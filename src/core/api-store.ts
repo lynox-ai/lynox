@@ -1287,7 +1287,7 @@ export class ApiStore {
       // tokens (a token exchange, a connect, a stored refresh token), so the refusal
       // states the fact and does not prescribe one.
       const move = `Store the ${what} under a name of its own and point auth.oauth.${field} at that name`;
-      const left = `Until ${half === 'access' ? 'an' : 'a'} ${half} token is written to ${name}, it may still hold the ${what}, and wherever this profile reads that name, it takes the value as its ${half} token.`;
+      const left = `Until ${half === 'access' ? 'an' : 'a'} ${half} token is written to ${name}, it may still hold the ${what}, and wherever this profile reads that name, it takes the value as a token.`;
       if (mode === 'load') {
         return `profile "${profile.id}" keeps its OAuth ${what} under ${name}, the name its own tokens are written to, so it is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use this API again, ${move.charAt(0).toLowerCase()}${move.slice(1)}, then save the corrected profile with api_setup update. ${left}`;
       }

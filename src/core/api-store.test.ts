@@ -1477,15 +1477,15 @@ describe('vault slot derivation — one function, and it must stay injective at 
       return result.ok === false ? result.reason : '';
     };
 
-    it('on the access name, says the name may still hold it and is read as the access token', () => {
+    it('on the access name, says the name may still hold it and is read as a token', () => {
       const reason = reasonFor(withClient('crm', 'CRM_ID', 'CRM_ACCESS_TOKEN'));
-      expect(reason).toContain('Until an access token is written to CRM_ACCESS_TOKEN, it may still hold the client secret, and wherever this profile reads that name, it takes the value as its access token.');
+      expect(reason).toContain('Until an access token is written to CRM_ACCESS_TOKEN, it may still hold the client secret, and wherever this profile reads that name, it takes the value as a token.');
       expect(reason).not.toMatch(/fetch_token|connect|ask_secret/);
     });
 
     it('on the refresh name, says the same for the refresh token', () => {
       const reason = reasonFor(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'));
-      expect(reason).toContain('Until a refresh token is written to CRM_REFRESH_TOKEN, it may still hold the client id, and wherever this profile reads that name, it takes the value as its refresh token.');
+      expect(reason).toContain('Until a refresh token is written to CRM_REFRESH_TOKEN, it may still hold the client id, and wherever this profile reads that name, it takes the value as a token.');
     });
 
     it('control: save admits the same profile with client slots of its own', () => {
