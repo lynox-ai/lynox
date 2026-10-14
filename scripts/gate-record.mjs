@@ -543,25 +543,27 @@ export function proseOpenCountLines(body) {
   // line and `findings filed` on the next read as a count. Markdown that renders as plain text
   // around the number (`**2**`, `_2_`, `` `2` ``, a link) is taken out before matching.
   let para = [];
+  // A trailing `\` is a hard break; inline HTML and `&nbsp;` render as text around the number;
+  // zero-width characters render as nothing. All of them would otherwise split a count.
+  // Only what LOOKS like a tag or comment goes: a plain `<` with a later `>` (`p95 < 300ms … ->`)
+  // is shown literally by GitHub, and a bare `<[^>]*>` erased the count between them.
+  const readable = (raw) => raw
+    .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
+    .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ')
+    // Again after decoding: an entity can name a fullwidth digit.
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
+    .replace(/\]\([^)]*\)/g, '')
+    .replace(/[*_`[\]]/g, '');
   const flush = () => {
-    // A trailing `\` is a hard break; inline HTML and `&nbsp;` render as text around the number;
-    // zero-width characters render as nothing. All of them would otherwise split a count.
-    // Only what LOOKS like a tag or comment goes: a plain `<` with a later `>` (`p95 < 300ms … ->`)
-    // is shown literally by GitHub, and a bare `<[^>]*>` erased the count between them.
-    const text = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ')
-      // A comment's MARKERS go, its text stays: GitHub hides it, but the raw body — API, edit
-      // view — is public, so a count inside a comment is still published.
-      .replace(/<!--|-->/g, ' ')
-      .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
-      .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
-      .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
-      .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ')
-      // Again after decoding: an entity can name a fullwidth digit.
-      .normalize('NFKC')
-      .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
-      .replace(/\]\([^)]*\)/g, '')
-      .replace(/[*_`[\]]/g, '');
-    if (para.length > 0 && PROSE_OPEN_COUNT.test(text)) hits.push(para[0].n);
+    const joined = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ');
+    // Read twice. As RENDERED, a comment is a tag and goes — `2 findings <!-- x --> filed` shows
+    // the count. As PUBLISHED, its markers go and its text stays — the raw body (API, edit view)
+    // is public, so `<!-- 2 findings filed -->` is too. A count in either reading is a hit.
+    const views = [joined, joined.replace(/<!--|-->/g, ' ')];
+    if (para.length > 0 && views.some((v) => PROSE_OPEN_COUNT.test(readable(v)))) hits.push(para[0].n);
     para = [];
   };
   for (const [i, line] of lines.entries()) {

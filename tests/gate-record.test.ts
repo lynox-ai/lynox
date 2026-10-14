@@ -1801,6 +1801,9 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
     // A count inside an HTML comment is still in the public raw body.
     expect(proseOpenCountLines('<!-- 2 findings filed -->')).toEqual([1]);
     expect(proseOpenCountLines('<!--\n2 findings filed\n-->')).toEqual([1]);
+    // ...and a comment INSIDE a count is hidden as rendered, so the count still reads.
+    expect(proseOpenCountLines('2 findings <!-- x --> filed')).toEqual([1]);
+    expect(proseOpenCountLines('<a <!-- x --> 2 findings filed >')).toEqual([1]);
     // An entity naming a fullwidth digit is folded after decoding.
     expect(proseOpenCountLines('left &#xFF12; findings filed')).toEqual([1]);
     // An entity outside Unicode does not throw.
