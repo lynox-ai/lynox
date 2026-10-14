@@ -54,6 +54,13 @@ export class GrantLedger {
       .all(connectionId) as GrantLedgerRow[];
   }
 
+  /** The connection's newest grant, by insertion order (a clock can step back; the rowid does not). */
+  latest(connectionId: string): GrantLedgerRow | undefined {
+    return this.db
+      .prepare('SELECT grant_id, connection_id, kind, reason, minted_at FROM connection_grants WHERE connection_id = ? ORDER BY rowid DESC LIMIT 1')
+      .get(connectionId) as GrantLedgerRow | undefined;
+  }
+
   /** Run `fn` in one transaction, so a mint and the save that carries it land together. */
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();

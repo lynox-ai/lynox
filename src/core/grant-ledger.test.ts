@@ -105,6 +105,41 @@ describe('grant ledger', () => {
     expect(ledger.get(g!)).toBeDefined(); // the old grant stays in the ledger
   });
 
+  // Where the credentials go and what their token may do: the fields that end a release
+  // (`credentialBearing`) start a new grant too, one row each.
+  it.each<[string, (a: Auth) => Auth]>([
+    ['token endpoint', (a) => ({ ...a, oauth: { ...a.oauth, token_url: 'https://issuer.example/token' } })],
+    ['scope', (a) => ({ ...a, oauth: { ...a.oauth, scope: 'read write' } })],
+    ['audience', (a) => ({ ...a, oauth: { ...a.oauth, audience: 'https://api.example' } })],
+    ['preset', (a) => ({ ...a, oauth: { ...a.oauth, preset_id: 'bexio' } })],
+    ['preset parameters', (a) => ({ ...a, oauth: { ...a.oauth, preset_params: { shop: 'other' } } })],
+    ['body format', (a) => ({ ...a, oauth: { ...a.oauth, body_format: 'json' } })],
+  ])('a save that changes only the %s mints a new grant (reason credentials)', (_label, change) => {
+    store.save(profile('shop', { auth: baseAuth }));
+    const g = grantOf('shop');
+    store.save(profile('shop', { auth: change(baseAuth) }));
+    expect(grantOf('shop')).not.toBe(g);
+    expect(ledger.get(grantOf('shop')!)).toMatchObject({ reason: 'credentials' });
+  });
+
+  it('a save that moves base_url to another origin mints; one that changes only its path keeps the grant', () => {
+    store.save(profile('shop', { base_url: 'https://shop.example/v1' }));
+    const g = grantOf('shop');
+    store.save(profile('shop', { base_url: 'https://shop.example/v2' }));
+    expect(grantOf('shop')).toBe(g);
+    store.save(profile('shop', { base_url: 'https://shop.example:8443/v2' }));
+    expect(grantOf('shop')).not.toBe(g);
+  });
+
+  it('the same preset parameters in another key order are the same configuration', () => {
+    const withParams = (preset_params: Record<string, string>): Partial<ApiProfile> =>
+      ({ auth: { ...baseAuth, oauth: { ...baseAuth.oauth, preset_params } } });
+    store.save(profile('shop', withParams({ a: '1', b: '2' })));
+    const g = grantOf('shop');
+    store.save(profile('shop', withParams({ b: '2', a: '1' })));
+    expect(grantOf('shop')).toBe(g);
+  });
+
   it('an empty vault-key list and no list are the same configuration', () => {
     store.save(profile('shop', { auth: { type: 'bearer', vault_keys: [] } }));
     const g = grantOf('shop');
@@ -237,6 +272,21 @@ describe('grant ledger', () => {
       expect(store.backfillGrants()).toBe(1);
       expect(grantOf('other')).not.toBe(g);
       expect(ledger.get(grantOf('other')!)).toMatchObject({ connection_id: 'other', reason: 'backfill' });
+    });
+
+    it('replaces a grant of this connection that a later one superseded', () => {
+      store.save(profile('shop'));
+      const old = grantOf('shop')!;
+      store.save(store.get('shop')!, undefined, { newConsent: true });
+      const current = grantOf('shop')!;
+      // The row comes back carrying the superseded grant, as a restored backup or a copy would.
+      seed({ ...profile('shop'), oauth_grant: { grant_id: old } });
+      wire();
+      expect(store.backfillGrants()).toBe(1);
+      const next = grantOf('shop')!;
+      expect([old, current]).not.toContain(next);
+      expect(ledger.get(next)).toMatchObject({ connection_id: 'shop', reason: 'backfill' });
+      expect(store.backfillGrants()).toBe(0);
     });
 
     it('a profile whose write throws gets no grant in memory, and the others still get theirs', () => {

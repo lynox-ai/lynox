@@ -22,6 +22,7 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
+import { credentialBearing } from './profile-secret-view.js';
 
 // ── Errors ──
 
@@ -858,8 +859,10 @@ export type RegisterMode = 'save' | 'load';
 
 /**
  * What a profile is configured to authenticate with (PRD connection-attribution A2): the auth
- * type, the OAuth grant type, and each vault name the profile configures together with the
- * role it is sent in. A save that changes this starts a new grant. Built from the configured
+ * type, the OAuth grant type, each vault name the profile configures together with the role it
+ * is sent in, and where the credentials go and how they are sent or scoped
+ * (`credentialBearing`: the base origin, the token endpoint, scope, audience, the preset and its
+ * parameters, the body format). A save that changes this starts a new grant. Built from the configured
  * names only — never from `written`, which a token exchange extends on its own, and never
  * from the derived token names, which depend on the id alone — so a renewal leaves it as it is.
  */
@@ -883,6 +886,7 @@ export function credentialTuple(profile: ApiProfile): string {
     Array.isArray(vaultKeys) && vaultKeys.some((k) => typeof k === 'string')
       ? vaultKeys.filter((k): k is string => typeof k === 'string')
       : null,
+    credentialBearing(profile),
   ]);
 }
 
@@ -984,7 +988,10 @@ export class ApiStore {
       if (row === undefined) { reissue(p.id, 'backfill'); continue; }
       // A grant the ledger records for another connection is not this profile's, whether or
       // not that connection still holds it; the one the ledger names keeps it.
-      if (row.connection_id !== p.id) reissue(p.id, (holders.get(g)?.length ?? 1) > 1 ? 'split' : 'backfill');
+      if (row.connection_id !== p.id) { reissue(p.id, (holders.get(g)?.length ?? 1) > 1 ? 'split' : 'backfill'); continue; }
+      // A grant of this connection that a later one superseded — or one of an earlier connection
+      // that had the same id — no longer names the credentials it holds now.
+      if (ledger.latest(p.id)?.grant_id !== g) reissue(p.id, 'backfill');
     }
     return minted;
   }
