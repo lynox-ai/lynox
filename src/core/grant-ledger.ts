@@ -7,8 +7,15 @@ import type Database from 'better-sqlite3';
  * credentials the connection is configured with (see `credentialTuple`).
  * `backfill` — the boot found a connection without a grant this ledger knows.
  * `split` — the boot found two connections sharing one grant and gave one a fresh one.
+ * `baseline` — the boot found a grant with no stored credential fingerprints, minted before
+ * they were recorded. `secret-write` — the user stored a credential the connection reads.
+ * `secret-changed` — the boot found a credential the connection reads that is not the one its
+ * grant recorded. `exchange` — a token exchange ran on a credential the grant never recorded.
+ * `rekey` — the boot found the grant's fingerprints taken under another vault key.
+ * `engine-write` — a token exchange of another connection wrote a name this one reads.
  */
-export type GrantMintReason = 'new' | 'consent' | 'credentials' | 'backfill' | 'split';
+export type GrantMintReason = 'new' | 'consent' | 'credentials' | 'backfill' | 'split'
+  | 'baseline' | 'secret-write' | 'secret-changed' | 'exchange' | 'rekey' | 'engine-write';
 
 export interface GrantLedgerRow {
   grant_id: string;

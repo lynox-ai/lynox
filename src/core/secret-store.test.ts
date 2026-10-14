@@ -72,6 +72,45 @@ describe('SecretStore', () => {
     });
   });
 
+  // The connection grants record WHICH credential a name holds (PRD connection-attribution A2),
+  // so the fingerprint reads the stored value whether or not it may be handed out now.
+  describe('fingerprint', () => {
+    const h = (v: string): string => `h(${v})`;
+
+    it('is the hash of the stored value, and empty when nothing is stored', () => {
+      const store = new SecretStore(undefined, mockVault([['K', { value: 'vault-value-1234', scope: 'any', ttlMs: 0 }]]));
+      expect(store.fingerprint('K', h)).toBe('h(vault-value-1234)');
+      expect(store.fingerprint('MISSING', h)).toBe('');
+    });
+
+    it('a stored empty value holds no credential', () => {
+      const store = new SecretStore(undefined, mockVault([['K', { value: '', scope: 'any', ttlMs: 0 }]]));
+      expect(store.fingerprint('K', h)).toBe('');
+    });
+
+    it('reads an environment value over the vault, as resolve does', () => {
+      process.env['LYNOX_SECRET_K'] = 'env-value-123456';
+      const store = new SecretStore(undefined, mockVault([['K', { value: 'vault-value-1234', scope: 'any', ttlMs: 0 }]]));
+      expect(store.fingerprint('K', h)).toBe('h(env-value-123456)');
+    });
+
+    it('identifies a value resolve withholds — no consent, or refused by the guard', () => {
+      process.env['LYNOX_SECRET_K'] = 'env-value-123456';
+      const store = new SecretStore();
+      store.setResolveGuard(() => false);
+      expect(store.resolve('K')).toBeNull();
+      expect(store.fingerprint('K', h)).toBe('h(env-value-123456)');
+    });
+
+    it('is announced as its own action, never as a resolve', async () => {
+      const { channels } = await import('./observability.js');
+      const store = new SecretStore(undefined, mockVault([['K', { value: 'vault-value-1234', scope: 'any', ttlMs: 0 }]]));
+      store.fingerprint('K', h);
+      expect(channels.secretAccess.publish).toHaveBeenCalledWith({ name: 'K', action: 'fingerprint' });
+      expect(channels.secretAccess.publish).not.toHaveBeenCalledWith({ name: 'K', action: 'resolve' });
+    });
+  });
+
   // === Loading ===
 
   describe('loading from env vars', () => {

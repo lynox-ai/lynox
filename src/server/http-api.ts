@@ -26,7 +26,7 @@ import {
   exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
-import { accessTokenKey, refreshTokenKey, recordedWrites } from '../core/api-store.js';
+import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
@@ -6311,6 +6311,16 @@ export class LynoxHTTPApi {
         errorResponse(res, 503, msg);
         return;
       }
+      // A credential a connection reads starts a new grant for that connection (PRD
+      // connection-attribution A2(4)): what it stores from here on came from this value. A name
+      // an environment value shadows too — the write replaces the value the attach reads until
+      // the next boot. A failure here does not undo the write the user asked for; the next boot's
+      // comparison mints instead.
+      try {
+        engine.getApiStore()?.secretWritten(name);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:api-store] Grant for the credential write to ${JSON.stringify(name)} not minted, the next boot mints it: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
       // PRD-IA-V2 P3-PR-B (Security S4) parity: emit a names-only audit row
       // for every BYOK secret write. /api/config audits at L~2510; secrets
       // need the same trail for compliance + incident-replay.
@@ -10392,7 +10402,9 @@ export class LynoxHTTPApi {
           const saved = apiStore.save(
             { ...fresh, auth: { ...fresh.auth, oauth: oauthNext }, oauth_grant: grantNext } as typeof fresh,
             join(getLynoxDir(), 'apis'),
-            { newConsent: true },
+            // The new grant records the refresh token stored above, or none — never what the slot
+            // still holds, which after a consent without one is the previous account's token.
+            { newConsent: true, consentRefresh: refreshToken },
           );
           // The result is READ. `save` does not throw when `_admit` refuses — it
           // returns `{ok:false}` — so ignoring it meant the tokens were stored,
@@ -11206,8 +11218,9 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'GET /api/api-profiles', async (_req, res) => {
       const store = engine.getApiStore();
       if (!store) { jsonResponse(res, 200, { profiles: [] }); return; }
-      const profiles = store.getAll();
-      jsonResponse(res, 200, { profiles });
+      // Without the grant's credential fingerprints, which are the engine's bookkeeping; no
+      // reader of this route needs them.
+      jsonResponse(res, 200, { profiles: store.getAll().map(withoutFingerprints) });
     }, READS);
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/api-profiles/:id', async (_req, res, params) => {
@@ -11215,7 +11228,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, store, 'API store')) return;
       const profile = store.get(params['id']!);
       if (!profile) { errorResponse(res, 404, 'Profile not found'); return; }
-      jsonResponse(res, 200, { profile });
+      jsonResponse(res, 200, { profile: withoutFingerprints(profile) });
     }, READS));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/api-profiles/:id', async (_req, res, params) => {

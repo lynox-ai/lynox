@@ -551,6 +551,21 @@ export class SecretStore implements SecretStoreLike {
     this.resolveGuard = guard;
   }
 
+  /**
+   * `hash` of the value stored under `name` (an environment value over the vault, as
+   * {@link resolve} reads it), or `''` when nothing is stored. It identifies WHICH credential
+   * sits under the name, for the connection grants (`ApiStore`), so it asks none of `resolve`'s
+   * questions about whether the value may be used now — consent, expiry, the resolve guard: a
+   * withheld credential is still the same credential. The value goes into `hash` and nowhere
+   * else (the engine passes a keyed hash, so a stored fingerprint of a weak password cannot be
+   * attacked from a copy of the record), and the read is announced as its own action.
+   */
+  fingerprint(name: string, hash: (value: string) => string): string {
+    const secret = this.secrets.get(name);
+    channels.secretAccess.publish({ name, action: 'fingerprint' });
+    return secret === undefined || secret.value === '' ? '' : hash(secret.value);
+  }
+
   resolve(name: string): string | null {
     const secret = this.secrets.get(name);
     if (!secret) return null;

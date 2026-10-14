@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider, getActiveProvider } from './llm-client.js';
 import type { RunFailure } from './provider-failure.js';
+import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { resolveProviderApiKey, enrichTierSetCreds, enrichSlotCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
@@ -1560,13 +1561,31 @@ export class Engine {
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
-        // The grant ledger (PRD connection-attribution A1), and its boot backfill: every
-        // connection the store registered leaves the boot with a grant the ledger knows. A failure here costs
+        // The grant ledger (PRD connection-attribution A1), its boot backfill and the credential
+        // comparison (A2(5)): every connection the store registered leaves the boot with a grant
+        // the ledger knows, recording the credentials it reads now. A failure here costs
         // attribution, not the connections, so it is reported and the boot goes on.
         const { GrantLedger } = await import('./grant-ledger.js');
         this._apiStore.setGrantLedger(new GrantLedger(this.engineDb.getDb()));
+        // Keyed under a subkey of the vault key (`EngineDb.keyedHash`), so a stored fingerprint of
+        // a weak credential — a password, a short key — cannot be attacked from a copy of the row.
+        // Without a vault key that hash is plain SHA-256, so no fingerprints are taken at all.
+        // The foreign tokens are plain token fingerprints, so a new vault key keeps them.
+        const fingerprintStore = this.secretStore;
+        const engineDb = this.engineDb;
+        if (fingerprintStore && engineDb.hashIsKeyed) {
+          const ofValue = (value: string): string => (value === '' ? '' : engineDb.keyedHash(['lynox-grant-fingerprint', value]).slice(0, 32));
+          const tokenOfValue = (value: string): string => (value === '' ? '' : tokenFingerprint(value));
+          this._apiStore.setFingerprinter({
+            keyCheck: engineDb.keyedHash(['lynox-grant-fingerprint-key']).slice(0, 32),
+            ofValue,
+            tokenOfValue,
+            read: (name, hash) => fingerprintStore.fingerprint(name, hash),
+          });
+        }
         try {
           this._apiStore.backfillGrants();
+          this._apiStore.checkFingerprints();
         } catch (err: unknown) {
           process.stderr.write(`[lynox:api-store] Grant backfill failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
         }

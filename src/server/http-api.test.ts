@@ -4218,6 +4218,60 @@ describe('LynoxHTTPApi', () => {
       expect(mockSecretSet).toHaveBeenCalledWith('NEW_KEY', 'secret-value');
     });
 
+    // PRD connection-attribution A2(4): a credential a connection reads starts a new grant for it.
+    it('PUT of a name a connection reads hands the write to the grant store', async () => {
+      const secretWritten = vi.fn().mockReturnValue(1);
+      mockGetApiStore.mockReturnValue({ secretWritten });
+      try {
+        const res = await jsonFetch('/api/secrets/SHOP_KEY', { method: 'PUT', body: JSON.stringify({ value: 'v' }) });
+        expect(res.status).toBe(200);
+        expect(secretWritten).toHaveBeenCalledWith('SHOP_KEY');
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    it('PUT of a name an environment value shadows does too: the write replaces the value the attach reads', async () => {
+      const secretWritten = vi.fn().mockReturnValue(1);
+      mockGetApiStore.mockReturnValue({ secretWritten });
+      mockSecretIsEnvironment.mockImplementation((n: string) => n === 'SHOP_KEY');
+      try {
+        const res = await jsonFetch('/api/secrets/SHOP_KEY', { method: 'PUT', body: JSON.stringify({ value: 'v' }) });
+        expect(res.status).toBe(200);
+        expect(mockSecretSet).toHaveBeenCalledWith('SHOP_KEY', 'v');
+        expect(secretWritten).toHaveBeenCalledWith('SHOP_KEY');
+      } finally {
+        mockSecretIsEnvironment.mockReset();
+        mockSecretIsEnvironment.mockReturnValue(false);
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    it('PUT answers 200 when the grant store throws: the write the user asked for stands', async () => {
+      mockGetApiStore.mockReturnValue({ secretWritten: () => { throw new Error('ledger down'); } });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const res = await jsonFetch('/api/secrets/SHOP_KEY', { method: 'PUT', body: JSON.stringify({ value: 'v' }) });
+        expect(res.status).toBe(200);
+      } finally {
+        stderr.mockRestore();
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
+    it('GET of the api profiles leaves out the grant\'s credential record — fingerprints, foreign tokens, key check — and keeps the rest', async () => {
+      const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', oauth_grant: { grant_id: 'g-1', fingerprints: { SHOP_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' } };
+      mockGetApiStore.mockReturnValue({ getAll: () => [profile], get: () => profile });
+      try {
+        const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
+        expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
+        const one = await (await jsonFetch('/api/api-profiles/shop')).json() as { profile: { oauth_grant?: Record<string, unknown> } };
+        expect(one.profile.oauth_grant).toEqual({ grant_id: 'g-1' });
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+      }
+    });
+
     it('PUT rejects empty value', async () => {
       const res = await jsonFetch('/api/secrets/NEW_KEY', {
         method: 'PUT',
@@ -15002,8 +15056,9 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       redirect: 'manual', headers: { cookie },
     });
     expect(res.status).toBe(200);
-    // The save carries the consent, so the store starts a new grant (PRD connection-attribution A2(2)).
-    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true });
+    // The save carries the consent, so the store starts a new grant (PRD connection-attribution A2(2)),
+    // and names the refresh token it stored for the new grant to record.
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: 'rt-1' });
 
     const saved = store.get(PROFILE);
     expect(saved?.auth?.oauth?.grant_type, 'the callback stored a refresh token and said nothing about how to use it').toBe('refresh_token');
@@ -15040,6 +15095,20 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
    * So the assertion is in two halves: the route must NOT invent a grant type it
    * cannot perform, and the predicate must refuse the shape that leaves.
    */
+  it('a consent without a refresh token tells the new grant it stored none', async () => {
+    const { cookie, store } = await arrange({
+      tokenBody: JSON.stringify({ access_token: 'at-1', expires_in: 3600 }),
+    });
+    const saveSpy = vi.spyOn(store, 'save');
+    const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, {
+      redirect: 'manual', headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+    // Null, not absent: the grant must record an empty refresh slot rather than read the slot,
+    // which after such a consent still holds the previous account's token.
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({ newConsent: true, consentRefresh: null });
+  });
+
   it('says no-refresh, invents no grant type, and the renewal then refuses the profile', async () => {
     const { cookie, store } = await arrange({
       tokenBody: JSON.stringify({ access_token: 'at-1', expires_in: 3600 }),

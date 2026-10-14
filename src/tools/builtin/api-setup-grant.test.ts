@@ -4034,3 +4034,63 @@ describe('fetch_token — whose consent a grant records', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+// PRD connection-attribution A2(2'): the save after a SUCCESSFUL exchange tells the grant store
+// what the exchange ran on, so a token the epoch never recorded starts a new grant.
+describe('fetch_token — what the success-path save tells the grant store', () => {
+  const readerOver = (store: ApiStore, vault: MockVault): void => {
+    const ofValue = (v: string): string => (v === '' ? '' : `k-${tokenFingerprint(v)}`);
+    const tokenOfValue = (v: string): string => (v === '' ? '' : `t-${tokenFingerprint(v)}`);
+    store.setFingerprinter({
+      keyCheck: 'kc', ofValue, tokenOfValue,
+      read: (name, hash) => hash(vault.peek?.(name) ?? ''),
+    });
+  };
+
+  it('names the refresh token presented, the access value replaced (read before the write), and what it wrote', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile());
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', [ACCESS]: 'at-old' });
+    readerOver(store, vault);
+    const saveSpy = vi.spyOn(store, 'save');
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', refresh_token: 'rt-2', expires_in: 3600 }));
+
+    expect(await fetchToken(makeAgent(store, vault))).toContain('Token exchange OK');
+
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toEqual({
+      exchange: {
+        presentedRefreshFp: `k-${tokenFingerprint('rt-1')}`,
+        presentedRefreshTokenFp: `t-${tokenFingerprint('rt-1')}`,
+        replacedAccessFp: `k-${tokenFingerprint('at-old')}`,
+        wrote: [ACCESS, REFRESH],
+      },
+    });
+  });
+
+  it('a client-credentials exchange presents no refresh token', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({}, 'client_credentials'));
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' });
+    readerOver(store, vault);
+    const saveSpy = vi.spyOn(store, 'save');
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', expires_in: 3600 }));
+
+    await fetchToken(makeAgent(store, vault));
+
+    expect(saveSpy.mock.calls.at(-1)?.[2]).toMatchObject({ exchange: { presentedRefreshFp: null, presentedRefreshTokenFp: null, replacedAccessFp: '' } });
+  });
+
+  it('the save after a refused exchange tells it nothing: nothing was fetched, so nothing can mint', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: stamp('client-1', 'rt-1') }));
+    const vault = vaultWithRefresh('rt-1');
+    readerOver(store, vault);
+    const saveSpy = vi.spyOn(store, 'save');
+    tokenEndpoint(400, JSON.stringify({ error: 'invalid_grant' }));
+
+    await fetchToken(makeAgent(store, vault));
+
+    expect(saveSpy).toHaveBeenCalled();
+    for (const call of saveSpy.mock.calls) expect(call[2]?.exchange).toBeUndefined();
+  });
+});

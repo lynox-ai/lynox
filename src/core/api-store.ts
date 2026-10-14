@@ -15,7 +15,7 @@ import { compose, engineText, wrapUntrustedData, renderFence } from './data-boun
 import { SUGGESTED_API_CATALOG, type SuggestedApiCatalog } from './suggested-apis.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
 import { ConnectionStore, type ConnectionRow } from './connection-store.js';
-import type { GrantLedger } from './grant-ledger.js';
+import type { GrantLedger, GrantMintReason } from './grant-ledger.js';
 import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
@@ -407,6 +407,31 @@ export interface OAuthGrantRecord {
    * the stored one, whatever the caller passed.
    */
   grant_id?: string | undefined;
+  /**
+   * Which credential each watched name held when the grant was minted (PRD
+   * connection-attribution A2), for every name the grant watches: a keyed fingerprint of the
+   * stored value, or `''` when the name held none. A successful exchange inside the epoch moves
+   * the entries of the names it wrote. A credential that differs from its entry is not this
+   * epoch's, and the next check mints. Only {@link ApiStore} assigns it, and it is never handed
+   * out by the API.
+   */
+  fingerprints?: Record<string, string> | undefined;
+  /**
+   * The OAuth tokens present in this profile's token slots that are NOT this epoch's: a refresh
+   * slot a new consent did not write still holds the previous account's token. Plain token
+   * fingerprints, so a change of vault key keeps them; only tokens are ever recorded here, never
+   * a password or an API key, whose plain fingerprint a copy of the row could be tested against.
+   * A token stays foreign while some token slot of the profile still holds it, whichever; an
+   * exchange presenting it is never known, and the grant it mints adopts it. Only
+   * {@link ApiStore} assigns it, and it is never handed out by the API.
+   */
+  foreign?: string[] | undefined;
+  /**
+   * Identifies the key {@link fingerprints} were taken under. When the vault key changes, every
+   * fingerprint changes with it, so the boot mints once per profile (`rekey`) instead of reading
+   * that as changed credentials.
+   */
+  fingerprint_check?: string | undefined;
 }
 
 /** One entry of {@link OAuthGrantRecord.written}. */
@@ -890,23 +915,178 @@ export function credentialTuple(profile: ApiProfile): string {
   ]);
 }
 
+/**
+ * The names whose credentials a grant watches (PRD connection-attribution A2, set `F`): every
+ * vault name the profile configures (the keys, the Basic pair, the OAuth client pair and
+ * refresh slot), and for an OAuth profile the derived token pair, since a hand-configured
+ * refresh token can sit under the derived name. Names only `written` holds are not watched:
+ * the attach never reads them. Sorted, without repeats.
+ */
+export function watchedNames(profile: ApiProfile): string[] {
+  const names = new Set<string>();
+  const auth = profile.auth;
+  const vaultKeys: unknown = auth?.vault_keys;
+  if (Array.isArray(vaultKeys)) for (const k of vaultKeys) if (typeof k === 'string' && k !== '') names.add(k);
+  for (const k of [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key, auth?.oauth?.refresh_token_key]) {
+    if (typeof k === 'string' && k !== '') names.add(k);
+  }
+  if (auth?.type === 'oauth2') {
+    names.add(accessTokenKey(profile.id));
+    names.add(refreshTokenKey(profile.id));
+  }
+  return [...names].sort();
+}
+
+/** `profile` without its grant's credential record, for what the engine hands out. */
+export function withoutFingerprints(profile: ApiProfile): ApiProfile {
+  const g = profile.oauth_grant;
+  if (g === undefined || (g.fingerprints === undefined && g.foreign === undefined && g.fingerprint_check === undefined)) return profile;
+  const { fingerprints: _f, foreign: _x, fingerprint_check: _c, ...rest } = g;
+  return { ...profile, oauth_grant: rest };
+}
+
+/** The stored fingerprints, or undefined when the record has none — or none of the right shape. */
+function storedFingerprints(profile: ApiProfile | undefined): Record<string, string> | undefined {
+  const fps: unknown = profile?.oauth_grant?.fingerprints;
+  if (fps === null || typeof fps !== 'object' || Array.isArray(fps)) return undefined;
+  const entries = Object.entries(fps as Record<string, unknown>);
+  return entries.every(([, v]) => typeof v === 'string') ? Object.fromEntries(entries) as Record<string, string> : undefined;
+}
+
+/** The stored foreign tokens; none when the record has none of the right shape. */
+function storedForeign(profile: ApiProfile | undefined): string[] {
+  const foreign: unknown = profile?.oauth_grant?.foreign;
+  return Array.isArray(foreign) ? foreign.filter((t): t is string => typeof t === 'string' && t !== '') : [];
+}
+
+/**
+ * Fingerprints credentials for the grants. `ofValue` is the keyed fingerprint, `tokenOfValue`
+ * the plain token fingerprint, for {@link OAuthGrantRecord.foreign} only; both `''` for `''`.
+ * `read` hands the value a vault name holds to such a function (`SecretStore.fingerprint`),
+ * `''` for none, so the value itself never leaves the vault. `keyCheck` identifies the key.
+ */
+export interface CredentialFingerprinter {
+  readonly keyCheck: string;
+  ofValue(value: string): string;
+  tokenOfValue(value: string): string;
+  read(name: string, hash: (value: string) => string): string;
+}
+
+/** The keyed fingerprint of what vault name `name` holds. */
+function keyedOf(f: CredentialFingerprinter, name: string): string {
+  return f.read(name, (v) => f.ofValue(v));
+}
+
+/** The plain token fingerprint of what vault name `name` holds. */
+function tokenOf(f: CredentialFingerprinter, name: string): string {
+  return f.read(name, (v) => f.tokenOfValue(v));
+}
+
+/** What a successful token exchange presented, replaced and wrote, for its save to judge. */
+export interface ExchangeFacts {
+  /**
+   * The refresh token the exchange sent, fingerprinted with {@link ApiStore.valueFingerprint},
+   * or null for one that sent none.
+   */
+  presentedRefreshFp: string | null;
+  /**
+   * The same token as a plain token fingerprint ({@link ApiStore.tokenFingerprint}), to match
+   * against the grant's foreign tokens; null for an exchange that sent none.
+   */
+  presentedRefreshTokenFp: string | null;
+  /**
+   * Which value the exchange overwrote in the derived access slot, read before the write with
+   * {@link ApiStore.currentFingerprint} (`''` when the slot was empty). Undefined when the
+   * exchange wrote its token somewhere else.
+   */
+  replacedAccessFp?: string | undefined;
+  /** The vault names the exchange wrote. */
+  wrote: string[];
+}
+
+/** The refresh slot the readers use: the configured one, or the derived name. */
+function readersRefreshSlot(profile: ApiProfile): string {
+  return profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
+}
+
+/**
+ * The vault names an OAuth profile keeps its own tokens under: the derived access and refresh
+ * names, and a configured refresh slot. None for any other profile — a password, a client
+ * secret or an API key is never a token slot.
+ */
+function tokenSlots(profile: ApiProfile): string[] {
+  if (profile.auth?.type !== 'oauth2') return [];
+  return [...new Set([accessTokenKey(profile.id), refreshTokenKey(profile.id), readersRefreshSlot(profile)])];
+}
+
+/**
+ * Whether an exchange ran on credentials this epoch recorded: the refresh token it presented
+ * and the access value it replaced must each match the grant's stored fingerprint for that
+ * slot, and the token presented must not be one the grant marked foreign. Only the stored
+ * record counts, never `written`: a new consent keeps the earlier epochs' entries there for
+ * the purge, so a token from before the consent would pass as known.
+ */
+function exchangeKnown(prev: ApiProfile, ex: ExchangeFacts): boolean {
+  const fps = storedFingerprints(prev);
+  if (fps === undefined) return false;
+  if (ex.presentedRefreshFp !== null && fps[readersRefreshSlot(prev)] !== ex.presentedRefreshFp) return false;
+  if (ex.presentedRefreshTokenFp !== null && storedForeign(prev).includes(ex.presentedRefreshTokenFp)) return false;
+  if (ex.replacedAccessFp !== undefined && fps[accessTokenKey(prev.id)] !== ex.replacedAccessFp) return false;
+  return true;
+}
+
 /** A save's own reason to start a new grant, beyond what `save` detects by itself. */
 export interface SaveOptions {
   /** The save carries a new consent (the OAuth callback). */
   newConsent?: boolean | undefined;
+  /**
+   * With `newConsent`: the refresh token the callback stored under the derived refresh name,
+   * or null when the answer carried none. The new grant records THAT for the derived slot, and
+   * marks the token in every refresh slot the consent did not write as foreign — never adopting
+   * what a slot still holds, which is the previous account's token.
+   */
+  consentRefresh?: string | null | undefined;
+  /** The save that follows a successful token exchange (`fetch_token`), and what it ran on. */
+  exchange?: ExchangeFacts | undefined;
 }
 
 class SaveRefused extends Error {
   constructor(readonly reason: string) { super(reason); }
 }
 
-function withGrantId(profile: ApiProfile, grantId: string | undefined): ApiProfile {
-  if (grantId === undefined) {
-    if (profile.oauth_grant?.grant_id === undefined) return profile;
-    const { grant_id: _dropped, ...rest } = profile.oauth_grant;
-    return { ...profile, oauth_grant: rest };
+/** What a grant records about the credentials it was minted on. */
+interface GrantCredentials {
+  fingerprints: Record<string, string> | undefined;
+  foreign: string[];
+  check: string | undefined;
+}
+
+/** `profile` carrying exactly this grant and this credential record, whatever it carried before. */
+function withGrant(profile: ApiProfile, grantId: string | undefined, credentials: GrantCredentials | undefined): ApiProfile {
+  const g = profile.oauth_grant;
+  const { grant_id: _g, fingerprints: _f, foreign: _x, fingerprint_check: _c, ...rest } = g ?? {};
+  const record: OAuthGrantRecord = { ...rest };
+  if (grantId !== undefined) record.grant_id = grantId;
+  if (credentials?.fingerprints !== undefined) record.fingerprints = credentials.fingerprints;
+  if (credentials !== undefined && credentials.foreign.length > 0) record.foreign = credentials.foreign;
+  if (credentials?.check !== undefined) record.fingerprint_check = credentials.check;
+  if (g === undefined && Object.keys(record).length === 0) return profile;
+  return { ...profile, oauth_grant: record };
+}
+
+/**
+ * The vault names `profile` configures for a credential that is not an OAuth token: its keys,
+ * the Basic pair and the OAuth client pair.
+ */
+function nonTokenNames(profile: ApiProfile): string[] {
+  const auth = profile.auth;
+  const names: string[] = [];
+  const vaultKeys: unknown = auth?.vault_keys;
+  if (Array.isArray(vaultKeys)) for (const k of vaultKeys) if (typeof k === 'string' && k !== '') names.push(k);
+  for (const k of [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key]) {
+    if (typeof k === 'string' && k !== '') names.push(k);
   }
-  return { ...profile, oauth_grant: { ...profile.oauth_grant, grant_id: grantId } };
+  return names;
 }
 
 export class ApiStore {
@@ -946,6 +1126,158 @@ export class ApiStore {
   }
 
   /**
+   * Fingerprints credentials for the grants ({@link CredentialFingerprinter}). The engine wires
+   * one only under a vault key: without one the keyed fingerprint would be plain SHA-256, which a
+   * copy of the row lets anyone test a guessed password against. While it is null no
+   * fingerprints are taken; a grant minted then has none, and the first check with one mints its
+   * baseline.
+   */
+  private fingerprinter: CredentialFingerprinter | null = null;
+
+  setFingerprinter(fingerprinter: CredentialFingerprinter): void {
+    this.fingerprinter = fingerprinter;
+  }
+
+  /**
+   * Which credential `name` holds now, fingerprinted the way the grants record it; undefined
+   * without a fingerprinter. For an exchange to name the value it is about to overwrite.
+   */
+  currentFingerprint(name: string): string | undefined {
+    const f = this.fingerprinter;
+    return f === null ? undefined : keyedOf(f, name);
+  }
+
+  /** `value` fingerprinted the way the grants record it; undefined without a fingerprinter. */
+  valueFingerprint(value: string): string | undefined {
+    return this.fingerprinter?.ofValue(value);
+  }
+
+  /** The token `value` fingerprinted the way the foreign tokens record it; undefined without a fingerprinter. */
+  tokenFingerprint(value: string): string | undefined {
+    return this.fingerprinter?.tokenOfValue(value);
+  }
+
+  /**
+   * The credential record a grant minted now carries for `profile`: every watched name's keyed
+   * fingerprint as the vault holds it, and the foreign tokens. A token the previous grant
+   * (`prevForeign`) marked foreign stays foreign while one of the profile's token slots still
+   * holds it — a later mint must not adopt the previous account's leftover — unless it is
+   * `adopt`, the token an exchange just presented, which the new epoch runs on. After a new
+   * consent (`consentRefresh` given), the derived refresh slot records the token the callback
+   * stored, and the token in every refresh slot the consent did not write is foreign. A name
+   * some profile configures for a credential that is not a token is never recorded as foreign,
+   * whatever it holds: only token fingerprints are recorded. Without a fingerprinter nothing is
+   * read; the foreign tokens are carried as they were, since they do not depend on the key.
+   */
+  private _credentialsOf(profile: ApiProfile, opts: { prevForeign?: readonly string[] | undefined; consentRefresh?: string | null | undefined; adopt?: string | undefined } = {}): GrantCredentials | undefined {
+    const f = this.fingerprinter;
+    if (f === null) {
+      const carried = [...(opts.prevForeign ?? [])].filter((t) => t !== opts.adopt).sort();
+      return carried.length > 0 ? { fingerprints: undefined, foreign: carried, check: undefined } : undefined;
+    }
+    const fingerprints: Record<string, string> = {};
+    for (const name of watchedNames(profile)) fingerprints[name] = keyedOf(f, name);
+    const held = this._heldTokens(profile, f);
+    const foreign = new Set((opts.prevForeign ?? []).filter((t) => held.has(t) && t !== opts.adopt));
+    if (opts.consentRefresh !== undefined) {
+      const derived = refreshTokenKey(profile.id);
+      for (const slot of new Set([derived, readersRefreshSlot(profile)])) {
+        if (slot === derived && opts.consentRefresh !== null && opts.consentRefresh !== '') {
+          fingerprints[slot] = f.ofValue(opts.consentRefresh);
+          continue;
+        }
+        if ([profile, ...this.profiles.values()].some((p) => nonTokenNames(p).includes(slot))) continue;
+        const t = tokenOf(f, slot);
+        if (t !== '') foreign.add(t);
+      }
+    }
+    return { fingerprints, foreign: [...foreign].sort(), check: f.keyCheck };
+  }
+
+  /**
+   * The tokens `profile`'s token slots hold now, as plain token fingerprints. Only these ever
+   * feed the foreign set: no other name of a profile is a token slot ({@link tokenSlots}).
+   */
+  private _heldTokens(profile: ApiProfile, f: CredentialFingerprinter): Set<string> {
+    const held = new Set<string>();
+    for (const slot of tokenSlots(profile)) {
+      const t = tokenOf(f, slot);
+      if (t !== '') held.add(t);
+    }
+    return held;
+  }
+
+  /**
+   * Every OTHER profile that watches one of `names` starts a new grant (`engine-write`): a value
+   * the engine wrote for one connection on a new epoch — a consent, an exchange that minted — is
+   * a new credential for any connection that reads the same name.
+   */
+  private _othersWatching(id: string, names: readonly string[]): void {
+    if (names.length === 0) return;
+    for (const p of [...this.profiles.values()]) {
+      if (p.id !== id && watchedNames(p).some((n) => names.includes(n))) this._reissue(p.id, 'engine-write');
+    }
+  }
+
+  /**
+   * A renewal the engine made for connection `id` on credentials its epoch recorded wrote
+   * `names`: the same account's token, renewed. Every other profile that reads one of them keeps
+   * its grant and records the new value there — when it had recorded what `id`'s grant had
+   * (`before`). A reader that had recorded something else, or nothing, did not hold what was
+   * renewed, and starts a new grant (`engine-write`). A failed write is logged; the next boot's
+   * comparison then mints instead.
+   */
+  private _followRenewal(id: string, before: Readonly<Record<string, string>>, names: readonly string[]): void {
+    if (names.length === 0) return;
+    const f = this.fingerprinter;
+    for (const p of [...this.profiles.values()]) {
+      if (p.id === id) continue;
+      const read = watchedNames(p).filter((n) => names.includes(n));
+      if (read.length === 0) continue;
+      const stored = storedFingerprints(p);
+      if (f === null || stored === undefined || read.some((n) => !Object.hasOwn(before, n) || stored[n] !== before[n])) {
+        this._reissue(p.id, 'engine-write');
+        continue;
+      }
+      const moved = { ...stored };
+      for (const n of read) moved[n] = keyedOf(f, n);
+      const check: unknown = p.oauth_grant?.fingerprint_check;
+      const next = withGrant(p, p.oauth_grant?.grant_id, { fingerprints: moved, foreign: storedForeign(p), check: typeof check === 'string' ? check : undefined });
+      try {
+        this.connStore?.upsert(profileToConnectionRow(next));
+        this.profiles.set(p.id, next);
+      } catch (err: unknown) {
+        process.stderr.write(`[lynox:api-store] Renewed credential for ${JSON.stringify(p.id)} not recorded, compared next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+  }
+
+  /**
+   * Give `id` a fresh grant outside a save, with fingerprints taken now: the boot checks and a
+   * user's credential write. Stored first, then held: a write that throws rolls the ledger row
+   * back and leaves the profile in memory as it was, so no grant the ledger never recorded is
+   * carried on. Returns whether it minted; a failure is logged and retried at the next boot.
+   */
+  private _reissue(id: string, reason: GrantMintReason): boolean {
+    const ledger = this.grantLedger;
+    const current = this.profiles.get(id);
+    if (!ledger || !current) return false;
+    try {
+      ledger.transaction(() => {
+        const next = withGrant(current, ledger.mint(id, 'api', reason), this._credentialsOf(current, { prevForeign: storedForeign(current) }));
+        this.connStore?.upsert(profileToConnectionRow(next));
+        this.profiles.set(id, next);
+      });
+      return true;
+    } catch (err: unknown) {
+      // One profile's failure does not cost the others their grant; this one is retried
+      // at the next boot.
+      process.stderr.write(`[lynox:api-store] Grant ${reason} for ${JSON.stringify(id)} failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+      return false;
+    }
+  }
+
+  /**
    * The boot backfill (PRD connection-attribution A2(6)). Gives a fresh grant to every
    * profile whose grant is absent or unknown to the ledger — a profile from before the
    * ledger, or a flat-JSON file copied from another engine with its record — and to every
@@ -963,24 +1295,7 @@ export class ApiStore {
       if (typeof g === 'string' && g !== '') holders.set(g, [...(holders.get(g) ?? []), p.id]);
     }
     let minted = 0;
-    const reissue = (id: string, reason: 'backfill' | 'split'): void => {
-      const current = this.profiles.get(id);
-      if (!current) return;
-      try {
-        // Stored first, then held: a write that throws rolls the ledger row back and leaves
-        // the profile in memory as it was, so no grant the ledger never recorded is carried on.
-        ledger.transaction(() => {
-          const next = withGrantId(current, ledger.mint(id, 'api', reason));
-          this.connStore?.upsert(profileToConnectionRow(next));
-          this.profiles.set(id, next);
-        });
-        minted++;
-      } catch (err: unknown) {
-        // One profile's failure does not cost the others their grant; this one is retried
-        // at the next boot.
-        process.stderr.write(`[lynox:api-store] Grant backfill for ${JSON.stringify(id)} failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
-    };
+    const reissue = (id: string, reason: 'backfill' | 'split'): void => { if (this._reissue(id, reason)) minted++; };
     for (const p of [...this.profiles.values()]) {
       const g = p.oauth_grant?.grant_id;
       if (typeof g !== 'string' || g === '') { reissue(p.id, 'backfill'); continue; }
@@ -992,6 +1307,57 @@ export class ApiStore {
       // A grant of this connection that a later one superseded — or one of an earlier connection
       // that had the same id — no longer names the credentials it holds now.
       if (ledger.latest(p.id)?.grant_id !== g) reissue(p.id, 'backfill');
+    }
+    return minted;
+  }
+
+  /**
+   * The boot comparison (PRD connection-attribution A2(5)), after the backfill. For every
+   * profile, each watched name's credential as the vault holds it now against the grant's
+   * stored fingerprint. A grant with no fingerprints, or none for a watched name, or no record
+   * of the key they were taken under, was minted before they were recorded: it mints its
+   * baseline (`baseline`) rather than adopting what is there now, which could be a credential
+   * changed in between. A grant whose fingerprints were taken under another vault key mints
+   * once per profile (`rekey`), and the foreign tokens, which do not depend on the key, carry
+   * over. Any other difference mints (`secret-changed`): the engine's own
+   * exchanges move the stored fingerprints in the save that records them, so a difference is a
+   * credential this epoch did not record — a value written from outside, an environment value,
+   * a restore. A recorded empty fingerprint is a value like any other. Idempotent. Returns how
+   * many grants it minted.
+   */
+  checkFingerprints(): number {
+    if (!this.grantLedger || this.fingerprinter === null) return 0;
+    let minted = 0;
+    for (const p of [...this.profiles.values()]) {
+      const stored = storedFingerprints(p);
+      const check: unknown = p.oauth_grant?.fingerprint_check;
+      let reason: GrantMintReason | null = stored === undefined || typeof check !== 'string' ? 'baseline'
+        : check !== this.fingerprinter.keyCheck ? 'rekey'
+        : null;
+      for (const [name, fp] of Object.entries(this._credentialsOf(p)?.fingerprints ?? {})) {
+        if (reason !== null) break;
+        if (!Object.hasOwn(stored!, name)) reason = 'baseline';
+        else if (stored![name] !== fp) reason = 'secret-changed';
+      }
+      if (reason !== null && this._reissue(p.id, reason)) minted++;
+    }
+    return minted;
+  }
+
+  /**
+   * A user stored a credential under `name` (`PUT /api/secrets/:name`, which `ask_secret`'s
+   * value goes through too) — PRD connection-attribution A2(4). Every profile that watches the
+   * name starts a new grant, with fingerprints read after the write. That includes a name an
+   * environment value shadows: the write replaces the in-memory value, so the attach sends the
+   * user's value until the next boot, whose comparison then sees the environment value again and
+   * mints once more. The vault write and this one are two writes, not one transaction; if this
+   * one fails, the next boot's comparison mints instead. Returns how many grants it minted.
+   */
+  secretWritten(name: string): number {
+    if (!this.grantLedger) return 0;
+    let minted = 0;
+    for (const p of [...this.profiles.values()]) {
+      if (watchedNames(p).includes(name) && this._reissue(p.id, 'secret-write')) minted++;
     }
     return minted;
   }
@@ -1378,24 +1744,57 @@ export class ApiStore {
     const prev = this.profiles.get(profile.id);
     const isNew = prev === undefined;
     const ledger = this.grantLedger;
+    const exchange = options?.exchange;
     // The grant is the engine's, never the caller's: a save mints when it creates the
-    // profile, carries a new consent or changes the configured credentials, and otherwise
-    // keeps the stored grant — whatever the passed profile says.
-    const mintReason = ledger === null ? null
-      : isNew ? 'new' as const
-      : options?.newConsent === true ? 'consent' as const
-      : credentialTuple(prev) !== credentialTuple(profile) ? 'credentials' as const
+    // profile, carries a new consent, changes the configured credentials or follows an exchange
+    // that ran on a credential this epoch did not record, and otherwise keeps the stored grant
+    // and its fingerprints — whatever the passed profile says.
+    const mintReason: GrantMintReason | null = ledger === null ? null
+      : isNew ? 'new'
+      : options?.newConsent === true ? 'consent'
+      : credentialTuple(prev) !== credentialTuple(profile) ? 'credentials'
+      : exchange !== undefined && this.fingerprinter !== null && !exchangeKnown(prev, exchange) ? 'exchange'
       : null;
-    const keptGrant = withGrantId(profile, prev?.oauth_grant?.grant_id);
-    if (mintReason === null || ledger === null) return this._persist(keptGrant, apisDir, isNew);
+    // What the engine itself just wrote into the vault for this connection, which any other
+    // connection reading the same name must treat as a new credential.
+    const engineWrote = exchange?.wrote
+      ?? (options?.newConsent === true
+        ? [accessTokenKey(profile.id), ...(options.consentRefresh ? [refreshTokenKey(profile.id)] : [])]
+        : []);
+    if (mintReason === null || ledger === null) {
+      // A known exchange moves the fingerprints of the watched names it wrote, read back now:
+      // the new values are this epoch's, so neither the next exchange nor the boot reads them as
+      // a change. The foreign tokens stay as they are; the next mint keeps those still held.
+      const fps = storedFingerprints(prev);
+      const check: unknown = prev?.oauth_grant?.fingerprint_check;
+      let kept: GrantCredentials = { fingerprints: fps, foreign: storedForeign(prev), check: typeof check === 'string' ? check : undefined };
+      const f = this.fingerprinter;
+      if (fps !== undefined && exchange !== undefined && f !== null) {
+        const moved = { ...fps };
+        for (const name of exchange.wrote) if (Object.hasOwn(moved, name)) moved[name] = keyedOf(f, name);
+        kept = { ...kept, fingerprints: moved };
+      }
+      const saved = this._persist(withGrant(profile, prev?.oauth_grant?.grant_id, kept), apisDir, isNew);
+      // The readers of what a known renewal wrote follow it; nothing else a kept save does
+      // writes a credential.
+      if (saved.ok && ledger !== null && exchange !== undefined) this._followRenewal(profile.id, fps ?? {}, exchange.wrote);
+      return saved;
+    }
     try {
-      return ledger.transaction(() => {
-        const result = this._persist(withGrantId(profile, ledger.mint(profile.id, 'api', mintReason)), apisDir, isNew);
+      const saved = ledger.transaction(() => {
+        const minted = withGrant(profile, ledger.mint(profile.id, 'api', mintReason), this._credentialsOf(profile, {
+          prevForeign: storedForeign(prev),
+          consentRefresh: options?.newConsent === true ? options.consentRefresh : undefined,
+          adopt: mintReason === 'exchange' ? exchange?.presentedRefreshTokenFp ?? undefined : undefined,
+        }));
+        const result = this._persist(minted, apisDir, isNew);
         // A refused save must not leave a ledger row behind for a grant nothing carries:
         // throwing rolls the mint back with it.
         if (!result.ok) throw new SaveRefused(result.reason);
         return result;
       });
+      this._othersWatching(profile.id, engineWrote);
+      return saved;
     } catch (err: unknown) {
       if (err instanceof SaveRefused) return { ok: false, reason: err.reason };
       // The write threw after the profile was registered in memory: the ledger row is rolled
