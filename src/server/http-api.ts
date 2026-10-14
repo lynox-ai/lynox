@@ -10274,8 +10274,14 @@ export class LynoxHTTPApi {
           // `api-setup.ts › mergeWrites`: one entry per name, and the entry this
           // exchange wrote wins for the names it wrote.
           const rewritten = new Set(written.map((w) => w.name));
+          // Built new, not from the previous record: a new consent replaces the
+          // grant, and every field of the old one describes that old grant. Only
+          // `written` carries over, merged on purpose (above). Before, the old
+          // record was copied and its fields cleared by name, so a field added
+          // later would have outlived the consent it described: the mint stamp
+          // did, and named the client of the replaced grant. `state` is written
+          // below, which is also what ends a revocation for `hasRevokedGrant`.
           const grantNext: OAuthGrantRecord = {
-            ...fresh.oauth_grant,
             origin: 'callback',
             // `connected` and `no-refresh` are the two honest outcomes of an
             // exchange, and nothing in the engine wrote either of them before
@@ -10301,19 +10307,17 @@ export class LynoxHTTPApi {
             state: refreshToken !== null ? 'connected' : 'no-refresh',
             written: [...recordedWrites(fresh).filter((w) => !rewritten.has(w.name)), ...written],
             // Whose consent this is, from the signed start. A new consent replaces the old
-            // record whole: the owner connecting again is the owner's grant from now on.
+            // one: the owner connecting again is the owner's grant from now on.
             connected_by: by.tag,
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
-          else delete grantNext.connected_mandate_id;
-          // A revocation verdict is about a grant this authorization just
-          // replaced. Leaving it would let `hasRevokedGrant` keep reporting a
-          // connection the user has just re-established as revoked — and the
-          // attach steps aside for a changed refresh token, so the record would be
-          // the only thing still saying it. `fetch_token` clears the same three
-          // fields after a successful exchange, for the same reason.
-          delete grantNext.revoked_fp;
-          delete grantNext.revoked_at;
+          // This exchange's client and refresh token are the stamp, the same one
+          // `fetch_token` writes after a good exchange. An exchange that returned
+          // no refresh token leaves no stamp.
+          if (refreshToken !== null) {
+            grantNext.minted_by = tokenFingerprint(clientId);
+            grantNext.minted_for = tokenFingerprint(refreshToken);
+          }
           // `apisDir` for the same reason `api_setup` passes it: an engine
           // without an `engine.db` has no ConnectionStore, and `save` then
           // persists only when it is told where to. Resolved above the re-read.
