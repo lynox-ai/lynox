@@ -555,7 +555,7 @@ let contextBudget = $state<ContextBudget | null>(null);
 let compactionOffer = $state<number | null>(null);
 // Hosting tier of this instance. `null` = not yet probed; any non-null
 // string = probe completed. The engine sends the canonical billing tier
-// (normalized), '' on self-host; cpSuppliesLLMKey decides who brings the key.
+// (normalized) or null on self-host, mapped to '' below; cpSuppliesLLMKey decides who brings the key.
 let managedTier = $state<string | null>(null);
 let managedProbePromise: Promise<void> | null = null;
 

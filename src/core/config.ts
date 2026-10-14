@@ -625,7 +625,7 @@ export function loadConfig(): LynoxUserConfig {
     }
   }
   // Provider-agnostic routing (PR-3d): cp_supplied mirrors the billing-tier
-  // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
+  // key-custody flag (cpSuppliesLLMKey) so the managed tier_set allowlist can
   // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
   if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
   // CP-pinned preset (`LYNOX_TIER_PRESET`) — a SEED, not a lock: it fills an

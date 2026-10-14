@@ -59,14 +59,16 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 		// comparison check above cannot see those forms; this one does not care about the
 		// form. (`'managed'` and `'eu'` also name other things here — the hard_limits
 		// shape, an LLM region — so they stay with the narrower check.)
-		// The one allowed site is the label switch: it is exhaustive over BillingTier, so
-		// a new tier fails the compile there instead of slipping through.
-		const ALLOWED = new Set(['components/AccountBillingView.svelte']);
+		// The one allowed form is a `case` line of the account label switch: its `never`
+		// default makes it exhaustive over BillingTier, so a new tier fails the compile
+		// there. Only the case LINES are exempt — anything else in that file is checked.
+		const ALLOWED_CASE_FILE = 'components/AccountBillingView.svelte';
+		const CASE_LINE = /^\s*case\s+(['"`])managed_(?:pro|max)\1\s*:/;
 		const hits: string[] = [];
 		for (const file of sources(ROOT)) {
 			const rel = file.slice(ROOT.length).replace(/^lib\//, '');
-			if (ALLOWED.has(rel)) continue;
 			readFileSync(file, 'utf-8').split('\n').forEach((line, i) => {
+				if (rel === ALLOWED_CASE_FILE && CASE_LINE.test(line)) return;
 				if (CP_ONLY_LITERAL.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
 			});
 		}
@@ -80,6 +82,11 @@ describe('billing tier is asked through the contract, never spelled out', () => 
 		expect(CP_ONLY_LITERAL.test("case 'managed_pro':")).toBe(true);
 		expect(CP_ONLY_LITERAL.test('if (["managed", "managed_max"].includes(tier))')).toBe(true);
 		expect(CP_ONLY_LITERAL.test("t('account.billing.tier.managed_pro')")).toBe(false);
+	});
+
+	it('the account label switch is exhaustive by a never default, not by convention', () => {
+		const src = readFileSync(fileURLToPath(new URL('./components/AccountBillingView.svelte', import.meta.url)), 'utf-8');
+		expect(src).toMatch(/const \w+: never = managed;/);
 	});
 
 	it('every canonical tier has an account label in both locales', () => {

@@ -404,7 +404,7 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
  * by overlaying the managed defaults before the comparison.
  *
  * `eu` tier hides the SetupBanner outright (UI ~L55-59) so the only practical
- * caller of this code path is the `managed`/`managed_pro` SetupBanner, where
+ * caller of this code path is the CP-key-tier SetupBanner, where
  * provider is always 'anthropic'.
  */
 const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
@@ -6843,7 +6843,7 @@ export class LynoxHTTPApi {
           return;
         }
       }
-      // Managed-pool tiers (managed / managed_pro / eu): CP locks provider +
+      // Managed-pool tiers (cpSuppliesLLMKey): CP locks provider +
       // cost-caps + integrations. Starter BYOK is NOT gated here — customer
       // owns their LLM, owns their config. The Web UI re-sends every field on
       // every save (PRD-SETTINGS-REFACTOR Principle 6), so we can't reject
