@@ -79,9 +79,10 @@ function configKey(field: string): string | undefined {
   const v = readOperatorConfig().config?.[field];
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
-const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'] ?? configKey('anthropic_api_key');
-const MISTRAL_KEY = process.env['MISTRAL_API_KEY'] ?? configKey('mistral_api_key');
-const FIREWORKS_KEY = process.env['FIREWORKS_API_KEY'] ?? configKey('fireworks_api_key');
+// `||`, not `??`: an empty variable falls back to the config, as the missing-key message says.
+const ANTHROPIC_KEY = (process.env['ANTHROPIC_API_KEY'] || configKey('anthropic_api_key'));
+const MISTRAL_KEY = (process.env['MISTRAL_API_KEY'] || configKey('mistral_api_key'));
+const FIREWORKS_KEY = (process.env['FIREWORKS_API_KEY'] || configKey('fireworks_api_key'));
 const KEYS: Record<Family, string | undefined> = { anthropic: ANTHROPIC_KEY, mistral: MISTRAL_KEY, fireworks: FIREWORKS_KEY };
 
 const asked = MODE === 'smoke' || MODE === 'full';

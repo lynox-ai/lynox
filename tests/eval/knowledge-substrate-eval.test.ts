@@ -78,7 +78,7 @@ const PROVIDER = resolveProvider();
 const RUN = process.env['LYNOX_EVAL'] === '1' && PROVIDER !== null;
 // Asked for and still skipped is a failed lookup, not "nothing to measure": say where it looked.
 if (process.env['LYNOX_EVAL'] === '1' && PROVIDER === null) {
-  reportMissingKey('knowledge eval', ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'LYNOX_KNOWLEDGE_PROXY_URL', 'LYNOX_KNOWLEDGE_PROXY_KEY', 'LYNOX_KNOWLEDGE_PROXY_KEY_FILE'], ['anthropic_api_key', 'mistral_api_key']);
+  reportMissingKey('knowledge eval', ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'LYNOX_KNOWLEDGE_PROXY_URL', 'LYNOX_KNOWLEDGE_PROXY_KEY', 'LYNOX_KNOWLEDGE_PROXY_KEY_FILE'], ['anthropic_api_key', 'api_key', 'mistral_api_key']);
 }
 const RUNS = Math.max(1, Number(process.env['LYNOX_KNOWLEDGE_RUNS'] ?? '2'));
 const LABELS = loadLabels();
