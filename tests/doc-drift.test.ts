@@ -160,11 +160,19 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
     ['LYNOX_MAX_MODEL_TIER', 'envTier', 'src/core/config.ts'],
     ['LYNOX_DEFAULT_MODEL_TIER', 'envTier', 'src/core/config.ts'],
     ['LYNOX_DATA_DIR', 'readEnvAlias', 'src/core/config.ts'],
-    ['LYNOX_DATA_DIR', 'readEnvAlias', 'src/core/openai-adapter.ts'],
   ];
   for (const [canonical, accessor, file] of ALIAS_CONSUMERS) {
     it(`${file} reads ${canonical} via ${accessor}()`, () => {
-      expect(read(file)).toMatch(new RegExp(`${accessor}\\('${canonical}'\\)`));
+      expect(read(file)).toMatch(new RegExp(`${accessor}\\('${canonical}'[,)]`));
+    });
+  }
+
+  // These two files used to read the data-dir variables themselves; they now ask
+  // config.ts `lynoxDirFor`. A read of their own would be a second copy of the
+  // rule, which is how the data dir drifted before. Only these two are checked.
+  for (const file of ['src/core/openai-adapter.ts', 'src/core/wire-capture.ts']) {
+    it(`${file} reads no data-dir variable of its own`, () => {
+      expect(read(file)).not.toMatch(/['"]LYNOX_(DATA_)?DIR['"]|\.LYNOX_(DATA_)?DIR\b/);
     });
   }
 });

@@ -40,9 +40,9 @@ export type CanonicalEnvName = keyof typeof ENV_ALIASES;
  * First non-empty value among the given env var names, in order. An unset OR
  * empty-string var is skipped — an empty env var means "not provided" here.
  */
-function envFirst(...names: readonly string[]): string | undefined {
+function envFirst(env: NodeJS.ProcessEnv, names: readonly string[]): string | undefined {
   for (const name of names) {
-    const value = process.env[name];
+    const value = env[name];
     if (value !== undefined && value !== '') return value;
   }
   return undefined;
@@ -51,9 +51,10 @@ function envFirst(...names: readonly string[]): string | undefined {
 /**
  * Read a renamed env var by its canonical name, falling back to every
  * registered legacy alias. The canonical name wins when both are set.
+ * `env` defaults to `process.env`; pass another for a child's environment.
  */
-export function readEnvAlias(canonical: CanonicalEnvName): string | undefined {
-  return envFirst(canonical, ...ENV_ALIASES[canonical]);
+export function readEnvAlias(canonical: CanonicalEnvName, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return envFirst(env, [canonical, ...ENV_ALIASES[canonical]]);
 }
 
 /**

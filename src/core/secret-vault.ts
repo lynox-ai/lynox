@@ -10,7 +10,7 @@ import { ensureDirSync } from './atomic-write.js';
 import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './sqlite-constants.js';
 
 // Lazy — must not evaluate at import time (setDataDir may not have been called yet)
-function getVaultDbPath(): string {
+export function getVaultDbPath(): string {
   return join(getLynoxDir(), 'vault.db');
 }
 

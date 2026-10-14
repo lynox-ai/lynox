@@ -1759,3 +1759,33 @@ describe('Config', () => {
     expect(config.client_id).toBe('project-client');
   });
 });
+
+// The data-dir rule (`getLynoxDir`, the wire capture, the cache salt and the
+// vault rotation all resolve through it).
+describe('lynoxDirFor', () => {
+  it('takes the --data-dir override first, then LYNOX_DATA_DIR, then the legacy LYNOX_DIR, then ~/.lynox', async () => {
+    const { lynoxDirFor, setDataDir } = await import('./config.js');
+    expect(lynoxDirFor({})).toBe(join(fakeHome, '.lynox'));
+    expect(lynoxDirFor({ LYNOX_DIR: '/legacy' })).toBe('/legacy');
+    expect(lynoxDirFor({ LYNOX_DATA_DIR: '/data', LYNOX_DIR: '/legacy' })).toBe('/data');
+    // An empty variable is unset, as for every other alias read: it does not mean "the home".
+    expect(lynoxDirFor({ LYNOX_DATA_DIR: '', LYNOX_DIR: '/legacy' })).toBe('/legacy');
+    expect(lynoxDirFor({ LYNOX_DATA_DIR: '' })).toBe(join(fakeHome, '.lynox'));
+    setDataDir('/override');
+    try {
+      expect(lynoxDirFor({ LYNOX_DATA_DIR: '/data' })).toBe('/override');
+    } finally {
+      setDataDir(null);
+    }
+  });
+
+  it('getLynoxDir is lynoxDirFor over process.env', async () => {
+    const { getLynoxDir } = await import('./config.js');
+    vi.stubEnv('LYNOX_DATA_DIR', '/from-process-env');
+    try {
+      expect(getLynoxDir()).toBe('/from-process-env');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});

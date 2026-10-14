@@ -349,6 +349,10 @@ const VAULT_KEY_PATTERN = /^[A-Za-z0-9+/=]{32,128}$/;
  * it before {@link ensureVaultKey} so it derives engine.db's HKDF from the SAME
  * key the engine uses, never a divergent/auto-generated one.
  *
+ * ⚠ `~/.lynox/.env` on purpose, NOT the configured data dir: this file belongs to the install.
+ * `docker-installer.ts` and `entrypoint-webui.sh` write it there, and the entrypoint reads it
+ * there, whatever `LYNOX_DATA_DIR` says. Reading it from the data dir would miss the key it holds.
+ *
  * Security: only reads LYNOX_VAULT_KEY (no eval); rejects symlinks, foreign
  * ownership, group/other-readable perms, and malformed keys.
  */
