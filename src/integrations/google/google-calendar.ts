@@ -249,6 +249,9 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
         const built = input.action === 'update_event' ? buildEventUpdates(input) : { ok: true as const, updates: {} };
         if (!built.ok) return built.error;
         const eventUpdates = built.updates;
+        const created = input.action === 'create_event' ? buildEventCreate(input) : { ok: true as const, event: {} };
+        if (!created.ok) return created.error;
+        const newEvent = created.event;
 
         // Confirmation — fail-safe: block if no prompt available
         if (CONFIRM_ACTIONS.has(input.action) && !agent.promptUser) {
@@ -262,13 +265,7 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
           // rather than merely unlikely. See core/prompt-value.ts.
           let confirmMsg: PromptText = pv``;
           switch (input.action) {
-            case 'create_event': {
-              const attendeeStr = input.attendees?.length
-                ? ` with ${input.attendees.map((a) => a).join(', ')}`
-                : '';
-              confirmMsg = pv`Create event "${input.summary ?? '(untitled)'}"${calendarLine(input.calendar_id)}\nTime: ${input.start ?? '?'} – ${input.end ?? '?'}${attendeeStr}${input.attendees?.length ? '\nThis will send calendar invites.' : ''}`;
-              break;
-            }
+            case 'create_event': confirmMsg = describeEventCreate(input.calendar_id, newEvent); break;
             case 'update_event': confirmMsg = describeEventUpdate(input.event_id, input.calendar_id, eventUpdates); break;
             case 'delete_event': confirmMsg = pv`Delete event ${input.event_id ?? '(unknown)'}${calendarLine(input.calendar_id)}\nThis cannot be undone.`; break;
           }
@@ -280,7 +277,7 @@ export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<
 
         switch (input.action) {
           case 'list_events': return await handleListEvents(auth, input);
-          case 'create_event': return await handleCreateEvent(auth, input);
+          case 'create_event': return await handleCreateEvent(auth, input, newEvent);
           case 'update_event': return await handleUpdateEvent(auth, input, eventUpdates);
           case 'delete_event': return await handleDeleteEvent(auth, input);
           case 'free_busy': return await handleFreeBusy(auth, input);
@@ -333,31 +330,56 @@ async function handleListEvents(auth: GoogleAuth, input: CalendarInput): Promise
   return wrapUntrustedData(listing, 'google_calendar:events');
 }
 
-async function handleCreateEvent(auth: GoogleAuth, input: CalendarInput): Promise<string> {
-  if (!input.start) return 'Error: "start" is required for action "create_event".';
-  if (!input.end) return 'Error: "end" is required for action "create_event".';
-
-  const calendarId = input.calendar_id ?? 'primary';
+/**
+ * The POST body `create_event` sends, or why it cannot be sent. Like the update, the
+ * confirmation is built from this one object, so every field that reaches the calendar —
+ * description, location, recurrence, guests — is shown before it is sent.
+ */
+export function buildEventCreate(input: CalendarInput): { ok: true; event: Record<string, unknown> } | { ok: false; error: string } {
+  if (!input.start) return { ok: false, error: 'Error: "start" is required for action "create_event".' };
+  if (!input.end) return { ok: false, error: 'Error: "end" is required for action "create_event".' };
   const isAllDay = input.all_day ?? (input.start.length === 10); // YYYY-MM-DD
 
   const event: Record<string, unknown> = {
     summary: input.summary ?? 'Untitled Event',
-    description: input.description,
-    location: input.location,
-    start: isAllDay
-      ? { date: input.start }
-      : { dateTime: input.start, timeZone: input.timezone },
-    end: isAllDay
-      ? { date: input.end }
-      : { dateTime: input.end, timeZone: input.timezone },
+    start: isAllDay ? { date: input.start } : { dateTime: input.start, timeZone: input.timezone },
+    end: isAllDay ? { date: input.end } : { dateTime: input.end, timeZone: input.timezone },
   };
-
+  if (input.description) event['description'] = input.description;
+  if (input.location) event['location'] = input.location;
   if (input.attendees?.length) {
-    event['attendees'] = input.attendees.map(email => ({ email }));
+    const guests = input.attendees.map(normaliseGuest);
+    if (guests.some((g) => g === null)) return { ok: false, error: 'Error: every entry in "attendees" needs an email address.' };
+    event['attendees'] = guests;
   }
-  if (input.recurrence?.length) {
-    event['recurrence'] = input.recurrence;
+  if (input.recurrence?.length) event['recurrence'] = input.recurrence;
+  return { ok: true, event };
+}
+
+/** Every field the new event carries, one line each; each guest and each rule is its own value. */
+export function describeEventCreate(calendarId: string | undefined, event: Record<string, unknown>): PromptText {
+  const when = (v: unknown): string => {
+    const t = v as { date?: string; dateTime?: string; timeZone?: string };
+    return t.date ?? (t.timeZone ? `${t.dateTime ?? '?'} (${t.timeZone})` : (t.dateTime ?? '?'));
+  };
+  const lines: PromptText[] = [
+    pv`Create event "${String(event['summary'])}"${calendarLine(calendarId)}`,
+    pv`Time: ${when(event['start'])} – ${when(event['end'])}`,
+  ];
+  if (typeof event['location'] === 'string') lines.push(pv`Location: ${event['location']}`);
+  if (Array.isArray(event['recurrence'])) {
+    lines.push(pv`Repeats: ${joinPrompts((event['recurrence'] as unknown[]).map((r) => pv`${String(r)}`), '; ')}`);
   }
+  if (typeof event['description'] === 'string') lines.push(pv`Description: ${event['description']}`);
+  if (Array.isArray(event['attendees'])) {
+    lines.push(pv`Guests: ${joinPrompts((event['attendees'] as { email: string }[]).map((g) => pv`${g.email}`), ', ')}`);
+    lines.push(pv`Everyone listed under Guests can see this event.`);
+  }
+  return joinPrompts(lines, '\n');
+}
+
+async function handleCreateEvent(auth: GoogleAuth, input: CalendarInput, event: Record<string, unknown>): Promise<string> {
+  const calendarId = input.calendar_id ?? 'primary';
 
   const response = await calendarFetch(auth, `${CALENDAR_BASE}/calendars/${encodeURIComponent(calendarId)}/events`, {
     method: 'POST',
