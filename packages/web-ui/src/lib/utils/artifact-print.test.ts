@@ -237,6 +237,12 @@ describe('buildPrintDocument — the print document runs no script but its own',
 		expect(out.match(/<!DOCTYPE/gi)).toHaveLength(1);
 	});
 
+	it('puts the policy first when the doctype is not the first thing the parser reads', () => {
+		for (const lead of ['\u00a0', '\ufeff', 'x']) {
+			expect(POLICY.test(buildPrintDocument(`${lead}<!DOCTYPE html><html><body>x</body></html>`)), JSON.stringify(lead)).toBe(true);
+		}
+	});
+
 	it('uses a new nonce for every document', () => {
 		const a = POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1];
 		const b = POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1];

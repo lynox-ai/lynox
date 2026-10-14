@@ -127,7 +127,9 @@ function printNonce(): string {
 export function buildPrintDocument(html: string, nonce: string = printNonce()): string {
   const policy = `<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-${nonce}'; object-src 'none'; base-uri 'none'; form-action 'none'">`;
   const doc = injectPrintScaffold(html, nonce);
-  const doctype = /^\s*<!doctype[^>]*>/i.exec(doc)?.[0] ?? '';
+  // HTML whitespace only: JS `\s` also matches U+00A0 and U+FEFF, which the parser reads as text,
+  // and text before the doctype would put the policy into the body, where it does not apply.
+  const doctype = /^[\t\n\f\r ]*<!doctype[^>]*>/i.exec(doc)?.[0] ?? '';
   return `${doctype}${policy}${doc.slice(doctype.length)}`;
 }
 
