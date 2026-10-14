@@ -625,7 +625,7 @@ describe('setup probe — operator permission policy', () => {
     const rendered = templates.flatMap(t => t.includes('${exfilWarning}')
       ? warnings.map(w => t.replace('${exfilWarning}', w))
       : [t.replace(/\$\{(\w+)\}/g, (whole, name: string) => ({
-          method: 'POST', gatedMethod: 'POST', hostname: '203.0.113.40', path: '/v1/orders?page=…', fields: 'fields "sku"', note: '', sentNote: '',
+          method: 'POST', gatedMethod: 'POST', hostname: '203.0.113.40', path: '/v1/orders?page=…', fields: 'fields "sku"', note: '', sentNote: '', contextBlock: '',
           bodyBlock: '\n\n```\n{\n  "sku": "A-1"\n}\n```',
         } as Record<string, string>)[name] ?? whole)]);
     expect(rendered.every(q => !q.includes('${'))).toBe(true);

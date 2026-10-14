@@ -70,6 +70,18 @@ describe('a bexio profile holds only the decided scopes', () => {
   });
 });
 
+describe('a bexio profile that writes documents, notes or tasks can read the contact they concern', () => {
+  it.each([['kb_invoice_edit'], ['kb_offer_edit'], ['note_edit'], ['task_edit'], ['kb_invoice_show kb_invoice_edit']])('refuses %s without a contact scope', async (scope) => {
+    const result = await create(scope);
+    expect(result).toContain('Invalid auth.oauth.scope for the provider "bexio"');
+    expect(result).toContain('needs contact_show or contact_edit as well: the question before each write names the contact it concerns');
+  });
+
+  it.each([['kb_invoice_edit contact_show'], ['kb_offer_edit contact_edit'], ['contact_edit'], ['kb_invoice_show']])('control: saves %s', async (scope) => {
+    expect(await create(scope)).not.toContain('auth.oauth.scope');
+  });
+});
+
 describe('view tells the model which bexio scopes exist', () => {
   it('lists the write scopes as allowed, and no scope outside the preset', async () => {
     const store = new ApiStore();

@@ -1206,6 +1206,132 @@ describe('httpRequestTool', () => {
         });
       });
 
+      describe('a write to a connected bexio account shows what it changes there', () => {
+        async function withBexio(): Promise<void> {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'bexio-api', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio API',
+            auth: {
+              type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+              oauth: { grant_type: 'refresh_token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', preset_id: 'bexio', scope: 'contact_show kb_invoice_edit' },
+            },
+          });
+          testCtx.apiStore = store;
+        }
+        const invoice = { id: 7, document_nr: 'RE-00042', contact_address: 'Muster AG\nMusterstrasse 15', total: '19.150000', total_remaining_payments: '19.150000', currency_id: 1 };
+        /** The account: readings by path, and the write's own answer. */
+        function account(readings: Record<string, Response | (() => Response)>): ReturnType<typeof vi.fn> {
+          const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+            const url = new URL(String(input instanceof Request ? input.url : input));
+            if ((init?.method ?? 'GET') !== 'GET') return createMockResponse({ status: 200, json: { ok: true } });
+            const found = readings[url.pathname];
+            return found === undefined ? createMockResponse({ status: 404, body: 'not found' }) : typeof found === 'function' ? found() : found;
+          });
+          vi.stubGlobal('fetch', fetchMock);
+          return fetchMock;
+        }
+        const sent = (fetchMock: ReturnType<typeof vi.fn>): string[] =>
+          fetchMock.mock.calls.map(([u, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${new URL(String(u)).pathname}`);
+        const cancel = { url: 'https://api.bexio.com/2.0/kb_invoice/7/cancel', method: 'POST', body: '{}' };
+
+        it('cancelling an invoice: reads it, and the question names number, recipient and amount, on the instance only', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler(cancel, makeAgent({ promptUser }));
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1', 'POST /2.0/kb_invoice/7/cancel']);
+          const question = promptUser.mock.calls[0]![0] as PromptText;
+          expect(flattenPrompt(question)).toContain('bexio invoice "RE-00042" · recipient: "Muster AG, Musterstrasse 15" · total CHF 19.15, open CHF 19.15');
+          expect(flattenPrompt(offBoxPrompt(question))).not.toContain('Muster AG');
+          expect(flattenPrompt(offBoxPrompt(question))).not.toContain('19.15');
+        });
+
+        it.each([
+          ['a reading answers 403', { '/2.0/kb_invoice/7': () => createMockResponse({ status: 403, body: 'forbidden' }) }, /answered 403; the connection may lack read access/],
+          ['the currency cannot be read', { '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }) }, /reading \/3\.0\/currencies\/1 answered 404/],
+          ['a reading is not JSON', { '/2.0/kb_invoice/7': () => createMockResponse({ body: '<html>' }) }, /reading \/2\.0\/kb_invoice\/7 failed/],
+          ['a reading redirects', { '/2.0/kb_invoice/7': () => createMockResponse({ status: 302, headers: { location: 'https://api.bexio.com/2.0/kb_invoice/8' } }) }, /reading \/2\.0\/kb_invoice\/7 failed/],
+        ] as const)('fail-closed: when %s, the write is refused unasked and not sent', async (_label, readings, why) => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account(readings as Record<string, () => Response>);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const err = await handler(cancel, makeAgent({ promptUser })).then(() => null, (e: unknown) => e);
+          expect(String(err)).toMatch(/could not show what it changes in the bexio account/);
+          expect(String(err)).toMatch(why);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(sent(fetchMock).filter((c) => !c.startsWith('GET '))).toEqual([]);
+        });
+
+        it('each reading is charged against the session\'s HTTP budget', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/HTTP request limit \(100\) is reached/);
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7']);
+          expect(promptUser).not.toHaveBeenCalled();
+        });
+
+        it('a write the readings leave without budget is refused before the question', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 2;
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/session HTTP request limit \(100\) exceeded/);
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1']);
+          expect(promptUser).not.toHaveBeenCalled();
+        });
+
+        it('an order, which lynox does not show, is refused unasked and not sent', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({});
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler({ url: 'https://api.bexio.com/2.0/kb_order/3/invoice', method: 'POST', body: '{}' }, makeAgent({ promptUser })))
+            .rejects.toThrow(/does not write to bexio's kb_order documents/);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('a host two providers share is refused unasked: lynox cannot tell what the write changes', async () => {
+          await withBexio();
+          testCtx.apiStore!.register({
+            id: 'other-api', name: 'Other', base_url: 'https://api.bexio.com/other', description: 'Other API',
+            auth: { type: 'oauth2', vault_keys: ['O_ID', 'O_SECRET'], oauth: { grant_type: 'refresh_token', client_id_key: 'O_ID', client_secret_key: 'O_SECRET', preset_id: 'example-shop' } },
+          });
+          mockDnsPublic();
+          const fetchMock = account({});
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/profiles of more than one provider share this host/);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: a changed contact needs no reading and is asked with its body', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({});
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ url: 'https://api.bexio.com/2.0/contact/17', method: 'POST', body: '{"name_1":"Muster AG"}' }, makeAgent({ promptUser }));
+          expect(sent(fetchMock)).toEqual(['POST /2.0/contact/17']);
+          expect(promptUser).toHaveBeenCalledTimes(1);
+        });
+      });
+
       describe('a redirect after a reviewed write', () => {
         const reviewed: CapabilityContract = {
           version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
