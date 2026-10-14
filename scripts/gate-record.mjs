@@ -512,8 +512,8 @@ function openCountRefusal(field, visibility) {
  *     `step 2` ending one still does — joined, it reads as a count, and nothing says otherwise);
  *   · `deferred` and `issues`, which hit "9 of 17 deferred tools" and "the 3 issues filed by users".
  * ⚠ A COPY of a rule that lives in the private repo, now slightly wider, so the two can drift.
- * Bounded, not exact: a count in words ("two remain") passes, as it does in the fields, and so do
- * digits outside ASCII that NFKC does not fold (Arabic-Indic).
+ * Bounded, not exact: a count in words ("two remain") passes, as it does in the fields. A count in
+ * any other digit script (`٢`, `२`) is read as its ASCII value.
  *
  * Returns the first line of each paragraph that counts, never the text: the refusal goes into a
  * public Actions log.
@@ -547,15 +547,23 @@ export function proseOpenCountLines(body) {
   // zero-width characters render as nothing. All of them would otherwise split a count.
   // Only what LOOKS like a tag or comment goes: a plain `<` with a later `>` (`p95 < 300ms … ->`)
   // is shown literally by GitHub, and a bare `<[^>]*>` erased the count between them.
+  // Any decimal digit to ASCII: Unicode keeps every digit set one contiguous run starting at its
+  // zero, so a digit's value is its distance from the run's start, mod 10 (adjacent sets abut).
+  const asciiDigit = (ch) => {
+    let start = ch.codePointAt(0);
+    while (/\p{Nd}/u.test(String.fromCodePoint(start - 1))) start -= 1;
+    return String((ch.codePointAt(0) - start) % 10);
+  };
   const readable = (raw, fold) => {
     const decoded = raw
       .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
       .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
       .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
       .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ');
-    // Again after decoding: an entity can name a fullwidth digit. Optional, because the fold can
-    // also glue a decoded character onto a count (`2 filed&#xFF12;`), which unfolded still reads.
-    return (fold ? decoded.normalize('NFKC') : decoded)
+    // Again after decoding: an entity can name a fullwidth digit, and digits of other scripts go
+    // to ASCII. Optional, because the fold can also glue a decoded character onto a count
+    // (`2 filed&#xFF12;`), which unfolded still reads.
+    return (fold ? decoded.normalize('NFKC').replace(/(?![0-9])\p{Nd}/gu, asciiDigit) : decoded)
       .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
       .replace(/\]\([^)]*\)/g, '')
       .replace(/[*_`[\]]/g, '');

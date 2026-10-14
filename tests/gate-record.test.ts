@@ -1804,6 +1804,15 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
     // ...and a comment INSIDE a count is hidden as rendered, so the count still reads.
     expect(proseOpenCountLines('2 findings <!-- x --> filed')).toEqual([1]);
     expect(proseOpenCountLines('<a <!-- x --> 2 findings filed >')).toEqual([1]);
+    // Any digit script reads as its value, a zero in any script stays a zero.
+    expect(proseOpenCountLines('left ٢ findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('left २ findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('left 𝟐 findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('left ٠ findings filed')).toEqual([]);
+    // Two digit sets that abut (U+116D0 and U+116DA): the second set's 2 is 2, not 12.
+    expect(proseOpenCountLines(`left ${String.fromCodePoint(0x116dc)} findings filed`)).toEqual([1]);
+    expect(proseOpenCountLines(`left ${String.fromCodePoint(0x116da)} findings filed`)).toEqual([]);
+    expect(proseOpenCountLines('left ١٠ findings filed')).toEqual([1]);
     // An entity naming a fullwidth digit is folded after decoding.
     expect(proseOpenCountLines('left &#xFF12; findings filed')).toEqual([1]);
     // ...without the fold taking away a boundary the unfolded text had.
