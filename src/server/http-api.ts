@@ -3344,7 +3344,8 @@ export class LynoxHTTPApi {
       if (ct === '' && body !== null) {
         errorResponse(res, 415, 'Content-Type must be application/json');
         return;
-      }    }
+      }
+    }
 
     // What the browser attached on its own, for `_refusedAsAmbientCrossSite`.
     const ambient: 'none' | 'no-secret' | 'cookie' = !secret
