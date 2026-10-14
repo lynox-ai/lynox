@@ -84,7 +84,7 @@ jobs:
       # Dependency audit via osv-scanner. audit-ci was replaced 2026-04-15
       # because it shells out to `pnpm audit`, and pnpm audit still hits the
       # retired npm legacy advisory endpoint (HTTP 410). osv-scanner reads
-      # pnpm-lock.yaml natively and queries OSV.dev (aggregates GHSA + npm
+      # both lockfiles (the root and docs/) natively and queries OSV.dev (aggregates GHSA + npm
       # advisories + more). High/critical fail the job; moderate/low are listed
       # and do not block, which keeps the prior Phase 1 policy — and a finding
       # whose severity the report does not state now fails too, which is the
@@ -99,7 +99,11 @@ jobs:
 
       # The exit code is CAPTURED and handed to the gate rather than discarded.
       # Measured on 2.5.1: an unreadable lockfile exits 127 and a lockfile that
-      # yields no packages exits 128, and neither writes the report. Under the
+      # yields no packages exits 128, and neither writes the report. With two
+      # lockfiles, 128 fires only when BOTH yield nothing: an empty docs lockfile
+      # beside a readable root one scans green here. The override guard below
+      # is what refuses that case — it fails a tree whose lockfile records
+      # overrides and resolves no packages. Under the
       # old `|| true` that was survivable only by accident — the missing file
       # broke the jq that followed. The accident is what is being removed.
       #
