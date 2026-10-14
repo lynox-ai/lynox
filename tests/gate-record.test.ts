@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -1726,5 +1726,131 @@ describe('a PUBLIC record does not count open findings', () => {
     const tpl = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8');
     expect(tpl).toContain('findings filed privately');
     expect(tpl).not.toMatch(/`security:[^`]*\d+ filed`/);
+  });
+});
+
+describe('a PUBLIC body does not count open findings in its prose either', () => {
+  // The witness, measured before this check existed: a valid record plus this sentence was green.
+  const COUNTED = 'The security round left 2 findings filed in the register.';
+  const withProse = (line: string) => record().replace('Something.', line);
+
+  it('REFUSES a count in the prose on a public repo — and on an unknown one', () => {
+    for (const visibility of ['public', 'unknown'] as const) {
+      const v = evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility });
+      expect(v.ok, visibility).toBe(false);
+      expect(v.errors.join('\n')).toContain('paragraph at line 3');
+      if (visibility === 'unknown') expect(v.errors.join('\n')).toContain('could not be determined');
+      else expect(v.errors.join('\n')).not.toContain('could not be determined');
+    }
+  });
+
+  it('never echoes the count into the log it writes', () => {
+    const v = evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility: 'public' });
+    expect(v.errors.join('\n')).not.toContain('2 findings');
+  });
+
+  it('accepts the prescribed number-free form, and the private repo', () => {
+    expect(evaluate({ body: withProse('Findings outside this change are filed privately.'), head: HEAD, files: CODE, visibility: 'public' }).ok).toBe(true);
+    expect(evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
+  });
+
+  it('applies on a docs-only diff without a record too — prose is published there as well', () => {
+    const v = evaluate({ body: `## Docs\n\n${COUNTED}\n`, head: HEAD, files: ['docs/x.md'], visibility: 'public' });
+    expect(v.ok).toBe(false);
+  });
+
+  it('leaves a bot body alone, like the field rule', () => {
+    expect(evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, author: 'dependabot[bot]', visibility: 'public' }).ok).toBe(true);
+  });
+
+  it('reads all three forms, and the calibrated exclusions stay out', () => {
+    for (const hit of ['2 findings filed', '1 filed', '3 security findings filed', '2 open findings', '4 offene Befunde', '2 gaps remain open', '3 findings are still open', '2 Befunde bleiben offen']) {
+      expect(proseOpenCountLines(hit), hit).toEqual([1]);
+    }
+    for (const miss of ['findings filed privately', '0 filed', 'core#1274 filed', 'v1.2 filed', 'the 3 issues filed by users', '9 of 17 deferred tools', '5 findings, all fixed', 'x2 filed']) {
+      expect(proseOpenCountLines(miss), miss).toEqual([]);
+    }
+  });
+
+  it('a valid record is not a prose hit, and nothing that LOOKS like a record hides prose', () => {
+    expect(proseOpenCountLines(record())).toEqual([]);
+    // Review findings against the first version, which skipped from an opener to the next fence:
+    // a second, unterminated opener after a valid record hid everything after it…
+    const fence = '`'.repeat(3) + 'gate-record';
+    const unterminated = `${record()}\n${fence}\n\n${COUNTED}\n`;
+    expect(evaluate({ body: unterminated, head: HEAD, files: CODE, visibility: 'public' }).ok).toBe(false);
+    // …and so did an opener inside an HTML comment, which the record parser strips.
+    const commented = `<!--\n${fence}\n-->\n\n${COUNTED}\n\n${record()}`;
+    expect(evaluate({ body: commented, head: HEAD, files: CODE, visibility: 'public' }).ok).toBe(false);
+    // On a docs diff the bare unterminated opener was enough.
+    expect(evaluate({ body: `${fence}\n\n${COUNTED}\n`, head: HEAD, files: ['docs/x.md'], visibility: 'public' }).ok).toBe(false);
+  });
+
+  it('reads a count that markdown or a line break splits up', () => {
+    for (const text of ['**2** findings filed', '_2_ open findings', '`2` findings filed', '[2 findings](https://x) filed', 'left\n2\nfindings filed', 'two lines: 2 findings\nwere filed']) {
+      expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
+    }
+    // What GitHub renders as text around the number: inline HTML, an entity, a hard break, a
+    // zero-width character.
+    for (const text of ['left <b>2</b> findings filed', 'left 2&nbsp;findings filed', 'left 2\\\nfindings filed', 'left 2\u200B findings filed',
+      'left 2\\\r\nfindings filed', 'left 2&#8203; findings filed', 'left 2&ensp;findings filed', 'left &#50; findings filed', 'left &#x32; findings filed',
+      // a plain `<` and a later `>` are text, not a tag
+      'p95 < 300ms, 2 findings filed -> register', 'x < y; 2 open findings => later']) {
+      expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
+    }
+    // A count inside an HTML comment is still in the public raw body.
+    expect(proseOpenCountLines('<!-- 2 findings filed -->')).toEqual([1]);
+    expect(proseOpenCountLines('<!--\n2 findings filed\n-->')).toEqual([1]);
+    // ...and a comment INSIDE a count is hidden as rendered, so the count still reads.
+    expect(proseOpenCountLines('2 findings <!-- x --> filed')).toEqual([1]);
+    expect(proseOpenCountLines('<a <!-- x --> 2 findings filed >')).toEqual([1]);
+    // Any digit script reads as its value, a zero in any script stays a zero.
+    expect(proseOpenCountLines('left ٢ findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('left २ findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('left 𝟐 findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('left ٠ findings filed')).toEqual([]);
+    // Two digit sets that abut (U+116D0 and U+116DA): the second set's 2 is 2, not 12.
+    expect(proseOpenCountLines(`left ${String.fromCodePoint(0x116dc)} findings filed`)).toEqual([1]);
+    expect(proseOpenCountLines(`left ${String.fromCodePoint(0x116da)} findings filed`)).toEqual([]);
+    expect(proseOpenCountLines('left ١٠ findings filed')).toEqual([1]);
+    // An entity naming a fullwidth digit is folded after decoding.
+    expect(proseOpenCountLines('left &#xFF12; findings filed')).toEqual([1]);
+    // ...without the fold taking away a boundary the unfolded text had.
+    expect(proseOpenCountLines('2 filed&#xFF12;')).toEqual([1]);
+    expect(proseOpenCountLines('&#xFF41;2 findings filed')).toEqual([1]);
+    // An entity outside Unicode does not throw.
+    expect(proseOpenCountLines('left &#99999999; 2 findings filed')).toEqual([1]);
+    // …but a date ending one line does not meet the next one's words. (A bare `step 2` ending a
+    // line still would — joined, it IS a count, and nothing in the text says otherwise.)
+    for (const text of ['Merged 2026-10-14\nfindings filed privately', 'tag v2.15.4\nfindings filed privately']) {
+      expect(proseOpenCountLines(text), JSON.stringify(text)).toEqual([]);
+    }
+    // A blank line ends the paragraph: the number and the noun are then two statements.
+    expect(proseOpenCountLines('we found 2\n\nfindings filed privately')).toEqual([]);
+  });
+
+  it('reads the shapes the review measured passing: "were filed", "filed N", "unresolved"', () => {
+    for (const hit of ['2 findings were filed', '3 gaps have been filed', 'we filed 2 findings', 'filed 4 security findings', '2 findings remain unresolved']) {
+      expect(proseOpenCountLines(hit), hit).toEqual([1]);
+    }
+    expect(proseOpenCountLines('filed 0 findings')).toEqual([]);
+  });
+
+  it('folds fullwidth digits (NFKC) and reads a CRLF body', () => {
+    expect(proseOpenCountLines('２ findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('intro\r\n\r\n2 findings\r\nfiled\r\n')).toEqual([3]);
+  });
+
+  it('a line carrying the allow marker opts out, and only that line', () => {
+    const marker = ['public-repo-guard', 'allow'].join(':');
+    expect(proseOpenCountLines(`${COUNTED} <!-- ${marker} -->`)).toEqual([]);
+    expect(proseOpenCountLines(`${COUNTED} <!-- ${marker} -->\n${COUNTED}`)).toEqual([2]);
+    // The marker hides its own line, not the paragraph: a count split around it is still read.
+    expect(proseOpenCountLines(`we left 2\nquoted: 1 filed <!-- ${marker} -->\nfindings filed`)).toEqual([1]);
+  });
+
+  it('the shipped template passes its own rule', () => {
+    const template = readFileSync(fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)), 'utf8');
+    expect(proseOpenCountLines(template)).toEqual([]);
   });
 });
