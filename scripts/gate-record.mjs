@@ -131,6 +131,22 @@ export const SECURITY_PATHS = [
   /^src\/tools\/builtin\//,
   /^src\/server\//,
   /^src\/integrations\//,
+  // The web UI's own trust boundary. Every entry above is anchored at `^src/`, and the
+  // second package carries real login code: the session cookie, link codes, magic links,
+  // passkey and renew routes. `packages/web-ui/src/lib/server/auth.ts` owed only
+  // code-review and delta until this was added (requiredGates at b58ba62b). The
+  // DIRECTORY, not file names, for the reason the integrations note gives: public-paths.ts
+  // and demo-mode.ts sit beside auth.ts and decide who gets in just as much. The account
+  // settings directory is here because `account/mobile` hands an owner session a link
+  // code that logs a device in as the owner, from under `routes/`. Cheap by the measure
+  // above: 1 of the last 60 and 7 of the last 300 commits on main touched these paths
+  // (ranges, at b58ba62b).
+  /^packages\/web-ui\/src\/lib\/server\//,
+  /^packages\/web-ui\/src\/hooks\.server\.ts$/,
+  /^packages\/web-ui\/src\/routes\/auth\//,
+  /^packages\/web-ui\/src\/routes\/login\//,
+  /^packages\/web-ui\/src\/routes\/logout\//,
+  /^packages\/web-ui\/src\/routes\/app\/settings\/account\//,
 ];
 
 /** A diff touching only these needs no record at all. */
