@@ -723,6 +723,31 @@ export function protectedDerivedSlot(profile: ApiProfile): string | null {
   return null;
 }
 
+/**
+ * The client slot of an oauth2 profile that is also one of its own derived token
+ * names, or `null` when none is.
+ *
+ * The derived pair is written without asking what else lives there: `fetch_token`
+ * stores the access token and a rotated refresh token under it, and the OAuth
+ * callback stores both after a connect. A profile that keeps its client id or
+ * secret under one of those names loses it to the first token that arrives, and
+ * the attach, which reads the derived access name, sends the client secret to the
+ * profile's host as a bearer token until then. Asked here, beside
+ * {@link protectedDerivedSlot}, so every one of those paths is covered by the one
+ * gate a profile passes before any of them can see it.
+ */
+export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_id_key' | 'client_secret_key'; name: string } | null {
+  if (profile.auth?.type !== 'oauth2') return null;
+  const oauth = profile.auth.oauth;
+  if (!oauth) return null;
+  const derived = new Set([accessTokenKey(profile.id), refreshTokenKey(profile.id)]);
+  for (const field of ['client_id_key', 'client_secret_key'] as const) {
+    const name = oauth[field];
+    if (typeof name === 'string' && derived.has(name)) return { field, name };
+  }
+  return null;
+}
+
 /** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
 function hostOf(profile: ApiProfile): string | null {
   try {
@@ -1244,6 +1269,16 @@ export class ApiStore {
         return `profile "${profile.id}" is oauth2 and derives the vault slot ${reserved}, a name that belongs to a credential of this instance, so it is not registered and cannot be used. Nothing was deleted: the stored profile stays, and whatever the vault holds under ${accessTokenKey(profile.id)} and ${refreshTokenKey(profile.id)} is left as it is. To use this API again, delete this profile by its id (api_setup's delete action takes an id that is not registered) and set it up under a different id.`;
       }
       return `profile "${profile.id}" is oauth2, so its token would live in the vault slot ${reserved}, and that name belongs to a credential of this instance. Nothing was saved. Choose a different id for this profile.`;
+    }
+    // Nor may it keep a client credential under one of its own token names — see
+    // `clientSlotOnDerivedName`. Same gate, same two modes, same reason.
+    const clientOnToken = clientSlotOnDerivedName(profile);
+    if (clientOnToken !== null) {
+      const { field, name } = clientOnToken;
+      if (mode === 'load') {
+        return `profile "${profile.id}" keeps its OAuth ${field === 'client_id_key' ? 'client id' : 'client secret'} under ${name}, the name its own tokens are written to, so it is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use this API again, point auth.oauth.${field} at a name of its own with api_setup update.`;
+      }
+      return `profile "${profile.id}" keeps its OAuth ${field === 'client_id_key' ? 'client id' : 'client secret'} under ${name}, the name its own tokens are written to — the first token would replace it. Nothing was saved. Point auth.oauth.${field} at a name of its own.`;
     }
 
     const hostname = hostOf(profile);
