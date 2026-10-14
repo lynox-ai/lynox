@@ -547,23 +547,27 @@ export function proseOpenCountLines(body) {
   // zero-width characters render as nothing. All of them would otherwise split a count.
   // Only what LOOKS like a tag or comment goes: a plain `<` with a later `>` (`p95 < 300ms … ->`)
   // is shown literally by GitHub, and a bare `<[^>]*>` erased the count between them.
-  const readable = (raw) => raw
-    .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
-    .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ')
-    // Again after decoding: an entity can name a fullwidth digit.
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
-    .replace(/\]\([^)]*\)/g, '')
-    .replace(/[*_`[\]]/g, '');
+  const readable = (raw, fold) => {
+    const decoded = raw
+      .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
+      .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
+      .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ');
+    // Again after decoding: an entity can name a fullwidth digit. Optional, because the fold can
+    // also glue a decoded character onto a count (`2 filed&#xFF12;`), which unfolded still reads.
+    return (fold ? decoded.normalize('NFKC') : decoded)
+      .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
+      .replace(/\]\([^)]*\)/g, '')
+      .replace(/[*_`[\]]/g, '');
+  };
   const flush = () => {
     const joined = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ');
     // Read twice. As RENDERED, a comment is a tag and goes — `2 findings <!-- x --> filed` shows
     // the count. As PUBLISHED, its markers go and its text stays — the raw body (API, edit view)
     // is public, so `<!-- 2 findings filed -->` is too. A count in either reading is a hit.
     const views = [joined, joined.replace(/<!--|-->/g, ' ')];
-    if (para.length > 0 && views.some((v) => PROSE_OPEN_COUNT.test(readable(v)))) hits.push(para[0].n);
+    const hit = views.some((v) => [true, false].some((fold) => PROSE_OPEN_COUNT.test(readable(v, fold))));
+    if (para.length > 0 && hit) hits.push(para[0].n);
     para = [];
   };
   for (const [i, line] of lines.entries()) {
