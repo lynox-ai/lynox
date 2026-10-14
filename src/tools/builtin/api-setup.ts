@@ -2566,11 +2566,11 @@ ${draftJson}
       // Nor a slot this profile signs in with. The write below would replace the client
       // id or secret with the access token, and the next exchange would send the token as
       // the client's credential — failing as a client problem the user cannot trace back to
-      // this call. Asked of the input field only: the derived name can never be a client
-      // slot, because `_admit` refuses such a profile (`clientSlotOnDerivedName`), and that
-      // gate also covers the callback and the rotated refresh write, which this one cannot.
-      const clientField = input.output_secret_name === undefined ? undefined
-        : outputName === clientIdKey ? 'client id' : outputName === clientSecretKey ? 'client secret' : undefined;
+      // this call. Only an explicit output_secret_name can reach it: the derived name is
+      // never a client slot, because `_admit` refuses such a profile
+      // (`clientSlotOnDerivedName`), and that gate also covers the callback and the
+      // rotated refresh write, which this one cannot.
+      const clientField = outputName === clientIdKey ? 'client id' : outputName === clientSecretKey ? 'client secret' : undefined;
       if (clientField !== undefined) {
         const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its OAuth ${clientField} — the access token would be written over it. Nothing was sent.`;
         const derivedAccess = accessTokenKey(input.id);
