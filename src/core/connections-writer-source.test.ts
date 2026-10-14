@@ -16,7 +16,7 @@ const UPSERT = /\.upsert\s*\(/g;
 // Every `.upsert(` call by file. The connections writers are api-store.ts and engine.ts;
 // connection-store.ts calls its own upsert from `upsertMany`; the rest write other tables.
 const KNOWN_CALLS: Record<string, number> = {
-  'core/api-store.ts': 4,
+  'core/api-store.ts': 2,
   'core/connection-store.ts': 1,
   'core/engine.ts': 1,
   'core/run-history.ts': 2,
@@ -49,7 +49,12 @@ describe('connections writers', () => {
   it('api-store.ts writes connections only through profileToConnectionRow, and that writes kind api', () => {
     const text = read('core/api-store.ts');
     const args = [...text.matchAll(/\.upsert\s*\(\s*([A-Za-z_]+)/g)].map((m) => m[1]);
-    expect(args, FIX).toEqual(['profileToConnectionRow', 'profileToConnectionRow', 'profileToConnectionRow', 'profileToConnectionRow']);
+    expect(args, FIX).toEqual(['profileToConnectionRow', 'profileToConnectionRow']);
+    // One of the two is the store's own write, behind the check for another kind's row; the
+    // other is the static re-gate, which only rewrites rows it read as kind api.
+    expect(text.match(/this\.connStore\??\.upsert\s*\(/g)?.length, FIX).toBe(1);
+    const writeRow = text.slice(text.indexOf('private _writeRow('));
+    expect(writeRow.slice(0, writeRow.indexOf('\n  }\n')), FIX).toMatch(/_otherKindAt\(profile\.id\)[\s\S]*throw[\s\S]*this\.connStore\.upsert\(/);
     const body = text.slice(text.indexOf('function profileToConnectionRow'));
     expect([...body.slice(0, body.indexOf('\n}\n')).matchAll(/\bkind:\s*'([a-z_]+)'/g)].map((m) => m[1]), FIX).toEqual(['api']);
   });
