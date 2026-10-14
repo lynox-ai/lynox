@@ -3,7 +3,7 @@ import { mkdirSync, rmdirSync, writeFileSync, rmSync, readFileSync, readdirSync,
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDerivedSlot, STORED_PROFILE_PREAMBLE } from './api-store.js';
+import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey, protectedDerivedSlot, clientSlotOnDerivedName, STORED_PROFILE_PREAMBLE } from './api-store.js';
 import { vaultKeyForAccount } from '../integrations/mail/auth/app-password.js';
 import { PROVIDER_KEY_SLOTS } from './llm/provider-keys.js';
 import { containsUntrustedMarker } from './data-boundary.js';
@@ -1428,6 +1428,87 @@ describe('vault slot derivation — one function, and it must stay injective at 
       expect(store.get('shopify-store')).toBeDefined();
       expect(store.get('lynox-x')).toBeUndefined();
       expect(warn.mock.calls.map((c) => String(c[0])).join('')).toMatch(/LYNOX_X_ACCESS_TOKEN/);
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    });
+  });
+
+  describe('an oauth2 profile may not keep a client credential under one of its own token names', () => {
+    // The derived pair is written by fetch_token, by a rotated refresh token and by the
+    // OAuth callback, none of which asks what else lives there.
+    const withClient = (id: string, clientIdKey: string, clientSecretKey: string): ApiProfile => {
+      const p = profile(id);
+      return { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, client_id_key: clientIdKey, client_secret_key: clientSecretKey } } } as ApiProfile;
+    };
+
+    it.each([
+      ['client_secret_key', 'the access name', 'CRM_ID', 'CRM_ACCESS_TOKEN'],
+      ['client_secret_key', 'the refresh name', 'CRM_ID', 'CRM_REFRESH_TOKEN'],
+      ['client_id_key', 'the access name', 'CRM_ACCESS_TOKEN', 'CRM_SECRET'],
+      ['client_id_key', 'the refresh name', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'],
+    ])('names %s on %s', (field, _where, clientIdKey, clientSecretKey) => {
+      const name = field === 'client_id_key' ? clientIdKey : clientSecretKey;
+      expect(clientSlotOnDerivedName(withClient('crm', clientIdKey, clientSecretKey))).toEqual({ field, name });
+    });
+
+    it('names nothing for client slots of their own', () => {
+      expect(clientSlotOnDerivedName(withClient('crm', 'CRM_ID', 'CRM_SECRET'))).toBeNull();
+      const bearer = { ...profile('crm'), auth: { type: 'bearer', vault_keys: ['CRM_ACCESS_TOKEN'] } } as unknown as ApiProfile;
+      expect(clientSlotOnDerivedName(bearer)).toBeNull();
+    });
+
+    it('save refuses it, names the field, and stores nothing', () => {
+      const store = new ApiStore();
+      const result = store.save(withClient('crm', 'CRM_ID', 'CRM_ACCESS_TOKEN'));
+
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.reason).toMatch(/client secret under CRM_ACCESS_TOKEN, the name its own tokens are written to/);
+      expect(result.ok === false && result.reason).toMatch(/Nothing was saved\. Store the client secret under a name of its own and point auth\.oauth\.client_secret_key at that name\./);
+      expect(store.get('crm')).toBeUndefined();
+    });
+
+    // Moving the field leaves whatever the vault already holds under the token name, and
+    // the profile reads that name again once registered. The refusal says so for the half
+    // it names, and prescribes no step: which one overwrites it depends on the profile.
+    const reasonFor = (p: ApiProfile): string => {
+      const result = new ApiStore().save(p);
+      return result.ok === false ? result.reason : '';
+    };
+
+    it('on the access name, says the name may still hold it and is read as a token', () => {
+      const reason = reasonFor(withClient('crm', 'CRM_ID', 'CRM_ACCESS_TOKEN'));
+      expect(reason).toContain('Until an access token is written to CRM_ACCESS_TOKEN, it may still hold the client secret, and wherever this profile reads that name, it takes the value as a token.');
+      expect(reason).not.toMatch(/fetch_token|connect|ask_secret/);
+    });
+
+    it('on the refresh name, says the same for the refresh token', () => {
+      const reason = reasonFor(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET'));
+      expect(reason).toContain('Until a refresh token is written to CRM_REFRESH_TOKEN, it may still hold the client id, and wherever this profile reads that name, it takes the value as a token.');
+    });
+
+    it('control: save admits the same profile with client slots of its own', () => {
+      const store = new ApiStore();
+      expect(store.save(withClient('crm', 'CRM_ID', 'CRM_SECRET')).ok).toBe(true);
+      expect(store.get('crm')).toBeDefined();
+    });
+
+    it('the boot load refuses a stored one, says nothing was deleted, and still admits its neighbour', () => {
+      const dir = createTmpDir();
+      const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      writeFileSync(join(dir, 'crm.json'), JSON.stringify(withClient('crm', 'CRM_REFRESH_TOKEN', 'CRM_SECRET')));
+      writeFileSync(join(dir, 'shopify-store.json'), JSON.stringify(profile('shopify-store')));
+
+      const store = new ApiStore();
+      const loaded = store.loadFromDirectory(dir);
+
+      expect(loaded).toBe(1);
+      expect(store.get('shopify-store')).toBeDefined();
+      expect(store.get('crm')).toBeUndefined();
+      const said = warn.mock.calls.map((c) => String(c[0])).join('');
+      expect(said).toMatch(/client id under CRM_REFRESH_TOKEN/);
+      expect(said).toMatch(/Nothing was deleted/);
+      // The order the steps can be taken in: move the field, save, and only then can a token land.
+      expect(said).toMatch(/store the client id under a name of its own and point auth\.oauth\.client_id_key at that name, then save the corrected profile with api_setup update\. Until a refresh token/);
       warn.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     });

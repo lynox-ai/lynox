@@ -2547,6 +2547,10 @@ ${draftJson}
       // not fix gets its own answer — a profile that reads its refresh token from
       // that very name — because there, following "leave it out" walks into the
       // next refusal. (An id whose derived names are protected was refused above.)
+      // The answer for that shape, shared with the client-slot refusal below.
+      const refreshOnDerivedAdvice = `Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${grantType === 'refresh_token'
+        ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
+        : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`}`;
       if (outputName === refreshKey || outputName === refreshTokenKey(input.id)) {
         const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its refresh token — the access token would be written over it.`;
         const derivedAccess = accessTokenKey(input.id);
@@ -2556,12 +2560,24 @@ ${draftJson}
         // an explicit output name and would otherwise be told to leave it out, only
         // to land here on the next call.
         if (refreshKey === derivedAccess) {
-          const move = grantType === 'refresh_token'
-            ? `Point auth.oauth.refresh_token_key at a slot that holds only the refresh token — api_setup update — and store the token there with ask_secret.`
-            : `Remove auth.oauth.refresh_token_key with api_setup update: a client-credentials profile does not read one.`;
-          return `${clash} Leaving output_secret_name out does not help: this profile reads its refresh token from "${refreshKey}", the name its access token needs. ${move}`;
+          return `${clash} ${refreshOnDerivedAdvice}`;
         }
         return `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
+      }
+      // Nor a slot this profile signs in with. The write below would replace the client
+      // id or secret with the access token, and the next exchange would send the token as
+      // the client's credential — failing as a client problem the user cannot trace back to
+      // this call. Only an explicit output_secret_name can reach it: the derived name is
+      // never a client slot, because `_admit` refuses such a profile
+      // (`clientSlotOnDerivedName`), and that gate also covers the callback and the
+      // rotated refresh write, which this one cannot.
+      const clientField = outputName === clientIdKey ? 'client id' : outputName === clientSecretKey ? 'client secret' : undefined;
+      if (clientField !== undefined) {
+        const clash = `Error: output_secret_name "${outputName}" is where this profile keeps its OAuth ${clientField} — the access token would be written over it. Nothing was sent.`;
+        const derivedAccess = accessTokenKey(input.id);
+        return refreshKey === derivedAccess
+          ? `${clash} ${refreshOnDerivedAdvice}`
+          : `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';

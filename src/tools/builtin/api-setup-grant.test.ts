@@ -1126,6 +1126,70 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBe('rt-1');
   });
 
+  describe('the slots the profile signs in with', () => {
+    it.each([
+      ['client secret', 'CRM_CLIENT_SECRET'],
+      ['client id', 'CRM_CLIENT_ID'],
+    ])('refuses the %s slot as output name before posting anything', async (what, outputName) => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = vaultWithRefresh();
+      const agent = makeAgent(store, vault);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: outputName }, agent) as string;
+
+      expect(result).toContain(`output_secret_name "${outputName}" is where this profile keeps its OAuth ${what}`);
+      expect(result).toContain(`Leave output_secret_name out, so the access token goes to "${ACCESS}"`);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vault.peek('CRM_CLIENT_ID')).toBe('client-1');
+      expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
+    });
+
+    it('control: a name of the profile\'s own beside its client slots takes the token', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = vaultWithRefresh();
+      const agent = makeAgent(store, vault);
+      tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, agent) as string;
+
+      expect(result).not.toContain('Error');
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+      expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
+    });
+
+    it('advises leaving the name out when the profile reads its refresh token from a name of its own', async () => {
+      const store = new ApiStore();
+      const base = crmProfile();
+      store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: 'CRM_RT_OWN' } } });
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_RT_OWN: 'rt-1' });
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain(`Leave output_secret_name out, so the access token goes to "${ACCESS}"`);
+      expect(result).not.toContain('Leaving output_secret_name out does not help');
+    });
+
+    it('does not advise leaving the name out when the default is where the profile reads its refresh token', async () => {
+      const store = new ApiStore();
+      const base = crmProfile();
+      store.register({ ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: ACCESS } } });
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'rt-1' });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_SECRET' }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain('is where this profile keeps its OAuth client secret');
+      expect(result).toContain(`Leaving output_secret_name out does not help: this profile reads its refresh token from "${ACCESS}"`);
+      expect(result).toContain('Point auth.oauth.refresh_token_key at a slot that holds only the refresh token');
+      expect(result).not.toContain('Leave output_secret_name out');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
+    });
+  });
+
   it('names the way out of a refresh-slot collision: the default name the attach reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
