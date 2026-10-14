@@ -2688,6 +2688,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           ? await describeConnectedWrite(presetOnHost, gatedMethod, input.url, typeof sentBody === 'string' ? sentBody : undefined, { toolContext, agent, ackHosts: guardedAckHosts })
           : null;
         const contextBlock = context === null ? pv`` : onBoxBlock(mask(context));
+        // The readings count against the session's request budget, as the write itself will:
+        // checked again here, before the person is asked about a write that could not be sent.
+        if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
+          blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+        }
         const bodyBlock = shown !== undefined && 'text' in shown
           ? onBoxBlock(shown.text)
           : !bodyGoesOut ? pv``

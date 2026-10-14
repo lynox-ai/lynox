@@ -117,7 +117,9 @@ function text(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new WriteContextRefused(`the reading has no ${what}`);
   const line = singleLine(value.replace(/\s*\r?\n\s*/g, ', ')).trim();
   if (line === '') throw new WriteContextRefused(`the reading has no ${what}`);
-  return JSON.stringify(line.length > SHOWN_VALUE_MAX ? `${line.slice(0, SHOWN_VALUE_MAX)}…` : line);
+  // Cut by code point, so a character outside the BMP is never split into a lone surrogate.
+  const points = Array.from(line);
+  return JSON.stringify(points.length > SHOWN_VALUE_MAX ? `${points.slice(0, SHOWN_VALUE_MAX).join('')}…` : line);
 }
 
 async function contactName(read: PresetRead, path: string): Promise<string> {
@@ -179,23 +181,28 @@ const bexio: PresetWriteContext = {
         return `New bexio ${kind} · recipient: ${name} (contact ${String(fields['contact_id'])}) · sum of positions: ${code} ${sum} (${SUM_LABEL})`;
       }
       const documentPath = readPath(`/2.0/${resource}/` as '/2.0/kb_invoice/' | '/2.0/kb_offer/', target);
-      // An edit of the document itself that changes its recipient or positions: the question
-      // shows the document as it is now and what the write sets.
-      const edit = segments.length === 3 && method.toUpperCase() !== 'DELETE' && fields !== undefined
-        && ('contact_id' in fields || 'positions' in fields || 'currency_id' in fields);
-      const newContactPath = edit && 'contact_id' in fields ? readPath('/2.0/contact/', fields['contact_id']) : undefined;
-      const newSum = edit && 'positions' in fields ? sumOfPositions(fields['positions']) : undefined;
+      // A write to the document itself (not a sub-resource, not a DELETE) may change anything its
+      // total depends on, the recipient, the positions or the tax mode among them: the question
+      // shows the document "as it is now", and what the write sets where lynox can name it.
+      const edit = segments.length === 3 && method.toUpperCase() !== 'DELETE';
+      if (edit && fields === undefined && body !== undefined && body.trim() !== '') {
+        throw new WriteContextRefused(`an edit of the ${kind} whose body is not a JSON object`);
+      }
+      const newContactPath = edit && fields !== undefined && 'contact_id' in fields ? readPath('/2.0/contact/', fields['contact_id']) : undefined;
+      const newCurrencyPath = edit && fields !== undefined && 'currency_id' in fields ? readPath('/3.0/currencies/', fields['currency_id']) : undefined;
+      const newSum = edit && fields !== undefined && 'positions' in fields ? sumOfPositions(fields['positions']) : undefined;
       const document = await read(documentPath);
-      if (edit && 'currency_id' in fields && String(fields['currency_id']) !== String(document['currency_id'])) {
+      const currencyPath = readPath('/3.0/currencies/', document['currency_id']);
+      if (newCurrencyPath !== undefined && newCurrencyPath !== currencyPath) {
         throw new WriteContextRefused(`the write changes the ${kind}'s currency, which the question does not show`);
       }
-      const code = await currencyCode(read, readPath('/3.0/currencies/', document['currency_id']));
+      const code = await currencyCode(read, currencyPath);
       const open = resource === 'kb_invoice' ? `, open ${code} ${amount(document['total_remaining_payments'], 'open amount')}` : '';
       const now = `bexio ${kind} ${text(document['document_nr'], 'document number')}${edit ? ' as it is now' : ''} · ` +
         `recipient: ${text(document['contact_address'], 'recipient')} · total ${code} ${amount(document['total'], 'total')}${open}`;
       if (!edit) return now;
       const changes = [
-        ...(newContactPath === undefined ? [] : [`recipient: ${await contactName(read, newContactPath)} (contact ${String(fields['contact_id'])})`]),
+        ...(newContactPath === undefined ? [] : [`recipient: ${await contactName(read, newContactPath)} (contact ${String(fields?.['contact_id'])})`]),
         ...(newSum === undefined ? [] : [`sum of positions: ${code} ${newSum} (${SUM_LABEL})`]),
       ];
       return changes.length === 0 ? now : `${now} · this write sets ${changes.join(' · ')}`;

@@ -84,9 +84,22 @@ describe('the question before a bexio write shows what it changes', () => {
     expect(reads).toEqual(['/2.0/kb_invoice/7', '/3.0/currencies/1', '/2.0/contact/18']);
   });
 
-  it('control: an edit of the title alone shows the invoice without "as it is now"', async () => {
+  it.each([
+    ['the tax mode alone', '{"mwst_is_net":false,"mwst_type":0}'],
+    ['the title alone', '{"title":"New title"}'],
+    ['no body', undefined],
+  ])('an edit of the invoice itself with %s shows it as it is now, whatever field it sets', async (_label, body) => {
     const { read } = account();
-    expect(await bexio.describe('POST', at('/2.0/kb_invoice/7'), '{"title":"New title"}', read)).not.toContain('as it is now');
+    const text = await bexio.describe('POST', at('/2.0/kb_invoice/7'), body, read);
+    expect(text).toContain('bexio invoice "RE-00042" as it is now · ');
+    expect(text).not.toContain('this write sets');
+  });
+
+  it('control: a write to a sub-resource is not an edit, a contact_id in its body included', async () => {
+    const { read, reads } = account();
+    const text = await bexio.describe('POST', at('/2.0/kb_invoice/7/kb_position_custom'), '{"contact_id":18,"amount":"1","unit_price":"5"}', read);
+    expect(text).not.toContain('as it is now');
+    expect(reads).toEqual(['/2.0/kb_invoice/7', '/3.0/currencies/1']);
   });
 
   it.each([
@@ -96,6 +109,7 @@ describe('the question before a bexio write shows what it changes', () => {
     ['a forged label', 'Muster AG · sum of positions: CHF 10.00 ·', '"Muster AG · sum of positions: CHF 10.00 ·"'],
     ['a quote', 'Muster "AG"', '"Muster \\"AG\\""'],
     ['an overlong name', 'x'.repeat(200), `"${'x'.repeat(120)}…"`],
+    ['a character outside the BMP at the cut', `${'x'.repeat(119)}\u{1F600}yy`, `"${'x'.repeat(119)}\u{1F600}…"`],
   ])('a name read from the account with %s is shown on one line, quoted and cut', async (_label, name, shown) => {
     ACCOUNT['/2.0/contact/19'] = { id: 19, name_1: name };
     const { read } = account();
@@ -206,6 +220,15 @@ describe('a bexio write whose question cannot show it is refused, before any rea
     ['an invalid contact_id after a valid currency', { contact_id: 'x', currency_id: 1 }],
   ])('a new invoice with %s: refused before anything is read', async (_label, fields) => {
     const { reads } = await refusal('POST', '/2.0/kb_invoice', JSON.stringify(fields));
+    expect(reads).toEqual([]);
+  });
+
+  it.each([
+    ['a currency_id in a list', '{"currency_id":[1]}', 'is not a plain number'],
+    ['a body that is not JSON', 'title=x', 'body is not a JSON object'],
+  ])('an edit with %s: refused before anything is read', async (_label, body, why) => {
+    const { message, reads } = await refusal('POST', '/2.0/kb_invoice/7', body);
+    expect(message).toContain(why);
     expect(reads).toEqual([]);
   });
 

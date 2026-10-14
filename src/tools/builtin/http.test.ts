@@ -1274,6 +1274,20 @@ describe('httpRequestTool', () => {
           expect(promptUser).not.toHaveBeenCalled();
         });
 
+        it('a write the readings leave without budget is refused before the question', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 2;
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/session HTTP request limit \(100\) exceeded/);
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1']);
+          expect(promptUser).not.toHaveBeenCalled();
+        });
+
         it('an order, which lynox does not show, is refused unasked and not sent', async () => {
           await withBexio();
           mockDnsPublic();
