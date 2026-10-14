@@ -53,6 +53,9 @@ export const RUN_ROOT_PREFIX = 'lynox-test-run-';
 export const RUN_MARKER_FILE = '.lynox-test-run';
 export const RUN_MARKER_ENV = 'LYNOX_TEST_RUN';
 
+/** The run's own home inside the root (`test-run-home.ts`). Here, so both files can name it. */
+export const RUN_HOME_DIR = 'home';
+
 /**
  * Create the run root and point `TMPDIR` at it. Returns the path.
  *
@@ -103,7 +106,15 @@ export function summariseRunRoot(root: string): RunRootOutcome {
     // Filtering a growing list of known-innocent names would be worse: it would hide a real leak
     // the day something new appears. The honest reading is "entries in the run root", and the
     // marker is excluded only because THIS file creates it.
-    entries = readdirSync(root).filter((n) => n !== RUN_MARKER_FILE).length;
+    entries = readdirSync(root).filter((n) => n !== RUN_MARKER_FILE && n !== RUN_HOME_DIR).length;
+    // The run's home is created by globalSetup, like the marker, so it is not itself a leak; what
+    // tests leave INSIDE it is (a `.lynox` an engine created, say), and counting the home as one
+    // entry would hide all of that behind a number that could never reach 0.
+    try {
+      entries += readdirSync(join(root, RUN_HOME_DIR)).length;
+    } catch {
+      // No home: a root made by `redirectTmpdirForRun` alone, as its own tests do.
+    }
   } catch {
     return { state: 'absent', entries: 0 };
   }

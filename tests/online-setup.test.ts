@@ -2,23 +2,25 @@
  * `getApiKey()` — which config field the online tests fall back to.
  *
  * Offline: no API call. Each case writes a throwaway `~/.lynox/config.json` under its own
- * HOME, so the developer's real config is never read.
+ * home, so the developer's real config is never read. The key is read from the home the run
+ * started with (`operatorHome()`, `scripts/test-run-home.ts`), so that is the one stubbed here.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getApiKey, hasApiKey } from './online/setup.js';
+import { REAL_HOME_ENV, operatorHome } from '../scripts/test-run-home.js';
 
 describe('getApiKey reads the config fallback', () => {
   let home = '';
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'lynox-online-setup-'));
-    vi.stubEnv('HOME', home);
+    vi.stubEnv(REAL_HOME_ENV, home);
     vi.stubEnv('ANTHROPIC_API_KEY', '');
-    // The guard on this file's purpose: if HOME did not take, the real config would be read.
-    expect(homedir()).toBe(home);
+    // The guard on this file's purpose: if the stub did not take, the real config would be read.
+    expect(operatorHome()).toBe(home);
   });
 
   afterEach(() => {
@@ -59,7 +61,17 @@ describe('getApiKey reads the config fallback', () => {
   it('throws, and hasApiKey is false, when neither field holds a key', () => {
     config({ anthropic_api_key: '', mistral_api_key: 'not-anthropic' });
     expect(() => getApiKey()).toThrow(/No API key found/);
-    expect(hasApiKey()).toBe(false);
+    const said = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(hasApiKey()).toBe(false);
+      // Not a silent skip: it says where it looked, the variable and the config file by path.
+      const text = said.mock.calls.map((c) => String(c[0])).join('');
+      expect(text).toContain('online tests: SKIPPED, no API key');
+      expect(text).toContain('ANTHROPIC_API_KEY: unset or empty');
+      expect(text).toContain(`${join(home, '.lynox', 'config.json')} has none of anthropic_api_key, api_key`);
+    } finally {
+      said.mockRestore();
+    }
   });
 
   it('lets the environment variable win over the config', () => {
