@@ -17,7 +17,7 @@
 import { join } from 'node:path';
 import type { ToolEntry, IAgent, SecretStoreLike } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret } from '../../core/api-store.js';
+import type { ApiProfile, ApiStore, ResponseShape, ApiAuth, ApiEndpoint, OAuthGrantRecord, TokenPurge, WrittenSecret, ExchangeFacts } from '../../core/api-store.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, isMandateConnection, refreshTokenKey, protectedDerivedSlot, purgeRecordedTokens, recordedWrites, STORED_PROFILE_PREAMBLE } from '../../core/api-store.js';
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
@@ -1306,6 +1306,7 @@ function persistGrant(
   apisDir: string,
   update: (current: OAuthGrantRecord | undefined) => OAuthGrantRecord,
   tokenExpiresAt?: number | 'unknown',
+  exchange?: ExchangeFacts,
 ): 'saved' | 'gone' | 'not-saved' {
   if (!apiStore) return 'not-saved';
   const fresh = apiStore.get(id);
@@ -1323,7 +1324,7 @@ function persistGrant(
   }
   next.oauth_grant = update(fresh.oauth_grant);
   try {
-    return apiStore.save(next, apisDir).ok ? 'saved' : 'not-saved';
+    return apiStore.save(next, apisDir, exchange !== undefined ? { exchange } : undefined).ok ? 'saved' : 'not-saved';
   } catch {
     // See the docstring: the exchange is complete either way.
     return 'not-saved';
@@ -2733,6 +2734,9 @@ ${draftJson}
       const rotated = typeof parsed.refresh_token === 'string' && parsed.refresh_token !== '' && parsed.refresh_token !== presentedRefresh
         ? parsed.refresh_token
         : null;
+      // Which value this write replaces in the derived access slot, read before it is gone: the
+      // save below asks whether this epoch recorded it (PRD connection-attribution A2(2')).
+      const replacedAccessFp = outputName === accessTokenKey(input.id) ? apiStore?.currentFingerprint(outputName) : undefined;
       secretStore.set(outputName, accessToken);
       exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
@@ -2780,7 +2784,15 @@ ${draftJson}
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
-      }, tokenExpiresAt);
+      }, tokenExpiresAt, {
+        // What this exchange ran on and wrote. The save mints when either the refresh token it
+        // presented or the access value it replaced is not one this epoch recorded; otherwise it
+        // records the values written here as the epoch's own.
+        presentedRefreshFp: presentedRefresh !== null ? apiStore?.valueFingerprint(presentedRefresh) ?? null : null,
+        presentedRefreshTokenFp: presentedRefresh !== null ? apiStore?.tokenFingerprint(presentedRefresh) ?? null : null,
+        replacedAccessFp,
+        wrote: writes.map((w) => w.name),
+      });
       // Deleted while the exchange was out: there is no profile to hold the
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.

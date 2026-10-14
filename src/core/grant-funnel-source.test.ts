@@ -27,8 +27,38 @@ describe('grant funnel', () => {
     expect(writers).toEqual([...ALLOWED]);
   });
 
+  // The grant's credential fingerprints have the same single writer: a second one could record
+  // a credential as the epoch's own that the epoch never held (PRD connection-attribution A2).
+  it('only api-store.ts assigns fingerprints', () => {
+    const writers = sources(SRC)
+      .filter((path) => /\bfingerprints\??\s*(?::|=(?!=))/.test(readFileSync(path, 'utf-8')))
+      .map((path) => relative(SRC, path));
+    expect(writers).toEqual(['core/api-store.ts']);
+  });
+
+  // And so do the foreign tokens and the key check that ride with them: a second writer of
+  // `foreign` could clear the mark on the previous account's token.
+  // A property assignment, a key in an object literal or type, or a shorthand key — not a local
+  // variable that happens to share the name.
+  const RECORD_FIELD = /\.\s*(?:foreign|fingerprint_check)\s*=(?!=)|\b(?:foreign|fingerprint_check)\??\s*:|[{,]\s*(?:foreign|fingerprint_check)\s*[,}]/;
+  it('only api-store.ts assigns the foreign tokens and the key check', () => {
+    const writers = sources(SRC)
+      .filter((path) => RECORD_FIELD.test(readFileSync(path, 'utf-8')))
+      .map((path) => relative(SRC, path));
+    expect(writers).toEqual(['core/api-store.ts']);
+  });
+
   it('positive control: the pattern sees the assignment that exists', () => {
     expect(/\bgrant_id\s*(?::|=(?!=))/.test(readFileSync(join(SRC, 'core/api-store.ts'), 'utf-8'))).toBe(true);
     expect(/\bgrant_id\s*(?::|=(?!=))/.test('x.oauth_grant?.grant_id === y')).toBe(false);
+    expect(/\bfingerprints\??\s*(?::|=(?!=))/.test('record.fingerprints = fps;')).toBe(true);
+    expect(/\bfingerprints\??\s*(?::|=(?!=))/.test('if (g.fingerprints === undefined)')).toBe(false);
+    expect(RECORD_FIELD.test('record.foreign = credentials.foreign;')).toBe(true);
+    expect(RECORD_FIELD.test('{ ...g, foreign: [] }')).toBe(true);
+    expect(RECORD_FIELD.test('record.fingerprint_check = c;')).toBe(true);
+    expect(RECORD_FIELD.test('{ ...g, foreign }')).toBe(true);
+    expect(RECORD_FIELD.test('let foreign = false;')).toBe(false);
+    expect(RECORD_FIELD.test('if (x) foreign = true;')).toBe(false);
+    expect(RECORD_FIELD.test('if (g.foreign === undefined)')).toBe(false);
   });
 });
