@@ -672,6 +672,17 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(engine.getPluginManager()).not.toBeNull();
     });
 
+    // The flag is on here: the instance id alone must keep plugins off.
+    it('builds no plugin manager on an instance the control plane provisioned', async () => {
+      process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-test';
+      try {
+        const { engine } = await createEngineAndSession();
+        expect(engine.getPluginManager()).toBeNull();
+      } finally {
+        delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+      }
+    });
+
     it('first-turn briefing (2026-07-18): drops scope-label + data-table leaks, wires task overview', async () => {
       const { TaskManager } = await import('./task-manager.js');
       const { engine } = await createEngineAndSession();

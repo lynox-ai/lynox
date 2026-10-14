@@ -2067,8 +2067,14 @@ export class Engine {
     // Pipeline tools registered conditionally
     this._pipelinesEnabled = false;
 
-    // Load plugins (best-effort — never fail init, gated behind feature flag)
-    if (isFeatureEnabled('plugins')) {
+    // Load plugins (best-effort — never fail init, gated behind feature flag).
+    // An instance the control plane provisioned loads none, whatever the flag
+    // says: the control plane pins LYNOX_FEATURE_PLUGINS=0, and this still holds
+    // where that value is missing or spelled in a form the flag does not read.
+    // The instance id is the mark: every such instance carries it, and one with
+    // a billing tier but no id does not start (the managed hook below throws).
+    const cpProvisioned = Boolean(process.env['LYNOX_MANAGED_INSTANCE_ID']);
+    if (isFeatureEnabled('plugins') && !cpProvisioned) {
       try {
         this.pluginManager = new PluginManager(this.userConfig);
         await this.pluginManager.loadPlugins();
