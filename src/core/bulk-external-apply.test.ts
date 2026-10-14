@@ -1336,7 +1336,7 @@ describe('a run writes to a connected account only in a measured form', () => {
   const BEXIO = 'api.bexio.com';
   const payment = `https://${BEXIO}/2.0/kb_invoice/7/payment`;
   const contact = `https://${BEXIO}/2.0/contact/7`;
-  function bexioClient(connected: boolean): { c: ExternalClient; sent: string[]; restore: () => void } {
+  function bexioClient(connected: boolean, slot: Record<string, string> = {}): { c: ExternalClient; sent: string[]; restore: () => void } {
     vi.mocked(dns.lookup).mockResolvedValue([{ address: '93.184.216.34', family: 4 }] as unknown as Awaited<ReturnType<typeof dns.lookup>>);
     const sent: string[] = [];
     const restore = setPinnedTransportForTests(async (input: PinnedTransportInput) => {
@@ -1347,7 +1347,7 @@ describe('a run writes to a connected account only in a measured form', () => {
       contract: mintBulkContract(BEXIO, [payment, contact], 'POST'),
       hostPolicy: createToolContext({}),
       ackHosts: undefined,
-      attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; return true; },
+      attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; Object.assign(headers, slot); return true; },
       rateLimit: () => null,
       scan: detectSecretInContent,
       connectedAccount: () => connected,
@@ -1370,6 +1370,18 @@ describe('a run writes to a connected account only in a measured form', () => {
     try {
       expect((await c.write(contact, 'POST', { name_1: 'Muster' })).kind).not.toBe('not_granted');
       expect(sent).toEqual(['POST /2.0/contact/7']);
+    } finally {
+      restore();
+    }
+  });
+
+  // The measured form is decided before the credential is attached; a slot that then turns the
+  // measured POST into a DELETE must not go out with it on the account the decision was about.
+  it('SECURITY: does not send a measured write whose attach turns it into another method', async () => {
+    const { c, sent, restore } = bexioClient(true, { 'x-http-method-override': 'DELETE' });
+    try {
+      expect((await c.write(contact, 'POST', { name_1: 'Muster' })).kind).toBe('no_credential');
+      expect(sent).toEqual([]);
     } finally {
       restore();
     }
