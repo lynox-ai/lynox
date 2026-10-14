@@ -167,9 +167,9 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
     });
   }
 
-  // The data dir has ONE read (config.ts `lynoxDirFor`). These files ask it
-  // instead of reading the variables, so a read of their own is a second copy
-  // of the rule, which is how the data dir drifted before.
+  // These two files used to read the data-dir variables themselves; they now ask
+  // config.ts `lynoxDirFor`. A read of their own would be a second copy of the
+  // rule, which is how the data dir drifted before. Only these two are checked.
   for (const file of ['src/core/openai-adapter.ts', 'src/core/wire-capture.ts']) {
     it(`${file} reads no data-dir variable of its own`, () => {
       expect(read(file)).not.toMatch(/['"]LYNOX_(DATA_)?DIR['"]|\.LYNOX_(DATA_)?DIR\b/);
