@@ -172,6 +172,30 @@ function boundOf<T extends object>(table: Readonly<Record<string, FieldBearing>>
   return out;
 }
 
+/** `value` as JSON with every object's keys sorted, so the same configuration always spells the same. */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v);
+}
+
+/**
+ * Where a profile's credentials go and how they are sent or scoped: every `host` field, as
+ * {@link credentialEndpoints} resolves it, and every `bound` field. These are the changes that
+ * end a release, and `credentialTuple` folds them in for the same reason: a save that moves a
+ * credential to another destination or changes what its token may do starts a new grant. Read
+ * from the tables above, so a field placed there later is counted here without a second edit.
+ */
+export function credentialBearing(profile: ApiProfile): string {
+  return stableJson({
+    endpoints: [...credentialEndpoints(profile)].sort(),
+    profile: boundOf(PROFILE_FIELDS, profile),
+    auth: boundOf(AUTH_FIELDS, profile.auth),
+    oauth: boundOf(OAUTH_FIELDS, profile.auth?.oauth),
+  });
+}
+
 /**
  * The slot in which the engine itself sends `name` for `profile`, or null when it sends it in
  * none. Only a shape the engine attaches has one: the client pair of an OAuth profile, the two

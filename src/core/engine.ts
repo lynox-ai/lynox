@@ -1560,6 +1560,16 @@ export class Engine {
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
+        // The grant ledger (PRD connection-attribution A1), and its boot backfill: every
+        // connection the store registered leaves the boot with a grant the ledger knows. A failure here costs
+        // attribution, not the connections, so it is reported and the boot goes on.
+        const { GrantLedger } = await import('./grant-ledger.js');
+        this._apiStore.setGrantLedger(new GrantLedger(this.engineDb.getDb()));
+        try {
+          this._apiStore.backfillGrants();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox:api-store] Grant backfill failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
       } else {
         // Degraded (engine.db unavailable): fall back to the flat-JSON directory,
         // exactly as before S4b.
