@@ -6,7 +6,7 @@ import { request as httpRequest, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
@@ -12743,6 +12743,31 @@ describe('LynoxHTTPApi', () => {
     it('rejects plain path traversal with 403', async () => {
       const res = await jsonFetch('/api/files?path=../../etc');
       expect(res.status).toBe(403);
+    });
+
+    it('answers a missing directory with 404, not an empty listing', async () => {
+      const res = await jsonFetch('/api/files?path=no-such-dir');
+      expect(res.status).toBe(404);
+    });
+
+    it('answers a file path with 400, not an empty listing', async () => {
+      const res = await jsonFetch('/api/files?path=safe/ok.txt');
+      expect(res.status).toBe(400);
+    });
+
+    it('answers an unreadable directory with 500, not an empty listing', async () => {
+      // Root reads through mode bits, so the fixture cannot fail there.
+      if (process.getuid?.() === 0) return;
+      const locked = join(base, 'locked');
+      mkdirSync(locked);
+      writeFileSync(join(locked, 'kept.txt'), 'still here');
+      chmodSync(locked, 0o000);
+      try {
+        const res = await jsonFetch('/api/files?path=locked');
+        expect(res.status).toBe(500);
+      } finally {
+        chmodSync(locked, 0o700);
+      }
     });
   });
 });
