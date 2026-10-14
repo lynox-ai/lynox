@@ -115,7 +115,7 @@ const SHOWN_VALUE_MAX = 120;
  */
 function text(value: unknown, what: string): string {
   if (typeof value !== 'string') throw new WriteContextRefused(`the reading has no ${what}`);
-  const line = singleLine(value.replace(/\s*\r?\n\s*/g, ', ')).replace(/ {2,}/g, ' ').trim();
+  const line = singleLine(value.replace(/\s*\r?\n\s*/g, ', ')).trim();
   if (line === '') throw new WriteContextRefused(`the reading has no ${what}`);
   return JSON.stringify(line.length > SHOWN_VALUE_MAX ? `${line.slice(0, SHOWN_VALUE_MAX)}…` : line);
 }
@@ -148,14 +148,15 @@ function parsedBody(body: string | undefined): Record<string, unknown> | undefin
 
 const bexio: PresetWriteContext = {
   async describe(method, url, body, read) {
-    // Matched on the path as a server may route it (decoded once, case and empty segments
-    // folded, matrix parameters cut). A path that needs percent-encoding at all, or whose
-    // routing is not known, is refused: bexio's paths never need it, and the raw and the
-    // decoded form could name two different resources.
-    const { path, ambiguous } = normalizeWritePath(url.pathname);
-    if (ambiguous || url.pathname.includes('%')) {
+    // A path that carries percent-encoding at all is refused: bexio's paths never need it, and
+    // the raw and the decoded form could name two different resources. Every form whose routing
+    // is ambiguous (`normalizeWritePath`) carries one by the time the URL parser is done, since it
+    // encodes spaces, controls and non-ASCII and resolves literal dot segments. The rest is
+    // matched as a server may route it: case and empty segments folded, matrix parameters cut.
+    if (url.pathname.includes('%')) {
       throw new WriteContextRefused('the path is percent-encoded or its routing is ambiguous. Write it plainly');
     }
+    const { path } = normalizeWritePath(url.pathname);
     const segments = path.split('/').filter((s) => s !== '');
     if (segments[0] !== '2.0' || segments[1] === undefined) return null;
     const resource = segments[1];
