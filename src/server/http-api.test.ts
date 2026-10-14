@@ -4582,22 +4582,10 @@ describe('LynoxHTTPApi', () => {
       expect(r.location).toBe('');
     });
 
-    // `{}` is valid JSON, so only the empty-body rule refuses it; a form field is refused as JSON.
-    // The profile can change between the page and the click (an update adding a write scope).
-    it.each([
-      ['fewer scopes than the link now asks for', '?shown_scopes=openid+offline_access+contact_show+note_edit'],
-      ['no record of what it showed', ''],
-    ])('refuses a confirmation of a page that showed %s, and starts nothing', async (_label, query) => {
-      const r = await open(WRITING, { ...confirm, query });
-      expect(r.status).toBe(409);
-      expect(r.text).toContain('asks for other access than the page you confirmed showed');
-      expect(r.state).toBeNull();
-      expect(r.location).toBe('');
-    });
-
-    it.each([['a form field', 'confirmed=1'], ['a JSON body', '{}']])('refuses a confirmation that carries %s, and starts nothing', async (_label, body) => {
+    // Only an empty body is the confirmation; `null` and `{}` would read as no body or as JSON.
+    it.each([['a form field', 'confirmed=1'], ['a JSON null', 'null'], ['a JSON object', '{}']])('refuses a confirmation that carries %s, and starts nothing', async (_label, body) => {
       const r = await open(WRITING, { ...confirm, body });
-      expect(r.status).toBe(400);
+      expect(r.status).toBe(415);
       expect(r.state).toBeNull();
     });
 

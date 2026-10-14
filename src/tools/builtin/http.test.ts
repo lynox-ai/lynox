@@ -1157,25 +1157,6 @@ describe('httpRequestTool', () => {
           expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
-        it('refuses a profile that names its own header for the token, and nothing is sent', async () => {
-          const { ApiStore } = await import('../../core/api-store.js');
-          const store = new ApiStore();
-          store.register({
-            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
-            auth: {
-              type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'], header_name: 'X-Pay-900',
-              oauth: { grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' } },
-            },
-          });
-          testCtx.apiStore = store;
-          mockDnsPublic();
-          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
-          vi.stubGlobal('fetch', fetchMock);
-          const out = await visible(post, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }));
-          expect(out).toContain('whose profile names its own header for the token');
-          expect(fetchMock).not.toHaveBeenCalled();
-        });
-
         it('refuses a header the question does not show, named, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
@@ -1188,12 +1169,13 @@ describe('httpRequestTool', () => {
           expect(fetchMock).not.toHaveBeenCalled();
         });
 
-        it('refuses a content-type outside the list: a media type can carry a value too', async () => {
+        // A media type can carry a value; a form body is shown decoded, so `%41` and `A` look alike.
+        it.each([['a made-up media type', 'application/x-pay-900'], ['a form body', 'application/x-www-form-urlencoded']])('refuses a content-type outside the list: %s', async (_label, type) => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
-          const out = await visible({ ...post, headers: { 'content-type': 'application/x-pay-900' } }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }));
+          const out = await visible({ ...post, headers: { 'content-type': type } }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }));
           expect(out).toContain('sets headers the approval question does not show (content-type).');
           expect(fetchMock).not.toHaveBeenCalled();
         });

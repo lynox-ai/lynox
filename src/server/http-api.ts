@@ -3318,10 +3318,11 @@ export class LynoxHTTPApi {
     if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
       const ct = (req.headers['content-type'] ?? '').split(';')[0]!.trim();
       // The consent page before a provider connect confirms with a plain HTML form, and a form
-      // cannot send JSON. Let through only that: this one path, and an empty body, which is read
-      // as null below; any other body is refused there. The route refuses a POST that is not
-      // same-origin on its own.
-      const emptyFormConfirm = method === 'POST' && ct === 'application/x-www-form-urlencoded' && CONNECT_CONFIRM_PATH.test(pathname);
+      // cannot send JSON. Let through only that: this one path, and an empty body, declared as
+      // such (a body of `null` parses to null as well); a form with a body is refused as not JSON. The
+      // route refuses a POST that is not same-origin on its own.
+      const emptyFormConfirm = method === 'POST' && ct === 'application/x-www-form-urlencoded' && CONNECT_CONFIRM_PATH.test(pathname)
+        && req.headers['content-length'] === '0';
       if (ct && ct !== 'application/json' && !emptyFormConfirm) {
         errorResponse(res, 415, 'Content-Type must be application/json');
         return;
@@ -3343,12 +3344,7 @@ export class LynoxHTTPApi {
       if (ct === '' && body !== null) {
         errorResponse(res, 415, 'Content-Type must be application/json');
         return;
-      }
-      if (emptyFormConfirm && body !== null) {
-        errorResponse(res, 400, 'Invalid request body');
-        return;
-      }
-    }
+      }    }
 
     // What the browser attached on its own, for `_refusedAsAmbientCrossSite`.
     const ambient: 'none' | 'no-secret' | 'cookie' = !secret

@@ -183,7 +183,9 @@ const PLAIN_QUERY_PAIR = /^[A-Za-z0-9_]{1,40}(=[A-Za-z0-9_]{0,40})?$/;
  * for a value the question does not show.
  */
 const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ['content-type', new Set(['application/json', 'application/json; charset=utf-8', 'application/x-www-form-urlencoded', 'application/x-www-form-urlencoded; charset=utf-8'])],
+  // JSON only: a form body is shown decoded (`name=%41` and `name=A` look the same in the
+  // question and differ on the wire), and the providers connected so far speak JSON.
+  ['content-type', new Set(['application/json', 'application/json; charset=utf-8'])],
   ['accept', new Set(['application/json', '*/*'])],
 ]);
 
@@ -1740,6 +1742,12 @@ async function attachEngineManagedAuth(
     const ownHeader = auth.header_name !== undefined && auth.header_name.toLowerCase() !== 'authorization'
       ? auth.header_name
       : undefined;
+    // An account connected through a built-in provider takes its token as `Bearer`: the header
+    // name a profile names is the model's choice, and it would reach the provider on every
+    // request, a bulk run's included, where no question shows it.
+    if (ownHeader !== undefined && auth.oauth?.preset_id !== undefined) {
+      return { refusal: `Error: api_profile "${profile.id}" is connected through a built-in provider and names its own header for the token (auth.header_name), which nothing shows before it is sent, so the token was not attached. Remove auth.header_name with api_setup action="update".` };
+    }
     const oauthSlot = ownHeader ?? 'Authorization';
     const oauthValue = ownHeader !== undefined ? resolved : `Bearer ${resolved}`;
     // The vault value came back from a token endpoint; it enters a header here.
@@ -2340,17 +2348,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     }
 
     // A write to a connected account is shown with everything the request puts on the wire, as
-    // the customer text says: the path and the query as sent (`shownTarget` below), the body, and
-    // no header of the request's own. So refused, before the credential is attached (a refused
-    // write renews no token):
+    // the customer text says: the path and the query as sent (the query's values on the
+    // instance, `queryBlock` below), the body, and no header of the request's own. So refused,
+    // before the credential is attached (a refused write renews no token):
     //  - a path or query the question could not show as sent: percent-encoded (the raw and the
     //    decoded form differ), longer than the question shows, or a query pair outside a plain
     //    `key=value` shape. A plain one stays possible, which bexio's search needs for its
     //    `limit`, `offset` and `order_by`;
     //  - a header the request sets, except `content-type` and `accept` with a value from a fixed
     //    list (`UNSHOWN_HEADER_VALUES`). Those are sent as the list spells them, name included:
-    //    letter case and spacing are free text too;
-    //  - a profile that names the header its token goes in: the name is the model's, and sent.
+    //    letter case and spacing are free text too.
+    // The header the token goes in is the credential's own business: a connected profile that
+    // names one of its own is refused where every request attaches it (`attachEngineManagedAuth`).
     if (presetOnHost.length > 0) {
       const target = new URL(input.url);
       const host = target.hostname.replace(/\.+$/, '');
@@ -2372,9 +2381,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
       if (unshown.length > 0) {
         blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
-      }
-      if (presetOnHost.some((p) => p.auth?.header_name !== undefined && p.auth.header_name.trim().toLowerCase() !== 'authorization')) {
-        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account whose profile names its own header for the token, which the approval question does not show. Nothing was sent. Remove auth.header_name from the profile with api_setup update.`);
       }
     }
 
