@@ -1126,6 +1126,75 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBe('rt-1');
   });
 
+  describe('the slots the profile signs in with', () => {
+    const withClientKeys = (clientIdKey: string, clientSecretKey: string): ApiProfile => {
+      const base = crmProfile();
+      return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, client_id_key: clientIdKey, client_secret_key: clientSecretKey } } };
+    };
+
+    it.each([
+      ['client secret', 'CRM_CLIENT_SECRET'],
+      ['client id', 'CRM_CLIENT_ID'],
+    ])('refuses the %s slot as output name before posting anything', async (what, outputName) => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = vaultWithRefresh();
+      const agent = makeAgent(store, vault);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: outputName }, agent) as string;
+
+      expect(result).toContain(`"${outputName}" is where this profile keeps its OAuth ${what}`);
+      expect(result).toContain(`Leave output_secret_name out, so the access token goes to "${ACCESS}"`);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vault.peek('CRM_CLIENT_ID')).toBe('client-1');
+      expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
+    });
+
+    it('control: a name of the profile\'s own beside its client slots takes the token', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = vaultWithRefresh();
+      const agent = makeAgent(store, vault);
+      tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, agent) as string;
+
+      expect(result).not.toContain('Error');
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+      expect(vault.peek('CRM_CLIENT_SECRET')).toBe('secret-1');
+    });
+
+    it('refuses the default name when the profile keeps its client secret there, and names the field to move', async () => {
+      const store = new ApiStore();
+      store.register(withClientKeys('CRM_CLIENT_ID', ACCESS));
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', [ACCESS]: 'secret-1', [REFRESH]: 'rt-1' });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await fetchToken(makeAgent(store, vault));
+
+      expect(result).toContain(`"${ACCESS}" is where this profile keeps its OAuth client secret`);
+      expect(result).toContain('Point auth.oauth.client_secret_key at a slot of its own');
+      expect(result).not.toContain('Leave output_secret_name out');
+      // No output name was given, so there is nothing to leave out.
+      expect(result).not.toContain('Leaving output_secret_name out');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vault.peek(ACCESS)).toBe('secret-1');
+    });
+
+    it('does not advise leaving the name out when the default is a client slot too', async () => {
+      const store = new ApiStore();
+      store.register(withClientKeys('CRM_CLIENT_ID', ACCESS));
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', [ACCESS]: 'secret-1', [REFRESH]: 'rt-1' });
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_CLIENT_ID' }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain('"CRM_CLIENT_ID" is where this profile keeps its OAuth client id');
+      expect(result).toContain(`Leaving output_secret_name out does not help: the access token then goes to "${ACCESS}", where this profile keeps its client secret.`);
+      expect(result).toContain('Point auth.oauth.client_secret_key at a slot of its own');
+    });
+  });
+
   it('names the way out of a refresh-slot collision: the default name the attach reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile());

@@ -2560,6 +2560,27 @@ ${draftJson}
         }
         return `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
       }
+      // Nor a slot this profile signs in with. The write below would replace the client
+      // id or secret with the access token, and the next exchange would send the token
+      // as the client's credential — failing as a client problem the user cannot trace
+      // back to this call. The derived name is checked too: a profile can name it as its
+      // client slot, and then even leaving output_secret_name out lands here.
+      const clientSlotOf = (name: string): 'client_id_key' | 'client_secret_key' | undefined =>
+        name === clientIdKey ? 'client_id_key' : name === clientSecretKey ? 'client_secret_key' : undefined;
+      const clientSlot = clientSlotOf(outputName);
+      if (clientSlot !== undefined) {
+        const what = (field: 'client_id_key' | 'client_secret_key'): string => field === 'client_id_key' ? 'client id' : 'client secret';
+        const clash = `Error: "${outputName}" is where this profile keeps its OAuth ${what(clientSlot)} — the access token would be written over it. Nothing was sent.`;
+        // "Leave it out" only helps when the derived name is free; when it is a client
+        // slot as well, that advice walks straight into this refusal on the next call.
+        const derivedAccess = accessTokenKey(input.id);
+        const derivedSlot = clientSlotOf(derivedAccess);
+        if (derivedSlot === undefined) {
+          return `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
+        }
+        const lead = input.output_secret_name === undefined ? '' : ` Leaving output_secret_name out does not help: the access token then goes to "${derivedAccess}", where this profile keeps its ${what(derivedSlot)}.`;
+        return `${clash}${lead} Point auth.oauth.${derivedSlot} at a slot of its own with api_setup update, and store the ${what(derivedSlot)} there with ask_secret.`;
+      }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
