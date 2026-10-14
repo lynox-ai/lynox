@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, httpTarget, requestPathTarget } from './audit-log.js';
+import { AuditLog, httpTarget, requestOutcomePhase, requestPathTarget } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { ToolEntry } from '../types/index.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
@@ -213,3 +213,14 @@ describe('requestPathTarget: no secret shape survives into a read row', () => {
   });
 });
 
+
+describe('requestOutcomePhase', () => {
+  it('reads a request\'s outcome from its status: 2xx done, other answers below 500 refused, 5xx or none failed', () => {
+    const cases: Array<[number, string]> = [
+      [200, 'done'], [204, 'done'], [299, 'done'],
+      [101, 'refused'], [199, 'refused'], [300, 'refused'], [302, 'refused'], [400, 'refused'], [404, 'refused'], [499, 'refused'],
+      [500, 'failed'], [503, 'failed'], [0, 'failed'],
+    ];
+    expect(cases.map(([status]) => [status, requestOutcomePhase(status)])).toEqual(cases);
+  });
+});

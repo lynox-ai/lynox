@@ -32,6 +32,18 @@ import { maskSecretPatterns } from './secret-store.js';
  */
 export type AuditPhase = 'attempt' | 'done' | 'refused' | 'returned' | 'failed' | 'read';
 
+/**
+ * A request's outcome from the status it answered with, `0` for none: `done` for 2xx, `refused`
+ * for any other answer below 500, `failed` for a 5xx or no answer. One rule for every writer of
+ * request rows, so the same answer reads the same in a mandate's trail and the control plane's.
+ */
+export function requestOutcomePhase(status: number): 'done' | 'refused' | 'failed' {
+  return status >= 200 && status < 300 ? 'done' : status === 0 || status >= 500 ? 'failed' : 'refused';
+}
+
+/** Actors that are not a request principal: the control plane on a provisioned instance. */
+export type AuditActorKind = 'cp-migration';
+
 export interface AuditEntry {
   readonly principal: RequestPrincipal;
   /** What was done, e.g. `trigger.run`, `trigger.delete`, `http_request:POST`. */
@@ -42,28 +54,37 @@ export interface AuditEntry {
   readonly correlationId: string;
   readonly runId?: string | undefined;
   readonly requestId?: string | undefined;
+  /** Who acted, when the principal does not say it (the migration token acts as the owner). */
+  readonly actorKind?: AuditActorKind | undefined;
+  /** When the act happened, for a row written later than that (cp-trail.ts). Absent: now. */
+  readonly at?: string | undefined;
 }
 
 /** Bounds on what a row holds, so a model-chosen value cannot grow the table without limit. */
 const ACTION_MAX = 120;
-const TARGET_MAX = 400;
+/** Exported for writers that fit a list into a row (cp-trail.ts). */
+export const TARGET_MAX = 400;
 
 export class AuditLog {
   private readonly insert: Database.Statement;
 
   constructor(db: Database.Database) {
     this.insert = db.prepare(
-      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, request_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO audit_log (ts, actor_kind, actor_email, actor_display, mandate_id, action, target, phase, correlation_id, run_id, request_id, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
   /** Append one row. Throws when it cannot be written; the caller refuses the act then. */
   record(entry: AuditEntry): void {
     const p = entry.principal;
+    // `recorded_at` is when the row is written, `ts` when the act happened: the same instant for
+    // every row but one written late (cp-trail.ts), which `recorded_at ≠ ts` gives away unless
+    // both fall in the same millisecond.
+    const recordedAt = new Date().toISOString();
     this.insert.run(
-      new Date().toISOString(),
-      p.kind,
+      entry.at ?? recordedAt,
+      entry.actorKind ?? p.kind,
       p.kind === 'mandate' ? p.email : null,
       p.kind === 'mandate' ? (p.display ?? null) : null,
       p.kind === 'mandate' ? (p.mandateId ?? null) : null,
@@ -73,6 +94,7 @@ export class AuditLog {
       entry.correlationId,
       entry.runId ?? null,
       entry.requestId ?? null,
+      recordedAt,
     );
   }
 }
