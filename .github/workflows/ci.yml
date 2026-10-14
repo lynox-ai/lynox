@@ -114,6 +114,15 @@ jobs:
           set -e
           node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
 
+      # Every override floor a lockfile records must also be resolved above, in
+      # the root tree and in docs/. Neither `--frozen-lockfile` nor a plain
+      # install re-resolves a version that is already locked, so a floor can be
+      # recorded and never applied; the osv scan above catches that only when
+      # the version left behind carries an advisory itself. After the install,
+      # because the guard imports semver and yaml.
+      - name: Recorded overrides are applied to both lockfiles
+        run: node scripts/override-applied-guard.mjs
+
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm exec vitest run --coverage
