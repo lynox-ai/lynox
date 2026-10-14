@@ -7,7 +7,8 @@
  * Spends money, so it runs only when asked for twice: `LYNOX_ONLINE=1` (all online tests)
  * AND `LYNOX_E2=smoke|full`. `smoke` is one call on Haiku, or on `LYNOX_E2_SMOKE_MODEL` to check a provider's wire first; `full` is 40 fixtures × 2 rules ×
  * 3 repetitions × 4 models = 960 calls. A hard limit of 3 USD actual spend (from each reply's
- * usage) is checked before every call; reaching it stops the run and says so.
+ * usage; `LYNOX_E2_LIMIT_USD` lowers it) is checked before every call; reaching it stops the run
+ * and says so.
  *
  * Path: `callForStructuredJson` with an explicit client from `clientForTierSnapshot` — the
  * path L2 takes (Anthropic native, Mistral over the openai wire). Keys from the environment
@@ -30,8 +31,24 @@ import {
 } from './bulk-judge-cases.js';
 
 const MODE = process.env['LYNOX_E2'];
-const LIMIT_USD = 3;
+
+/** A positive number from the environment, at most `max`; unset → `fallback`. Anything else stops the run. */
+function envNumber(name: string, max: number, fallback: number | undefined): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > max) throw new Error(`${name}=${raw}: expected a number in (0, ${String(max)}]`);
+  return n;
+}
+
+/** `LYNOX_E2_LIMIT_USD` can only lower the 3 USD limit, never raise it. */
+const LIMIT_USD = envNumber('LYNOX_E2_LIMIT_USD', 3, 3)!;
 const MAX_OUTPUT_TOKENS = 400;
+/**
+ * `LYNOX_E2_MAX_OUTPUT` replaces every picked model's output budget — the arm that asks whether a
+ * model failed for want of room or for another reason. Recorded in each outcome as `maxOutput`.
+ */
+const MAX_OUTPUT_OVERRIDE = envNumber('LYNOX_E2_MAX_OUTPUT', 16_000, undefined);
 const REPS = 3;
 const MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
 
@@ -56,6 +73,13 @@ const CANDIDATES: readonly Candidate[] = [
   { family: 'fireworks', modelId: 'accounts/fireworks/models/minimax-m3', maxOutput: 1424 },
   { family: 'fireworks', modelId: 'accounts/fireworks/models/gpt-oss-120b' },
   { family: 'fireworks', modelId: 'accounts/fireworks/models/glm-5p3' },
+  // Tool-capable entries not measured on 2026-10-13.
+  { family: 'anthropic', modelId: 'claude-haiku-5-5' },
+  { family: 'mistral', modelId: 'ministral-14b-2512' },
+  { family: 'mistral', modelId: 'mistral-large-2512' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/qwen3p7-plus' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/kimi-k2p6' },
+  { family: 'fireworks', modelId: 'accounts/fireworks/models/deepseek-v4-flash-0731' },
 ];
 const picked = process.env['LYNOX_E2_MODELS']?.split(',').map((x) => x.trim()).filter(Boolean);
 const MODELS: readonly Candidate[] = picked ? CANDIDATES.filter((c) => picked.includes(c.modelId)) : CANDIDATES.slice(0, 4);
@@ -67,6 +91,7 @@ const unknownPicks = (picked ?? []).filter((id) => !CANDIDATES.some((c) => c.mod
  * so shows in the measured cost. Everyone else gets the judge's own small budget.
  */
 function maxOutputFor(m: Candidate): number {
+  if (MAX_OUTPUT_OVERRIDE !== undefined) return MAX_OUTPUT_OVERRIDE;
   if (m.maxOutput !== undefined) return m.maxOutput;
   const silent = modelCapability(m.modelId)?.thinkingOnly?.emptyAtOrBelow;
   return silent === undefined ? MAX_OUTPUT_TOKENS : silent + 1024;
@@ -160,7 +185,7 @@ describeE2('E2 bulk_judge model tier (spends money)', () => {
             }
             spent += o!.costUsd;
             outcomes.push(o!);
-            appendFileSync(jsonl, `${JSON.stringify(o)}\n`);
+            appendFileSync(jsonl, `${JSON.stringify({ ...o, maxOutput: maxOut })}\n`);
           }
           if (aborted) break;
         }
