@@ -1798,6 +1798,11 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
       'p95 < 300ms, 2 findings filed -> register', 'x < y; 2 open findings => later']) {
       expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
     }
+    // A count inside an HTML comment is still in the public raw body.
+    expect(proseOpenCountLines('<!-- 2 findings filed -->')).toEqual([1]);
+    expect(proseOpenCountLines('<!--\n2 findings filed\n-->')).toEqual([1]);
+    // An entity naming a fullwidth digit is folded after decoding.
+    expect(proseOpenCountLines('left &#xFF12; findings filed')).toEqual([1]);
     // An entity outside Unicode does not throw.
     expect(proseOpenCountLines('left &#99999999; 2 findings filed')).toEqual([1]);
     // …but a date ending one line does not meet the next one's words. (A bare `step 2` ending a

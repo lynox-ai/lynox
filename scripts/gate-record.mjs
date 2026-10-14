@@ -549,10 +549,15 @@ export function proseOpenCountLines(body) {
     // Only what LOOKS like a tag or comment goes: a plain `<` with a later `>` (`p95 < 300ms … ->`)
     // is shown literally by GitHub, and a bare `<[^>]*>` erased the count between them.
     const text = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ')
+      // A comment's MARKERS go, its text stays: GitHub hides it, but the raw body — API, edit
+      // view — is public, so a count inside a comment is still published.
+      .replace(/<!--|-->/g, ' ')
       .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
       .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
       .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
       .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ')
+      // Again after decoding: an entity can name a fullwidth digit.
+      .normalize('NFKC')
       .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
       .replace(/\]\([^)]*\)/g, '')
       .replace(/[*_`[\]]/g, '');
