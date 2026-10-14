@@ -4,6 +4,7 @@ import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
+import { execViaSidecar, SidecarOverflowError } from '../../shell-sidecar/client.js';
 
 interface BashInput {
   command: string;
@@ -125,6 +126,42 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
   return safeEnv;
 }
 
+/**
+ * Managed hosting runs bash in the shell sidecar, not in the engine (PRD 152 v2 §4.1): the
+ * engine holds the vault key and the integration credentials, a call's processes must not
+ * share its container. When the socket is set there is NO fallback to `execSync` — a
+ * missing or refusing sidecar is an error, never a reason to run the command here (S5).
+ *
+ * The call starts in the sidecar's workspace root, the same volume the engine's workspace
+ * is. Calls are asynchronous now, so two bash calls of one turn can run side by side.
+ */
+async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.ProcessEnv): Promise<string> {
+  const callEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) if (v !== undefined) callEnv[k] = v;
+  let r;
+  try {
+    r = await execViaSidecar(socketPath, { cmd: input.command, timeoutMs: input.timeout_ms, env: callEnv }, MAX_BUFFER_BYTES);
+  } catch (err: unknown) {
+    if (err instanceof SidecarOverflowError) {
+      const combined = [err.stdout, err.stderr].filter(Boolean).join('\n');
+      throw new ToolSoftFailure(combined || `Command failed: ${input.command}`, `bash output exceeded ${String(err.maxBytes)} bytes`);
+    }
+    const cause = err instanceof Error ? err : new Error(String(err));
+    throw new Error(`bash: ${cause.message}`, { cause });
+  }
+  if (r.error !== undefined) throw new Error(`bash: exec sidecar refused the call: ${r.error}`);
+  if (r.code === 0 && !r.timedOut) return r.stdout || '(no output)';
+  const combined = [r.stdout, r.stderr].filter(Boolean).join('\n');
+  const reason = r.timedOut
+    ? `bash killed by ${r.signal ?? 'SIGKILL'} after ${String(r.limitMs)}ms`
+    : typeof r.code === 'number'
+      ? `bash exited ${String(r.code)}`
+      : r.signal !== null
+        ? `bash killed by ${r.signal}`
+        : 'bash failed without an exit code';
+  throw new ToolSoftFailure(combined || `Command failed: ${input.command}`, reason);
+}
+
 // NOTE: This tool intentionally uses execSync with shell execution.
 // It is a bash tool for an autonomous agent — shell features are required by design.
 // Input comes from the LLM agent, not from untrusted external users.
@@ -170,6 +207,12 @@ export const bashTool: ToolEntry<BashInput> = {
   // Input comes from the LLM agent, not untrusted external users.
   handler: async (input: BashInput, agent: IAgent): Promise<string> => {
     const safeEnv = buildSafeEnv(agent.isolation);
+    const sidecarSocket = process.env['LYNOX_SHELL_EXEC_SOCKET'];
+    // Set at all — even empty — means managed: an empty value is a broken config, not "run here".
+    if (sidecarSocket !== undefined) {
+      if (sidecarSocket === '') throw new Error('bash: LYNOX_SHELL_EXEC_SOCKET is set but empty');
+      return runInSidecar(sidecarSocket, input, safeEnv);
+    }
 
     try {
       const output = execSync(input.command, {
