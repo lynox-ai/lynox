@@ -133,7 +133,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     // Read access to business records, and only scopes the discovery document lists. Five
     // write scopes, for contacts, notes, tasks, offers and invoices, and no others. Accounting,
     // bank and payroll stay out entirely, reading included (bills, expenses, bank accounts,
-    // payments, transactions): the customer text below says lynox does not ask for them, and a
+    // payments, transactions, and the file archive, where their documents can lie): the customer text below says lynox does not ask for them, and a
     // test holds this list to it. A scope is asked for only when the profile names it
     // (`presetScopeRequest`), so a profile that names none stays read-only. A write to the
     // account is asked on its own (`http_request`), and no contract grants one, because one of
@@ -144,7 +144,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
       'email', 'profile',
       'contact_show', 'lead_show', 'note_show', 'task_show', 'project_show', 'article_show',
       'kb_offer_show', 'kb_order_show', 'kb_delivery_show', 'kb_invoice_show', 'kb_credit_voucher_show',
-      'kb_article_order_show', 'archive_show',
+      'kb_article_order_show',
       'contact_edit', 'note_edit', 'task_edit', 'kb_offer_edit', 'kb_invoice_edit',
     ],
     // The question before a write names the contact it concerns (`preset-write-context.ts`),
