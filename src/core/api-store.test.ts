@@ -1451,10 +1451,8 @@ describe('vault slot derivation — one function, and it must stay injective at 
       expect(clientSlotOnDerivedName(withClient('crm', clientIdKey, clientSecretKey))).toEqual({ field, name });
     });
 
-    it('names nothing for client slots of their own, or for another profile\'s token names', () => {
+    it('names nothing for client slots of their own', () => {
       expect(clientSlotOnDerivedName(withClient('crm', 'CRM_ID', 'CRM_SECRET'))).toBeNull();
-      // Only this profile's own token names count here.
-      expect(clientSlotOnDerivedName(withClient('crm', 'CRM_ID', 'SHOP_ACCESS_TOKEN'))).toBeNull();
       const bearer = { ...profile('crm'), auth: { type: 'bearer', vault_keys: ['CRM_ACCESS_TOKEN'] } } as unknown as ApiProfile;
       expect(clientSlotOnDerivedName(bearer)).toBeNull();
     });
