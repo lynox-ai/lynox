@@ -341,7 +341,7 @@ function main() {
   let trees = DEFAULT_TREES;
   if (argv.length > 0) {
     // Exactly `--dir <path>` or nothing: a misspelled flag must not quietly fall back to the defaults.
-    if (argv.length !== 2 || argv[0] !== '--dir') {
+    if (argv.length !== 2 || argv[0] !== '--dir' || argv[1] === '') {
       console.error('usage: override-applied-guard.mjs [--dir <directory with package.json and pnpm-lock.yaml>]');
       process.exit(2);
     }

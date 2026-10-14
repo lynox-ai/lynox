@@ -140,7 +140,7 @@ describe('the real trees', () => {
   });
 });
 
-describe('declared against recorded — what this port adds', () => {
+describe('where the rules come from: the recorded header, which the declared set must equal', () => {
   it('a floor raised in package.json but not in the lockfile FAILS', () => {
     const r = runGuard(writeTree({ vite: '>=8.0.16' }, ['vite@8.2.2'], { recorded: { vite: '>=8.0.0' } }));
     expect(r.code).toBe(1);
@@ -305,7 +305,7 @@ describe('override-applied-guard', () => {
   }, PROCESS_TEST_TIMEOUT_MS);
 
   it('rejects --dir without a value, and any other argument, instead of falling back to the defaults', () => {
-    for (const args of [['--dir'], ['--dir=docs'], ['--dirs', 'docs'], ['--dir', 'docs', 'extra']]) {
+    for (const args of [['--dir'], ['--dir', ''], ['--dir=docs'], ['--dirs', 'docs'], ['--dir', 'docs', 'extra']]) {
       const r = runGuard(args);
       expect(r.code, args.join(' ')).toBe(2);
       expect(r.out).toContain('usage:');
