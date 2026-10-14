@@ -131,12 +131,12 @@ describe('the bexio preset', () => {
   it('allows exactly the decided read scopes and five write scopes', () => {
     // The exact list, not a shape check: a regex for `_edit` or `payroll` would
     // let an administrative scope without either through. Widening this list is
-    // a decision (accounting, bank payments and payroll records were deliberately left out).
+    // a decision (accounting, bank and payroll were deliberately left out, reading included).
     expect([...(bexio?.allowedScopes ?? [])].sort()).toEqual([
-      'archive_show', 'article_show', 'bank_account_show', 'bank_payment_show', 'contact_edit', 'contact_show', 'email',
-      'kb_article_order_show', 'kb_bill_show', 'kb_credit_voucher_show', 'kb_delivery_show', 'kb_expense_show',
+      'archive_show', 'article_show', 'contact_edit', 'contact_show', 'email',
+      'kb_article_order_show', 'kb_credit_voucher_show', 'kb_delivery_show',
       'kb_invoice_edit', 'kb_invoice_show', 'kb_offer_edit', 'kb_offer_show', 'kb_order_show', 'lead_show', 'note_edit',
-      'note_show', 'profile', 'project_show', 'task_edit', 'task_show', 'transaction_show',
+      'note_show', 'profile', 'project_show', 'task_edit', 'task_show',
     ]);
     expect(bexio?.requiredScopes).toEqual(['openid', 'offline_access']);
   });
@@ -376,4 +376,20 @@ describe('the bexio customer text covers every write scope the preset allows', (
     expect(writing.length).toBeGreaterThan(0);
     expect([...(bexio.consentNotice?.writeScopes ?? [])].sort()).toEqual([...writing].sort());
   });
+
+  // The text says lynox does not ask bexio for accounting, bank or payroll rights at all. A
+  // scope on that side, reading included, may not come back into the list without a new text.
+  it('allows no accounting, bank or payroll scope, reading included', () => {
+    const bexio = OAUTH_PRESETS.get('bexio')!;
+    expect(bexio.consentNotice?.paragraphs.join(' ')).toContain('Buchhaltung, Bank und Lohn fasst lynox nicht an; diese Rechte fragt es bei bexio gar nicht an.');
+    const promised = /^(bank_|kb_bill|kb_expense|transaction|payroll|accounting|salary)/;
+    expect([...bexio.allowedScopes, ...bexio.requiredScopes].filter((s) => promised.test(s))).toEqual([]);
+  });
+
+  it.each([['bank_account_show'], ['bank_payment_show'], ['transaction_show'], ['kb_bill_show'], ['kb_expense_show']])(
+    'refuses %s when a profile names it',
+    (scope) => {
+      expect(presetScopeRequest(OAUTH_PRESETS.get('bexio')!, `contact_show ${scope}`)).toEqual({ refused: [scope] });
+    },
+  );
 });
