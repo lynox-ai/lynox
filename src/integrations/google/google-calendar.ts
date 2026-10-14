@@ -345,8 +345,19 @@ export function buildEventCreate(input: CalendarInput): { ok: true; event: Recor
     start: isAllDay ? { date: input.start } : { dateTime: input.start, timeZone: input.timezone },
     end: isAllDay ? { date: input.end } : { dateTime: input.end, timeZone: input.timezone },
   };
-  if (input.description) event['description'] = input.description;
-  if (input.location) event['location'] = input.location;
+  // Typed at runtime: the model writes these, and a value the confirmation cannot render
+  // (a non-string description, a recurrence given as one string) would be sent unseen.
+  for (const field of ['description', 'location'] as const) {
+    const value: unknown = input[field];
+    if (value !== undefined && typeof value !== 'string') return { ok: false, error: `Error: "${field}" must be text.` };
+    if (value) event[field] = value;
+  }
+  if (input.recurrence !== undefined && (!Array.isArray(input.recurrence) || input.recurrence.some((r: unknown) => typeof r !== 'string'))) {
+    return { ok: false, error: 'Error: "recurrence" must be a list of RRULE lines.' };
+  }
+  if (input.attendees !== undefined && !Array.isArray(input.attendees)) {
+    return { ok: false, error: 'Error: "attendees" must be a list of email addresses.' };
+  }
   if (input.attendees?.length) {
     const guests = input.attendees.map(normaliseGuest);
     if (guests.some((g) => g === null)) return { ok: false, error: 'Error: every entry in "attendees" needs an email address.' };

@@ -207,6 +207,53 @@ describe('google_calendar tool', () => {
       expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event "X"\nTime: 2026-03-20 – 2026-03-21');
     });
 
+    it('marks every supplied text as a value, never as frame', async () => {
+      const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'R', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
+      const agent = createMockAgent('Yes');
+      await tool.handler({
+        action: 'create_event', summary: 'R', start: '2026-03-20', end: '2026-03-21',
+        location: 'Room 2', description: 'Agenda', recurrence: ['RRULE:FREQ=WEEKLY', 'EXDATE:20260327'],
+        attendees: ['a@example.org', 'b@example.org'],
+      }, agent);
+      const prompt = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText;
+      const values = prompt.segments.filter((x) => x.kind === 'value').map((x) => x.text);
+      expect(values).toEqual(['R', '2026-03-20', '2026-03-21', 'Room 2', 'RRULE:FREQ=WEEKLY', 'EXDATE:20260327', 'Agenda', 'a@example.org', 'b@example.org']);
+      expect(flattenPrompt(prompt)).toContain('Repeats: RRULE:FREQ=WEEKLY; EXDATE:20260327');
+    });
+
+    it('decides all-day from all_day before the shape of start', async () => {
+      const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
+      const ok = () => mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'X', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
+      ok();
+      await tool.handler({ action: 'create_event', start: '2026-03-20T10:00:00', end: '2026-03-20T11:00:00', all_day: true }, createMockAgent('Yes'));
+      expect(JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body)['start']).toEqual({ date: '2026-03-20T10:00:00' });
+      ok();
+      await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', all_day: false }, createMockAgent('Yes'));
+      expect(JSON.parse((mockFetch.mock.calls[1]![1] as { body: string }).body)['start']).toEqual({ dateTime: '2026-03-20', timeZone: undefined });
+    });
+
+    it('names an untitled event as such, and leaves out empty text', async () => {
+      const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'c1', summary: 'Untitled Event', start: { date: '2026-03-20' }, end: { date: '2026-03-21' }, htmlLink: 'x' }) });
+      const agent = createMockAgent('Yes');
+      await tool.handler({ action: 'create_event', start: '2026-03-20', end: '2026-03-21', description: '', location: '' }, agent);
+      expect(flattenPrompt((agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as PromptText)).toBe('Create event "Untitled Event"\nTime: 2026-03-20 – 2026-03-21');
+      expect(JSON.parse((mockFetch.mock.calls[0]![1] as { body: string }).body)).toEqual({ summary: 'Untitled Event', start: { date: '2026-03-20' }, end: { date: '2026-03-21' } });
+    });
+
+    it('refuses a value the confirmation could not show, before asking', async () => {
+      const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
+      const agent = createMockAgent('Yes');
+      const base = { action: 'create_event' as const, start: '2026-03-20', end: '2026-03-21' };
+      expect(await tool.handler({ ...base, description: { text: 'x' } } as never, agent)).toContain('"description" must be text');
+      expect(await tool.handler({ ...base, location: 7 } as never, agent)).toContain('"location" must be text');
+      expect(await tool.handler({ ...base, recurrence: 'RRULE:FREQ=DAILY' } as never, agent)).toContain('"recurrence" must be a list');
+      expect(await tool.handler({ ...base, attendees: 'a@example.org' } as never, agent)).toContain('"attendees" must be a list');
+      expect(agent.promptUser).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
     it('refuses a guest without an address, before asking', async () => {
       const tool = createCalendarTool(() => createMockAuth(['https://www.googleapis.com/auth/calendar.events']));
       const agent = createMockAgent('Yes');
