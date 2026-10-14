@@ -4140,7 +4140,7 @@ describe('httpRequestTool', () => {
       const out = await visible({ url: 'https://api.bexio.com/3.0/items', method: 'POST', body: '{}' }, agent);
       expect(fetchMock).not.toHaveBeenCalled();
       // Refused at the attach, before the consent check that reads the attached headers.
-      expect(out).toContain('changes the request\'s method, target or body type');
+      expect(out).toContain('changes the request\'s method, target or how its body is read');
     });
 
     it('`header` type puts the RAW token in its own named slot — no Bearer prefix', async () => {
@@ -4368,7 +4368,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: value }));
-      expect(result).toContain('changes the request\'s method, target or body type');
+      expect(result).toContain('changes the request\'s method, target or how its body is read');
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
@@ -4380,7 +4380,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'DELETE' }));
-      expect(result).toContain('changes the request\'s method, target or body type');
+      expect(result).toContain('changes the request\'s method, target or how its body is read');
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
@@ -4395,13 +4395,13 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       }) as never;
       const header = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] });
-      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(header))).toContain('changes the request\'s method, target or body type');
+      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(header))).toContain('changes the request\'s method, target or how its body is read');
       // An expired token would be renewed against its token endpoint before the attach.
       const oauth = await storeWith({
         type: 'oauth2', header_name: 'X-HTTP-Method-Override',
         oauth: { token_url: 'https://idp.bexio.com/token', token_expires_at: 1 },
       });
-      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(oauth))).toContain('changes the request\'s method, target or body type');
+      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(oauth))).toContain('changes the request\'s method, target or how its body is read');
       expect(reads).toEqual([]);
       expect(fetchMock).not.toHaveBeenCalled();
       expect(lastPinnedInputs).toHaveLength(0);

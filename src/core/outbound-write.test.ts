@@ -166,6 +166,77 @@ describe('effectiveWriteMethod reads a top-level `_method` field of the body', (
   });
 });
 
+describe('a body the gate cannot read is gated as a DELETE', () => {
+  const JSON_CT = { 'content-type': 'application/json' };
+  // A server that inflates the body reads a `_method` the gate, reading the body as written, does not.
+  it.each([
+    ['deflate', { ...JSON_CT, 'Content-Encoding': 'deflate' }, '{"a":1}', 'DELETE'],
+    ['gzip, any case and spelling', { ...JSON_CT, content_encoding: ' GZip ' }, 'x', 'DELETE'],
+    ['identity listed before a coding', { ...JSON_CT, 'content-encoding': 'identity, br' }, '{"a":1}', 'DELETE'],
+    ['identity alone', { ...JSON_CT, 'Content-Encoding': 'identity' }, '{"a":1}', 'POST'],
+    ['identity in capitals', { ...JSON_CT, 'Content-Encoding': ' IDENTITY ' }, '{"a":1}', 'POST'],
+    ['an empty value', { ...JSON_CT, 'Content-Encoding': '' }, '{"a":1}', 'POST'],
+    ['no body to read', { ...JSON_CT, 'Content-Encoding': 'deflate' }, '', 'POST'],
+    ['gzip on a form', { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Encoding': 'gzip' }, 'a=1', 'DELETE'],
+    ['identity first, then a coding in a second header', { ...JSON_CT, 'content-encoding': 'identity', 'Content-Encoding': 'gzip' }, '{"a":1}', 'DELETE'],
+    ['a coding first, then identity in a second header', { ...JSON_CT, 'Content-Encoding': 'gzip', 'content-encoding': 'identity' }, '{"a":1}', 'DELETE'],
+  ] as const)('Content-Encoding: %s', (_k, headers, body, want) => {
+    expect(effectiveWriteMethod('POST', { ...headers }, U, body)).toBe(want);
+  });
+
+  it('reads no body for a GET, whatever its encoding', () => {
+    expect(effectiveWriteMethod('GET', { 'Content-Encoding': 'deflate' }, U, 'x')).toBe('GET');
+  });
+
+  // `JSON.parse` keeps the last of two equal keys; a parser that keeps the first reads another method.
+  it.each([
+    ['twice, the weaker one last', '{"_method":"DELETE","_method":"PATCH"}', 'DELETE'],
+    ['twice, the same value', '{"_method":"PATCH","_method":"PATCH"}', 'DELETE'],
+    ['twice, once escaped', '{"_method":"DELETE","_\\u006dethod":"PATCH"}', 'DELETE'],
+    ['once at the top and once nested', '{"item":{"_method":"DELETE"},"_method":"PATCH"}', 'PATCH'],
+    ['twice, in two nested objects', '{"a":{"_method":"x"},"b":{"_method":"y"}}', 'POST'],
+    ['in two cases, both read', '{"_method":"PATCH","_METHOD":"PUT"}', 'PUT'],
+    ['twice, with a space before the colon', '{"_method" :"DELETE","_method" :"PATCH"}', 'DELETE'],
+    ['twice, in capitals', '{"_METHOD":"DELETE","_METHOD":"PATCH"}', 'DELETE'],
+  ] as const)('a JSON `_method` key %s', (_k, body, want) => {
+    expect(effectiveWriteMethod('POST', { ...JSON_CT }, U, body)).toBe(want);
+  });
+
+  it('reads every charset of two Content-Type headers', () => {
+    expect(effectiveWriteMethod('POST', { 'content-type': 'application/json; charset=utf-8', 'Content-Type': 'application/json; charset=utf-16' }, U, '{"a":1}')).toBe('DELETE');
+  });
+
+  it('reads a doubled key without a Content-Type too', () => {
+    expect(effectiveWriteMethod('POST', {}, U, '{"_method":"DELETE","_method":"PATCH"}')).toBe('DELETE');
+  });
+
+  // The body goes out as UTF-8; a server that decodes it in another charset reads other characters.
+  it.each([
+    ['utf-16le', 'application/json; charset=utf-16le', 'DELETE'],
+    ['quoted UTF-16', 'application/json; charset="UTF-16"', 'DELETE'],
+    ['utf-7', 'application/x-www-form-urlencoded; charset=utf-7', 'DELETE'],
+    ['utf-8', 'application/json; charset=utf-8', 'POST'],
+    ['UTF-8 in capitals', 'application/json; Charset=UTF-8', 'POST'],
+    ['quoted utf-8', 'application/json; charset="utf-8"', 'POST'],
+    ['spaces around the equals sign', 'application/json; charset = utf-16', 'DELETE'],
+    ['utf-8, then utf-16 in the same header', 'application/json; charset=utf-8; charset=utf-16', 'DELETE'],
+    ['utf-16 without a semicolon before it', 'application/json,charset=utf-16', 'DELETE'],
+    ['RFC 2231 form', "application/json; charset*=utf-16''", 'DELETE'],
+    ['RFC 2231 numbered form', 'application/json; charset*0=utf-16', 'DELETE'],
+    ['RFC 2231 numbered form, two digits', 'application/json; charset*10=utf-16', 'DELETE'],
+    ['RFC 2231 numbered and extended form', "application/json; charset*0*=utf-16''", 'DELETE'],
+    ['utf-16, then utf-8 in the same header', 'application/json; charset=utf-16; charset=utf-8', 'DELETE'],
+    ['us-ascii', 'application/x-www-form-urlencoded; charset=us-ascii', 'DELETE'],
+    ['ascii, which a decoder may read with the high bit dropped', 'application/x-www-form-urlencoded; charset=ascii', 'DELETE'],
+    ['iso-8859-1', 'application/x-www-form-urlencoded; charset=iso-8859-1', 'POST'],
+    ['latin1', 'application/x-www-form-urlencoded; charset=latin1', 'POST'],
+    ['windows-1252', 'application/x-www-form-urlencoded; charset=windows-1252', 'POST'],
+    ['utf8, without the hyphen', 'application/json; charset=utf8', 'POST'],
+  ] as const)('charset %s', (_k, contentType, want) => {
+    expect(effectiveWriteMethod('POST', { 'Content-Type': contentType }, U, '{"a":1}')).toBe(want);
+  });
+});
+
 describe('the body read as given and as sent', () => {
   const JSON_CT = { 'content-type': 'application/json' };
   it('counts an override that only the repaired reading names', () => {
@@ -213,7 +284,7 @@ describe('a header name read the way a CGI-style server reads it', () => {
   });
 
   it('names a credential slot that would shape the request, in any spelling, and no ordinary one', () => {
-    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type']) {
+    for (const name of ['X-HTTP-Method-Override', 'x_http_method', ' X-Method-Override ', 'Host', 'X_Forwarded_Host', 'X-Original-URL', 'Content-Type', 'content_type', 'Content-Encoding', 'content_encoding', ' CONTENT-ENCODING ']) {
       expect(isRequestShapingHeaderName(name), name).toBe(true);
     }
     for (const name of ['X-Api-Key', 'X_Api_Key', 'Authorization', 'X-Shopify-Access-Token', 'X-Forwarded-For', 'X-RapidAPI-Host', 'Content-Length']) {

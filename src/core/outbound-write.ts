@@ -89,8 +89,59 @@ function percentDecoded(text: string): string {
  * `\uXXXX` escapes are read. A value or a longer name that only contains the word is not one.
  */
 function namesMethodKey(body: string): boolean {
+  return methodKeysWritten(body) > 0;
+}
+
+/**
+ * How many times the text writes a `_method` key in any case, `"_method"` followed by a colon
+ * after optional whitespace, once its `\uXXXX` escapes are read.
+ */
+function methodKeysWritten(body: string): number {
   const unescaped = body.replace(/\\u([0-9a-f]{4})/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
-  return /"_method"\s*:/i.test(unescaped);
+  return unescaped.match(/"_method"\s*:/gi)?.length ?? 0;
+}
+
+/** How many keys named `_method` (any case) the parsed value holds, at any depth. */
+function methodKeysParsed(value: unknown): number {
+  if (value === null || typeof value !== 'object') return 0;
+  let count = 0;
+  for (const [name, inner] of Object.entries(value)) {
+    if (name.toLowerCase() === '_method') count++;
+    count += methodKeysParsed(inner);
+  }
+  return count;
+}
+
+/**
+ * Whether the request names a `Content-Encoding` other than `identity`. A server that inflates
+ * the body reads a field this module, which reads the body as written, cannot see.
+ */
+function encodedBody(headers: Record<string, string>): boolean {
+  return Object.entries(headers)
+    .filter(([name]) => headerKey(name) === 'content-encoding')
+    .some(([, value]) => value.split(',').some((coding) => !['', 'identity'].includes(coding.trim().toLowerCase())));
+}
+
+/**
+ * Charsets a server decodes the body's UTF-8 bytes in without turning any of them into ASCII the
+ * gate did not read: UTF-8 itself, and single-byte supersets of ASCII whose bytes above 0x7F all
+ * decode to characters above 0x7F. Not `ascii`: a decoder may drop the high bit.
+ */
+const ASCII_READING_CHARSETS = new Set(['utf-8', 'utf8', 'iso-8859-1', 'latin1', 'windows-1252']);
+
+/**
+ * Whether the Content-Type names a charset this module cannot read the body in. The body goes out
+ * as UTF-8; a server that decodes it as UTF-16 (or UTF-32, UTF-7) reads other characters,
+ * a `_method` field among them, than the ones written.
+ */
+function foreignCharset(contentType: string): boolean {
+  // Every `charset` parameter counts, wherever it stands: one parser takes the last, another
+  // finds the first by searching for the word, and the RFC 2231 forms (`charset*=`, `charset*0=`)
+  // are ones too.
+  for (const match of contentType.matchAll(/charset\s*(?:\*\d+)?\*?\s*=\s*("?)([^";,\s]*)\1/g)) {
+    if (!ASCII_READING_CHARSETS.has(match[2]!)) return true;
+  }
+  return false;
 }
 
 /**
@@ -122,8 +173,8 @@ function multipartNamesMethod(body: string): boolean {
 /**
  * The `_method` fields of a request body, as a server that parses the body may read them
  * (Rack's MethodOverride and Laravel read the form or the JSON body; Express's method-override
- * reads whatever its body parser produced). Only top-level fields count: a field of that name
- * inside a nested object, or a form key such as `data[_method]`, is ordinary data.
+ * reads whatever its body parser produced). Only top-level fields are read as overrides: a field
+ * of that name inside a nested object, or a form key such as `data[_method]`, is ordinary data.
  *
  * Servers do not agree on which parser a Content-Type selects, so the body is read both as JSON
  * and as a form. A value from a parser the Content-Type names is `declared`, and one that is not
@@ -131,8 +182,10 @@ function multipartNamesMethod(body: string): boolean {
  * it is a method. The form reading is left out only for a body declared as JSON alone that parses
  * as JSON: no server reads that as a form. `unreadable` is set when a server may read an
  * override this module cannot: a body that looks like JSON (by its type or its first character),
- * does not parse and holds a `"_method":` key, or a body under a multipart type with a part named
- * `_method`.
+ * does not parse and holds a `"_method":` key; JSON that names the same `_method` key twice (in
+ * any case, at any depth); a body under a multipart type with a part named `_method`; or a body
+ * sent with a `Content-Encoding` other than `identity`, or in a charset outside a fixed list of
+ * UTF-8 and single-byte ASCII supersets.
  * The caller gates such a request as the strongest method.
  */
 function bodyOverrides(body: string, headers: Record<string, string>): { declared: string[]; other: string[]; unreadable: boolean } {
@@ -140,8 +193,12 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
     .filter(([name]) => name.trim().toLowerCase() === 'content-type')
     .map(([, value]) => value).join(', ').toLowerCase();
   let json: string[] | null;
+  // A key JSON names twice: `JSON.parse` keeps the last one, and a parser that keeps the first
+  // one reads another method. The parsed value holds fewer `_method` keys than the text writes.
+  let duplicateKey = false;
   try {
     const parsed: unknown = JSON.parse(body);
+    duplicateKey = methodKeysWritten(body) > methodKeysParsed(parsed);
     json = parsed === null || typeof parsed !== 'object'
       ? []
       : Object.entries(parsed)
@@ -162,8 +219,9 @@ function bodyOverrides(body: string, headers: Record<string, string>): { declare
     // A multipart type may follow a form type (`application/x-www-form-urlencoded, multipart/…`),
     // and a server that takes the first one reads the form: the multipart check is added to the
     // two readings, not put in their place.
-    unreadable: (looksJson && json === null && namesMethodKey(body)) ||
-      (contentType.includes('multipart/') && multipartNamesMethod(body)),
+    unreadable: (looksJson && json === null && namesMethodKey(body)) || duplicateKey ||
+      (contentType.includes('multipart/') && multipartNamesMethod(body)) ||
+      (body !== '' && (encodedBody(headers) || foreignCharset(contentType))),
   };
 }
 
@@ -284,13 +342,13 @@ function isRetargetingHeaderName(raw: string): boolean {
 
 /**
  * Whether a header name changes how a server reads the request rather than who sent it: a
- * method override, a header that re-targets it, or the `Content-Type` that decides how its body
- * is parsed. The gate reads all three before the engine attaches a profile's credential, so a
+ * method override, a header that re-targets it, or the `Content-Type` and `Content-Encoding`
+ * that decide how its body is read. The gate reads all three before the engine attaches a profile's credential, so a
  * credential slot of one of these names would change the request after it was checked.
  */
 export function isRequestShapingHeaderName(raw: string): boolean {
   const name = headerKey(raw);
-  return OVERRIDE_HEADERS.has(name) || isRetargetingHeaderName(name) || name === 'content-type';
+  return OVERRIDE_HEADERS.has(name) || isRetargetingHeaderName(name) || name === 'content-type' || name === 'content-encoding';
 }
 
 /** The first header the request sets that re-targets it away from its URL, by its name. */
