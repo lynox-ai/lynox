@@ -1738,7 +1738,9 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
     for (const visibility of ['public', 'unknown'] as const) {
       const v = evaluate({ body: withProse(COUNTED), head: HEAD, files: CODE, visibility });
       expect(v.ok, visibility).toBe(false);
-      expect(v.errors.join('\n')).toContain('outside the record (line 3)');
+      expect(v.errors.join('\n')).toContain('paragraph at line 3');
+      if (visibility === 'unknown') expect(v.errors.join('\n')).toContain('could not be determined');
+      else expect(v.errors.join('\n')).not.toContain('could not be determined');
     }
   });
 
@@ -1770,17 +1772,46 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
     }
   });
 
-  it('skips the record block itself — its fields have their own, stricter rule', () => {
-    const body = record({ review: '1 opus round, 2 findings, 1 fixed, 1 filed' });
-    expect(proseOpenCountLines(body)).toEqual([]);
-    // …and still sees prose after the block.
-    expect(proseOpenCountLines(`${body}\n${COUNTED}\n`)).toEqual([body.split('\n').length + 1]);
+  it('a valid record is not a prose hit, and nothing that LOOKS like a record hides prose', () => {
+    expect(proseOpenCountLines(record())).toEqual([]);
+    // Review findings against the first version, which skipped from an opener to the next fence:
+    // a second, unterminated opener after a valid record hid everything after it…
+    const fence = '`'.repeat(3) + 'gate-record';
+    const unterminated = `${record()}\n${fence}\n\n${COUNTED}\n`;
+    expect(evaluate({ body: unterminated, head: HEAD, files: CODE, visibility: 'public' }).ok).toBe(false);
+    // …and so did an opener inside an HTML comment, which the record parser strips.
+    const commented = `<!--\n${fence}\n-->\n\n${COUNTED}\n\n${record()}`;
+    expect(evaluate({ body: commented, head: HEAD, files: CODE, visibility: 'public' }).ok).toBe(false);
+    // On a docs diff the bare unterminated opener was enough.
+    expect(evaluate({ body: `${fence}\n\n${COUNTED}\n`, head: HEAD, files: ['docs/x.md'], visibility: 'public' }).ok).toBe(false);
+  });
+
+  it('reads a count that markdown or a line break splits up', () => {
+    for (const text of ['**2** findings filed', '_2_ open findings', '`2` findings filed', '[2 findings](https://x) filed', 'left\n2\nfindings filed', 'two lines: 2 findings\nwere filed']) {
+      expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
+    }
+    // A blank line ends the paragraph: the number and the noun are then two statements.
+    expect(proseOpenCountLines('we found 2\n\nfindings filed privately')).toEqual([]);
+  });
+
+  it('reads the shapes the review measured passing: "were filed", "filed N", "unresolved"', () => {
+    for (const hit of ['2 findings were filed', '3 gaps have been filed', 'we filed 2 findings', 'filed 4 security findings', '2 findings remain unresolved']) {
+      expect(proseOpenCountLines(hit), hit).toEqual([1]);
+    }
+    expect(proseOpenCountLines('filed 0 findings')).toEqual([]);
+  });
+
+  it('folds fullwidth digits (NFKC) and reads a CRLF body', () => {
+    expect(proseOpenCountLines('２ findings filed')).toEqual([1]);
+    expect(proseOpenCountLines('intro\r\n\r\n2 findings\r\nfiled\r\n')).toEqual([3]);
   });
 
   it('a line carrying the allow marker opts out, and only that line', () => {
     const marker = ['public-repo-guard', 'allow'].join(':');
     expect(proseOpenCountLines(`${COUNTED} <!-- ${marker} -->`)).toEqual([]);
     expect(proseOpenCountLines(`${COUNTED} <!-- ${marker} -->\n${COUNTED}`)).toEqual([2]);
+    // The marker hides its own line, not the paragraph: a count split around it is still read.
+    expect(proseOpenCountLines(`we left 2\nquoted: 1 filed <!-- ${marker} -->\nfindings filed`)).toEqual([1]);
   });
 
   it('the shipped template passes its own rule', () => {

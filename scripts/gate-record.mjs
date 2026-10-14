@@ -496,44 +496,63 @@ function openCountRefusal(field, visibility) {
 }
 
 /**
- * An open-findings COUNT in the body's PROSE, outside the record block. The fields are held to
+ * An open-findings COUNT in the body's PROSE. The record's fields are held to
  * `openFiledCount` below; this is the same rule for the sentences around them, which until now
  * only a manual run of the private repo's text check read. Measured before it existed: a valid
  * record plus the sentence "the security round left 2 findings filed in the register" was green.
  *
- * The pattern is the private repo's PROSE pattern, not `OPEN_COUNT`: prose needs the narrower
- * one. Calibrated there over core's own bodies and commit messages, and re-measured here over the
- * last 300 core PR bodies (record block removed): 0 hits, while 50 of them say "filed" in the
- * number-free form this repo prescribes. What it leaves out, and why, is the calibration:
+ * The pattern starts from the private repo's PROSE pattern, not `OPEN_COUNT`: prose needs the
+ * narrower one. Widened here by three shapes a review measured passing — "2 findings were filed",
+ * "filed 2 findings", "2 findings remain unresolved" — and re-measured over the last 300 core PR
+ * bodies: 0 hits, while 50 of them say "filed" in the number-free form this repo prescribes.
+ * What it leaves out, and why, is the calibration:
  *   · `0` — `0 filed` means nothing is open;
  *   · a `#`, `.` or word character before the number — `core#1274 filed` is a PR that filed;
  *   · `deferred` and `issues`, which hit "9 of 17 deferred tools" and "the 3 issues filed by users".
- * ⚠ A COPY of a rule that lives in the private repo, so the two can drift. Bounded, not exact:
- * a count in words ("two remain") passes, as it does in the fields.
+ * ⚠ A COPY of a rule that lives in the private repo, now slightly wider, so the two can drift.
+ * Bounded, not exact: a count in words ("two remain") passes, as it does in the fields, and so do
+ * digits outside ASCII that NFKC does not fold (Arabic-Indic).
  *
- * Returns the 1-based line numbers, never the text: the refusal goes into a public Actions log.
+ * Returns the first line of each paragraph that counts, never the text: the refusal goes into a
+ * public Actions log.
  */
 const PROSE_OPEN_NOUN = String.raw`(?:findings?|Befunde?|defects?|gaps?|Lücken?)`;
 const PROSE_OPEN_COUNT = new RegExp([
-  String.raw`(?<![#\w.])[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?(?:${PROSE_OPEN_NOUN}\s+)?filed\b`,
+  String.raw`(?<![#\w.])[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?(?:${PROSE_OPEN_NOUN}\s+)?(?:(?:were|was|are|is|have\s+been|has\s+been|got)\s+)?filed\b`,
+  String.raw`\bfiled\s+[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?${PROSE_OPEN_NOUN}`,
   String.raw`(?<![#\w.])[1-9]\d*\s+(?:open|offene[nr]?)\s+${PROSE_OPEN_NOUN}\b`,
-  String.raw`(?<![#\w.])[1-9]\d*\s+${PROSE_OPEN_NOUN}\s+(?:(?:are|is|sind|ist)\s+)?(?:(?:remain|remains|left|still|stay|stays|bleib\w*|noch)\s+)*(?:open|offen)\b`,
+  String.raw`(?<![#\w.])[1-9]\d*\s+${PROSE_OPEN_NOUN}\s+(?:(?:are|is|sind|ist)\s+)?(?:(?:remain|remains|left|still|stay|stays|bleib\w*|noch)\s+)*(?:open|offen|unresolved|ungelöst)\b`,
 ].join('|'), 'i');
 /** A line that quotes the form on purpose (a PR about this check) opts out, as in public-repo-guard. */
 const PROSE_ALLOW = ['public-repo-guard', 'allow'].join(':');
 
 export function proseOpenCountLines(body) {
+  // NOTHING is skipped as "the record", on purpose. The first version skipped from a
+  // record-block opener to the next fence, and a second, unterminated opener — or one inside an
+  // HTML comment, which `extractRecord` strips — then hid every sentence after it. The record's own
+  // lines need no exemption: a valid one carries no open count, and one that does is refused by
+  // the field rule anyway, so the cost of reading it twice is a second message, never a false red.
+  const lines = String(body ?? '').normalize('NFKC').split('\n');
   const hits = [];
-  let inRecord = false;
-  for (const [i, raw] of String(body ?? '').normalize('NFKC').split('\n').entries()) {
-    const line = raw.replace(/\r$/, '');
-    // The record's own lines are the fields, held to the stricter field rule; reporting them
-    // twice would only bury the field message under a second one.
-    if (inRecord) { if (/^```/.test(line)) inRecord = false; continue; }
-    if (new RegExp('^```' + MARK + '[ \\t]*$').test(line)) { inRecord = true; continue; }
+  // Per PARAGRAPH, not per line: a soft line break renders as a space, so `2` at the end of one
+  // line and `findings filed` on the next read as a count. Markdown that renders as plain text
+  // around the number (`**2**`, `_2_`, `` `2` ``, a link) is taken out before matching.
+  let para = [];
+  const flush = () => {
+    const text = para.map((p) => p.text).join(' ')
+      .replace(/\]\([^)]*\)/g, '')
+      .replace(/[*_`[\]]/g, '');
+    if (para.length > 0 && PROSE_OPEN_COUNT.test(text)) hits.push(para[0].n);
+    para = [];
+  };
+  for (const [i, line] of lines.entries()) {
+    if (line.trim() === '') { flush(); continue; } // `trim` also takes a CRLF body's `\r`
+    // A line that quotes the form on purpose opts out, and only that line. It does NOT end the
+    // paragraph: a count split across the marker line must still be read as one.
     if (line.includes(PROSE_ALLOW)) continue;
-    if (PROSE_OPEN_COUNT.test(line)) hits.push(i + 1);
+    para.push({ n: i + 1, text: line });
   }
+  flush();
   return hits;
 }
 
@@ -549,7 +568,7 @@ export function evaluate(input) {
     ok: false,
     errors: [
       ...(verdict.errors ?? []),
-      `the body counts OPEN findings outside the record (line ${lines.join(', ')}), and this body goes into a PUBLIC repo.`,
+      `the body counts OPEN findings (paragraph at line ${lines.join(', ')}), and this body goes into a PUBLIC repo.`,
       'A finding that is not yet closed must not be named in public text, not even its existence, which is what',
       'a count states. Write `findings filed privately` without a number, or `<N> findings, all fixed`.',
       ...(visibility === 'unknown'
