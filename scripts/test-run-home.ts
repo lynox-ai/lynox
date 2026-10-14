@@ -17,15 +17,18 @@
  * and turns those tests red for a cause outside their file. With both removed, the default applies,
  * and the default is now under the run's home.
  *
- * ⚠ What this does NOT cover: a test that builds an absolute path to a real home, or code that asks
- * `os.userInfo().homedir`, which reads the passwd entry and ignores `HOME`.
+ * ⚠ What this does NOT cover: a test that builds an absolute path to a real home, code that asks
+ * `os.userInfo().homedir` (it reads the passwd entry and ignores `HOME`), and runs outside
+ * `vitest.config.ts`: the benches (`vitest.bench.config.ts`) and a `--config` pointing elsewhere get
+ * neither the redirect nor the guard. The opt-in harnesses read their API key from the developer's
+ * own config through `operatorHome()`, on purpose and read-only.
  */
 import { mkdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, relative, isAbsolute } from 'node:path';
-import { RUN_MARKER_ENV, RUN_MARKER_FILE } from './test-run-tmpdir.js';
+import { RUN_HOME_DIR, RUN_MARKER_ENV, RUN_MARKER_FILE } from './test-run-tmpdir.js';
 
-/** The run's home, inside the run root. */
-export const RUN_HOME_DIR = 'home';
+export { RUN_HOME_DIR };
 
 /**
  * Set on `globalThis` by the guard once it has let a worker through, so a test can tell that the
@@ -35,6 +38,67 @@ export const RUN_HOME_DIR = 'home';
  */
 export const HOME_GUARD_RAN = Symbol.for('lynox.test.homeGuardRan');
 
+/** The home the run started with, kept by `redirectHomeForRun` before it points `HOME` away. */
+export const REAL_HOME_ENV = 'LYNOX_TEST_REAL_HOME';
+
+/**
+ * The developer's own home, for the opt-in harnesses ONLY (online tests, `LYNOX_EVAL`), which read
+ * an API key from the developer's `~/.lynox/config.json`. With `HOME` redirected they would find
+ * none and skip without a word. Nothing in the normal suite may use this: the point of the
+ * redirect is that the normal suite cannot reach that directory.
+ */
+export function operatorHome(): string {
+  return process.env[REAL_HOME_ENV] ?? homedir();
+}
+
+/** The developer's own `~/.lynox/config.json`, read only. `problem` says why there is no config. */
+export function readOperatorConfig(): { path: string; config: Record<string, unknown> | null; problem: string | null } {
+  const path = join(operatorHome(), '.lynox', 'config.json');
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return { path, config: null, problem: code === 'ENOENT' ? 'no such file' : `unreadable (${code ?? String(e)})` };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { path, config: null, problem: 'not a JSON object' };
+    }
+    return { path, config: parsed as Record<string, unknown>, problem: null };
+  } catch {
+    return { path, config: null, problem: 'not valid JSON' };
+  }
+}
+
+/**
+ * Said out loud when an opt-in harness finds no key, naming every place it looked. A silent skip
+ * here reads like "nothing to test" while it is "could not look", and that is the reading that
+ * gets a run believed.
+ */
+export function reportMissingKey(harness: string, envNames: readonly string[], configFields: readonly string[]): void {
+  const cfg = readOperatorConfig();
+  const where = cfg.problem === null ? `${cfg.path} has none of ${configFields.join(', ')}` : `${cfg.path}: ${cfg.problem}`;
+  process.stderr.write(
+    `\n⚠ ${harness}: SKIPPED, no API key. Looked in the environment (${envNames.join(', ')}: unset) ` +
+      `and in the developer config (${where}).\n\n`,
+  );
+}
+
+/**
+ * Where the knowledge eval keeps its results: the developer's own `~/.lynox/knowledge-gold/results`,
+ * where its gold corpora and earlier results live. Only with `LYNOX_EVAL=1`: it is the one place a
+ * test writes into a real `~/.lynox`, so it is not reachable from the normal suite (orchestrator
+ * 2026-10-14: an operator tool that only adds files to its own folder, never removes any).
+ */
+export function evalResultsDir(env: NodeJS.ProcessEnv = process.env): string {
+  if (env['LYNOX_EVAL'] !== '1') {
+    throw new Error('evalResultsDir is for the knowledge eval only, which runs with LYNOX_EVAL=1');
+  }
+  return join(operatorHome(), '.lynox', 'knowledge-gold', 'results');
+}
+
 /**
  * Point `HOME` at a directory inside the run root and remove the data-dir variables. Returns the
  * home. Called from `globalSetup`, after the run root exists: the variables reach the worker
@@ -43,6 +107,9 @@ export const HOME_GUARD_RAN = Symbol.for('lynox.test.homeGuardRan');
 export function redirectHomeForRun(runRoot: string): string {
   const home = join(runRoot, RUN_HOME_DIR);
   mkdirSync(home, { mode: 0o700 });
+  // Kept first, and only if not kept already: a test that calls globalSetup again runs with the
+  // run's home, and must not record THAT as the real one.
+  process.env[REAL_HOME_ENV] ??= homedir();
   process.env.HOME = home;
   delete process.env.LYNOX_DATA_DIR;
   delete process.env.LYNOX_DIR;

@@ -29,7 +29,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { evalResultsDir, readOperatorConfig, reportMissingKey } from '../../scripts/test-run-home.js';
 import {
   runReplayEval,
   worstOf,
@@ -49,12 +49,11 @@ import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
 import { resolveReplayProvider } from './knowledge-substrate-provider.js';
 import { HAIKU } from '../online/setup.js';
 
-/** Read ~/.lynox/config.json (same store as the CLI). Missing/corrupt → {}, which
- *  the resolver reads as "nothing configured" and self-skips on. */
+/** Read the developer's own ~/.lynox/config.json (same store as the CLI), read only: the suite
+ *  points HOME at a directory of its own (`scripts/test-run-home.ts`). Missing/corrupt → {},
+ *  which the resolver reads as "nothing configured"; the skip that follows is said out loud. */
 function readCliConfig(): Record<string, unknown> {
-  try {
-    return JSON.parse(readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8')) as Record<string, unknown>;
-  } catch { return {}; }
+  return readOperatorConfig().config ?? {};
 }
 
 /** Resolution itself lives in `knowledge-substrate-provider.ts` — pure, and
@@ -77,6 +76,10 @@ function resolveProvider(): ReplayProviderConfig | null {
 
 const PROVIDER = resolveProvider();
 const RUN = process.env['LYNOX_EVAL'] === '1' && PROVIDER !== null;
+// Asked for and still skipped is a failed lookup, not "nothing to measure": say where it looked.
+if (process.env['LYNOX_EVAL'] === '1' && PROVIDER === null) {
+  reportMissingKey('knowledge eval', ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY'], ['anthropic_api_key', 'mistral_api_key']);
+}
 const RUNS = Math.max(1, Number(process.env['LYNOX_KNOWLEDGE_RUNS'] ?? '2'));
 const LABELS = loadLabels();
 
@@ -174,7 +177,7 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       }
       try {
         const { writeFileSync, mkdirSync } = await import('node:fs');
-        const dir = join(homedir(), '.lynox', 'knowledge-gold', 'results');
+        const dir = evalResultsDir();
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
         const mode = BASELINE ? 'baseline' : 'dk';

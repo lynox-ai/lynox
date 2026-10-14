@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, basename, dirname } from 'node:path';
 import setup from '../../scripts/vitest-global-setup.js';
 import {
-  RUN_ROOT_PREFIX, RUN_MARKER_FILE, RUN_MARKER_ENV, summariseRunRoot, redirectTmpdirForRun,
+  RUN_ROOT_PREFIX, RUN_MARKER_FILE, RUN_MARKER_ENV, RUN_HOME_DIR, summariseRunRoot, redirectTmpdirForRun,
 } from '../../scripts/test-run-tmpdir.js';
 
 // The hook also points `HOME` into the root it creates (`test-run-home.ts`); a test that calls it
@@ -65,6 +65,21 @@ describe('summariseRunRoot distinguishes three outcomes', () => {
     // Two, not three: counting the marker would overstate every leak by exactly one.
     expect(summariseRunRoot(root)).toEqual({ state: 'removed', entries: 2 });
     expect(existsSync(root)).toBe(false);
+  });
+
+  it('removed: the run’s home is not a leak, what was left inside it is', () => {
+    const root = mkdtempSync(join(tmpdir(), 'summarise-home-'));
+    writeFileSync(join(root, RUN_MARKER_FILE), 'token');
+    mkdirSync(join(root, RUN_HOME_DIR, '.lynox'), { recursive: true });
+    writeFileSync(join(root, RUN_HOME_DIR, 'stray.txt'), 'x');
+    writeFileSync(join(root, 'b.txt'), 'x');
+    // Three: `b.txt` in the root, `.lynox` and `stray.txt` in the home. The home itself is ours.
+    expect(summariseRunRoot(root)).toEqual({ state: 'removed', entries: 3 });
+    const empty = mkdtempSync(join(tmpdir(), 'summarise-home-empty-'));
+    writeFileSync(join(empty, RUN_MARKER_FILE), 'token');
+    mkdirSync(join(empty, RUN_HOME_DIR));
+    // An empty home leaves the count at 0, so the number can still reach it.
+    expect(summariseRunRoot(empty)).toEqual({ state: 'removed', entries: 0 });
   });
 
   it('absent: a root that is already gone is not a leak', () => {

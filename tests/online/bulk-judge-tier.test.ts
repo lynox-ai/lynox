@@ -16,9 +16,10 @@
  * so an aborted run keeps what it paid for.
  */
 import { describe, it, expect } from 'vitest';
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readOperatorConfig, reportMissingKey } from '../../scripts/test-run-home.js';
 import { callForStructuredJson, extractionSpendOf } from '../../src/core/llm-helper.js';
 import { clientForTierSnapshot, createLLMClient } from '../../src/core/llm-client.js';
 import { FIREWORKS_API_BASE } from '../../src/core/tier-presets.js';
@@ -72,12 +73,11 @@ function maxOutputFor(m: Candidate): number {
   return silent === undefined ? MAX_OUTPUT_TOKENS : silent + 1024;
 }
 
+// The developer's own config, read only: the suite points HOME at a directory of its own
+// (`scripts/test-run-home.ts`).
 function configKey(field: string): string | undefined {
-  try {
-    const c = JSON.parse(readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8')) as Record<string, unknown>;
-    const v = c[field];
-    return typeof v === 'string' && v.length > 0 ? v : undefined;
-  } catch { return undefined; }
+  const v = readOperatorConfig().config?.[field];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 const ANTHROPIC_KEY = process.env['ANTHROPIC_API_KEY'] ?? configKey('anthropic_api_key');
 const MISTRAL_KEY = process.env['MISTRAL_API_KEY'] ?? configKey('mistral_api_key');
@@ -87,6 +87,10 @@ const KEYS: Record<Family, string | undefined> = { anthropic: ANTHROPIC_KEY, mis
 const asked = MODE === 'smoke' || MODE === 'full';
 // Every picked model needs its key. A name in LYNOX_E2_MODELS that matches no candidate fails the run.
 const describeE2 = asked && ANTHROPIC_KEY && MODELS.every((m) => KEYS[m.family]) ? describe : describe.skip;
+// Asked for and still skipped is a failed lookup, not "nothing to run": say where it looked.
+if (asked && !(ANTHROPIC_KEY && MODELS.every((m) => KEYS[m.family]))) {
+  reportMissingKey('bulk-judge e2', ['ANTHROPIC_API_KEY', 'MISTRAL_API_KEY', 'FIREWORKS_API_KEY'], ['anthropic_api_key', 'mistral_api_key', 'fireworks_api_key']);
+}
 
 function outDir(): string {
   const dir = process.env['LYNOX_E2_OUT'] ?? join(tmpdir(), `bulk-judge-e2-${new Date().toISOString().slice(0, 10)}`, MODE ?? 'none');
