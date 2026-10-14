@@ -403,9 +403,9 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
  * against `loadConfig()` would 403 every save. Treat these resends as no-ops
  * by overlaying the managed defaults before the comparison.
  *
- * `eu` tier hides the SetupBanner outright (UI ~L55-59) so the only practical
- * caller of this code path is the CP-key-tier SetupBanner, where
- * provider is always 'anthropic'.
+ * The only practical caller of this code path is the SetupBanner on a CP-key
+ * tier: when the key is missing it sets the provider to 'anthropic' and skips
+ * the provider picker.
  */
 const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
   provider: 'anthropic',
