@@ -3139,17 +3139,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   },
 };
 
-/**
- * The engine-managed credential attach for a caller with no agent — a bulk run's
- * worker effect (`core/bulk-external.ts`). It is a CALL of the decision
- * `http_request` makes, not a copy: the attach reads only the profile store and the
- * vault, and both are the engine's own objects on either path.
- *
- * Only an attached credential counts. A `refusal`, a `hint` and no profile at all
- * are one answer here — the bulk path has no model header to fall back on, so any
- * of them would send the request without the credential the run was planned with.
- * No text is returned: the caller reports a fixed reason, never a profile's wording.
- */
 const WRITE_CONTEXT_READ_TIMEOUT_MS = 10_000;
 const WRITE_CONTEXT_READ_MAX_BYTES = 1_000_000;
 
@@ -3176,6 +3165,10 @@ async function describeConnectedWrite(
   if (context === undefined) return null;
   const origin = new URL(url).origin;
   const read: PresetRead = async (path) => {
+    // Each reading is a request of this session, charged against the same budget.
+    const counters = deps.agent.sessionCounters;
+    if (counters.httpRequests >= MAX_REQUESTS_PER_SESSION) throw new WriteContextRefused(`the session's HTTP request limit (${MAX_REQUESTS_PER_SESSION}) is reached`);
+    counters.httpRequests++;
     const readUrl = `${origin}${path}`;
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
     if (limited) throw new WriteContextRefused(limited);
@@ -3214,6 +3207,17 @@ async function describeConnectedWrite(
   }
 }
 
+/**
+ * The engine-managed credential attach for a caller with no agent — a bulk run's
+ * worker effect (`core/bulk-external.ts`). It is a CALL of the decision
+ * `http_request` makes, not a copy: the attach reads only the profile store and the
+ * vault, and both are the engine's own objects on either path.
+ *
+ * Only an attached credential counts. A `refusal`, a `hint` and no profile at all
+ * are one answer here — the bulk path has no model header to fall back on, so any
+ * of them would send the request without the credential the run was planned with.
+ * No text is returned: the caller reports a fixed reason, never a profile's wording.
+ */
 export async function attachStoredCredential(
   url: string,
   headers: Record<string, string>,

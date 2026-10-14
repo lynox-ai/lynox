@@ -11,9 +11,12 @@
  *
  * Every path read comes from a fixed template here, with an id that is digits only and taken
  * from the write being asked (its path or its parsed body) or from a document read for it;
- * the caller reads on the write's own origin and follows no redirect. A write is read at most
- * twice: the document or the contact, then the currency.
+ * the caller reads on the write's own origin and follows no redirect. What the write itself
+ * carries is checked before anything is read.
  */
+
+import { normalizeWritePath } from './outbound-write.js';
+import { singleLine } from './prompt-value.js';
 
 /** Reads one path on the write's origin; resolves the JSON object, or throws `WriteContextRefused`. */
 export type PresetRead = (path: string) => Promise<Record<string, unknown>>;
@@ -102,22 +105,35 @@ function amount(value: unknown, what: string): string {
   return money(decimal(value, `the ${what}`) * SCALE);
 }
 
+/** Longest a value read from the account is shown, in characters, before it is cut. */
+const SHOWN_VALUE_MAX = 120;
+
+/**
+ * A value read from the account, as it is shown: on one line, format characters (bidi
+ * overrides, zero-width) removed, runs of space folded, cut at `SHOWN_VALUE_MAX`, and quoted,
+ * so text that imitates a label ("· total CHF 10.00") stays visibly inside its quotes.
+ */
 function text(value: unknown, what: string): string {
-  if (typeof value !== 'string' || value.trim() === '') throw new WriteContextRefused(`the reading has no ${what}`);
-  return value.replace(/\s*\r?\n\s*/g, ', ').trim();
+  if (typeof value !== 'string') throw new WriteContextRefused(`the reading has no ${what}`);
+  const line = singleLine(value.replace(/\s*\r?\n\s*/g, ', ')).replace(/ {2,}/g, ' ').trim();
+  if (line === '') throw new WriteContextRefused(`the reading has no ${what}`);
+  return JSON.stringify(line.length > SHOWN_VALUE_MAX ? `${line.slice(0, SHOWN_VALUE_MAX)}…` : line);
 }
 
-async function contactName(read: PresetRead, id: unknown): Promise<string> {
-  const contact = await read(readPath('/2.0/contact/', id));
-  const name = [contact['name_1'], contact['name_2']].filter((n): n is string => typeof n === 'string' && n.trim() !== '').join(' ');
-  return text(name, 'contact name');
+async function contactName(read: PresetRead, path: string): Promise<string> {
+  const contact = await read(path);
+  return text([contact['name_1'], contact['name_2']].filter((n): n is string => typeof n === 'string').join(' '), 'contact name');
 }
 
-async function currencyCode(read: PresetRead, id: unknown): Promise<string> {
-  return text((await read(readPath('/3.0/currencies/', id)))['name'] ?? undefined, 'currency code');
+/** ISO 4217, as bexio names a currency; anything else is not shown as one. */
+async function currencyCode(read: PresetRead, path: string): Promise<string> {
+  const code = (await read(path))['name'];
+  if (typeof code !== 'string' || !/^[A-Z]{3}$/.test(code)) throw new WriteContextRefused('the reading has no currency code');
+  return code;
 }
 
 const DOCUMENTS = { kb_invoice: 'invoice', kb_offer: 'quote' } as const;
+const SUM_LABEL = "quantity × unit price less each position's discount, as entered; bexio applies its tax settings and rounding";
 
 function parsedBody(body: string | undefined): Record<string, unknown> | undefined {
   if (body === undefined || body.trim() === '') return undefined;
@@ -131,10 +147,16 @@ function parsedBody(body: string | undefined): Record<string, unknown> | undefin
 }
 
 const bexio: PresetWriteContext = {
-  async describe(_method, url, body, read) {
-    // Matched case-insensitively and with empty segments dropped, so a spelling the server may
-    // read as the same path is not a way past this table.
-    const segments = url.pathname.toLowerCase().split('/').filter((s) => s !== '');
+  async describe(method, url, body, read) {
+    // Matched on the path as a server may route it (decoded once, case and empty segments
+    // folded, matrix parameters cut). A path that needs percent-encoding at all, or whose
+    // routing is not known, is refused: bexio's paths never need it, and the raw and the
+    // decoded form could name two different resources.
+    const { path, ambiguous } = normalizeWritePath(url.pathname);
+    if (ambiguous || url.pathname.includes('%')) {
+      throw new WriteContextRefused('the path is percent-encoded or its routing is ambiguous. Write it plainly');
+    }
+    const segments = path.split('/').filter((s) => s !== '');
     if (segments[0] !== '2.0' || segments[1] === undefined) return null;
     const resource = segments[1];
     const fields = parsedBody(body);
@@ -142,28 +164,47 @@ const bexio: PresetWriteContext = {
       const kind = DOCUMENTS[resource];
       const target = segments[2];
       if (target === 'search') return null;
+      // Everything the write itself carries is checked before anything is read.
       if (target === undefined) {
         if (fields === undefined) throw new WriteContextRefused(`a new ${kind}'s body is not a JSON object`);
         for (const field of ['contact_id', 'currency_id']) {
           if (fields[field] === undefined) throw new WriteContextRefused(`a new ${kind} names no ${field}. Name it in the body, so the question can show it`);
         }
-        const name = await contactName(read, fields['contact_id']);
+        const contactPath = readPath('/2.0/contact/', fields['contact_id']);
+        const currencyPath = readPath('/3.0/currencies/', fields['currency_id']);
         const sum = sumOfPositions(fields['positions']);
-        const code = await currencyCode(read, fields['currency_id']);
-        return `New bexio ${kind} · recipient: ${name} (contact ${String(fields['contact_id'])}) · ` +
-          `sum of positions: ${code} ${sum} (quantity × unit price less each position's discount; bexio adds tax and rounds)`;
+        const name = await contactName(read, contactPath);
+        const code = await currencyCode(read, currencyPath);
+        return `New bexio ${kind} · recipient: ${name} (contact ${String(fields['contact_id'])}) · sum of positions: ${code} ${sum} (${SUM_LABEL})`;
       }
-      const document = await read(readPath(`/2.0/${resource}/` as '/2.0/kb_invoice/' | '/2.0/kb_offer/', target));
-      const code = await currencyCode(read, document['currency_id']);
+      const documentPath = readPath(`/2.0/${resource}/` as '/2.0/kb_invoice/' | '/2.0/kb_offer/', target);
+      // An edit of the document itself that changes its recipient or positions: the question
+      // shows the document as it is now and what the write sets.
+      const edit = segments.length === 3 && method.toUpperCase() !== 'DELETE' && fields !== undefined
+        && ('contact_id' in fields || 'positions' in fields || 'currency_id' in fields);
+      const newContactPath = edit && 'contact_id' in fields ? readPath('/2.0/contact/', fields['contact_id']) : undefined;
+      const newSum = edit && 'positions' in fields ? sumOfPositions(fields['positions']) : undefined;
+      const document = await read(documentPath);
+      if (edit && 'currency_id' in fields && String(fields['currency_id']) !== String(document['currency_id'])) {
+        throw new WriteContextRefused(`the write changes the ${kind}'s currency, which the question does not show`);
+      }
+      const code = await currencyCode(read, readPath('/3.0/currencies/', document['currency_id']));
       const open = resource === 'kb_invoice' ? `, open ${code} ${amount(document['total_remaining_payments'], 'open amount')}` : '';
-      return `bexio ${kind} ${text(document['document_nr'], 'document number')} · recipient: ${text(document['contact_address'], 'recipient')} · ` +
-        `total ${code} ${amount(document['total'], 'total')}${open}`;
+      const now = `bexio ${kind} ${text(document['document_nr'], 'document number')}${edit ? ' as it is now' : ''} · ` +
+        `recipient: ${text(document['contact_address'], 'recipient')} · total ${code} ${amount(document['total'], 'total')}${open}`;
+      if (!edit) return now;
+      const changes = [
+        ...(newContactPath === undefined ? [] : [`recipient: ${await contactName(read, newContactPath)} (contact ${String(fields['contact_id'])})`]),
+        ...(newSum === undefined ? [] : [`sum of positions: ${code} ${newSum} (${SUM_LABEL})`]),
+      ];
+      return changes.length === 0 ? now : `${now} · this write sets ${changes.join(' · ')}`;
     }
     if (resource.startsWith('kb_')) {
       throw new WriteContextRefused(`lynox does not write to bexio's ${resource} documents: it cannot show them in the question`);
     }
     if (fields !== undefined && 'contact_id' in fields) {
-      return `bexio contact ${String(fields['contact_id'])}: ${await contactName(read, fields['contact_id'])}`;
+      const contactPath = readPath('/2.0/contact/', fields['contact_id']);
+      return `bexio contact ${String(fields['contact_id'])}: ${await contactName(read, contactPath)}`;
     }
     return null;
   },

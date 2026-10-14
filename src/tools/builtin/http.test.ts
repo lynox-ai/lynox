@@ -1238,7 +1238,7 @@ describe('httpRequestTool', () => {
           await handler(cancel, makeAgent({ promptUser }));
           expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7', 'GET /3.0/currencies/1', 'POST /2.0/kb_invoice/7/cancel']);
           const question = promptUser.mock.calls[0]![0] as PromptText;
-          expect(flattenPrompt(question)).toContain('bexio invoice RE-00042 · recipient: Muster AG, Musterstrasse 15 · total CHF 19.15, open CHF 19.15');
+          expect(flattenPrompt(question)).toContain('bexio invoice "RE-00042" · recipient: "Muster AG, Musterstrasse 15" · total CHF 19.15, open CHF 19.15');
           expect(flattenPrompt(offBoxPrompt(question))).not.toContain('Muster AG');
           expect(flattenPrompt(offBoxPrompt(question))).not.toContain('19.15');
         });
@@ -1258,6 +1258,20 @@ describe('httpRequestTool', () => {
           expect(String(err)).toMatch(why);
           expect(promptUser).not.toHaveBeenCalled();
           expect(sent(fetchMock).filter((c) => !c.startsWith('GET '))).toEqual([]);
+        });
+
+        it('each reading is charged against the session\'s HTTP budget', async () => {
+          await withBexio();
+          mockDnsPublic();
+          const fetchMock = account({
+            '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          testCounters.httpRequests = MAX_REQUESTS_PER_SESSION - 1;
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/HTTP request limit \(100\) is reached/);
+          expect(sent(fetchMock)).toEqual(['GET /2.0/kb_invoice/7']);
+          expect(promptUser).not.toHaveBeenCalled();
         });
 
         it('an order, which lynox does not show, is refused unasked and not sent', async () => {
