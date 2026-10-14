@@ -50,8 +50,8 @@ gates the diff OWES, derived from the real file list, so leaving out a required
   `secret-store` or `migration-crypto` — and in the web UI, its login code:
   `packages/web-ui/src/lib/server/`, `packages/web-ui/src/hooks.server.ts`,
   `packages/web-ui/src/routes/auth/`, `packages/web-ui/src/routes/login/`,
-  `packages/web-ui/src/routes/logout/` and
-  `packages/web-ui/src/routes/app/settings/account/`. That list is a **floor**: a change can
+  `packages/web-ui/src/routes/logout/`, `packages/web-ui/src/routes/+page.server.ts`
+  (it mints the demo-mode session) and `packages/web-ui/src/routes/app/settings/account/`. That list is a **floor**: a change can
   open a trust boundary somewhere it does not name, and then the gate is still
   yours to run. It reaches wider than it strictly must, on purpose — too narrow
   fails open, too broad costs one gate run.
