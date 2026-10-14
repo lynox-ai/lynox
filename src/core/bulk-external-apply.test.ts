@@ -477,6 +477,7 @@ describe('applying an external run', () => {
         hostPolicy: createToolContext({}),
         ackHosts: undefined,
         attach: async (_u, headers) => { headers['authorization'] = `Bearer ${TOKEN}`; headers[name] = value; return true; },
+        connectedAccount: () => false,
         rateLimit: () => null,
         scan: detectSecretInContent,
       });
@@ -496,6 +497,7 @@ describe('applying an external run', () => {
         hostPolicy: createToolContext({}),
         ackHosts: undefined,
         attach: async (_u, headers) => { headers['x-http-method-override'] = 'DELETE'; return true; },
+        connectedAccount: () => false,
         rateLimit: () => null,
         scan: detectSecretInContent,
       });
