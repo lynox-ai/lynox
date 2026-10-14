@@ -99,11 +99,10 @@ jobs:
 
       # The exit code is CAPTURED and handed to the gate rather than discarded.
       # Measured on 2.5.1: an unreadable lockfile exits 127 and a lockfile that
-      # yields no packages exits 128, and neither writes the report. With two
-      # lockfiles, 128 fires only when BOTH yield nothing: an empty docs lockfile
-      # beside a readable root one scans green here. The override guard below
-      # is what refuses that case — it fails a tree whose lockfile records
-      # overrides and resolves no packages. Under the
+      # yields no packages exits 128, and neither writes the report. One scan
+      # PER LOCKFILE, on purpose: a single call over both exits 128 only when
+      # BOTH yield nothing, so an empty docs lockfile beside a readable root one
+      # scanned green. Each scan hands its own exit code to the gate. Under the
       # old `|| true` that was survivable only by accident — the missing file
       # broke the jq that followed. The accident is what is being removed.
       #
@@ -113,10 +112,12 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
           OSV_RC=$?
+          osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json
+          OSV_DOCS_RC=$?
           set -e
-          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --report /tmp/osv-docs.json --rc "${OSV_DOCS_RC}"
 
       - run: pnpm run lint
       - run: pnpm run typecheck

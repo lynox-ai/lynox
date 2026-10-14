@@ -63,8 +63,10 @@ jobs:
           # It read `.database_specific.severity` only, so the malicious-package
           # entries that carry no band would never have opened an issue either.
           set +e
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
           OSV_RC=$?
+          osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json
+          OSV_DOCS_RC=$?
           osv-scanner scan source --lockfile=pnpm-lock.yaml --lockfile=docs/pnpm-lock.yaml > /tmp/osv-table.txt 2>&1
           set -e
 
@@ -73,7 +75,7 @@ jobs:
           # The gate exits 1 whenever anything blocks, which here is the normal
           # case worth an issue, so its status is captured rather than trusted.
           set +e
-          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --format=json > /tmp/osv-verdict.json
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --report /tmp/osv-docs.json --rc "${OSV_DOCS_RC}" --format=json > /tmp/osv-verdict.json
           set -e
 
           # What must NOT be survivable is the gate declining to judge — an

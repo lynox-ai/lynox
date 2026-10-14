@@ -42,7 +42,14 @@
  *    later command happened to trip.
  *
  * Usage:
- *   node scripts/osv-report-gate.mjs --report <path> --rc <scanner exit code>
+ *   node scripts/osv-report-gate.mjs --report <path> --rc <scanner exit code> \
+ *        [--report <path> --rc <code> …] [--format=json]
+ *
+ * ONE SCAN PER LOCKFILE, one pair per scan. A single osv-scanner call over two
+ * lockfiles exits 128 only when BOTH yield no packages, so an empty second
+ * lockfile beside a readable first one scanned green. Scanned separately, each
+ * lockfile carries its own exit code into the checks below, and the verdict is
+ * the union: every pair must be a completed scan, and nothing in any may block.
  *
  * Exits 0 when nothing blocks, 1 otherwise.
  */
@@ -196,15 +203,15 @@ export function evaluate({ doc, rc }) {
  * same failure as writing nothing, so unknown options are refused too.
  */
 function parseArgs(argv) {
-  const out = { unknown: [] };
+  const out = { reports: [], rcs: [], unknown: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i] ?? '';
     if (!token.startsWith('--')) continue;
     const eq = token.indexOf('=');
     const key = eq === -1 ? token.slice(2) : token.slice(2, eq);
     const value = eq === -1 ? argv[i + 1] : token.slice(eq + 1);
-    if (key === 'report') out.report = value;
-    else if (key === 'rc') out.rc = Number.parseInt(value ?? '', 10);
+    if (key === 'report') out.reports.push(value);
+    else if (key === 'rc') out.rcs.push(Number.parseInt(value ?? '', 10));
     else if (key === 'format') out.format = value ?? '';
     else out.unknown.push(token);
   }
@@ -212,13 +219,20 @@ function parseArgs(argv) {
 }
 
 export function main(argv) {
-  const { report, rc, format, unknown } = parseArgs(argv);
+  const { reports, rcs, format, unknown } = parseArgs(argv);
   if (unknown.length > 0) {
     console.error(`osv-report-gate: unknown option(s): ${unknown.join(', ')}`);
     return 1;
   }
-  if (!report) {
+  if (reports.length === 0 || reports.some((r) => !r)) {
     console.error('osv-report-gate: --report <path> is required');
+    return 1;
+  }
+  // Paired by position. A count mismatch would pair a report with another
+  // scan's exit code — or with none, which the check below would then refuse
+  // for the wrong report. Refused here, by name.
+  if (rcs.length > reports.length) {
+    console.error(`osv-report-gate: ${rcs.length} --rc for ${reports.length} --report; each report takes exactly one`);
     return 1;
   }
   // `--format` as the last token leaves `value` undefined, which would read as
@@ -228,17 +242,27 @@ export function main(argv) {
     return 1;
   }
 
-  let doc;
-  try {
-    doc = JSON.parse(readFileSync(report, 'utf8'));
-  } catch (err) {
-    // A report that cannot be read is the loudest failure this gate has, and it
-    // is the one the old `|| true` reached by accident. It is now the rule.
-    console.error(`::error::osv-report-gate: cannot read ${report}: ${String(err)}`);
-    return 1;
+  const errors = [];
+  const blocking = [];
+  const below = [];
+  for (const [i, report] of reports.entries()) {
+    let doc;
+    try {
+      doc = JSON.parse(readFileSync(report, 'utf8'));
+    } catch (err) {
+      // A report that cannot be read is the loudest failure this gate has, and it
+      // is the one the old `|| true` reached by accident. It is now the rule.
+      console.error(`::error::osv-report-gate: cannot read ${report}: ${String(err)}`);
+      return 1;
+    }
+    const rc = rcs[i];
+    const one = evaluate({ doc, rc: rc === undefined || Number.isNaN(rc) ? undefined : rc });
+    // With one report the reasons read as before; with several, each says which scan it is about.
+    errors.push(...one.errors.map((e) => (reports.length > 1 ? `${report}: ${e}` : e)));
+    blocking.push(...one.blocking);
+    below.push(...one.below);
   }
-
-  const { ok, errors, blocking, below } = evaluate({ doc, rc: Number.isNaN(rc) ? undefined : rc });
+  const ok = errors.length === 0 && blocking.length === 0;
 
   // The daily watch needs the same classification as the merge gate but files
   // an issue instead of failing, so it reads counts rather than an exit code.
