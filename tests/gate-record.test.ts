@@ -1792,9 +1792,14 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
     }
     // What GitHub renders as text around the number: inline HTML, an entity, a hard break, a
     // zero-width character.
-    for (const text of ['left <b>2</b> findings filed', 'left 2&nbsp;findings filed', 'left 2\\\nfindings filed', 'left 2\u200B findings filed']) {
+    for (const text of ['left <b>2</b> findings filed', 'left 2&nbsp;findings filed', 'left 2\\\nfindings filed', 'left 2\u200B findings filed',
+      'left 2\\\r\nfindings filed', 'left 2&#8203; findings filed', 'left 2&ensp;findings filed', 'left &#50; findings filed', 'left &#x32; findings filed',
+      // a plain `<` and a later `>` are text, not a tag
+      'p95 < 300ms, 2 findings filed -> register', 'x < y; 2 open findings => later']) {
       expect(proseOpenCountLines(text), JSON.stringify(text)).toHaveLength(1);
     }
+    // An entity outside Unicode does not throw.
+    expect(proseOpenCountLines('left &#99999999; 2 findings filed')).toEqual([1]);
     // …but a date ending one line does not meet the next one's words. (A bare `step 2` ending a
     // line still would — joined, it IS a count, and nothing in the text says otherwise.)
     for (const text of ['Merged 2026-10-14\nfindings filed privately', 'tag v2.15.4\nfindings filed privately']) {

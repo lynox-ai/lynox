@@ -508,7 +508,8 @@ function openCountRefusal(field, visibility) {
  * What it leaves out, and why, is the calibration:
  *   · `0` — `0 filed` means nothing is open;
  *   · a `#`, `.`, `-` or word character before the number — `core#1274 filed` is a PR that filed,
- *     and with paragraphs joined, a date or `step 2` ending one line must not meet the next;
+ *     and with paragraphs joined, a date ending one line must not meet the next (a bare
+ *     `step 2` ending one still does — joined, it reads as a count, and nothing says otherwise);
  *   · `deferred` and `issues`, which hit "9 of 17 deferred tools" and "the 3 issues filed by users".
  * ⚠ A COPY of a rule that lives in the private repo, now slightly wider, so the two can drift.
  * Bounded, not exact: a count in words ("two remain") passes, as it does in the fields, and so do
@@ -527,6 +528,9 @@ const PROSE_OPEN_COUNT = new RegExp([
 /** A line that quotes the form on purpose (a PR about this check) opts out, as in public-repo-guard. */
 const PROSE_ALLOW = ['public-repo-guard', 'allow'].join(':');
 
+/** An entity's character; one outside Unicode is a space, never a thrown RangeError. */
+const codePoint = (n) => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ');
+
 export function proseOpenCountLines(body) {
   // NOTHING is skipped as "the record", on purpose. The first version skipped from a
   // record-block opener to the next fence, and a second, unterminated opener — or one inside an
@@ -542,9 +546,13 @@ export function proseOpenCountLines(body) {
   const flush = () => {
     // A trailing `\` is a hard break; inline HTML and `&nbsp;` render as text around the number;
     // zero-width characters render as nothing. All of them would otherwise split a count.
-    const text = para.map((p) => p.text.replace(/\\$/, '')).join(' ')
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/&nbsp;|&#160;|&#xa0;/gi, ' ')
+    // Only what LOOKS like a tag or comment goes: a plain `<` with a later `>` (`p95 < 300ms … ->`)
+    // is shown literally by GitHub, and a bare `<[^>]*>` erased the count between them.
+    const text = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ')
+      .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
+      .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
+      .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ')
       .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
       .replace(/\]\([^)]*\)/g, '')
       .replace(/[*_`[\]]/g, '');
