@@ -136,8 +136,9 @@ const ASCII_READING_CHARSETS = new Set(['utf-8', 'utf8', 'iso-8859-1', 'latin1',
  */
 function foreignCharset(contentType: string): boolean {
   // Every `charset` parameter counts, wherever it stands: one parser takes the last, another
-  // finds the first by searching for the word, and the RFC 2231 form (`charset*=`) is one too.
-  for (const match of contentType.matchAll(/charset\s*\*?\s*=\s*("?)([^";,\s]*)\1/g)) {
+  // finds the first by searching for the word, and the RFC 2231 forms (`charset*=`, `charset*0=`)
+  // are ones too.
+  for (const match of contentType.matchAll(/charset\s*(?:\*\d+)?\*?\s*=\s*("?)([^";,\s]*)\1/g)) {
     if (!ASCII_READING_CHARSETS.has(match[2]!)) return true;
   }
   return false;
