@@ -403,9 +403,9 @@ const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
  * against `loadConfig()` would 403 every save. Treat these resends as no-ops
  * by overlaying the managed defaults before the comparison.
  *
- * The only practical caller of this code path is the SetupBanner on a CP-key
- * tier: when the key is missing it sets the provider to 'anthropic' and skips
- * the provider picker.
+ * Today no save reaches this overlay: `provider` is in
+ * MANAGED_USER_WRITABLE_CONFIG, so the strict-diff loop skips it before the
+ * lookup, and `enforceManagedProviderConstraints` caps its value instead.
  */
 const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
   provider: 'anthropic',
@@ -6870,12 +6870,10 @@ export class LynoxHTTPApi {
         const attempted: string[] = [];
         for (const [field, value] of Object.entries(update)) {
           if (MANAGED_USER_WRITABLE_CONFIG.has(field)) continue;
-          // Managed pool: provider is forced to 'anthropic' (CP key); the UI
-          // resends it on every save (read from /api/secrets/status, which
-          // defaults the field). A strict diff against loadConfig() would
-          // 403 because the field isn't physically in the config file —
-          // overlay the managed default before comparing so the no-op
-          // resend passes.
+          // A locked field the config file does not carry is compared against
+          // its managed default (MANAGED_EFFECTIVE_DEFAULTS), so a no-op
+          // resend passes. `provider`, the one such default, is allowlisted
+          // above and never gets here.
           const effective = fileConfig[field] ?? MANAGED_EFFECTIVE_DEFAULTS[field];
           if (JSON.stringify(value) !== JSON.stringify(effective)) {
             attempted.push(field);
