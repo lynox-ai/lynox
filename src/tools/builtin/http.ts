@@ -3150,8 +3150,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
  * of them would send the request without the credential the run was planned with.
  * No text is returned: the caller reports a fixed reason, never a profile's wording.
  */
-/** At most this many readings before one write's question (`preset-write-context.ts`). */
-const WRITE_CONTEXT_MAX_READS = 3;
 const WRITE_CONTEXT_READ_TIMEOUT_MS = 10_000;
 const WRITE_CONTEXT_READ_MAX_BYTES = 1_000_000;
 
@@ -3177,9 +3175,7 @@ async function describeConnectedWrite(
   const context = presetId === undefined ? undefined : PRESET_WRITE_CONTEXT[presetId];
   if (context === undefined) return null;
   const origin = new URL(url).origin;
-  let reads = 0;
   const read: PresetRead = async (path) => {
-    if (++reads > WRITE_CONTEXT_MAX_READS) throw new WriteContextRefused(`it needs more than ${WRITE_CONTEXT_MAX_READS} readings`);
     const readUrl = `${origin}${path}`;
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
     if (limited) throw new WriteContextRefused(limited);

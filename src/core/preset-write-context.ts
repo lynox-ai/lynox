@@ -11,7 +11,8 @@
  *
  * Every path read comes from a fixed template here, with an id that is digits only and taken
  * from the write being asked (its path or its parsed body) or from a document read for it;
- * the caller reads on the write's own origin and follows no redirect.
+ * the caller reads on the write's own origin and follows no redirect. A write is read at most
+ * twice: the document or the contact, then the currency.
  */
 
 /** Reads one path on the write's origin; resolves the JSON object, or throws `WriteContextRefused`. */
