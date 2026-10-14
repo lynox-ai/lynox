@@ -2,7 +2,7 @@ name: dep-scan-daily
 
 # Between-release dependency vulnerability watch.
 #
-# The `test` job in ci.yml runs osv-scanner against pnpm-lock.yaml and hard-fails
+# The `test` job in ci.yml runs osv-scanner against both lockfiles (the root and docs/) and hard-fails
 # on HIGH/CRITICAL — but only on push/PR. osv-scanner queries the LIVE OSV.dev
 # database, so a newly-DISCLOSED advisory against an already-pinned dependency
 # flips every open PR's `test` job red the moment the advisory drops, with no code
@@ -65,7 +65,9 @@ jobs:
           set +e
           osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
           OSV_RC=$?
-          osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1
+          osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json
+          OSV_DOCS_RC=$?
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --lockfile=docs/pnpm-lock.yaml > /tmp/osv-table.txt 2>&1
           set -e
 
           # A watch reports rather than blocks, so it reads counts instead of an
@@ -73,7 +75,7 @@ jobs:
           # The gate exits 1 whenever anything blocks, which here is the normal
           # case worth an issue, so its status is captured rather than trusted.
           set +e
-          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --format=json > /tmp/osv-verdict.json
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --report /tmp/osv-docs.json --rc "${OSV_DOCS_RC}" --format=json > /tmp/osv-verdict.json
           set -e
 
           # What must NOT be survivable is the gate declining to judge — an
@@ -116,7 +118,7 @@ jobs:
 
           if [ "${HIGH}" -gt 0 ]; then
             {
-              echo "A daily \`osv-scanner\` scan of \`pnpm-lock.yaml\` on \`main\` found **${HIGH}** HIGH/CRITICAL dependency vulnerability(ies) (of ${TOTAL} total)."
+              echo "A daily \`osv-scanner\` scan of \`pnpm-lock.yaml\` and \`docs/pnpm-lock.yaml\` on \`main\` found **${HIGH}** HIGH/CRITICAL dependency vulnerability(ies) (of ${TOTAL} total)."
               echo ""
               echo "This issue is opened and kept up to date automatically by \`.github/workflows/dep-scan-daily.yml\`. It closes itself when the HIGH/CRITICAL count returns to zero. **Do not rename it** — the workflow finds it by the \`dep-scan\` label, not the title."
               echo ""

@@ -41,8 +41,10 @@ jobs:
           set +e
           osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
           OSV_RC=$?
+          osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json
+          OSV_DOCS_RC=$?
           set -e
-          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --report /tmp/osv-docs.json --rc "${OSV_DOCS_RC}"
       - run: pnpm run typecheck
       - run: pnpm exec vitest run
 

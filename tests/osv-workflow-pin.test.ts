@@ -280,16 +280,20 @@ const PINNED: Readonly<Record<string, readonly string[]>> = {
     'set +e',
     'osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json',
     'OSV_RC=$?',
+    'osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json',
+    'OSV_DOCS_RC=$?',
     'set -e',
-    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"',
+    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --report /tmp/osv-docs.json --rc "${OSV_DOCS_RC}"',
   ],
   'release.yml:test': [
     'set -euo pipefail',
     'set +e',
     'osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json',
     'OSV_RC=$?',
+    'osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json',
+    'OSV_DOCS_RC=$?',
     'set -e',
-    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"',
+    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --report /tmp/osv-docs.json --rc "${OSV_DOCS_RC}"',
   ],
   // Only the osv slice of a longer step: the issue bookkeeping around it is
   // allowed to change without a ceremony, the scanning is not.
@@ -298,10 +302,12 @@ const PINNED: Readonly<Record<string, readonly string[]>> = {
     "set +e",
     "osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json",
     "OSV_RC=$?",
-    "osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1",
+    "osv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json",
+    "OSV_DOCS_RC=$?",
+    "osv-scanner scan source --lockfile=pnpm-lock.yaml --lockfile=docs/pnpm-lock.yaml > /tmp/osv-table.txt 2>&1",
     "set -e",
     "set +e",
-    "node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --format=json > /tmp/osv-verdict.json",
+    "node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\" --format=json > /tmp/osv-verdict.json",
     "set -e",
     "jq -r '.errors[]? | \"::error::osv watch: \" + .' /tmp/osv-verdict.json",
     "jq -e 'has(\"blocking\") and has(\"below\") and ((.errors // [\"no verdict\"]) | length == 0)' /tmp/osv-verdict.json > /dev/null",
@@ -397,7 +403,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
       },
       {
         "name": "Scan dependencies (high+critical hard-fail)",
-        "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
+        "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nosv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json\nOSV_DOCS_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\"\n"
       }
     ],
     "timeout-minutes": 20
@@ -431,7 +437,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
       },
       {
         "name": "Scan dependencies (high+critical hard-fail)",
-        "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
+        "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nosv-scanner scan source --lockfile=docs/pnpm-lock.yaml --format=json --output-file=/tmp/osv-docs.json\nOSV_DOCS_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --report /tmp/osv-docs.json --rc \"${OSV_DOCS_RC}\"\n"
       }
     ]
   },
