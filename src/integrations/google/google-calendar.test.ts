@@ -249,6 +249,7 @@ describe('google_calendar tool', () => {
       expect(await tool.handler({ ...base, description: { text: 'x' } } as never, agent)).toContain('"description" must be text');
       expect(await tool.handler({ ...base, location: 7 } as never, agent)).toContain('"location" must be text');
       expect(await tool.handler({ ...base, recurrence: 'RRULE:FREQ=DAILY' } as never, agent)).toContain('"recurrence" must be a list');
+      expect(await tool.handler({ ...base, recurrence: ['RRULE:FREQ=DAILY', 5] } as never, agent)).toContain('"recurrence" must be a list');
       expect(await tool.handler({ ...base, attendees: 'a@example.org' } as never, agent)).toContain('"attendees" must be a list');
       expect(agent.promptUser).not.toHaveBeenCalled();
       expect(mockFetch).not.toHaveBeenCalled();
