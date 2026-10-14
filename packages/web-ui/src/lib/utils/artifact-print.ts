@@ -1,9 +1,8 @@
 // Shared artifact "Save as PDF" via the browser's own print pipeline. Produces
 // a real PDF with selectable text and native fidelity (for an HTML contract,
 // arbitrary client-side PDF libs can't render the source faithfully — the
-// browser engine can). Used by both the inline artifact bubble
-// (MarkdownRenderer) and the gallery (ArtifactsView) so the "Als PDF" action is
-// identical on both surfaces.
+// browser engine can). Used by the gallery (ArtifactsView) for its "Als PDF"
+// action.
 
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -103,10 +102,9 @@ export function injectPrintScaffold(html: string, nonce?: string): string {
   return `${html}${style}${script}`;
 }
 
-/** A fresh value for one print document's script policy. */
+/** A fresh value for one print document's script policy: 16 random bytes, as 32 hex digits. */
 function printNonce(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return btoa(String.fromCharCode(...bytes)).replace(/[+/=]/g, '');
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 /**
@@ -120,15 +118,15 @@ function printNonce(): string {
  * in Chrome: the meta lands in `<head>` before a full document or a fragment, and with it only
  * the scaffold runs. Forms send nowhere and plugins load nothing either.
  *
- * After a leading `<!DOCTYPE>`, not before it: anything before the doctype makes the parser drop
- * it, and the document renders in quirks mode (measured in Chrome: `BackCompat`), which changes
- * how it prints.
+ * After a leading `<!DOCTYPE>`, not before it: an element or text before the doctype makes the
+ * parser drop it, and the document renders in quirks mode (measured in Chrome: `BackCompat`),
+ * which changes how it prints.
  */
 export function buildPrintDocument(html: string, nonce: string = printNonce()): string {
   const policy = `<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-${nonce}'; object-src 'none'; base-uri 'none'; form-action 'none'">`;
   const doc = injectPrintScaffold(html, nonce);
-  // HTML whitespace only: JS `\s` also matches U+00A0 and U+FEFF, which the parser reads as text,
-  // and text before the doctype would put the policy into the body, where it does not apply.
+  // HTML whitespace only: JS `\s` also matches U+00A0 and U+FEFF, which the parser can read as
+  // text, and text before the doctype would put the policy into the body, where it does not apply.
   const doctype = /^[\t\n\f\r ]*<!doctype[^>]*>/i.exec(doc)?.[0] ?? '';
   return `${doctype}${policy}${doc.slice(doctype.length)}`;
 }

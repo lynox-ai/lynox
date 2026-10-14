@@ -220,7 +220,7 @@ describe('buildPrintDocument — the print document runs no script but its own',
 	// The document opens from a blob: URL in the app's origin, where the app's policy allows inline
 	// script. Its own policy comes first and admits only the scaffold's nonce; measured in Chrome,
 	// an artifact's `<script>` and `onerror` then do not run, and the scaffold does.
-	const POLICY = /^<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-([A-Za-z0-9]+)'; object-src 'none'; base-uri 'none'; form-action 'none'">/;
+	const POLICY = /^<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-([0-9a-f]+)'; object-src 'none'; base-uri 'none'; form-action 'none'">/;
 
 	it('starts with a script policy whose nonce only the scaffold carries', () => {
 		const out = buildPrintDocument('<html><body><script>alert(1)</script><p>x</p></body></html>');
@@ -243,11 +243,9 @@ describe('buildPrintDocument — the print document runs no script but its own',
 		}
 	});
 
-	it('uses a new nonce for every document', () => {
-		const a = POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1];
-		const b = POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1];
-		expect(a).toBeDefined();
-		expect(a).not.toBe(b);
-		expect(a!.length).toBeGreaterThanOrEqual(20);
+	it('uses a new nonce for every document, always 32 hex digits', () => {
+		const nonces = Array.from({ length: 64 }, () => POLICY.exec(buildPrintDocument('<p>x</p>'))?.[1]);
+		for (const n of nonces) expect(n).toMatch(/^[0-9a-f]{32}$/);
+		expect(new Set(nonces).size).toBe(64);
 	});
 });
