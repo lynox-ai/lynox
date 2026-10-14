@@ -658,6 +658,20 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(result).toBe(engine);
     });
 
+    // Managed instances pin LYNOX_FEATURE_PLUGINS=0 (src/contract/env-registry.ts).
+    // The flag must keep the plugin manager from being built at all, not only
+    // be read somewhere in the engine.
+    it('builds no plugin manager when LYNOX_FEATURE_PLUGINS=0', async () => {
+      process.env['LYNOX_FEATURE_PLUGINS'] = '0';
+      const { engine } = await createEngineAndSession();
+      expect(engine.getPluginManager()).toBeNull();
+    });
+
+    it('builds the plugin manager when LYNOX_FEATURE_PLUGINS=1 (control)', async () => {
+      const { engine } = await createEngineAndSession();
+      expect(engine.getPluginManager()).not.toBeNull();
+    });
+
     it('first-turn briefing (2026-07-18): drops scope-label + data-table leaks, wires task overview', async () => {
       const { TaskManager } = await import('./task-manager.js');
       const { engine } = await createEngineAndSession();
