@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { handleConnection, startupSweep, CALL_WRAPPER, callNproc, type DaemonDeps } from './exec-daemon.js';
 import { spawnSync } from 'node:child_process';
 import { UidPool } from './pool.js';
-import { parseFrame, MAX_RESPONSE_LINE_BYTES, type ExecFrame } from './protocol.js';
+import { parseFrame, MAX_RESPONSE_LINE_BYTES, MAX_REQUEST_BYTES, type ExecFrame } from './protocol.js';
 import type { ReleaseOps } from './release.js';
 
 /** The daemon's wiring with a spawner that runs as the current user; kills go to the call's process group. */
@@ -220,7 +220,9 @@ describe('exec daemon: refusals', () => {
   it('refuses an oversize request line that does end in a newline', async () => {
     const h = (current = harness());
     await h.ready;
-    const f = frames(await call(h.sock, req({ cmd: 'x'.repeat(600 * 1024) })));
+    // Just over the limit, so the buffer stays at or under it until the chunk with the newline.
+    const line = req({ cmd: 'x'.repeat(MAX_REQUEST_BYTES) }).slice(0, MAX_REQUEST_BYTES + 8) + '"}\n';
+    const f = frames(await call(h.sock, line));
     expect(f).toEqual([{ t: 'exit', code: null, signal: null, timedOut: false, error: 'request too large' }]);
     expect(h.events.filter((e) => e.startsWith('spawn:'))).toEqual([]);
   });
