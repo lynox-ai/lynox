@@ -798,11 +798,11 @@ export const EMPTY_MAX_DEPTH = 4096;
  * everything — the mount check, the removal, the final count — runs from that
  * held directory, so renaming `rel` meanwhile changes nothing. Bottom-up, never
  * following a link, names as raw bytes. Refuses before deleting anything when a
- * mount boundary is below or the tree is deeper than EMPTY_MAX_DEPTH. After the
+ * mount boundary is below or the tree is deeper than `maxDepth`. After the
  * pass it lists again and THROWS (REMAINDER) if anything is left — a caller that
  * promises erasure must not report success otherwise.
  */
-export function emptyDir(anchor: WorkspaceAnchor, rel: string): EmptyResult {
+export function emptyDir(anchor: WorkspaceAnchor, rel: string, maxDepth = EMPTY_MAX_DEPTH): EmptyResult {
   const top = walkDir(anchor, splitRel(rel));
   try {
     const topMount = mountKey(top.fd);
@@ -814,7 +814,7 @@ export function emptyDir(anchor: WorkspaceAnchor, rel: string): EmptyResult {
       for (const name of names) {
         const st = lstatOrNull(dir, name);
         if (st === null || !st.isDirectory()) continue;
-        if (depth + 1 > EMPTY_MAX_DEPTH) throw new WorkspaceAccessError('LIMIT', `deeper than ${EMPTY_MAX_DEPTH} below ${JSON.stringify(rel)}`);
+        if (depth + 1 > maxDepth) throw new WorkspaceAccessError('LIMIT', `deeper than ${maxDepth} below ${JSON.stringify(rel)}`);
         let child: DirHandle;
         try { child = openChildDir(dir, name); } catch { continue; }
         try {

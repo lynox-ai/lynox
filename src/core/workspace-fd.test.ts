@@ -345,6 +345,13 @@ describe.runIf(LINUX)('names that are not UTF-8', () => {
 });
 
 describe('emptyDir depth', () => {
+  it('refuses a tree deeper than maxDepth before deleting anything', () => {
+    mkdirSync(join(ws, 'a', 'b', 'c', 'd'), { recursive: true });
+    writeFileSync(join(ws, 'keep'), '1');
+    expect(code(() => emptyDir(anchor, '', 3))).toBe('LIMIT');
+    expect(existsSync(join(ws, 'keep'))).toBe(true);
+    expect(emptyDir(anchor, '', 4).removed).toBe(5);
+  });
   it('empties a tree deeper than the default walk depth of old', () => {
     let p = ws;
     for (let i = 0; i < 100; i++) { p = join(p, 'd'); mkdirSync(p); }
