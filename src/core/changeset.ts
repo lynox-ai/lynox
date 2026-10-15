@@ -4,7 +4,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
-import { isPathWithin } from './workspace.js';
+import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
@@ -22,15 +22,20 @@ export class ChangesetManager {
   /** `runId` names the session run this manager belongs to (one per user run, not the HTTP
    *  run registry's id). The review shows it and its answer carries it back, so an answer to
    *  one run's review never reaches the next run's files. */
-  constructor(private readonly cwd: string, readonly runId: string) {
-    try { this.realCwd = realpathSync(cwd); } catch { this.realCwd = resolve(cwd); }
+  constructor(private readonly cwd: string, readonly runId: string, otherRoots: readonly string[] = []) {
+    const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+    this.realCwd = real(cwd);
+    this.roots = [this.realCwd, ...otherRoots.map(real)];
   }
 
-  /** `cwd` with symlinks resolved: the directory every tracked file has to be inside. */
+  /** `cwd` with symlinks resolved: the workspace, which names in the review are relative to. */
   private readonly realCwd: string;
+  /** Every directory a tracked file may be inside: the workspace and the other roots a write
+   *  tool may reach (`writeRootsBesidesWorkspace`), symlinks resolved. */
+  private readonly roots: readonly string[];
 
   /**
-   * The real path of `filePath` if it lies inside the workspace (`cwd`), else null. Symlinks
+   * The real path of `filePath` if it lies inside one of the roots, else null. Symlinks
    * are resolved on the file, or on its closest existing ancestor when the file does not
    * exist yet. The manager tracks, reads, copies, restores and deletes only paths this
    * returns, and checks again right before each of those: the path it is handed comes from
@@ -53,10 +58,10 @@ export class ChangesetManager {
     } catch {
       return null;
     }
-    return isPathWithin(real, this.realCwd) && real !== this.realCwd ? real : null;
+    return this.roots.some((root) => real !== root && isPathWithin(real, root)) ? real : null;
   }
 
-  /** The bytes of a tracked file, read only while it is still inside the workspace and
+  /** The bytes of a tracked file, read only while it is still inside a root and
    *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
   private _readTracked(abs: string): Buffer | null {
     if (this._confine(abs) !== abs) return null;
@@ -130,15 +135,15 @@ export class ChangesetManager {
    * bytes that are not valid UTF-8 decodes to the same string after a write that changed
    * them, and that write must still be reviewed.
    */
-  private _changed(): Array<[string, ChangesetEntry, string]> {
-    const changed: Array<[string, ChangesetEntry, string]> = [];
+  private _changed(): Array<[string, ChangesetEntry, string, Buffer]> {
+    const changed: Array<[string, ChangesetEntry, string, Buffer]> = [];
     for (const [abs, entry] of this.entries) {
       // Deleted during the run, unreadable, or no longer inside the workspace — not reported
       const currentBytes = this._readTracked(abs);
       if (currentBytes === null) continue;
       if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
       const currentContent = currentBytes.toString('utf-8');
-      changed.push([abs, entry, currentContent]);
+      changed.push([abs, entry, currentContent, currentBytes]);
     }
     return changed;
   }
@@ -149,7 +154,7 @@ export class ChangesetManager {
   getChanges(): ChangesetDiff[] {
     const diffs: ChangesetDiff[] = [];
 
-    for (const [abs, entry, currentContent] of this._changed()) {
+    for (const [abs, entry, currentContent, currentBytes] of this._changed()) {
       const rel = relative(this.realCwd, abs);
 
       let diffText: string;
@@ -165,7 +170,9 @@ export class ChangesetManager {
         const currentPath = backupPath === null ? null : `${backupPath}.current`;
         try {
           if (backupPath === null || currentPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
-          writeFileSync(currentPath, currentContent, { mode: 0o600 });
+          // The bytes, as the backup holds bytes: decoded text would turn every line that is
+          // not UTF-8 into a change.
+          writeFileSync(currentPath, currentBytes, { mode: 0o600 });
           diffText = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, backupPath, currentPath], {
             encoding: 'utf-8',
             timeout: 5000,
@@ -303,9 +310,9 @@ export class ChangesetManager {
       // New file — delete it (unlink removes a symlink itself, never its target)
       try {
         unlinkSync(abs);
-        // Try to remove empty parent dirs up to cwd
+        // Try to remove empty parent dirs up to the root the file is in, never the root itself
         let dir = dirname(abs);
-        while (dir !== this.realCwd && dir !== dirname(dir)) {
+        while (!this.roots.includes(dir) && dir !== dirname(dir)) {
           try {
             rmdirSync(dir);
             dir = dirname(dir);
@@ -334,4 +341,14 @@ export class ChangesetManager {
       }
     }
   }
+}
+
+/**
+ * The changeset of one session run: the current workspace, plus the other roots a write tool
+ * may reach while isolation is active (`/tmp`, the artifacts directory). An artifact edited
+ * with `edit_file` is reviewed and can be rolled back like a workspace file; the file tools
+ * bypass the artifact store's version ring, so nothing else could undo it.
+ */
+export function workspaceChangeset(runId: string): ChangesetManager {
+  return new ChangesetManager(getWorkspaceCwd(), runId, writeRootsBesidesWorkspace());
 }

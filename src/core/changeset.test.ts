@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync, readdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync, readdirSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
-import { ChangesetManager } from './changeset.js';
+import { ChangesetManager, workspaceChangeset } from './changeset.js';
+import { setTenantWorkspace, _resetCache as resetWorkspaceCache, isPathWithin } from './workspace.js';
+import { vi } from 'vitest';
 
 describe('ChangesetManager', () => {
   const tempDirs: string[] = [];
@@ -664,6 +666,174 @@ describe('ChangesetManager', () => {
         mgr.cleanup();
       }
     }, 60_000);
+  });
+
+  // The roots a write tool may reach besides the workspace (`/tmp`, the artifacts directory)
+  // are tracked as well: with the changeset active the write is not prompted, so the review
+  // and its rollback are the only check on it.
+  describe('the other roots a write may reach', () => {
+    it('tracks and rolls back a file in another root, and keeps that root', () => {
+      const cwd = makeTempDir();
+      const artifacts = join(makeTempDir(), 'artifacts');
+      mkdirSync(artifacts);
+      const page = join(artifacts, 'a1.html');
+      writeFileSync(page, '<p>v1</p>', 'utf-8');
+      const added = join(artifacts, 'new', 'a2.html');
+      const mgr = new ChangesetManager(cwd, 'test-run', [artifacts]);
+      mgr.backupBeforeWrite(page);
+      mgr.backupBeforeWrite(added);
+      writeFileSync(page, '<p>v2</p>', 'utf-8');
+      mkdirSync(join(artifacts, 'new'));
+      writeFileSync(added, '<p>new</p>', 'utf-8');
+      expect(mgr.size).toBe(2);
+      mgr.rollbackAll();
+      expect(readFileSync(page, 'utf-8')).toBe('<p>v1</p>');
+      expect(existsSync(added)).toBe(false);
+      expect(existsSync(join(artifacts, 'new')), 'the empty directory the run made goes').toBe(false);
+      expect(existsSync(artifacts), 'the root itself stays').toBe(true);
+      mgr.cleanup();
+    });
+
+    it('a root given to the manager is not a licence for a sibling outside it', () => {
+      const cwd = makeTempDir();
+      const base = makeTempDir();
+      mkdirSync(join(base, 'artifacts'));
+      writeFileSync(join(base, 'vault.db'), 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run', [join(base, 'artifacts')]);
+      mgr.backupBeforeWrite(join(base, 'vault.db'));
+      writeFileSync(join(base, 'vault.db'), 'after', 'utf-8');
+      expect(mgr.getChanges()).toEqual([]);
+      mgr.rollbackAll();
+      expect(readFileSync(join(base, 'vault.db'), 'utf-8')).toBe('after');
+      mgr.cleanup();
+    });
+  });
+
+  describe('names and bytes', () => {
+    it('tracks a file whose name starts with two dots', () => {
+      const cwd = makeTempDir();
+      const file = join(cwd, '..env');
+      writeFileSync(file, 'A=1', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(file);
+      writeFileSync(file, 'A=2', 'utf-8');
+      expect(mgr.getChanges().map(c => c.file)).toEqual(['..env']);
+      mgr.cleanup();
+    });
+
+    it('the diff of a file that is not UTF-8 shows only the line that changed', () => {
+      const cwd = makeTempDir();
+      const file = join(cwd, 'latin1.txt');
+      writeFileSync(file, Buffer.from('caf\xe9 line\nsecond\n', 'latin1'));
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(file);
+      writeFileSync(file, Buffer.from('caf\xe9 line\nsecond changed\n', 'latin1'));
+      const diff = mgr.getChanges()[0]!.diff;
+      expect(diff).toContain('-second');
+      expect(diff).toContain('+second changed');
+      expect(diff.split('\n').filter(l => /^[-+]caf/.test(l))).toEqual([]);
+      mgr.cleanup();
+    });
+
+    // A path first backed up while it pointed outside (not tracked) and again once it is a real
+    // file inside: the second backup records it, so a rollback restores the bytes from before
+    // the write instead of treating the file as one the run added and deleting it.
+    it('a path that was outside at its first backup is recorded by its second', () => {
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      symlinkSync(elsewhere, join(cwd, 'sub'));
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'sub', 'f.txt'));
+      rmSync(join(cwd, 'sub'));
+      mkdirSync(join(cwd, 'sub'));
+      writeFileSync(join(cwd, 'sub', 'f.txt'), 'pre', 'utf-8');
+      mgr.backupBeforeWrite(join(cwd, 'sub', 'f.txt'));
+      writeFileSync(join(cwd, 'sub', 'f.txt'), 'post', 'utf-8');
+      mgr.rollbackAll();
+      expect(readFileSync(join(cwd, 'sub', 'f.txt'), 'utf-8')).toBe('pre');
+      mgr.cleanup();
+    });
+  });
+
+  // The backup itself, raced: a fresh manager backs the file up while a second process flips
+  // it between a regular file and a symlink to a file outside. The backup holds the bytes it
+  // read through O_NOFOLLOW, never a copy of the name. Positive control: reading the same name
+  // in the same loop reaches the outside file at least once.
+  describe.runIf(process.platform === 'linux')('a race against the backup', () => {
+    it('never backs up or shows the outside file', async () => {
+      const { spawn } = await import('node:child_process');
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      const target = join(elsewhere, 'vault.txt');
+      writeFileSync(target, 'outside', 'utf-8');
+      const file = join(cwd, 'f.txt');
+      writeFileSync(file, 'inside', 'utf-8');
+      writeFileSync(join(cwd, 'f.real'), 'inside', 'utf-8');
+      symlinkSync(target, join(cwd, 'f.link'));
+      const SWAP = `
+        const fs = require('fs'), p = require('path'), d = process.argv[1];
+        const f = p.join(d, 'f.txt'), real = p.join(d, 'f.real'), link = p.join(d, 'f.link');
+        for (;;) {
+          try { fs.linkSync(real, f + '.n'); fs.renameSync(f + '.n', f); } catch {}
+          try { fs.symlinkSync(fs.readlinkSync(link), f + '.s'); fs.renameSync(f + '.s', f); } catch {}
+        }`;
+      const swapper = spawn(process.execPath, ['-e', SWAP, cwd], { stdio: 'ignore' });
+      try {
+        await new Promise((r) => setTimeout(r, 200));
+        let byName = 0;
+        let shown = 0;
+        for (let i = 0; i < 3000; i++) {
+          try { if (readFileSync(file, 'utf-8') === 'outside') byName++; } catch { /* mid-swap */ }
+          const mgr = new ChangesetManager(cwd, 'test-run');
+          mgr.backupBeforeWrite(file);
+          writeFileSync(join(cwd, 'f.real'), `inside ${i}`, 'utf-8');
+          if (mgr.getChanges().some((c) => c.diff.includes('outside'))) shown++;
+          mgr.cleanup();
+          writeFileSync(join(cwd, 'f.real'), 'inside', 'utf-8');
+        }
+        expect(byName, 'positive control: reading by name reached the outside file').toBeGreaterThan(0);
+        expect(shown).toBe(0);
+      } finally {
+        swapper.kill('SIGKILL');
+      }
+    }, 60_000);
+  });
+
+  // What a session run gets: the workspace plus the artifacts directory (and /tmp). Through
+  // the factory the session calls, so dropping the roots there fails here.
+  describe('the changeset a session run gets', () => {
+    afterEach(() => { vi.unstubAllEnvs(); resetWorkspaceCache(); });
+
+    // That a root is not a licence for a sibling outside it is the unit test above; here the
+    // data directory may itself sit under /tmp, which is a root.
+    it('reviews an artifact edited with a file tool', () => {
+      const data = makeTempDir();
+      const ws = join(data, 'workspace', 'ctx');
+      mkdirSync(ws, { recursive: true });
+      mkdirSync(join(data, 'artifacts'));
+      vi.stubEnv('LYNOX_DATA_DIR', data);
+      setTenantWorkspace(ws);
+      const page = join(data, 'artifacts', 'a1.html');
+      writeFileSync(page, '<p>v1</p>', 'utf-8');
+      const mgr = workspaceChangeset('run');
+      mgr.backupBeforeWrite(page);
+      writeFileSync(page, '<p>v2</p>', 'utf-8');
+      expect(mgr.getChanges().map(c => c.absolutePath)).toEqual([realpathSync(page)]);
+      mgr.rollbackAll();
+      expect(readFileSync(page, 'utf-8')).toBe('<p>v1</p>');
+      mgr.cleanup();
+    });
+  });
+
+  describe('isPathWithin', () => {
+    it('a name that starts with two dots is inside; `..` and a sibling are not', () => {
+      expect(isPathWithin('/a/..env', '/a')).toBe(true);
+      expect(isPathWithin('/a/b/../..x', '/a')).toBe(true);
+      expect(isPathWithin('/a/..', '/a')).toBe(false);
+      expect(isPathWithin('/a/../b', '/a')).toBe(false);
+      expect(isPathWithin('/ab', '/a')).toBe(false);
+      expect(isPathWithin('/a', '/a')).toBe(true);
+    });
   });
 });
 

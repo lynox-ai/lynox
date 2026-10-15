@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, lstatSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { resolve, dirname, basename, join, isAbsolute, relative } from 'node:path';
+import { resolve, dirname, basename, join, isAbsolute, relative, sep } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
@@ -85,7 +85,26 @@ export function resolveFileAreaPath(filePath: string): string | null {
  */
 export function isPathWithin(child: string, parent: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  // `..` as a whole first component climbs out; a name that merely starts with two dots
+  // (`..env`) is a file inside.
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * The roots a write may reach besides the workspace when isolation is active: `/tmp` and the
+ * artifacts directory, symlinks resolved. One list for `validatePath` and for the changeset,
+ * which tracks exactly the files a write tool can change.
+ */
+export function writeRootsBesidesWorkspace(): string[] {
+  // Resolve /tmp via realpath for macOS /private/tmp
+  const realTmp = existsSync('/tmp') ? realpathSync('/tmp') : '/tmp';
+  // Artifacts dir is read+write accessible: artifact storage lives outside the
+  // per-context workspace (so it's gallery-global across threads/contexts) but
+  // on the same persistent volume. Exposing it lets the agent read/edit its own
+  // artifacts with the standard file tools instead of full-document rewrites.
+  const artRootRaw = join(getLynoxDir(), 'artifacts');
+  const realArtRoot = existsSync(artRootRaw) ? realpathSync(artRootRaw) : artRootRaw;
+  return [realTmp, realArtRoot];
 }
 
 /** Allowed read-only roots (besides workspace + /tmp). Frozen: importers must not widen them. */
@@ -123,15 +142,8 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
     real = join(realpathSync(ancestor), tail);
   }
 
-  // Check workspace + /tmp (resolve /tmp via realpath for macOS /private/tmp)
-  const realTmp = existsSync('/tmp') ? realpathSync('/tmp') : '/tmp';
-
-  // Artifacts dir is read+write accessible: artifact storage lives outside the
-  // per-context workspace (so it's gallery-global across threads/contexts) but
-  // on the same persistent volume. Exposing it lets the agent read/edit its own
-  // artifacts with the standard file tools instead of full-document rewrites.
-  const artRootRaw = join(getLynoxDir(), 'artifacts');
-  const realArtRoot = existsSync(artRootRaw) ? realpathSync(artRootRaw) : artRootRaw;
+  // Check workspace + /tmp + the artifacts directory
+  const [realTmp, realArtRoot] = writeRootsBesidesWorkspace() as [string, string];
 
   // Block writes through symlinks pointing outside the allowed roots
   if (existsSync(resolved) && operation === 'write') {

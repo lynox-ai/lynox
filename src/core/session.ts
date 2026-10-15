@@ -39,7 +39,7 @@ import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import { channels } from './observability.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
-import { ChangesetManager } from './changeset.js';
+import { ChangesetManager, workspaceChangeset } from './changeset.js';
 import {
   ToolResultBlobStore,
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
@@ -799,7 +799,7 @@ export class Session {
         const runId = randomUUID();
         // Relative to the workspace the files live in, not to the process: in the image the
         // process runs in /app and every workspace path would start with `../`.
-        runChangeset = new ChangesetManager(getWorkspaceCwd(), runId);
+        runChangeset = workspaceChangeset(runId);
         this._changesetManager = runChangeset;
         this._recreateAgent();
       } else {
