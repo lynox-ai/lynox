@@ -275,8 +275,18 @@ describe('release_secret: the owner answers in person', () => {
     await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
     expect(question).toContain('auth.type "header"');
     expect(question).toContain('auth.header_name "X-Api-Key"');
-    expect(question).toContain('the user\'s own and bulk runs included, until that mandate ends');
+    expect(question).toContain('the user\'s own and bulk runs included, until that mandate ends or the user withdraws it');
     expect(question).not.toContain('while that mandate is active');
+  });
+
+  it('names the token endpoint with its path and query, and marks a value it cuts', async () => {
+    const p = bearer({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example/oauth/token?tenant=t1', client_secret_key: 'CRM_KEY', grant_type: 'client_credentials', scope: 's'.repeat(250) } } });
+    const apiStore = apis([p]);
+    ask(p);
+    let question = '';
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    expect(question).toContain('auth.crm.example"/oauth/token?tenant=t1"');
+    expect(question).toContain('…(50 more)');
   });
 
   it('names a port other than the default in the question', async () => {

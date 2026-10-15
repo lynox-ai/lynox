@@ -270,8 +270,9 @@ function isPresetProfile(p: ApiProfile): boolean {
  * - `token` — a token slot: a connection's tokens are read only by the profile that holds the
  *   grant, through its own consent.
  * - `not-sent` — the engine does not send it for `via` ({@link sendRole}).
- * - `not-https` — one of the places the value goes ({@link credentialEndpoints}) is not https:
- *   the base it is attached to, or for an OAuth client pair the token endpoint it is posted to.
+ * - `not-https` — one of {@link credentialEndpoints} is not https: the base, where the value or
+ *   the access token an OAuth client pair mints is sent, or the token endpoint the pair is
+ *   posted to.
  * - `preset` — a preset profile other than `via` reads it: a preset connection's credentials go
  *   to its provider through that profile, the owner's own preset profiles included.
  * - `other-mandate` — a profile another mandate wrote reads it.
@@ -508,7 +509,7 @@ export function withheldText(names: readonly string[], offBase = false): string 
   // A request to another port or scheme of the base's host reaches the profile, but a release
   // covers only the base: say so, or a release that exists reads as one that does not.
   const where = offBase
-    ? ' This request does not go to the profile\'s base_url (its scheme, host and port), and a release covers only requests to the base.'
+    ? ' This request does not go to the profile\'s base_url (its scheme, host and port), and a release, where one is given, covers only requests to the base.'
     : '';
   return `${shown} ${one ? 'is' : 'are'} not available to this profile${offBase ? ' for this request' : ''}. A profile set up in a mandate's session reads a vault name of the owner's only once the owner releases it to that profile, and the owner is asked when the profile is saved.${where} Asking for the value with ask_secret does not change this.`;
 }

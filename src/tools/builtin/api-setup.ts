@@ -1483,15 +1483,22 @@ function adoptionHosts(profile: ApiProfile): string[] {
 
 /**
  * Where a released value goes, as the owner is asked about it: each of {@link credentialEndpoints}
- * by its host, with the scheme when it is not https and the port when it is not the default.
+ * by its host, with the port when it is not the default, and for the token endpoint its path and
+ * query too, since the binding holds the whole URL. Only https reaches the question (`not-https`).
  */
 function releaseDestinations(profile: ApiProfile): string[] {
   const shown = new Set<string>();
   for (const e of credentialEndpoints(profile)) {
     const u = new URL(e);
-    shown.add(`${u.protocol === 'https:' ? '' : `${shapedForLog(u.protocol.slice(0, -1), /^[a-z][a-z0-9+.-]{0,15}$/, 16)}://`}${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}`);
+    const rest = `${u.pathname === '/' ? '' : u.pathname}${u.search}`;
+    shown.add(`${shapedForLog(u.hostname, HOSTNAME_SHAPE, 255)}${u.port ? `:${u.port}` : ''}${rest === '' ? '' : JSON.stringify(boundedForQuestion(singleLine(rest)))}`);
   }
   return [...shown];
+}
+
+/** A value as the release question shows it: at most 200 characters, and a cut is marked. */
+function boundedForQuestion(value: string): string {
+  return value.length > 200 ? `${value.slice(0, 200)}…(${String(value.length - 200)} more)` : value;
 }
 
 /**
@@ -2915,13 +2922,13 @@ ${draftJson}
       const role = sendRole(profile, name)!;
       // Every field whose change ends the release, so what the person agrees to is all of it.
       const authority = releaseBoundFields(profile)
-        .map(([field, value]) => `${field} ${JSON.stringify(singleLine(typeof value === 'string' ? value : JSON.stringify(value)).slice(0, 200))}`)
+        .map(([field, value]) => `${field} ${typeof value === 'string' ? JSON.stringify(boundedForQuestion(singleLine(value))) : boundedForQuestion(singleLine(JSON.stringify(value)))}`)
         .join(', ');
       const held = vaultHolds({ secretStore: agent.secretStore } as IAgent, name);
       const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
         ? Promise.resolve(null)
         : promptUser(
-          pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
+          pv`⚠ api_setup: release the vault name ${shownName} to API profile ${id}, set up in the session of ${singleLine(author)}? The engine then sends its value, as ${role}, to ${hosts.length > 0 ? hosts.join(', ') : 'no host it can name'}${authority ? ` (${authority})` : ''}, for every request and run through this profile, the user's own and bulk runs included, until that mandate ends or the user withdraws it.${role === 'oauth.client_id_key' ? ' A client id also goes into the sign-in link, to the browser of whoever opens it.' : ''} The vault ${held ? 'holds a value' : 'holds no value yet'} under this name. Any change to where it goes ends the release. Release it?`,
           ['Allow', 'Deny', '\x00'],
         ));
       if (answer === null) return `Blocked: ${shownName} was not released — the run was stopped before the question was asked.`;
@@ -3044,7 +3051,7 @@ const RELEASE_OBSTACLE_TEXT: Record<ReleaseObstacle, string> = {
   protected: 'it is a provider key or an infrastructure secret.',
   token: 'it is a connection\'s token, which only the profile holding the connection reads.',
   'not-sent': 'the engine does not send it for this profile. Only a credential the engine attaches can be released: the client pair of an OAuth profile, the two halves of a split Basic credential, or the first vault key of a bearer or header profile.',
-  'not-https': 'the profile would send it to an address that is not https. A released value goes only over https.',
+  'not-https': 'the profile would send it, or the access token it mints, to an address that is not https. A released value goes only over https.',
   preset: 'a profile of a built-in provider reads it, and its credentials go to that provider only.',
   'other-mandate': 'a profile set up in another mandate\'s session reads it.',
 };
