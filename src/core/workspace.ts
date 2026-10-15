@@ -53,7 +53,8 @@ export function getFileAreaDir(): string {
  * file read for either path is confined identically. Callers that require an
  * existing file must `stat` the result themselves; a not-yet-existing path
  * is checked through its closest existing ancestor, so a missing leaf under a
- * symlink that points out of the area is refused like an existing one.
+ * symlink that points out of the area is refused like an existing one, and a
+ * dangling symlink is refused wherever it points.
  */
 export function resolveFileAreaPath(filePath: string): string | null {
   const base = getFileAreaDir();
@@ -75,10 +76,14 @@ export function resolveFileAreaPath(filePath: string): string | null {
 
 /**
  * The real path of `path`, or — when its leaf does not exist yet — the real path of its closest
- * existing ancestor with the missing rest re-attached. Null for any other failure (a component
- * that is a file, an unreadable directory, a link loop): accepting the logical path there let a
+ * existing ancestor with the missing rest re-attached. Null for a dangling symlink and for any
+ * other failure (a component that is a file, an unreadable directory, a link loop): accepting the logical path there let a
  * symlink out of the area answer differently for files and directories behind it.
  */
+function isPresent(path: string): boolean {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
 function realpathOfClosestExisting(path: string): string | null {
   let probe = path;
   let tail = '';
@@ -88,6 +93,9 @@ function realpathOfClosestExisting(path: string): string | null {
       return tail === '' ? real : join(real, tail);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      // ENOENT for a name that exists is a dangling symlink: its target is missing, wherever it
+      // points. Refused, or the answer would say whether that target exists outside the area.
+      if (isPresent(probe)) return null;
       const parent = dirname(probe);
       if (parent === probe) return null;
       tail = tail === '' ? basename(probe) : join(basename(probe), tail);

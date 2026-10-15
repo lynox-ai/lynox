@@ -12753,6 +12753,14 @@ describe('LynoxHTTPApi', () => {
       for (const p of ['escape/nope', 'escape/secret.txt/x', 'escape/sub', 'escape/sub/x/y']) {
         expect(`${p} → ${String((await jsonFetch(`/api/files?path=${encodeURIComponent(p)}`)).status)}`).toBe(`${p} → 403`);
       }
+      // A dangling link inside the workspace: refused whether or not its target exists, so the
+      // answer says nothing about the outside path it names.
+      symlinkSync(join(externalDir, 'gone'), join(base, 'dangle'));
+      try {
+        for (const p of ['dangle', 'dangle/x']) {
+          expect(`${p} → ${String((await jsonFetch(`/api/files?path=${encodeURIComponent(p)}`)).status)}`).toBe(`${p} → 403`);
+        }
+      } finally { rmSync(join(base, 'dangle'), { force: true }); }
       // Twin: the same shapes inside the workspace are not refused.
       expect((await jsonFetch('/api/files?path=safe/nope')).status).toBe(404);
       expect((await jsonFetch('/api/files?path=safe/ok.txt/x')).status).toBe(403);
