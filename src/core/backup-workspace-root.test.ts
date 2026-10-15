@@ -85,6 +85,25 @@ describe('backup — the workspace root', () => {
     }
   });
 
+  it('refuses a workspace file deleted after the verify pass instead of skipping it', async () => {
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
+    const signed = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-ws');
+    const created = await signed.createBackup();
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-live');
+    const spy = vi.spyOn(signed, 'createBackup').mockImplementation(async () => {
+      rmSync(join(created.path, 'workspace', 'http-api', 'a.txt'));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const restored = await signed.restoreBackup(created.path);
+      expect(restored.success).toBe(false);
+      expect(restored.error).toMatch(/changed after it was verified/);
+      expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-live');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('stages the workspace bytes it checked, never a second read by name', async () => {
     writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
     const signed = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-ws');
