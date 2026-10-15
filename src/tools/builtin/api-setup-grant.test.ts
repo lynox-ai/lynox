@@ -3769,8 +3769,10 @@ describe('mandates and stored credentials', () => {
     const elsewhere = await send([basic], vault({ SETUP_USER: 'u', SETUP_PASS: 'p' }), { url: 'https://api.crm.example:8443/v1/contacts' }, mandate);
     expect(elsewhere.calls).toEqual([]);
     expect(elsewhere.out).toContain(OFF_BASE);
+    expect(elsewhere.out).toContain('not available to this profile for this request');
     const onBase = await send([basic], vault({ SETUP_USER: 'u', SETUP_PASS: 'p' }), { url: 'https://api.crm.example/v1/contacts' }, mandate, 'none');
     expect(onBase.out).toContain('not available to this profile');
+    expect(onBase.out).not.toContain('for this request');
     expect(onBase.out).not.toContain(OFF_BASE);
   });
 
