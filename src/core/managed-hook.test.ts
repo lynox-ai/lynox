@@ -854,3 +854,109 @@ describe('managed-hook provider incident', () => {
     expect(incidentCalls(spy)).toHaveLength(2);
   });
 })
+
+/**
+ * An escalation whose push reached nobody is reported to the control plane, which may mail the
+ * owner. The report carries the class and nothing else, it goes
+ * out for every CP-provisioned instance whatever its tier (hosted included, so NOT gated on the
+ * spend gate), and a burst is held to one POST per window — also when the POST fails, so a CP
+ * without the route is not hit on every escalation.
+ */
+describe('managed-hook escalation notice', () => {
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  /** /status answers `spendGate`; /escalation answers ok, or rejects when `escalationOk` is false. */
+  function routingFetch(spendGate: string, escalationOk = true): ReturnType<typeof vi.fn> {
+    return vi.fn().mockImplementation((url: string) => {
+      if (String(url).endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: true, spend_gate: spendGate, balance_cents: 0 }) });
+      }
+      if (String(url).endsWith('/escalation')) {
+        return escalationOk ? Promise.resolve({ ok: true }) : Promise.reject(new Error('cp down'));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ allowed: true }) });
+    });
+  }
+
+  function noticeCalls(spy: ReturnType<typeof vi.fn>): Array<[string, RequestInit]> {
+    return spy.mock.calls.filter(([url]) => String(url).endsWith('/escalation')) as Array<[string, RequestInit]>;
+  }
+
+  async function hookOn(spy: ReturnType<typeof vi.fn>) {
+    vi.stubGlobal('fetch', spy);
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    return hook;
+  }
+
+  const flushMicrotasks = () => new Promise((r) => setTimeout(r, 0));
+
+  it('reports an escalation that reached nobody: one POST, the class and nothing else', async () => {
+    const spy = routingFetch('balance');
+    const hook = await hookOn(spy);
+    hook.onEscalationReported?.('not_delivered');
+    await flushMicrotasks();
+
+    const calls = noticeCalls(spy);
+    expect(calls).toHaveLength(1);
+    const [url, init] = calls[0]!;
+    expect(url).toBe('https://cp.test/internal/usage/inst-1/escalation');
+    expect(init.method).toBe('POST');
+    expect((init.headers as Record<string, string>)['x-instance-secret']).toBe('secret');
+    expect(JSON.parse(String(init.body))).toEqual({ kind: 'escalation' });
+  });
+
+  it('reports `no_channel` too, and never a delivered one', async () => {
+    const spy = routingFetch('balance');
+    const hook = await hookOn(spy);
+    hook.onEscalationReported?.('delivered');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(0);
+    hook.onEscalationReported?.('no_channel');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(1);
+  });
+
+  it('reports on a hosted instance too: the gate is the hook, not the spend gate', async () => {
+    const spy = routingFetch('unfunded');
+    const hook = await hookOn(spy);
+    hook.onEscalationReported?.('not_delivered');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(1);
+  });
+
+  it('holds a burst to one POST per ten minutes, and keeps the hold when the POST failed', async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const spy = routingFetch('balance', false);
+    const hook = await hookOn(spy);
+
+    hook.onEscalationReported?.('not_delivered');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(1);
+
+    // Failed, and still held: a CP without the route must not get a POST per escalation.
+    now += 10 * 60_000 - 1;
+    hook.onEscalationReported?.('not_delivered');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(1);
+
+    now += 1;
+    hook.onEscalationReported?.('not_delivered');
+    await flushMicrotasks();
+    expect(noticeCalls(spy)).toHaveLength(2);
+  });
+});

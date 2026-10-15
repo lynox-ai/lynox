@@ -418,6 +418,11 @@ export interface LynoxUserConfig {
   memory_auto_scope?: boolean | undefined;
   /** Show auto-greeting on session start (web UI / HTTP API). Default: true */
   greeting?: boolean | undefined;
+  /** Managed hosting: when an escalation (a scheduled workflow failed, or a watch found
+   *  something) reaches nobody, the control plane mails the owner from a lynox sender, with a
+   *  fixed text and nothing from the run. Default: true. Only the owner can change it
+   *  (`PUT /api/config` is owner-only). No effect on self-host, which has no control plane. */
+  escalation_mail?: boolean | undefined;
   /** Deprecated 2026-05-24 — Tavily backend retired. Field retained as
    *  `string | undefined` for migration-import compatibility with older
    *  config.json snapshots; the engine no longer reads it. */

@@ -505,6 +505,8 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   'changeset_review',
   'memory_auto_scope',
   'greeting',
+  // The owner's own mail about undelivered escalations: it only turns a mail to the owner off.
+  'escalation_mail',
   'memory_extraction',
   'knowledge_graph_enabled',
   'tts_voice',

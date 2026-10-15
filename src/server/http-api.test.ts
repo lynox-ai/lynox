@@ -10923,6 +10923,10 @@ describe('LynoxHTTPApi', () => {
         // Sonnet-variant opt-in is a user-preference (same provider, ~same
         // price), so a managed tenant may set it without a 403.
         ['balanced_model', 'claude-sonnet-5'],
+        // The owner's switch for the control plane's mail when an escalation reached nobody.
+        // `null` is what the UI sends to switch it back on (the key is then removed).
+        ['escalation_mail', false],
+        ['escalation_mail', null],
       ])(
         'PUT /api/config accepts user-pref %s in managed mode',
         async (field, value) => {
@@ -10940,6 +10944,14 @@ describe('LynoxHTTPApi', () => {
           }
         },
       );
+
+      it('PUT /api/config rejects an escalation_mail that is not a boolean', async () => {
+        const res = await jsonFetch('/api/config', {
+          method: 'PUT',
+          body: JSON.stringify({ escalation_mail: 'off' }),
+        });
+        expect(res.status).toBe(400);
+      });
 
       it('PUT /api/config rejects max_context_window_tokens above 1M on managed (Security S3 schema cap)', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');

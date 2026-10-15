@@ -116,6 +116,10 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   // name, and one under `tests/`, which is outside its roots — which is why this
   // repo's minter test imports the constant rather than restating it.
   { name: 'BROKER_START_GOLDEN', contractFile: 'broker-start.ts', twinPattern: valueTwin('BROKER_START_GOLDEN') },
+  // Engine → CP report shapes of the usage routes. Born in the contract; a local copy on
+  // either side is how the two would drift apart.
+  { name: 'ProviderIncidentRequest', contractFile: 'http.ts', twinPattern: typeTwin('ProviderIncidentRequest') },
+  { name: 'EscalationNoticeRequest', contractFile: 'http.ts', twinPattern: typeTwin('EscalationNoticeRequest') },
   { name: 'OAuthRefreshRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshRequest') },
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   { name: 'OAuthRevokeRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeRequest') },

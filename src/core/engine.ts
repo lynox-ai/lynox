@@ -120,7 +120,7 @@ import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
 import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
-import { NotificationRouter } from './notification-router.js';
+import { NotificationRouter, type DeliverySummary } from './notification-router.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
 import { Session, sessionInitialTier, resolveNamedProfile } from './session.js';
@@ -158,6 +158,11 @@ export interface LynoxHooks {
   onBeforeCreateAgent?(tools: ToolEntry[]): ToolEntry[];
   onAfterRun?(runId: string, costUsd: number, context: RunContext): void;
   onShutdown?(): Promise<void>;
+  /** An escalation's wakeup has answered: whether anyone was told. Called after the caller's
+   *  own `onReported`, each hook in its own try/catch, and only while the owner has not
+   *  switched `escalation_mail` off. The managed hook reports an undelivered one to the
+   *  control plane, which may mail the owner. */
+  onEscalationReported?(delivery: DeliverySummary): void;
 }
 
 export interface AccumulatedUsage {
@@ -2690,7 +2695,26 @@ export class Engine {
    * docks here with no second pour.
    */
   escalateToUser(opts: EscalateOpts): { threadId: string } | null {
-    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), opts);
+    // The caller's record and the hooks each run in their own try/catch: a caller whose record
+    // throws must not keep the hooks from hearing of an escalation that reached nobody, and a
+    // hook that throws must not cost the caller its record. The switch is read when the wakeup
+    // has answered, not here, so turning it off takes effect without a restart.
+    const caller = opts.onReported;
+    const onReported = (delivery: DeliverySummary): void => {
+      if (caller) {
+        try { caller(delivery); } catch (err: unknown) {
+          process.stderr.write(`[escalation] recording the delivery failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+      if (this.userConfig.escalation_mail === false) return;
+      for (const hook of this._hooks) {
+        if (!hook.onEscalationReported) continue;
+        try { hook.onEscalationReported(delivery); } catch (err: unknown) {
+          process.stderr.write(`[escalation] a hook failed on the delivery: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+    };
+    return runEscalation(this.getThreadStore(), this.getNotificationRouter(), { ...opts, onReported });
   }
 
   /**
