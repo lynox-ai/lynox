@@ -14,7 +14,7 @@ import type { DataStore } from './data-store.js';
 import { coercePlainColumnValue } from './data-store.js';
 import { getFileAreaDir, isPathWithin, resolveFileAreaPath } from './workspace.js';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead, splitRel, statEntry, WorkspaceAccessError } from './workspace-fd.js';
+import { openRead, statEntry, WorkspaceAccessError } from './workspace-fd.js';
 import type { BeforeImage, PlannedTarget } from './bulk-ledger.js';
 
 /** Most targets one plan may carry. */
@@ -247,31 +247,30 @@ export function heldWorkspace(): ReturnType<typeof workspaceBase> {
 }
 
 /**
- * The key a workspace file has in a bulk run. With isolation it is the file's path relative to
- * the context workspace (resolved against the files area, as {@link resolveFileAreaPath} does),
- * and the file is reached only through the workspace's open directory; without isolation, the
- * confined real path. Null when the target leaves the workspace.
+ * The key a workspace file has in a bulk run: its absolute path. With isolation that is the path
+ * in the context workspace (resolved against the files area, as {@link resolveFileAreaPath}
+ * does), and the file is reached only through the workspace's open directory; without isolation,
+ * the confined real path. Null when the target leaves the workspace. The key stays absolute so a
+ * run names the workspace it was planned in: applied in another one, its keys are not in it.
  */
 export function bulkFileKey(target: string): string | null {
   const base = heldWorkspace();
   if (base === null) return resolveBulkFilePath(target);
   const mapped = toWorkspaceRel(resolve(base.ws, target), base.ws);
-  return mapped.kind === 'inside' && mapped.rel !== '' ? mapped.rel : null;
+  return mapped.kind === 'inside' && mapped.rel !== '' ? mapped.shown : null;
 }
 
 /**
- * A run's key as a path relative to the context workspace. A run planned before keys were
- * relative (or without isolation) holds the absolute path; it is mapped the same way. Null when
- * the key names nothing in the workspace. Every read and write of a key goes through this one
- * mapping, so a key copied into a later run (an undo) means the same file.
+ * A run's key as a path relative to the context workspace, for the workspace's open directory.
+ * Every read and write of a key goes through this one mapping, so a key copied into a later run
+ * (an undo) means the same file. Null when the key is not an absolute path in this workspace — a
+ * run planned in another workspace, or a key that is not a path.
  */
 export function bulkKeyRel(key: string, ws: string): string | null {
+  if (!key.startsWith('/')) return null;
   try {
-    if (key.startsWith('/')) {
-      const mapped = toWorkspaceRel(key, ws);
-      return mapped.kind === 'inside' && mapped.rel !== '' ? mapped.rel : null;
-    }
-    return splitRel(key).length > 0 ? key : null;
+    const mapped = toWorkspaceRel(key, ws);
+    return mapped.kind === 'inside' && mapped.rel !== '' ? mapped.rel : null;
   } catch {
     return null;
   }

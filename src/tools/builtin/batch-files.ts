@@ -226,6 +226,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       if (landsInWorkspace(dir, base.ws)) {
         throw new Error(`${input.directory} reaches the workspace through a link. Name the directory by its path in the workspace (${base.ws}).`);
       }
+      // A directory that holds the workspace would walk into it, and reach its files by name.
+      const wsReal = existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
+      if (isPathWithin(base.ws, dir) || isPathWithin(wsReal, dir)) {
+        throw new Error(`${input.directory} holds the workspace. Name a directory in the workspace (${base.ws}), or one beside it.`);
+      }
       if (input.operation === 'move' && input.destination && landsInWorkspace(resolve(input.destination), base.ws)) {
         return `destination ${input.destination} is in the workspace, the directory is not; batch_files moves files within one of them only.`;
       }

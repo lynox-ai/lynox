@@ -433,7 +433,7 @@ function workspaceWriterByName(resolve: (target: string) => string | null): Targ
 /**
  * Workspace files with isolation: every read and write goes through the context workspace's open
  * directory, one component at a time with O_NOFOLLOW, never by name. The key is the file's path
- * relative to the workspace ({@link bulkKeyRel} maps a key from before keys were relative). A
+ * relative to the workspace ({@link bulkKeyRel} maps a run's absolute key into it). A
  * link on the way or at the file, or a non-directory on the way, is `path_changed`; a non-file, a
  * file with a second name or one that is not text is `foreign`. Writes are atomic as before: a
  * temp file beside the target, renamed over it. A write refuses anything but a file at the leaf.
@@ -489,7 +489,9 @@ export function anchoredWorkspaceWriter(): TargetWriter {
       if (st !== null && st.type !== 'file') throw new Error('not a regular file');
       const umask = processUmask();
       writeFileAt(at.anchor, at.rel, after.value, {
-        fileMode: st !== null ? st.mode : 0o666 & ~umask,
+        // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
+        // them on a write to the file in place.
+        fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,
         dirMode: 0o777 & ~umask,
       });
       return st === null ? 'created' : 'written';

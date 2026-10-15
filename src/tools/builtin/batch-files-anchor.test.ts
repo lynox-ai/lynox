@@ -144,6 +144,17 @@ describe('batch_files reaches the workspace through its open directory', () => {
     expect(await run({ directory: join(outside, 'src'), find: 'q', replace: 'Q' })).toContain('Transformed');
   });
 
+  it('refuses an outside directory that holds the workspace', async () => {
+    // A workspace inside a directory batch_files may work on (here under /tmp).
+    const nested = join(outside, 'ws');
+    mkdirSync(nested);
+    writeFileSync(join(nested, 'n.txt'), 'old n');
+    closeWorkspaceBase();
+    setTenantWorkspace(nested);
+    await expect(run({ directory: outside, find: 'old', replace: 'new' })).rejects.toThrow(/holds the workspace/);
+    expect(readFileSync(join(nested, 'n.txt'), 'utf8')).toBe('old n');
+  });
+
   it('refuses a directory named through /proc', async () => {
     await expect(run({ directory: `/proc/self/root${ws}` })).rejects.toThrow(/process handle/);
   });

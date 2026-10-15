@@ -70,12 +70,12 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('bulk keys are paths relative to the workspace', () => {
-  it('plans and applies by the relative key, and makes new files and directories with the umask\'s mode', async () => {
+describe('bulk keys name the file in the workspace the run was planned in', () => {
+  it('plans and applies by the absolute key, and makes new files and directories with the umask\'s mode', async () => {
     mkdirSync(join(ws, 'sub'));
     writeFileSync(join(ws, 'sub', 'f.txt'), 'before');
     const runId = runIdOf(await plan([{ target: join(ws, 'sub', 'f.txt'), after: 'after' }, { target: 'new/deep/n.txt', after: 'n' }]));
-    expect(ledger.getPreview(runId).map((t) => t.key).sort()).toEqual(['new/deep/n.txt', 'sub/f.txt']);
+    expect(ledger.getPreview(runId).map((t) => t.key).sort()).toEqual([join(ws, 'new/deep/n.txt'), join(ws, 'sub/f.txt')]);
     approve(runId);
     const before = process.umask(0o027);
     try {
@@ -116,15 +116,46 @@ describe('bulk keys are paths relative to the workspace', () => {
     expect(readFileSync(join(outside, 'x.txt'), 'utf8')).toBe('before');
   });
 
+  it('refuses a run planned in another workspace, and writes nothing in this one', async () => {
+    writeFileSync(join(ws, 'src.json'), JSON.stringify([{ target: 'a.txt', after: 'from the first workspace' }]));
+    const runId = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'src.json' }, agent()));
+    approve(runId);
+    const other = join(dir, 'other');
+    mkdirSync(other);
+    closeWorkspaceBase();
+    setTenantWorkspace(other);
+    await apply(runId);
+    expect(ledger.getPreview(runId)[0]!.error).toBe('path_changed');
+    expect(existsSync(join(other, 'a.txt'))).toBe(false);
+  });
+
+  it('does not carry setuid or setgid onto the file it writes', async () => {
+    writeFileSync(join(ws, 's.sh'), 'before');
+    chmodSync(join(ws, 's.sh'), 0o6755);
+    const runId = runIdOf(await plan([{ target: 's.sh', after: 'after' }]));
+    approve(runId);
+    expect((await apply(runId)).status).toBe('done');
+    expect(statSync(join(ws, 's.sh')).mode & 0o7777).toBe(0o755);
+  });
+
   it('refuses a key that names no file in the workspace, as path_changed', async () => {
     writeFileSync(join(outside, 'x.txt'), 'before');
-    for (const key of ['', '../outside/x.txt', 'a/../../outside/x.txt']) {
-      const runId = recordAbsolute([{ key, before: { absent: false, value: 'before' }, after: 'after' }]);
-      approve(runId);
-      await apply(runId);
-      expect(ledger.getPreview(runId)[0]!.error, JSON.stringify(key)).toBe('path_changed');
+    writeFileSync(join(ws, 'x.txt'), 'before');
+    // A relative key is refused even where it would resolve into the workspace: run from inside it.
+    const cwd = process.cwd();
+    process.chdir(ws);
+    try {
+      for (const key of ['', 'x.txt', './x.txt', '../outside/x.txt', 'a/../../outside/x.txt', `${ws}/../outside/x.txt`, ws, `${ws}/`]) {
+        const runId = recordAbsolute([{ key, before: { absent: false, value: 'before' }, after: 'after' }]);
+        approve(runId);
+        await apply(runId);
+        expect(ledger.getPreview(runId)[0]!.error, JSON.stringify(key)).toBe('path_changed');
+      }
+    } finally {
+      process.chdir(cwd);
     }
     expect(readFileSync(join(outside, 'x.txt'), 'utf8')).toBe('before');
+    expect(readFileSync(join(ws, 'x.txt'), 'utf8')).toBe('before');
   });
 });
 
@@ -214,7 +245,7 @@ describe('bulk_apply refuses what changed since the plan', () => {
     }
     expect(statSync(join(ws, 'x.sh')).mode & 0o777).toBe(0o750);
     if (process.getuid?.() !== 0) {
-      expect(ledger.getPreview(runId).find((t) => t.key === 'ro/r.txt')!.error).toBe('write_failed');
+      expect(ledger.getPreview(runId).find((t) => t.key === join(ws, 'ro/r.txt'))!.error).toBe('write_failed');
       expect(readFileSync(join(ws, 'ro', 'r.txt'), 'utf8')).toBe('before');
     }
   });
