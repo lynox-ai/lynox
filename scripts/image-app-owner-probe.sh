@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # image-app-owner-probe.sh — check a running container of the production image:
-# the runtime user cannot change the code it runs. Nothing under /app, and not the
-# entrypoint, belongs to that user or is writable for it by mode.
+# the runtime user cannot change the code it runs. Nothing under /app, not the
+# entrypoint and not their parent directory belongs to that user or is writable
+# for it by mode.
 #
 #   scripts/image-app-owner-probe.sh <container>
 #
@@ -35,6 +36,12 @@ writable_by_rt() {
   docker exec --user 0 "$CONTAINER" sh -c "find $* -xdev ! -type l \( -user $rt -o -perm -o+w $gexpr \) -print 2>/dev/null; true"
 }
 
+# The code paths themselves must exist: find's error is discarded above, so a
+# missing path would otherwise list nothing and pass.
+for p in /app /entrypoint-webui.sh; do
+  docker exec "$CONTAINER" test -e "$p" || { echo "probe error: $p does not exist in the container" >&2; exit 2; }
+done
+
 # Control: the runtime user's data directory belongs to it, so the predicate must
 # list it.
 home=$(docker exec "$CONTAINER" sh -c 'echo "$HOME"')
@@ -45,9 +52,12 @@ printf '%s\n' "$ctl" | grep -qx "$home/.lynox" || { echo "probe error: the predi
 count=$(docker exec --user 0 "$CONTAINER" sh -c 'find /app -xdev ! -type l | wc -l')
 (( count > 1000 )) || { echo "probe error: found only $count entries under /app; the listing does not work" >&2; exit 2; }
 
-found=$(writable_by_rt /app /entrypoint-webui.sh)
+# A writable parent directory would let the runtime user rename a code path
+# away and put its own in its place, so the parents count too (not their other
+# entries: `-maxdepth 0`).
+found=$(writable_by_rt /app /entrypoint-webui.sh; writable_by_rt / -maxdepth 0)
 if [[ -n "$found" ]]; then
   echo "FAIL: the runtime user (uid $rt) can change $(printf '%s\n' "$found" | grep -c .) of the image's code paths, e.g. $(printf '%s\n' "$found" | head -3 | tr '\n' ' ')" >&2
   exit 1
 fi
-echo "ok: none of $count entries under /app, nor the entrypoint, belongs to or is writable for uid $rt (control: $home/.lynox is)"
+echo "ok: none of $count entries under /app, nor the entrypoint or /, belongs to or is writable for uid $rt (control: $home/.lynox is)"
