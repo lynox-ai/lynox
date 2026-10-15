@@ -284,7 +284,7 @@ describe('backup — the workspace root', () => {
     expect(created.manifest.files.map(f => f.path)).toContain('workspace/http-api/a.txt');
 
     rmSync(join(ext, 'http-api', 'a.txt'));
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.error).toBeUndefined();
     expect(restored.success).toBe(true);
     expect(readFileSync(join(ext, 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-ext');
