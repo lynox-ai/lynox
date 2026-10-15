@@ -917,9 +917,14 @@ export class MigrationImporter {
       };
       const takes = (rel: string): boolean => {
         const parts = rel.split('/');
-        for (let i = 1; i < parts.length; i++) {
-          const prefix = parts.slice(0, i).join('/');
-          if (fileKeys.has(prefix)) return false;
+        // A name the file system would store as other bytes (a lone surrogate) or refuse (over 255
+        // bytes) is skipped here: in the stage it would fail the whole set, possibly mid-commit.
+        if (parts.some(part => Buffer.from(part, 'utf8').toString('utf8') !== part || Buffer.byteLength(part, 'utf8') > 255)) return false;
+        const prefixes = parts.slice(1).map((_, i) => parts.slice(0, i + 1).join('/'));
+        // A file the bundle already placed on the way, at any depth: asked before the target is,
+        // because an absent directory below ends the walk early.
+        if (prefixes.some(prefix => fileKeys.has(prefix))) return false;
+        for (const prefix of prefixes) {
           const kind = kindOf(prefix);
           if (kind === 'absent') return !dirKeys.has(rel);   // everything below is made fresh
           if (kind !== 'dir') return false;

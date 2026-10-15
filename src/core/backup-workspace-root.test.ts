@@ -74,10 +74,16 @@ describe('backup — the workspace root', () => {
     expect(created.success).toBe(true);
     expect(readFileSync(join(created.path, 'workspace', 'http-api', 'a.txt')).includes('ZZ-secret')).toBe(false);
     rmSync(ws('http-api/a.txt'));
-    const restored = await encrypted.restoreBackup(created.path);
-    expect(restored.error).toBeUndefined();
+    // A backup that cannot be written to: a plaintext copy beside it would fail the restore.
+    if (!IS_ROOT) chmodSync(created.path, 0o500);
+    try {
+      const restored = await encrypted.restoreBackup(created.path);
+      expect(restored.error).toBeUndefined();
+    } finally {
+      chmodSync(created.path, 0o700);
+    }
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-secret');
-    expect(readdirSync(created.path).filter(n => n.includes('restore'))).toEqual([]);
+    expect(readdirSync(created.path).filter(n => n.endsWith('.tmp'))).toEqual([]);
   });
 
   it('skips a link and a FIFO, never follows them, and names them in the result (I2)', async () => {

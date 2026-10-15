@@ -11,9 +11,10 @@ import { ensureWorkspaceRoot, resolveWorkspaceRoot, WorkspaceRootError, type Wor
  *
  * The anchor is opened BY NAME from `resolveWorkspaceRoot()` and kept. It is reopened only when
  * the resolved root names another path (a test that switches the data directory, a reconfigured
- * root); a root removed or replaced under the same name is not reopened silently. A root moved
- * away and replaced (`mv`, a re-pointed link) throws here, before a backup copies the old
- * directory as if it were the workspace; one deleted throws `GONE` in every primitive operation.
+ * root); a root removed, moved away or replaced under the same name (`rm`, `mv`, a re-pointed
+ * link) is not reopened silently: this throws, before a backup copies the old directory as if it
+ * were the workspace. An anchor already handed out throws `GONE` in every primitive operation
+ * once its directory is deleted.
  */
 export interface WorkspaceAccess {
   readonly root: WorkspaceRoot;

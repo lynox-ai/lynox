@@ -303,6 +303,29 @@ describe('portable directories survive a migration', () => {
     expect(readFileSync(join(dstDir, 'workspace', 'n', 'z'), 'utf-8')).toBe('Z');
   });
 
+  it('workspace: a file the bundle placed earlier blocks a deeper path, even under a new directory (P18 D6)', () => {
+    const dstDir = tmp('lynox-pdwf-dst-');
+    mkdirSync(join(dstDir, 'workspace'), { recursive: true });
+    const b64 = (t: string): string => Buffer.from(t, 'utf-8').toString('base64');
+    const importer = importCraftedWith(dstDir, 'workspace', { 'n/x': b64('X'), 'n/x/y': b64('Y') });
+    expect(importer?.portableDirSkipped).toEqual(['workspace/n/x/y']);
+    expect(readFileSync(join(dstDir, 'workspace', 'n', 'x'), 'utf-8')).toBe('X');
+  });
+
+  it('workspace: a name the file system cannot store as given is skipped, the rest lands (P18 D6)', () => {
+    const dstDir = tmp('lynox-pdws-dst-');
+    mkdirSync(join(dstDir, 'workspace'), { recursive: true });
+    const b64 = (t: string): string => Buffer.from(t, 'utf-8').toString('base64');
+    const lone = 'k' + String.fromCharCode(0xd801);
+    const long = 'n'.repeat(300);
+    const importer = importCraftedWith(dstDir, 'workspace', {
+      'a.txt': b64('A'), [lone]: b64('L'), [`${String.fromCharCode(0xd800)}/y`]: b64('Y'), [`new/${long}`]: b64('N'), 'z.txt': b64('Z'),
+    });
+    expect([...(importer?.portableDirSkipped ?? [])].sort()).toEqual([`workspace/${String.fromCharCode(0xd800)}/y`, `workspace/${lone}`, `workspace/new/${long}`].sort());
+    expect(readFileSync(join(dstDir, 'workspace', 'a.txt'), 'utf-8')).toBe('A');
+    expect(readFileSync(join(dstDir, 'workspace', 'z.txt'), 'utf-8')).toBe('Z');
+  });
+
   it('workspace: the export names a file whose name cannot travel, never drops it silently (P18 D6)', () => {
     const srcDir = tmp('lynox-pdwx-src-');
     mkdirSync(join(srcDir, 'workspace'), { recursive: true });

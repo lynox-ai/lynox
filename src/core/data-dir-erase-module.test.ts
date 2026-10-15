@@ -357,12 +357,10 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     expect(readFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'utf8')).toBe('ZZ-old');
   });
 
-  it('leaves the default root to its anchor, also through a symlink, and neither removes nor flags it', () => {
-    const real = join(outside, 'ws');
-    mkdirSync(join(real, 'http-api'), { recursive: true });
-    writeFileSync(join(real, 'http-api', 'a.txt'), 'ZZ-a');
-    symlinkSync(real, join(dir, 'workspace'));
-    const ws = defaultRoot(real);
+  it('leaves the default root to its anchor, and neither removes nor flags it', () => {
+    mkdirSync(join(dir, 'workspace', 'http-api'), { recursive: true });
+    writeFileSync(join(dir, 'workspace', 'http-api', 'a.txt'), 'ZZ-a');
+    const ws = defaultRoot(join(dir, 'workspace'));
     const scan = scanDataDir(dir, { workspace: ws });
     expect(scan.linked).toEqual([]);
     expect(scan.emptiedInPlace).toContain('workspace');
@@ -370,9 +368,30 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     const out = removeOwedEntries(scan, [], undefined, ws);
     expect(out.removed).not.toContain('workspace');
     expect(out.failures).toEqual([]);
-    // Neither the link nor the root behind it was touched by name.
-    expect(lstatSync(join(dir, 'workspace')).isSymbolicLink()).toBe(true);
-    expect(readFileSync(join(real, 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-a');
+    expect(readFileSync(join(dir, 'workspace', 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-a');
+  });
+
+  it('refuses a default root that is a symlink, as before: its content is at the target', () => {
+    const real = join(outside, 'ws');
+    mkdirSync(real);
+    symlinkSync(real, join(dir, 'workspace'));
+    const scan = scanDataDir(dir, { workspace: defaultRoot(real) });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/symbolic link/);
+    expect(scan.emptiedInPlace).not.toContain('workspace');
+  });
+
+  it('refuses a default root that is a mount point, as before: its content is on another filesystem', () => {
+    mkdirSync(join(dir, 'workspace'));
+    const real = statSync(dir);
+    const mountAt = (p: string): ReturnType<typeof statSync> => {
+      const st = lstatSync(p);
+      return p.endsWith('/workspace') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: real.dev + 1 }) : st;
+    };
+    const scan = scanDataDir(dir, { workspace: defaultRoot(join(dir, 'workspace')), lstat: mountAt });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/mount point/);
+    expect(scan.emptiedInPlace).not.toContain('workspace');
   });
 
   it('refuses the whole erasure when the anchor walk finds a mount below the root (I1e)', () => {

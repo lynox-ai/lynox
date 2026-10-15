@@ -273,18 +273,19 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
     const cls = classifyEntry(name, { externalWorkspace: ws?.external === true });
     if (cls.kind === 'litter') { litter.push(name); continue; }
     const path = join(dir, name);
-    // The default root itself — possibly through a link — is emptied through the anchor, not
-    // removed by name: the root and the anchor the engine holds survive the erasure.
-    if (ws !== undefined && cls.kind === 'declared' && name === WORKSPACE && ws.isRoot(path)) {
-      emptiedInPlace.push(name);
-      continue;
-    }
     let st: Stats;
     try {
       st = lstat(path);
     } catch (err) {
       if (isGone(err)) continue;   // gone since the listing
       throw err;                   // the route answers 500, nothing erased
+    }
+    // The default root itself is emptied through the anchor, not removed by name: the root and
+    // the anchor the engine holds survive the erasure. A `<data>/workspace` that is a link or a
+    // mount point is not: its content is elsewhere, and it is refused below as before.
+    if (ws !== undefined && cls.kind === 'declared' && name === WORKSPACE && !st.isSymbolicLink() && st.dev === dev && ws.isRoot(path)) {
+      emptiedInPlace.push(name);
+      continue;
     }
     const inPlace = cls.kind === 'declared' && cls.entry.erase.by === 'step';
     if (cls.kind === 'unknown' || cls.kind === 'leftover') unknown.push(identityOf(name, st));

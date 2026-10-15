@@ -444,14 +444,11 @@ export class BackupManager {
         e => e.type !== 'directory' && existsSync(join(backupPath, e.path)) && isEncryptedBackupFile(join(backupPath, e.path)),
       );
       if (probe) {
-        const probeTmp = join(backupPath, '.keycheck.tmp');
         try {
-          rmSync(probeTmp, { force: true });
-          decryptFile(join(backupPath, probe.path), probeTmp, deriveBackupKey(this.vaultKey));
+          // In memory: no plaintext beside the backup, and a read-only backup is not taken for a wrong key.
+          decryptFileToBuffer(join(backupPath, probe.path), deriveBackupKey(this.vaultKey)).fill(0);
         } catch {
           return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Backup decryption failed — the vault key does not match this backup; refusing to restore (avoids partially overwriting live data).' };
-        } finally {
-          try { rmSync(probeTmp, { force: true }); } catch { /* best-effort cleanup */ }
         }
       }
     }
