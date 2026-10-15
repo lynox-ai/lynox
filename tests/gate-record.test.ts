@@ -1870,8 +1870,9 @@ describe('scripts/guard-patterns/ — vendored by the private repo', () => {
   // The private repo runs these files standalone; an import would break its copy, not this one.
   it.each(files)('%s imports nothing', (f) => {
     const src = readFileSync(fileURLToPath(new URL(f, dir)), 'utf8');
-    // Static import, dynamic import, re-export (`export … from`), require, getBuiltinModule.
+    // Static import, dynamic import, re-export (`export … from`, also over several lines), require,
+    // getBuiltinModule.
     // `import.meta` is not a dependency.
-    expect(src).not.toMatch(/^\s*import(?!\.meta)\b|\bimport\s*\(|^\s*export\b[^\n]*\bfrom\s*['"]|\brequire\s*\(|getBuiltinModule/m);
+    expect(src).not.toMatch(/^\s*import(?!\.meta)\b|\bimport\s*\(|\bexport\b[^;]*?\bfrom\s*['"]|\brequire\s*\(|getBuiltinModule/m);
   });
 });
