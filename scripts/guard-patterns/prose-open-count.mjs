@@ -61,6 +61,27 @@ const LINK_BOUNDED = /\]\((?:[^)\]]|\](?!\())*\)/g;
 
 const LINK = /\]\((?:<[^<>\n]*>|(?:[^\s)\]<]|\](?!\())*)(?:\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|\(((?:\\.|[^()\\])*)\)))?\s*\)/g;
 
+/**
+ * LINK with the target CommonMark also allows: backslash escapes (`\)`), balanced parentheses
+ * (`u(a(b))`, here up to five deep) and a `<` anywhere but first. A third reading, so a `)`
+ * inside the target is not left in the text between the two halves of a count the link splits.
+ */
+const PARENS = Array.from({ length: 4 }).reduce(
+  (inner) => String.raw`\((?:\\.|[^\s()\\]|${inner})*\)`, String.raw`\((?:\\.|[^\s()\\])*\)`);
+const LINK_NESTED = new RegExp(String.raw`\]\((?:<[^<>\n]*>|(?!<)(?:\\.|[^\s()\\\]]|\](?!\()|${PARENS})*)(?:\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|\(((?:\\.|[^()\\])*)\)))?\s*\)`, 'g');
+
+/**
+ * LINK_NESTED's first form: escapes and one level of parentheses, `<` excluded. Kept as a fourth
+ * reading because the wider form can match a longer span at an earlier `](` and swallow a real
+ * link this one strips.
+ */
+const LINK_ESCAPED = /\]\((?:<[^<>\n]*>|(?:\\.|[^\s()\\\]<]|\](?!\()|\((?:\\.|[^\s()\\])*\))*)(?:\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|\(((?:\\.|[^()\\])*)\)))?\s*\)/g;
+
+/** Numeric entities decoded, as `readable` does before it strips links. */
+const decodeNumeric = (s) => s
+  .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
+  .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)));
+
 /** An entity's character; one outside Unicode is a space, never a thrown RangeError. */
 const codePoint = (n) => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ');
 
@@ -88,10 +109,8 @@ export function proseOpenCountLines(body) {
     return String((ch.codePointAt(0) - start) % 10);
   };
   const readable = (raw, fold, link) => {
-    const decoded = raw
-      .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
-      .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
-      .replace(/&#(\d+);/g, (_, d) => codePoint(Number(d)))
+    const decoded = decodeNumeric(raw
+      .replace(/<\/?[A-Za-z!][^<>]*>/g, ' '))
       .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ');
     // Again after decoding: an entity can name a fullwidth digit, and digits of other scripts go
     // to ASCII. Optional, because the fold can also glue a decoded character onto a count
@@ -108,12 +127,18 @@ export function proseOpenCountLines(body) {
     // the count. As PUBLISHED, its markers go and its text stays — the raw body (API, edit view)
     // is public, so `<!-- <n> findings filed -->` is too. A count in any view is a hit.
     // A link's title is not shown in the text, but the raw body carries it: each title is a view
-    // of its own. Never joined — two titles must not form one count.
-    const titles = [...joined.matchAll(LINK)].map((m) => m[1] ?? m[2] ?? m[3]).filter((t) => t);
+    // of its own. Never joined — two titles must not form one count. Titles are also taken after
+    // numeric entities are decoded: `readable` decodes before it strips, so a `&#34;`-quoted
+    // count would otherwise go as a title no view reads.
+    const titles = new Set([joined, decodeNumeric(joined)].flatMap((v) => [LINK, LINK_NESTED, LINK_ESCAPED].flatMap((re) =>
+      [...v.matchAll(re)].map((m) => m[1] ?? m[2] ?? m[3]).filter((t) => t))));
     const views = [joined, joined.replace(/<!--|-->/g, ' '), ...titles];
-    // Every view is read with both link readings (see LINK_BOUNDED), folded and not.
-    const hit = views.some((v) => [true, false].some((fold) => [LINK, LINK_BOUNDED].some((link) =>
-      PROSE_OPEN_COUNT.test(readable(v, fold, link)))));
+    // Every view is read with every link reading (LINK, LINK_BOUNDED, LINK_NESTED, LINK_ESCAPED),
+    // folded and not, and once more with the links stripped BEFORE `readable` decodes entities and
+    // turns tags into spaces: `u&#41;` would end the target early, `u(<i>)` would break it.
+    const hit = views.some((v) => [true, false].some((fold) => [LINK, LINK_BOUNDED, LINK_NESTED, LINK_ESCAPED].some((link) =>
+      PROSE_OPEN_COUNT.test(readable(v, fold, link))
+        || PROSE_OPEN_COUNT.test(readable(v.replace(link, ''), fold, link)))));
     if (para.length > 0 && hit) hits.push(para[0].n);
     para = [];
   };

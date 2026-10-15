@@ -2064,3 +2064,69 @@ describe('proseOpenCountLines — the parentheses after a link', () => {
       expect(performance.now() - start).toBeLessThan(1_500);
     });
 });
+
+describe('proseOpenCountLines — escapes and parentheses inside a link', () => {
+  // The count is assembled, so this file carries no literal count for a text check to read.
+  const W = 'findings';
+  const V = 'filed';
+
+  it.each([
+    ['balanced parentheses in the target', `[2](https://example.invalid/a(b)) ${W} ${V}`],
+    ['balanced parentheses and a title', `[2](https://example.invalid/a(b) "t") ${W} ${V}`],
+    ['an escaped `)` in the target', `[2](https://example.invalid/a\\)) ${W} ${V}`],
+    ['an empty link text', `2 [](https://example.invalid/a(b)) ${W} ${V}`],
+    ['an image as the link text', `[![2](https://example.invalid/i(b).png)](https://example.invalid/a) ${W} ${V}`],
+    ['parentheses two deep', `[2](https://example.invalid/u(a(b))) ${W} ${V}`],
+    ['parentheses five deep and a title', `[2](u(a(b(c(d(e))))) "t") ${W} ${V}`],
+    ['an escape inside parentheses', `[2](u(a\\)b)) ${W} ${V}`],
+    ['a `<` after the first character', `[2](a<(b)) ${W} ${V}`],
+    ['a `<` and an escape', `[2](a<b\\)) ${W} ${V}`],
+    ['a `)` as an entity', `[2](u&#41;) ${W} ${V}`],
+    ['a `(` as an entity before parentheses', `[2](a&#40;b(c)) ${W} ${V}`],
+    ['a (paren) title after parentheses', `[2](u(b) (t)) ${W} ${V}`],
+    ['a tag inside parentheses', `[2](u(<i>)) ${W} ${V}`],
+    ['a comment inside parentheses and a title', `[2](u(<!--x-->) "t") ${W} ${V}`],
+    ['a named space entity inside parentheses', `[2](u(a&nbsp;b)) ${W} ${V}`],
+  ])('reads a count split by a link with %s', (_label, body) => {
+    expect(proseOpenCountLines(body)).toEqual([1]);
+  });
+
+  it.each([
+    ['decimal', '&#34;'],
+    ['hex', '&#x22;'],
+    ['hex, upper case', '&#X22;'],
+  ])('reads a count between %s quote entities in link parentheses', (_label, q) => {
+    expect(proseOpenCountLines(`See [a](https://example.invalid/b ${q}2 ${W} ${V}${q}) here.`)).toEqual([1]);
+  });
+
+  // A title the tag strip would take with its surroundings is read as its own view, for each
+  // link reading that finds it.
+  it.each([
+    ['after parentheses', `[<i a](u(b) '2 ${W} ${V}') >`],
+    ['after a `<` LINK refuses', `[a](u(<b) '2 ${W} ${V}') x >`],
+    ['after parentheses two deep', `[<i a](u(a(b)) '2 ${W} ${V}') >`],
+  ])('reads a count in a title inside a tag %s', (_label, body) => {
+    expect(proseOpenCountLines(body)).toEqual([1]);
+  });
+
+  // The wider target must not swallow a real link that the narrower one strips.
+  it.each([
+    ['a `<`', `x](a<b '[2](c(d)') ${W} ${V}`],
+    ['nested parentheses', `x](a(b(c)) '[2](c(d)') ${W} ${V}`],
+  ])('reads a link inside a stray target with %s', (_label, body) => {
+    expect(proseOpenCountLines(body)).toEqual([1]);
+  });
+
+  it('passes such links without a count', () => {
+    expect(proseOpenCountLines('See [a](https://example.invalid/a(b)) and [c](d\\) "e").')).toEqual([]);
+    expect(proseOpenCountLines('See [a](https://example.invalid/b &#34;Docs&#34;).')).toEqual([]);
+  });
+
+  it.each(['](a(b)', '](a(', '](a\\', '](a(b', '](a(\\', '](&#34;', '](a &#34;', '](a(b) "', '[a](b &#34;c&#34;) ',
+    '](a((((', '](a<(', '](a&#41;'])(
+    'reads 40,000 × %j in one pass', (shape) => {
+      const start = performance.now();
+      proseOpenCountLines(shape.repeat(40_000));
+      expect(performance.now() - start).toBeLessThan(1_500);
+    });
+});
