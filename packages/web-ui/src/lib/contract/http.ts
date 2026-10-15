@@ -522,10 +522,10 @@ export interface OAuthRefreshResponse {
   /**
    * Present only when the provider rotated the refresh token. Google may do so
    * on any refresh; Microsoft does so on every one. The engine must replace its
-   * stored handle when this appears. What happens otherwise differs: Google
-   * invalidates the old token, so the next refresh fails; Microsoft leaves the
-   * old one valid until its own lifetime ends, so a handle that is not replaced
-   * fails later and without warning.
+   * stored handle when this appears. For Google, the next refresh would
+   * otherwise present a handle Google has already invalidated. Microsoft leaves
+   * the old token valid until its own lifetime ends, so a handle that is not
+   * replaced fails later and without warning.
    */
   refresh_handle?: string;
 }
