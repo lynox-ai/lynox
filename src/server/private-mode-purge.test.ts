@@ -188,7 +188,8 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     // What the switch's text (`threads.private_on` / `private_off`) promises about the two
     // always-loaded blocks: profile and playbook stay, except the profile lines setup seeded
     // in this chat (the seed is recorded as the onboarding promotion records it). A line the
-    // user wrote, or applied from a chat, has no seed and stays.
+    // user wrote, or applied from a chat, has no seed and stays — unless the one-time seed
+    // backfill on an older install matched it to an entry's text.
     const { ts, ks } = stores();
     const seededLine = 'Ruedi Kalt prefers mail to calls';
     const ownLine = 'Ruedi Kalt works four days a week';
