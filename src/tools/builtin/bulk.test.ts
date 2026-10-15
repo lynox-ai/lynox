@@ -160,6 +160,14 @@ describe('bulk_plan over workspace files', () => {
     set(0.004, null);
     expect(await status()).toContain('Model spend: < $0.01, no limit set.');
 
+    // Rounded down: a run just under its limit does not read as having reached it.
+    set(1.996, 2);
+    expect(await status()).toContain('Model spend: $1.99 of a $2.00 limit.');
+
+    // A value no booking can produce is not printed as an amount.
+    set(-0.004, 1);
+    expect(await status()).toContain('Model spend: (unknown) of a $1.00 limit.');
+
     // A limit with nothing spent yet still shows.
     set(0, 1.5);
     expect(await status()).toContain('Model spend: $0.00 of a $1.50 limit.');

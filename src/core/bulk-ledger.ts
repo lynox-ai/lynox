@@ -149,7 +149,9 @@ export interface BulkRunStatus {
   /** A list run's source and how far its read got; null on any other run. Planner-authored
    *  and engine-counted only — nothing the list's provider returned. */
   list: BulkListStatus | null;
-  /** Model spend booked for this run, in USD (PRD bulk-loop §3.3): actual, not estimated.
+  /** Model spend booked for this run, in USD (PRD bulk-loop §3.3): what the calls were
+   *  charged at, not the estimate made before each call. A model without a registered
+   *  price is charged at the fallback rate, so there the booking is an estimate too.
    *  0 for a run that called no model. */
   costUsd: number;
   /** The most this run may spend on model calls, set by the owner at the start of a run

@@ -35,9 +35,13 @@ interface BulkStatusInput {
   run_id?: string | undefined;
 }
 
-/** USD to the cent, at least one cent shown as such: spend under a cent is not "$0.00". */
-function formatUsd(usd: number): string {
-  return usd > 0 && usd < 0.01 ? '< $0.01' : `$${usd.toFixed(2)}`;
+/** USD to the cent. Spend is rounded DOWN, so a run just under its limit never reads as
+ *  having reached it; spend under a cent is "< $0.01", not "$0.00". */
+function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
+  if (!Number.isFinite(usd) || usd < 0) return '(unknown)';
+  if (usd > 0 && usd < 0.01) return '< $0.01';
+  const cents = round === 'down' ? Math.floor(usd * 100 + 1e-9) : Math.round(usd * 100);
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function formatStatus(s: BulkRunStatus): string {
@@ -57,7 +61,7 @@ function formatStatus(s: BulkRunStatus): string {
   }
   // Model spend exists only on a run with a judge; every other run would print "$0" here.
   if (s.costUsd > 0 || s.costCapUsd !== null) {
-    lines.push(`Model spend: ${formatUsd(s.costUsd)}${s.costCapUsd !== null ? ` of a ${formatUsd(s.costCapUsd)} limit` : ', no limit set'}.`);
+    lines.push(`Model spend: ${formatUsd(s.costUsd, 'down')}${s.costCapUsd !== null ? ` of a ${formatUsd(s.costCapUsd)} limit` : ', no limit set'}.`);
   }
   if (s.writeMethod !== null) {
     lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);

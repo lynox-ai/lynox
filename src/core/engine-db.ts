@@ -1113,7 +1113,9 @@ const MIGRATIONS: string[] = [
    ALTER TABLE audit_log ADD COLUMN recorded_at TEXT;`,
 
   // v35: what a bulk run spent on model calls, and the most it may spend (PRD bulk-loop §3.3).
-  // `cost_usd` is booked spend in USD, not an estimate; 0 on every run that called no model,
+  // `cost_usd` is booked spend in USD — what the calls were charged at, not the estimate made
+  // before each call (a model without a registered price is charged at the fallback rate,
+  // so on such a model the booking is itself an estimate); 0 on every run that called no model,
   // which is every run before the judge. `cost_cap_usd` is the owner's limit, set when a run
   // with a judge is started; NULL means none was set.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (35);
