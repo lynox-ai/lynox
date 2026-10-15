@@ -84,33 +84,32 @@ describe('workspace root', () => {
     });
   });
 
-  describe('an external root is refused by this engine (I7)', () => {
-    it('refuses a root that is another directory, naming both', () => {
+  describe('an external root is accepted (P18-2)', () => {
+    it('a root that is another directory is external, and the context lives under it', () => {
       const other = join(tmp, 'volume');
       mkdirSync(other);
       mkdirSync(byName);
       process.env['LYNOX_WORKSPACE_ROOT'] = other;
-      expect(() => resolveWorkspaceRoot()).toThrow(WorkspaceRootError);
-      expect(() => resolveWorkspaceRoot()).toThrow(`LYNOX_WORKSPACE_ROOT names ${other}, a workspace root other than ${byName}. This engine version does not support that`);
-      expect(() => ensureWorkspaceRoot()).toThrow(WorkspaceRootError);
-      expect(() => contextDir()).toThrow(WorkspaceRootError);
-      expect(() => getFileAreaDir()).toThrow(WorkspaceRootError);
+      expect(resolveWorkspaceRoot()).toEqual({ path: other, mode: 'external' });
+      expect(ensureWorkspaceRoot()).toEqual({ path: other, mode: 'external' });
+      expect(contextDir()).toBe(join(other, 'http-api'));
+      expect(getFileAreaDir()).toBe(other);
     });
 
-    it('refuses it when <data>/workspace does not exist (the state after a move)', () => {
+    it('also when <data>/workspace does not exist (the state after a move)', () => {
       const other = join(tmp, 'volume');
       mkdirSync(other);
       process.env['LYNOX_WORKSPACE_ROOT'] = other;
-      expect(() => resolveWorkspaceRoot()).toThrow('a workspace root other than');
+      expect(resolveWorkspaceRoot()).toEqual({ path: other, mode: 'external' });
     });
 
-    it('with the seam open, an external root is its realpath', () => {
+    it('an external root is its realpath', () => {
       const other = join(tmp, 'volume');
       mkdirSync(other);
       const link = join(tmp, 'volume-link');
       symlinkSync(other, link);
       process.env['LYNOX_WORKSPACE_ROOT'] = link;
-      expect(resolveWorkspaceRoot({ allowExternal: true })).toEqual({ path: other, mode: 'external' });
+      expect(resolveWorkspaceRoot()).toEqual({ path: other, mode: 'external' });
     });
   });
 

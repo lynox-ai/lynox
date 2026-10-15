@@ -85,13 +85,24 @@ describe('Engine boot — workspace root', () => {
     expect(statSync(join(target, 'http-api')).isDirectory()).toBe(true);
   });
 
-  it('refuses to start on an external root (I7)', async () => {
+  it('boots on an external root, with the context and the anchor under it (P18-2)', async () => {
+    dataDir();
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-wsrootboot-ext-')));
+    dirs.push(other);
+    setEnv('LYNOX_WORKSPACE_ROOT', other);
+    await boot();
+    expect(getWorkspaceDir()).toBe(join(other, 'http-api'));
+    expect(statSync(join(other, 'http-api')).mode & 0o777).toBe(0o700);
+    expect(fstatSync(workspaceAccess().anchor.fd).ino).toBe(statSync(other).ino);
+  });
+
+  it('refuses to start on an external root inside the data directory', async () => {
     const data = dataDir();
     const other = join(data, 'volume');
     mkdirSync(other);
     setEnv('LYNOX_WORKSPACE_ROOT', other);
     await expect(boot()).rejects.toThrow(WorkspaceRootError);
-    await expect(boot()).rejects.toThrow('This engine version does not support that');
+    await expect(boot()).rejects.toThrow('inside the data directory');
   });
 
   it.skipIf(IS_ROOT)('refuses to start when the root cannot be read, naming the root (I11; skipped as root)', async () => {

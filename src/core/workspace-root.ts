@@ -18,9 +18,9 @@ import { getLynoxDir } from './config.js';
  * string the engine used before; the realpath only decides identity. An external root is returned
  * as its realpath.
  *
- * This engine does not accept an external root yet: the backup, the migration export and the
- * Art. 17 erase still reach the workspace as `<data>/workspace`, so files under another root would
- * be missing from all three. It refuses instead of starting.
+ * Backup, migration and the Art. 17 erasure reach the root through its anchor
+ * (`workspace-access.ts`), so an external root is covered by all three. The anchor refuses the
+ * roots the erasure must never empty (see `workspaceAccess`).
  */
 
 export type WorkspaceRootMode = 'default' | 'external';
@@ -38,8 +38,8 @@ export class WorkspaceRootError extends Error {
   }
 }
 
-/** Whether this engine accepts an external root. Off until backup, export and erase reach it. */
-const EXTERNAL_ROOT_SUPPORTED = false;
+/** Whether this engine accepts an external root. Backup, export and erase reach it through its anchor. */
+const EXTERNAL_ROOT_SUPPORTED = true;
 
 /** `<data>/workspace`, the default root by name. */
 export function defaultWorkspaceRootPath(): string {
