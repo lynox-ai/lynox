@@ -108,6 +108,9 @@ describe('what it warns about', () => {
       '// an approval for PATCH does not cover a POST with a PATCH override',
       '// a schedule the owner took over is not held again by a later change of the owner\'s own',
       '// the next change to the file bumps its version',
+      '// re-renders with the next change to the store',
+      '// kept in a separate piece of memory',
+      '// not covered → coverage falls below the bar',
     ]) {
       expect(kindOf(line), line).toBeNull();
     }
@@ -282,6 +285,10 @@ describe('proseWarnings — pull-request text and commit messages', () => {
     expect(proseWarnings('Findings filed privately; the rest is its own PR.')).toEqual([
       { line: 1, kind: 'marks work as put off' },
     ]);
+    // Only `findings` filed privately: a named thing filed privately still names it.
+    for (const named of ['The token-refresh race is filed privately.', 'a gap filed privately in the register', 'The rest is filed privately for later.']) {
+      expect(proseWarnings(named), named).toEqual([{ line: 1, kind: 'marks work as put off' }]);
+    }
     // Control: `filed` without `privately` still warns.
     expect(proseWarnings('The rest is filed.')).toEqual([{ line: 1, kind: 'marks work as put off' }]);
   });

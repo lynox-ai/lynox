@@ -598,7 +598,11 @@ export function openWorkWarnings({ title = '', body = '', commits = [] } = {}) {
   return out;
 }
 
-/** Commit messages from `git log --format='%h%x1f%B%x1e'`: one record per commit. */
+/**
+ * Commit messages from `git log --format='%h%x1f%B%x1e'`: one record per commit. A message
+ * may itself contain the separator bytes, so a record counts only when what stands before
+ * its `\x1f` is a hex SHA: the SHA is printed in the warning, and author text must not be.
+ */
 export function parseCommits(text) {
   return String(text ?? '')
     .split('\x1e')
@@ -606,7 +610,8 @@ export function parseCommits(text) {
     .map((r) => {
       const i = r.indexOf('\x1f');
       return { sha: r.slice(0, i).trim(), message: r.slice(i + 1) };
-    });
+    })
+    .filter((c) => /^[0-9a-f]{4,40}$/.test(c.sha));
 }
 
 export function evaluate(input) {

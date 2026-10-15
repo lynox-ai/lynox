@@ -2394,6 +2394,10 @@ describe('gate-record — wording about open work in title, body and commit mess
       { sha: 'def5678', message: 'Second\n' },
     ]);
     expect(parseCommits('')).toEqual([]);
+    // A message may carry the separator bytes. Whatever follows them is not a commit, and its
+    // text never becomes the SHA that the warning prints.
+    const forged = 'a38223e\x1finnocent\x1e\nzzz\n::error::forged\x1fWhat this does not cover\n\x1e\n';
+    expect(parseCommits(forged)).toEqual([{ sha: 'a38223e', message: 'innocent' }]);
   });
 
   it('the CLI prints the warning as a workflow annotation and exits 0', () => {
