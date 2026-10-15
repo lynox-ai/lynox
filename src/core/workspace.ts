@@ -52,8 +52,9 @@ export function getFileAreaDir(): string {
  * `GET /api/files/download` (http-api.ts) and the media_process tool — so a
  * file read for either path is confined identically. Callers that require an
  * existing file must `stat` the result themselves; a not-yet-existing path
- * passes the logical containment check (the real-path check is skipped when the
- * file is absent, exactly as the download endpoint does).
+ * is checked through its closest existing ancestor, so a missing leaf under a
+ * symlink that points out of the area is refused like an existing one, and a
+ * dangling symlink is refused wherever it points.
  */
 export function resolveFileAreaPath(filePath: string): string | null {
   const base = getFileAreaDir();
@@ -64,17 +65,50 @@ export function resolveFileAreaPath(filePath: string): string | null {
   // the base too: if the base itself contains a symlinked component (macOS
   // /tmp -> /private/tmp, a symlinked $HOME, or a symlinked Docker volume),
   // realpath(resolved) would otherwise mismatch the literal base and
-  // false-reject every legitimate in-area path. realpathSync(base) may throw
-  // if the base hasn't been created yet — fall back to the literal base.
-  try {
-    let realBase = base;
-    try { realBase = realpathSync(base); } catch { /* base not created yet */ }
-    const real = realpathSync(resolved);
-    if (real !== realBase && !real.startsWith(realBase + '/')) return null;
-  } catch {
-    // File doesn't exist yet — logical path check above is sufficient.
-  }
+  // false-reject every legitimate in-area path. A base that hasn't been created
+  // yet is canonicalized the same way as the path, through its closest ancestor.
+  const realBase = realpathOfClosestExisting(base) ?? base;
+  const real = realpathOfClosestExisting(resolved);
+  if (real === null) return null;
+  if (real !== realBase && !real.startsWith(realBase + '/')) return null;
   return resolved;
+}
+
+/** True only when `lstat` says the name is not there; any other answer counts as present. */
+function isAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+/**
+ * The real path of `path`, or — when its leaf does not exist yet — the real path of its closest
+ * existing ancestor with the missing rest re-attached. Null for a dangling symlink and for any
+ * other failure (a component that is a file, an unreadable directory, a link loop): accepting
+ * the logical path there let a symlink out of the area answer differently for files and
+ * directories behind it.
+ */
+function realpathOfClosestExisting(path: string): string | null {
+  let probe = path;
+  let tail = '';
+  for (;;) {
+    try {
+      const real = realpathSync(probe);
+      return tail === '' ? real : join(real, tail);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      // ENOENT for a name that exists is a dangling symlink: its target is missing, wherever it
+      // points. Refused, or the answer would say whether that target exists outside the area.
+      if (!isAbsent(probe)) return null;
+      const parent = dirname(probe);
+      if (parent === probe) return null;
+      tail = tail === '' ? basename(probe) : join(basename(probe), tail);
+      probe = parent;
+    }
+  }
 }
 
 /**

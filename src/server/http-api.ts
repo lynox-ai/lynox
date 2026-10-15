@@ -12343,6 +12343,8 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const dirPath = url.searchParams.get('path') ?? '.';
       const showHidden = url.searchParams.get('hidden') === '1';
+      // A NUL byte is the caller's mistake, not the server's: refused before the filesystem sees it.
+      if (dirPath.includes('\0')) { errorResponse(res, 400, 'Invalid path'); return; }
       try {
         const { readdir, stat, access } = (await import('node:fs/promises'));
         const { join } = await import('node:path');
@@ -12360,14 +12362,28 @@ export class LynoxHTTPApi {
         if (target === null) { errorResponse(res, 403, 'Outside workspace'); return; }
         const dirEntries = await readdir(target, { withFileTypes: true });
         const filtered = dirEntries.filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
-        const entries = await Promise.all(filtered.map(async e => ({
-          name: e.name,
-          isDirectory: e.isDirectory(),
-          size: e.isFile() ? (await stat(join(target, e.name))).size : 0,
-        })));
-        jsonResponse(res, 200, { path: dirPath, entries });
-      } catch {
-        jsonResponse(res, 200, { path: dirPath, entries: [] });
+        const listed = await Promise.all(filtered.map(async e => {
+          let size = 0;
+          if (e.isFile()) {
+            try {
+              size = (await stat(join(target, e.name))).size;
+            } catch (err) {
+              // Removed between readdir and stat: it is gone, so it is not listed.
+              if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+              throw err;
+            }
+          }
+          return { name: e.name, isDirectory: e.isDirectory(), size };
+        }));
+        jsonResponse(res, 200, { path: dirPath, entries: listed.filter(e => e !== null) });
+      } catch (err) {
+        // An empty 200 here read as "the folder is empty" while the files were there, so a
+        // failure is answered as one.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') { errorResponse(res, 404, 'Directory not found'); return; }
+        if (code === 'ENOTDIR') { errorResponse(res, 400, 'Not a directory'); return; }
+        console.error(`[lynox] GET /api/files failed: ${code ?? (err instanceof Error ? err.message : String(err))}`);
+        errorResponse(res, 500, 'Could not read the directory');
       }
     }, free('creates the workspace directory when it is missing, and only reads otherwise'));
 

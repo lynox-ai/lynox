@@ -6,7 +6,7 @@ import { request as httpRequest, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
@@ -12883,6 +12883,61 @@ describe('LynoxHTTPApi', () => {
     it('rejects plain path traversal with 403', async () => {
       const res = await jsonFetch('/api/files?path=../../etc');
       expect(res.status).toBe(403);
+    });
+
+    it('answers every path behind an escaping symlink with 403, so files and directories out there look alike', async () => {
+      mkdirSync(join(externalDir, 'sub'), { recursive: true });
+      // Missing leaf, a file used as a directory, a directory, and a missing nested path: all
+      // outside the workspace, all the same answer. Before, the missing ones got past the realpath
+      // check, and a 400 for the file against a 404 for the rest told them apart.
+      for (const p of ['escape/nope', 'escape/secret.txt/x', 'escape/sub', 'escape/sub/x/y']) {
+        expect(`${p} → ${String((await jsonFetch(`/api/files?path=${encodeURIComponent(p)}`)).status)}`).toBe(`${p} → 403`);
+      }
+      // A dangling link inside the workspace: refused whether or not its target exists, so the
+      // answer says nothing about the outside path it names.
+      symlinkSync(join(externalDir, 'gone'), join(base, 'dangle'));
+      try {
+        for (const p of ['dangle', 'dangle/x']) {
+          expect(`${p} → ${String((await jsonFetch(`/api/files?path=${encodeURIComponent(p)}`)).status)}`).toBe(`${p} → 403`);
+        }
+      } finally { rmSync(join(base, 'dangle'), { force: true }); }
+      // Twin: the same shapes inside the workspace are not refused.
+      expect((await jsonFetch('/api/files?path=safe/nope')).status).toBe(404);
+      expect((await jsonFetch('/api/files?path=safe/ok.txt/x')).status).toBe(403);
+    });
+
+    it('answers a NUL byte in the path with 400, not as a server failure', async () => {
+      const res = await jsonFetch('/api/files?path=safe%00x');
+      expect(res.status).toBe(400);
+    });
+
+    it('answers a missing directory with 404, not an empty listing', async () => {
+      const res = await jsonFetch('/api/files?path=no-such-dir');
+      expect(res.status).toBe(404);
+    });
+
+    it('answers a file path with 400, not an empty listing', async () => {
+      const res = await jsonFetch('/api/files?path=safe/ok.txt');
+      expect(res.status).toBe(400);
+    });
+
+    // Root reads through mode bits, so the fixture cannot fail there: skipped, visibly.
+    it.skipIf(process.getuid?.() === 0)('answers an unreadable directory with 500, not an empty listing', async () => {
+      const locked = join(base, 'locked');
+      mkdirSync(locked);
+      writeFileSync(join(locked, 'kept.txt'), 'still here');
+      chmodSync(locked, 0o000);
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await jsonFetch('/api/files?path=locked');
+        expect(res.status).toBe(500);
+        // The log line carries the error code, not the path.
+        const lines = logged.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('GET /api/files failed'));
+        expect(lines).toEqual(['[lynox] GET /api/files failed: EACCES']);
+      } finally {
+        logged.mockRestore();
+        chmodSync(locked, 0o700);
+      }
     });
   });
 });
