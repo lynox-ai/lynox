@@ -13,8 +13,8 @@ copies. Within a day the copy here had grown five forms the other did not catch.
 | `prose-open-count.mjs` | `scripts/gate-record.mjs` | an open-findings COUNT in a PR body's prose |
 
 Rules — the same as for `src/contract/`, because the same lock depends on them:
-- **Dependency-free.** No imports from outside this directory. The private repo runs these files
-  standalone.
+- **Dependency-free.** No imports at all, not even from this directory or from `node:`; no
+  re-exports and no `getBuiltinModule`. The private repo runs these files standalone.
 - **No eol normalisation, no `.gitattributes`, no formatter** on this path: the lock compares
   git blob hashes.
 - **A change here is never local.** After it merges, the private repo has to sync; until then its

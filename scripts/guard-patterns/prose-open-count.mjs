@@ -5,7 +5,7 @@
 
 /**
  * An open-findings COUNT in the body's PROSE. The record's fields are held to
- * `openFiledCount` below; this is the same rule for the sentences around them, which until now
+ * `openFiledCount` in gate-record.mjs; this is the same rule for the sentences around them, which until now
  * only a manual run of the private repo's text check read. Measured before it existed: a valid
  * record plus the sentence "the security round left 2 findings filed in the register" was green.
  *

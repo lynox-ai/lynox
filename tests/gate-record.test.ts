@@ -1857,7 +1857,8 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
 
 describe('scripts/guard-patterns/ — vendored by the private repo', () => {
   const dir = new URL('../scripts/guard-patterns/', import.meta.url);
-  const files = readdirSync(fileURLToPath(dir)).filter((f) => f.endsWith('.mjs'));
+  // Every file but the README is vendored and run, whatever its extension.
+  const files = readdirSync(fileURLToPath(dir)).filter((f) => f !== 'README.md');
 
   it('holds the prose scanner gate-record runs', async () => {
     expect(files).toContain('prose-open-count.mjs');
@@ -1868,6 +1869,8 @@ describe('scripts/guard-patterns/ — vendored by the private repo', () => {
   // The private repo runs these files standalone; an import would break its copy, not this one.
   it.each(files)('%s imports nothing', (f) => {
     const src = readFileSync(fileURLToPath(new URL(f, dir)), 'utf8');
-    expect(src).not.toMatch(/^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
+    // Static import, dynamic import, re-export (`export … from`), require, getBuiltinModule.
+    // `import.meta` is not a dependency.
+    expect(src).not.toMatch(/^\s*import(?!\.meta)\b|\bimport\s*\(|\bfrom\s*['"]|\brequire\s*\(|getBuiltinModule/m);
   });
 });
