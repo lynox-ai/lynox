@@ -1839,6 +1839,10 @@ describe('RunHistory', () => {
         startIso: '2026-04-10T00:00:00.000Z', endIso: '2026-04-12T00:00:00.000Z', source: 'rolling', label: '2d',
       });
       expect(m.daily.map((d) => d.date)).toEqual(['2026-04-10', '2026-04-11']);
+      // A bound that is no date gives no buckets, and does not throw.
+      for (const [startIso, endIso] of [['2026-04-10T00:00:00.000Z', ''], ['', '2026-04-12T00:00:00.000Z']]) {
+        expect(h.getUsageSummary({ startIso: startIso!, endIso: endIso!, source: 'rolling', label: 'x' }).daily).toEqual([]);
+      }
     });
 
     it('a run list from an ISO date keeps that day\'s runs', () => {

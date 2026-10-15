@@ -2482,9 +2482,12 @@ export class RunHistory {
     // mid-day (rolling, or a billing period) ends on that day, not before it. Stepping from the
     // start's time of day stopped one step short and left the last day's spend out of `daily`
     // and `used_cents` while `by_model` counted it.
+    // A bound that is no date gives no buckets, as before, instead of throwing.
     const first = new Date(startIso.slice(0, 10) + 'T00:00:00.000Z');
-    const lastDay = new Date(new Date(endIso).getTime() - 1).toISOString().slice(0, 10);
-    for (let d = first; d.toISOString().slice(0, 10) <= lastDay; d.setUTCDate(d.getUTCDate() + 1)) {
+    const endMs = new Date(endIso).getTime();
+    const lastDay = Number.isFinite(endMs) && Number.isFinite(first.getTime())
+      ? new Date(endMs - 1).toISOString().slice(0, 10) : '';
+    for (let d = first; lastDay !== '' && d.toISOString().slice(0, 10) <= lastDay; d.setUTCDate(d.getUTCDate() + 1)) {
       const iso = d.toISOString().slice(0, 10);
       daily.push({ date: iso, cost_cents: Math.round((dailyMap.get(iso) ?? 0) * 100) });
     }
