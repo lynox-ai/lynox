@@ -192,4 +192,23 @@ describe('backup — the workspace root', () => {
     expect(paths).toContain('workspace/own.txt');
     expect(paths).not.toContain('workspace/http-api/engine.txt');
   });
+
+  it('with an external root, backs up the root and restores into it, never into <data>/workspace (I2)', async () => {
+    const ext = join(tmp, 'volume');
+    mkdirSync(join(ext, 'http-api'), { recursive: true });
+    writeFileSync(join(ext, 'http-api', 'a.txt'), 'ZZ-ext');
+    rmSync(join(data, 'workspace'), { recursive: true });
+    process.env['LYNOX_WORKSPACE_ROOT'] = ext;
+    _resetWorkspaceAccess();
+    const created = await manager().createBackup();
+    expect(created.success).toBe(true);
+    expect(created.manifest.files.map(f => f.path)).toContain('workspace/http-api/a.txt');
+
+    rmSync(join(ext, 'http-api', 'a.txt'));
+    const restored = await manager().restoreBackup(created.path);
+    expect(restored.error).toBeUndefined();
+    expect(restored.success).toBe(true);
+    expect(readFileSync(join(ext, 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-ext');
+    expect(existsSync(join(data, 'workspace'))).toBe(false);
+  });
 });
