@@ -3043,6 +3043,7 @@ const RELEASE_OBSTACLE_TEXT: Record<ReleaseObstacle, string> = {
   protected: 'it is a provider key or an infrastructure secret.',
   token: 'it is a connection\'s token, which only the profile holding the connection reads.',
   'not-sent': 'the engine does not send it for this profile. Only a credential the engine attaches can be released: the client pair of an OAuth profile, the two halves of a split Basic credential, or the first vault key of a bearer or header profile.',
+  'not-https': 'the profile would send it to an address that is not https. A released value goes only over https.',
   preset: 'a profile of a built-in provider reads it, and its credentials go to that provider only.',
   'other-mandate': 'a profile set up in another mandate\'s session reads it.',
 };

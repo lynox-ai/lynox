@@ -459,6 +459,26 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
     expect(releaseBinding(p, 'OWNER_KEY')).toBeNull();
   });
 
+  // Every place the value goes must be https: the base the engine attaches it to, and for an
+  // OAuth client pair the token endpoint it is posted to.
+  it.each([
+    ['a bearer profile on plain http', () => mb({ base_url: 'http://mb.example/v1' }), 'OWNER_KEY'],
+    ['an OAuth profile whose token endpoint is plain http', () => oauthP({ token_url: 'http://oa.example/token' }), 'OWNER_SECRET'],
+    ['an OAuth profile whose base is plain http', () => oauthP({}, { base_url: 'http://oa.example' }), 'OWNER_SECRET'],
+  ] as const)('never releases a name it would send to an address that is not https: %s', (_label, make, name) => {
+    const p = make();
+    expect(releaseObstacle(vault, { getAll: () => [p] }, p, name)).toBe('not-https');
+    expect(releaseState(vault, { getAll: () => [p] }, p, name, releasedFor(p, name))).toBe('not-releasable');
+    expect(read([p], p, name, releasedFor(p, name))).toBe(false);
+  });
+
+  it('control: the same profiles on https are releasable', () => {
+    for (const [p, name] of [[mb(), 'OWNER_KEY'], [oauthP(), 'OWNER_SECRET']] as const) {
+      expect(releaseObstacle(vault, { getAll: () => [p] }, p, name)).toBeNull();
+      expect(read([p], p, name, releasedFor(p, name))).toBe(true);
+    }
+  });
+
   it('control: a profile the owner wrote reads its name with no release at all', () => {
     expect(secretsForProfile(vault, ownerCrm, { getAll: () => [ownerCrm] }, NO_RELEASES).resolve('OWNER_KEY')).toBe('owner-value');
     expect(withheldFrom(vault, ownerCrm, { getAll: () => [ownerCrm] }, ['OWNER_KEY'], NO_RELEASES)).toEqual([]);

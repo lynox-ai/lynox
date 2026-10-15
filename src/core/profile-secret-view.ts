@@ -237,7 +237,7 @@ export function releaseBinding(profile: ApiProfile, name: string): string | null
 }
 
 /** Why `name` cannot be released to `profile`, or null when it can. */
-export type ReleaseObstacle = 'environment' | 'protected' | 'token' | 'not-sent' | 'preset' | 'other-mandate';
+export type ReleaseObstacle = 'environment' | 'protected' | 'token' | 'not-sent' | 'not-https' | 'preset' | 'other-mandate';
 
 function isPresetProfile(p: ApiProfile): boolean {
   return p.auth?.oauth?.preset_id !== undefined;
@@ -253,6 +253,8 @@ function isPresetProfile(p: ApiProfile): boolean {
  * - `token` — a token slot: a connection's tokens are read only by the profile that holds the
  *   grant, through its own consent.
  * - `not-sent` — the engine does not send it for `via` ({@link sendRole}).
+ * - `not-https` — one of the places the value goes ({@link credentialEndpoints}) is not https:
+ *   the base it is attached to, or for an OAuth client pair the token endpoint it is posted to.
  * - `preset` — a preset profile other than `via` reads it: a preset connection's credentials go
  *   to its provider through that profile, the owner's own preset profiles included.
  * - `other-mandate` — a profile another mandate wrote reads it.
@@ -267,6 +269,7 @@ export function releaseObstacle(
   if (isProtectedSecretWrite(name)) return 'protected';
   if (hasTokenSlotShape(name)) return 'token';
   if (sendRole(via, name) === null) return 'not-sent';
+  if (credentialEndpoints(via).some((e) => new URL(e).protocol !== 'https:')) return 'not-https';
   for (const p of apiStore.getAll()) {
     if (grantTokenNames(p).has(name)) return 'token';
     if (p.id === via.id || !collectVaultKeys(p).includes(name)) continue;

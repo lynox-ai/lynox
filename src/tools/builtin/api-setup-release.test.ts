@@ -123,6 +123,14 @@ describe('a mandate\'s save asks the owner', () => {
     expect(releases.pendingReleases()).toEqual([]);
   });
 
+  it('asks nothing for a profile on plain http, and tells the mandate the same as on https', async () => {
+    const plain = bearer({ base_url: 'http://api.crm.example/v1' });
+    const out = await apiSetupTool.handler({ action: 'create', profile: plain } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
+    expect(out).toContain('"CRM_KEY"');
+    expect(out).toContain('The owner sees what the profile asks for');
+    expect(releases.pendingReleases()).toEqual([]);
+  });
+
   it('asks nothing for a name that cannot be released: a query parameter', async () => {
     const q = bearer({ auth: { type: 'query', query_param: 'key', vault_keys: ['CRM_KEY'] } });
     await apiSetupTool.handler({ action: 'create', profile: q } as never, agentOf(apis([]), vault({ CRM_KEY: 'v' }), { principal: MANDATE, promptUser: async () => 'Allow' }));
@@ -259,24 +267,33 @@ describe('release_secret: the owner answers in person', () => {
     expect(releases.activeReleases()).toEqual([]);
   });
 
-  it('names a port and a scheme other than https in the question', async () => {
-    const p = bearer({ base_url: 'http://api.crm.example:8443/v1' });
+  it('names a port other than the default in the question', async () => {
+    const p = bearer({ base_url: 'https://api.crm.example:8443/v1' });
     const apiStore = apis([p]);
     ask(p);
     let question = '';
     await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
-    expect(question).toContain('http://api.crm.example:8443');
+    expect(question).toContain('api.crm.example:8443');
   });
 
-  it('asks for a base with a scheme the URL standard does not know, naming it', async () => {
-    const p = bearer({ base_url: 'foo://api.crm.example/v1' });
+  it.each([
+    ['plain http', 'http://api.crm.example:8443/v1'],
+    ['a scheme the URL standard does not know', 'foo://api.crm.example/v1'],
+  ])('is refused, without asking, for a base on %s', async (_label, base_url) => {
+    const p = bearer({ base_url });
     const apiStore = apis([p]);
     ask(p);
-    let question = '';
-    const out = await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
-    expect(out).toContain('user declined');
-    expect(question).toContain('foo://api.crm.example');
-    expect(releaseBinding(p, 'CRM_KEY')).not.toBe(releaseBinding(bearer({ base_url: 'foo://api.other.example/v1' }), 'CRM_KEY'));
+    const promptUser = vi.fn(async () => 'Allow');
+    const out = await release(apiStore, { promptUser });
+    expect(out).toContain('cannot be released');
+    expect(out).toContain('not https');
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(releases.activeReleases()).toEqual([]);
+  });
+
+  it('keeps an unknown scheme\'s host in the binding, so two such bases are not one', () => {
+    expect(releaseBinding(bearer({ base_url: 'foo://api.crm.example/v1' }), 'CRM_KEY'))
+      .not.toBe(releaseBinding(bearer({ base_url: 'foo://api.other.example/v1' }), 'CRM_KEY'));
   });
 
   it('is refused for a name the profile never asked for', async () => {
