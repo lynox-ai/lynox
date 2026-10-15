@@ -141,15 +141,15 @@ describe('policy', () => {
 
   it('reads the server name of a real TLS client hello', async () => {
     const bytes = await realHello('api.example.com');
-    expect(parseClientHello(bytes)).toEqual({ state: 'hello', sni: 'api.example.com' });
+    expect(parseClientHello(bytes)).toMatchObject({ state: 'hello', sni: 'api.example.com' });
     expect(parseClientHello(bytes.subarray(0, bytes.length - 1))).toEqual({ state: 'more' });
   });
 
   it('reads the server name across records, and refuses what is not one plain hello', () => {
-    expect(parseClientHello(hello(['a.example']))).toEqual({ state: 'hello', sni: 'a.example' });
-    expect(parseClientHello(hello(['A.Example']))).toEqual({ state: 'hello', sni: 'a.example' });
-    expect(parseClientHello(hello(['a.example'], { records: 3 }))).toEqual({ state: 'hello', sni: 'a.example' });
-    expect(parseClientHello(hello(null))).toEqual({ state: 'hello', sni: null });
+    expect(parseClientHello(hello(['a.example']))).toMatchObject({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(['A.Example']))).toMatchObject({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(['a.example'], { records: 3 }))).toMatchObject({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(null))).toMatchObject({ state: 'hello', sni: null });
     expect(parseClientHello(hello(['a.example', 'b.example'])).state).toBe('bad');
     expect(parseClientHello(hello(['a.example'], { sniExtensions: 2 })).state).toBe('bad');
     expect(parseClientHello(Buffer.from('GET / HTTP/1.1\r\n\r\n')).state).toBe('bad');
@@ -167,7 +167,7 @@ describe('policy: TLS hellos', () => {
     const firstLen = 5 + two.readUInt16BE(3);
     const mixed = Buffer.from(two);
     mixed[firstLen] = 23;
-    expect(parseClientHello(two)).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(two)).toMatchObject({ state: 'hello', sni: 'a.example' });
     expect(parseClientHello(mixed)).toEqual({ state: 'bad', error: 'not a TLS handshake' });
     const notClient = Buffer.from(hello(['a.example']));
     notClient[5] = 2;
@@ -184,15 +184,23 @@ describe('policy: TLS hellos', () => {
   it('refuses a hello that carries an encrypted inner hello', () => {
     expect(parseClientHello(hello(['a.example'], { extension: 0xfe0d }))).toEqual({ state: 'bad', error: 'encrypted client hello' });
     expect(parseClientHello(hello(['a.example'], { extension: 0xffce }))).toEqual({ state: 'bad', error: 'encrypted client hello' });
-    expect(parseClientHello(hello(['a.example'], { extension: 0x002b }))).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(['a.example'], { extension: 0x002b }))).toMatchObject({ state: 'hello', sni: 'a.example' });
+  });
+
+  it('says where the hello ends, so bytes behind it are not taken for part of it', () => {
+    const h = hello(['a.example']);
+    expect(parseClientHello(Buffer.concat([h, CCS, hello(['evil.example'])]))).toEqual({ state: 'hello', sni: 'a.example', bytes: h.length });
+    expect(parseClientHello(Buffer.concat([CCS, h, Buffer.from('x')]), true)).toEqual({ state: 'hello', sni: 'a.example', bytes: CCS.length + h.length });
+    expect(parseClientHello(hello(null))).toEqual({ state: 'hello', sni: null, bytes: hello(null).length });
   });
 
   it('takes a change_cipher_spec record before a second hello only', () => {
     const second = Buffer.concat([CCS, hello(['a.example'])]);
-    expect(parseClientHello(second, true)).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(second, true)).toMatchObject({ state: 'hello', sni: 'a.example' });
     expect(parseClientHello(second)).toEqual({ state: 'bad', error: 'not a TLS handshake' });
     expect(parseClientHello(CCS.subarray(0, 4), true)).toEqual({ state: 'more' });
     expect(parseClientHello(Buffer.from([20, 3, 3, 0, 2, 1, 1]), true).state).toBe('bad');
+    expect(parseClientHello(Buffer.concat([Buffer.from([20, 3, 3, 0, 1, 2]), hello(['a.example'])]), true).state).toBe('bad');
   });
 
   it('tells a HelloRetryRequest from a ServerHello and anything else', () => {
@@ -204,6 +212,23 @@ describe('policy: TLS hellos', () => {
     const notServer = Buffer.from(serverHello(true));
     notServer[5] = 1;
     expect(isHelloRetryRequest(notServer)).toBe('no');
+    expect(isHelloRetryRequest(Buffer.from([22, 3, 3, 0, 0]))).toBe('no');
+  });
+
+  it('reads a HelloRetryRequest split into small records', () => {
+    const split = (b: Buffer, size: number): Buffer => {
+      const hs = b.subarray(5);
+      const out: Buffer[] = [];
+      for (let o = 0; o < hs.length; o += size) out.push(Buffer.concat([Buffer.from([22, 3, 3]), u16(Math.min(size, hs.length - o)), hs.subarray(o, o + size)]));
+      return Buffer.concat(out);
+    };
+    expect(isHelloRetryRequest(split(serverHello(true), 7))).toBe('yes');
+    expect(isHelloRetryRequest(split(serverHello(false), 7))).toBe('no');
+    expect(isHelloRetryRequest(split(serverHello(true), 7).subarray(0, 30))).toBe('more');
+    // A record of another type in between ends the reading: not a plain ServerHello.
+    const mixed = Buffer.from(split(serverHello(true), 7));
+    mixed[12] = 21;
+    expect(isHelloRetryRequest(mixed)).toBe('no');
   });
 });
 
@@ -337,7 +362,7 @@ function listen(server: Server | HttpServer): Promise<number> {
  * A TCP server standing in for the internet: echoes what it gets, prefixed. With `firstAnswer`
  * it answers the first bytes of each connection with those instead (a ServerHello, say).
  */
-async function origin(firstAnswer?: Buffer): Promise<{ port: number; received: () => string; sockets: Socket[] }> {
+async function origin(firstAnswer?: Buffer, thenSend?: Buffer): Promise<{ port: number; received: () => string; sockets: Socket[] }> {
   let got = '';
   const sockets: Socket[] = [];
   const server = createServer((s) => {
@@ -345,7 +370,12 @@ async function origin(firstAnswer?: Buffer): Promise<{ port: number; received: (
     let answered = firstAnswer === undefined;
     s.on('data', (d) => {
       got += d.toString('latin1');
-      if (!answered) { answered = true; s.write(firstAnswer!); return; }
+      if (!answered) {
+        answered = true;
+        s.write(firstAnswer!);
+        if (thenSend) setTimeout(() => { if (!s.destroyed) s.write(thenSend); }, 20);
+        return;
+      }
       s.write(`echo:${d.toString('latin1')}`);
     });
     s.on('error', () => { /* closed by the test */ });
@@ -776,17 +806,6 @@ describe('contract: shell listener', () => {
     expect(r.registry.denials(CRED)).toEqual([]);
   });
 
-  it('closes the tunnel when the server does not answer the hello in time', async () => {
-    const silent = createServer((s) => { s.on('error', () => { /* closed by the test */ }); closers.push(async () => { s.destroy(); }); });
-    const port = await listen(silent);
-    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: port, limits: { idleTimeoutMs: 50 } });
-    r.registry.put(CRED, reg(['a.example']));
-    const res = await open(r);
-    await until(closedOf(res.socket));
-    expect(r.proxy.openTunnels).toBe(0);
-    expect(r.registry.denials(CRED)).toEqual([]);
-  });
-
   it('refuses a hello with an encrypted inner hello', async () => {
     const o = await origin();
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
@@ -872,5 +891,72 @@ describe('contract: shell listener', () => {
     await until(closedOf(quiet.socket));
     const produced = [...new Set(r.registry.denials(CRED)?.map((d) => d.reason))].sort();
     expect(produced).toEqual([...DENIAL_REASONS].sort());
+  });
+
+  it('holds a second hello the client sends right behind the first, and checks it after a retry', async () => {
+    const o = await origin(serverHello(true));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const first = hello(['a.example']);
+
+    const bad = await shellRequest(r, connectHead('a.example:443'));
+    const badClosed = closedOf(bad.socket);
+    bad.socket.write(Buffer.concat([first, CCS, hello(['other.cdn.example'])]));
+    await until(badClosed);
+    expect(o.received()).toBe(first.toString('latin1'));
+    expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([['other.cdn.example', 'sni-mismatch']]);
+
+    const good = await shellRequest(r, connectHead('a.example:443'));
+    const both = Buffer.concat([first, CCS, hello(['a.example']), Buffer.from('x')]);
+    good.socket.write(both);
+    await until(() => o.received().length === first.length + both.length);
+    expect(o.received()).toBe(first.toString('latin1') + both.toString('latin1'));
+  });
+
+  it('passes bytes sent behind the hello on when the server does not ask for a retry', async () => {
+    const o = await origin(serverHello(false));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(r, connectHead('a.example:443'));
+    const first = hello(['a.example']);
+    res.socket.write(Buffer.concat([first, Buffer.from('early')]));
+    // The hello alone first; the rest only after the server's answer.
+    await until(() => o.received().endsWith('early'));
+    expect(o.received()).toBe(`${first.toString('latin1')}early`);
+  });
+
+  it('forwards nothing more when the server does not answer the hello in time', async () => {
+    const silent = createServer((s) => {
+      let got = '';
+      s.on('data', (d: Buffer) => { got += d.toString('latin1'); seen = got; });
+      s.on('error', () => { /* closed by the test */ });
+      closers.push(async () => { s.destroy(); });
+    });
+    let seen = '';
+    const port = await listen(silent);
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: port, limits: { serverHelloTimeoutMs: 60, idleTimeoutMs: 10_000 } });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(r, connectHead('a.example:443'));
+    const closed = closedOf(res.socket);
+    res.socket.write(hello(['a.example']));
+    await new Promise((x) => setTimeout(x, 10));
+    res.socket.write(Buffer.concat([CCS, hello(['other.cdn.example'])]));
+    await until(closed);
+    await new Promise((x) => setTimeout(x, 20));
+    expect(seen).toBe(hello(['a.example']).toString('latin1'));
+    expect(r.registry.denials(CRED)).toEqual([]);
+  });
+
+  it('keeps what the server sends while the second hello is awaited', async () => {
+    const o = await origin(serverHello(true), Buffer.from('tail'));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await open(r);
+    await until(() => res.data().length > 0);
+    await new Promise((x) => setTimeout(x, 60));
+    res.socket.write(Buffer.concat([CCS, hello(['a.example'])]));
+    // The origin echoes the second hello after its tail; the tail must not be lost before it.
+    await until(() => res.data().includes('echo:'));
+    expect(res.data().startsWith(`${serverHello(true).toString('latin1')}tail`)).toBe(true);
   });
 });

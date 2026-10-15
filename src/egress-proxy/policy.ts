@@ -157,18 +157,24 @@ export function pickAddress(addresses: readonly string[], deny: ReadonlySet<stri
 
 export type HelloResult =
   | { state: 'more' }
-  | { state: 'hello'; sni: string | null }
+  | { state: 'hello'; sni: string | null; bytes: number }
   | { state: 'bad'; error: string };
 
-/** Extensions that carry an encrypted inner hello: ECH, and the draft ESNI before it. */
+/**
+ * Extensions that carry an encrypted inner hello: ECH, and the draft ESNI before it. Clients
+ * built on BoringSSL send a GREASE ECH extension by default; they are refused too, since the
+ * proxy cannot tell GREASE from a real inner hello. Node, OpenSSL and Go clients send none.
+ */
 const ENCRYPTED_HELLO_EXTENSIONS: ReadonlySet<number> = new Set([0xfe0d, 0xffce]);
 
 /**
  * The server name of a TLS client hello at the start of `buf`. The hello may span several
  * handshake records; `more` asks for further bytes, up to MAX_HELLO_BYTES. `sni` is `null`
- * when the hello names no server, and lower-cased otherwise. The records must hold the hello
- * and nothing else. `afterRetry` allows the change_cipher_spec record a TLS 1.3 client may
- * send before its second hello.
+ * when the hello names no server, and lower-cased otherwise. The records that carry the
+ * hello must carry nothing else; `bytes` is where they end. What follows them is not part of
+ * the hello and is not read here: the caller holds it back, because a client may send a
+ * second hello right behind the first. `afterRetry` allows the change_cipher_spec record a
+ * TLS 1.3 client may send before its second hello; `bytes` then counts it too.
  */
 export function parseClientHello(buf: Buffer, afterRetry = false): HelloResult {
   const hs: Buffer[] = [];
@@ -204,7 +210,7 @@ export function parseClientHello(buf: Buffer, afterRetry = false): HelloResult {
     p += 2 + h.readUInt16BE(p);
     p += 1 + h.readUInt8(p);
     if (p > h.length) return { state: 'bad', error: 'truncated hello' };
-    if (p === h.length) return { state: 'hello', sni: null };
+    if (p === h.length) return { state: 'hello', sni: null, bytes: off };
     const extEnd = p + 2 + h.readUInt16BE(p);
     if (extEnd > h.length) return { state: 'bad', error: 'truncated extensions' };
     p += 2;
@@ -233,7 +239,7 @@ export function parseClientHello(buf: Buffer, afterRetry = false): HelloResult {
       }
       p = end;
     }
-    return { state: 'hello', sni };
+    return { state: 'hello', sni, bytes: off };
   } catch {
     return { state: 'bad', error: 'truncated hello' };
   }
@@ -244,14 +250,27 @@ const HELLO_RETRY_RANDOM = Buffer.from('cf21ad74e59a6111be1d8c021e65b891c2a21116
 
 /**
  * Whether the server's first bytes are a HelloRetryRequest, after which the client sends a
- * second hello that must be checked too. Anything that is not a plaintext ServerHello is `no`.
+ * second hello that must be checked too. The start of the server's handshake is put together
+ * across records, so a ServerHello split into small records is still read. Anything that is
+ * not a plaintext ServerHello is `no`. A server that sends more than MAX_HELLO_BYTES without
+ * completing the start of one is treated as `yes`: the client's next bytes are then checked.
  */
 export function isHelloRetryRequest(buf: Buffer): 'yes' | 'no' | 'more' {
-  if (buf.length < 1) return 'more';
-  if (buf[0] !== 22) return 'no';
-  if (buf.length < 5) return 'more';
-  if (buf.readUInt16BE(3) < 4 + 2 + 32) return 'no';
-  if (buf.length < 5 + 4 + 2 + 32) return 'more';
-  if (buf[5] !== 2) return 'no';
-  return buf.subarray(5 + 4 + 2, 5 + 4 + 2 + 32).equals(HELLO_RETRY_RANDOM) ? 'yes' : 'no';
+  const need = 4 + 2 + 32;
+  const hs: Buffer[] = [];
+  let len = 0;
+  let off = 0;
+  while (len < need) {
+    if (off >= buf.length || off + 5 > buf.length) return buf.length > MAX_HELLO_BYTES ? 'yes' : 'more';
+    if (buf[off] !== 22) return 'no';
+    const recLen = buf.readUInt16BE(off + 3);
+    if (recLen === 0) return 'no';
+    if (off + 5 + recLen > buf.length) return buf.length > MAX_HELLO_BYTES ? 'yes' : 'more';
+    hs.push(buf.subarray(off + 5, off + 5 + recLen));
+    len += recLen;
+    off += 5 + recLen;
+  }
+  const h = Buffer.concat(hs);
+  if (h[0] !== 2) return 'no';
+  return h.subarray(4 + 2, need).equals(HELLO_RETRY_RANDOM) ? 'yes' : 'no';
 }

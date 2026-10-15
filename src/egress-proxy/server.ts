@@ -23,6 +23,8 @@ export interface ProxyLimits {
   maxHeaderBytes: number;
   /** For the request head, and again for the TLS client hello. */
   headerTimeoutMs: number;
+  /** For the server's answer to the client hello, while the client is held. */
+  serverHelloTimeoutMs: number;
   connectTimeoutMs: number;
   /** A tunnel with no bytes either way for this long is closed. */
   idleTimeoutMs: number;
@@ -40,6 +42,7 @@ export interface ProxyLimits {
 export const DEFAULT_LIMITS: ProxyLimits = {
   maxHeaderBytes: 16 * 1024,
   headerTimeoutMs: 10_000,
+  serverHelloTimeoutMs: 10_000,
   connectTimeoutMs: 10_000,
   idleTimeoutMs: 120_000,
   tunnelsPerCred: 32,
@@ -280,22 +283,28 @@ export class ShellProxy {
         start();
         return;
       }
-      this.readHello(client, host, rest, false, (verdict, hello) => {
+      this.readHello(client, host, rest, false, (verdict, hello, after) => {
         if (closed) return;
         if (verdict !== null) { refuse(verdict); return; }
+        // Only the hello goes out now. Whatever the client sent behind it waits for the
+        // server's answer: after a HelloRetryRequest it is the start of the second hello,
+        // which must name the same host; otherwise it is passed on (early data, say).
         up.write(hello);
-        // The client stays paused until the server has answered: a HelloRetryRequest makes
-        // the client send a second hello, and that one must name the same host.
         this.readServerFirst(up, (retry, answer) => {
           if (closed) return;
           // A server that does not answer is not the client's doing: closed, not a denial.
           if (retry === null) { handle.close(); return; }
           client.write(answer);
-          if (!retry) { start(); return; }
-          this.readHello(client, host, Buffer.alloc(0), true, (again, hello2) => {
+          if (!retry) {
+            if (after.length > 0) up.write(after);
+            start();
+            return;
+          }
+          this.readHello(client, host, after, true, (again, hello2, after2) => {
             if (closed) return;
             if (again !== null) { refuse(again); return; }
             up.write(hello2);
+            if (after2.length > 0) up.write(after2);
             start();
           });
         });
@@ -315,7 +324,8 @@ export class ShellProxy {
       up.pause();
       done(retry, buf);
     };
-    const timer = setTimeout(() => { finish(null); }, this.limits.idleTimeoutMs);
+    const timer = setTimeout(() => { finish(null); }, this.limits.serverHelloTimeoutMs);
+    up.once('close', () => { clearTimeout(timer); });
     const onData = (chunk: Buffer): void => {
       buf = Buffer.concat([buf, chunk]);
       const r = isHelloRetryRequest(buf);
@@ -327,27 +337,29 @@ export class ShellProxy {
 
   /**
    * Read a client hello and hold it to the tunnel's name. Nothing reaches the upstream
-   * before the verdict. `done(null, bytes)` passes the bytes read so far on.
+   * before the verdict. `done(null, hello, after)` passes the hello's bytes and, apart, the
+   * bytes the client sent behind it.
    */
-  private readHello(client: Socket, host: string, first: Buffer, afterRetry: boolean, done: (refused: { why: DenialReason; name?: string } | null, bytes: Buffer) => void): void {
+  private readHello(client: Socket, host: string, first: Buffer, afterRetry: boolean, done: (refused: { why: DenialReason; name?: string } | null, hello: Buffer, after: Buffer) => void): void {
     let buf = first;
     let finished = false;
-    const finish = (refused: { why: DenialReason; name?: string } | null): void => {
+    const finish = (refused: { why: DenialReason; name?: string } | null, bytes = buf.length): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
       client.off('data', onData);
       client.pause();
-      done(refused, buf);
+      done(refused, buf.subarray(0, bytes), buf.subarray(bytes));
     };
     const timer = setTimeout(() => { finish({ why: 'hello-timeout' }); }, this.limits.headerTimeoutMs);
+    client.once('close', () => { clearTimeout(timer); });
     const check = (): void => {
       const r = parseClientHello(buf, afterRetry);
       if (r.state === 'more') return;
       if (r.state === 'bad') { finish({ why: 'bad-hello' }); return; }
       if (r.sni === null) { finish({ why: 'no-sni' }); return; }
       if (r.sni !== host) { finish({ why: 'sni-mismatch', name: r.sni }); return; }
-      finish(null);
+      finish(null, r.bytes);
     };
     const onData = (chunk: Buffer): void => { buf = Buffer.concat([buf, chunk]); check(); };
     client.on('data', onData);
