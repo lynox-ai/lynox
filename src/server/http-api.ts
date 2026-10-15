@@ -8426,7 +8426,7 @@ export class LynoxHTTPApi {
           return;
         }
         const fields = (body ?? {}) as Record<string, unknown>;
-        if (ledger.getStatus(params['id']!)?.judge != null) {
+        if ((ledger.getStatus(params['id']!)?.judge ?? null) !== null) {
           // A judged run reports one metered cost per model call. On a tenant whose model key the
           // control plane does not supply, those reports are not debited and pile up until the
           // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).

@@ -26,7 +26,7 @@ import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { judgeAfterBound, judgeFields, type JudgeRule } from './bulk-judge-rule.js';
+import { judgeAfterBound, type JudgeRule } from './bulk-judge-rule.js';
 import type { ModelTier } from '../types/index.js';
 
 /** Local target systems a run can plan and write. An external run's system is
@@ -1041,7 +1041,7 @@ export class BulkLedger {
     }[];
     const run = this.runRow(runId);
     const external = externalHostOf(run?.target_system ?? '') !== null;
-    const judged = run?.judge_rule != null;
+    const judged = (run?.judge_rule ?? null) !== null;
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
       // A judged target without its verdict holds the template (every field null), not a plan:
@@ -1569,7 +1569,7 @@ export class BulkLedger {
     const before: BeforeImage = { absent: false, value: read.before };
     // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
     // judged target's after-state is its template until the verdict: its change is not known.
-    const change = this.runRow(runId)?.judge_rule != null
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null
       ? 'update'
       : classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
     return db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
