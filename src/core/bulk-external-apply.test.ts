@@ -1456,9 +1456,11 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
 
   // The worker asks whether a target is a connected account in every form of its host, as the
   // tool does: a target written with a root dot is the same account as the profile without one.
+  // Without a preset the write passes that check and stops later, at the credential (none is
+  // attached for the dotted host), so nothing is sent either way; the reason tells them apart.
   it.each([
     ['example-shop', 'not_granted'],
-    [undefined, 'sent'],
+    [undefined, 'no_credential'],
   ] as const)('refuses an unmeasured write to a connected account named with a root dot (preset %s: %s)', async (presetId, outcome) => {
     const s = shop();
     const restore = serve(s);
@@ -1483,13 +1485,8 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
       }).bulkClientFactory.call({ engine });
       const target = `https://${HOST}./products/0`;
       const c = factory(JSON.stringify(mintBulkContract(`${HOST}.`, [target])))!;
-      const result = await c.write(target, 'PATCH', { price: '15' });
-      if (outcome === 'not_granted') {
-        expect(result).toEqual({ kind: 'not_granted' });
-        expect(s.requests).toEqual([]);
-      } else {
-        expect(result.kind).not.toBe('not_granted');
-      }
+      expect(await c.write(target, 'PATCH', { price: '15' })).toEqual({ kind: outcome });
+      expect(s.requests).toEqual([]);
     } finally {
       formFixture.measured = true;
       restore();

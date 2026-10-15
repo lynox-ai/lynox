@@ -1500,6 +1500,8 @@ describe('httpRequestTool', () => {
           const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'example.com'] };
           await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
           expect(fetchMock).toHaveBeenCalledTimes(calls);
+          // The hop that is followed is the one the target raises: a GET that names the DELETE.
+          if (calls === 2) expect(String(fetchMock.mock.calls[1]![0])).toContain('_method=DELETE');
         });
 
         it('control: the same contract grants the DELETE on an account without a preset', async () => {
