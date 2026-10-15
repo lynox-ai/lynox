@@ -1666,21 +1666,27 @@ export class Engine {
     // Bulk runs' dry run, behind `bulk_runs_enabled` — registered conditionally for the
     // same byte-identical-when-OFF reason. Gated on the engine.db handle as well: the
     // ledger lives there, and a registered tool with no ledger would only ever refuse.
-    if (this.userConfig.bulk_runs_enabled === true && this.engineDb) {
+    const bulkOn = this.userConfig.bulk_runs_enabled === true;
+    if (this.engineDb) {
       const ledger = new BulkLedger(this.engineDb);
-      this._toolContext.bulkLedger = ledger;
-      this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      if (bulkOn) {
+        this._toolContext.bulkLedger = ledger;
+        this.registry.register(bulkPlanTool).register(bulkStatusTool);
+      }
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       // The same sweep ends a started judged run nobody approved within its retention (PRD
       // bulk-loop §3.1): its before-images went to a model, and the prune keeps it from a
-      // newer plan — so it must not depend on a plan being made to end.
-      const own = this.getBulkOwnership();
+      // newer plan — so it must not depend on a plan being made to end. Nor on the flag: a run
+      // started before the flag went off is deleted on time all the same.
+      const own = bulkOn ? this.getBulkOwnership() : null;
       const sweep = (): void => {
-        try {
-          ledger.expireEndedPlanners(own);
-        } catch (err: unknown) {
-          process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        if (own) {
+          try {
+            ledger.expireEndedPlanners(own);
+          } catch (err: unknown) {
+            process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
+          }
         }
         try {
           ledger.expireStaleJudgedRuns();
@@ -1689,7 +1695,7 @@ export class Engine {
         }
       };
       sweep();
-      this._mandateEnds?.onRevoke(sweep);
+      if (bulkOn) this._mandateEnds?.onRevoke(sweep);
       this._bulkSweepTimer = setInterval(sweep, 5 * 60_000);
       this._bulkSweepTimer.unref?.();
     }
