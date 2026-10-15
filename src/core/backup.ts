@@ -9,9 +9,10 @@
 
 import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, encryptFile, decryptFile, decryptFileToBuffer, isEncryptedBackupFile } from './backup-crypto.js';
+import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
@@ -48,6 +49,29 @@ function unrestorableEntry(files: unknown): string | null {
   return null;
 }
 
+/**
+ * Read a backup file once and check THOSE bytes against its entry. The restore verifies the
+ * archive first and stages it later, with the safety backup in between; a file swapped in that
+ * window would be copied unchecked if it were read again by name. In an encrypted backup every
+ * file must be ciphertext: a plaintext one needs no key to plant.
+ */
+function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
+  let raw: Buffer;
+  try {
+    raw = readFileSync(srcFile);
+  } catch {
+    // The verify pass found it; gone now means changed, not "skip it and report success".
+    throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
+  }
+  if (raw.length !== entry.size_bytes || createHash('sha256').update(raw).digest('hex') !== entry.checksum_sha256) {
+    throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
+  }
+  if (encrypted && !isEncryptedBackupBuffer(raw)) {
+    throw new Error(`Backup is encrypted but holds a file that is not — refusing to restore: ${entry.path}`);
+  }
+  return raw;
+}
+
 /** Metadata stored alongside every backup. */
 export interface BackupManifest {
   version: string;
@@ -56,7 +80,36 @@ export interface BackupManifest {
   encrypted: boolean;
   files: BackupFileEntry[];
   checksum: string;
+  /**
+   * Proof of origin: an HMAC over the rest of the manifest, keyed from the vault key. Written by
+   * every engine that has a vault key, encrypted backup or not. The manifest carries every file's
+   * checksum, so the MAC covers the files' bytes as well as their list and the `encrypted` flag.
+   */
+  auth?: { alg: 'hmac-sha256'; mac: string } | undefined;
 }
+
+/**
+ * Whether a backup's origin could be shown before a restore. `verified`: its MAC matches this
+ * vault key. `none`: it carries no MAC (made before backups were signed, or the MAC was removed).
+ * `mismatch`: it carries one that does not match (changed, or made under another vault key).
+ * `no-key`: this engine has no vault key to check with.
+ */
+export type BackupProvenance = 'verified' | 'none' | 'mismatch' | 'no-key';
+
+export interface RestoreOptions {
+  /**
+   * Restore although the backup's origin is not shown. Every restore path needs a way to say this
+   * (the HTTP route, the web UI, this API), or old backups and backups of a keyless engine could
+   * never be restored at all.
+   */
+  allowUnverified?: boolean | undefined;
+}
+
+const UNVERIFIED_REASON: Record<Exclude<BackupProvenance, 'verified'>, string> = {
+  none: 'This backup has no proof of origin: it was made before backups were signed, or its signature was removed.',
+  mismatch: 'This backup\'s proof of origin does not match this vault key: the backup was changed, or it was made under another vault key.',
+  'no-key': 'No vault key is available, so this backup\'s origin cannot be checked.',
+};
 
 export interface BackupResult {
   success: boolean;
@@ -78,6 +131,9 @@ export interface RestoreResult {
   files_restored: number;
   duration_ms: number;
   error?: string | undefined;
+  /** Set when the restore was refused because the backup's origin is not shown; confirm with `allowUnverified`. */
+  code?: 'unverified_backup' | undefined;
+  provenance?: BackupProvenance | undefined;
 }
 
 export interface BackupConfig {
@@ -282,6 +338,10 @@ export class BackupManager {
         files,
         checksum,
       };
+      // Truthy, not `!== null`, as in the constructor: an empty string is not key material.
+      if (this.vaultKey) {
+        manifest.auth = { alg: 'hmac-sha256', mac: manifestMac({ ...manifest }, deriveManifestKey(this.vaultKey)) };
+      }
 
       writeFileSync(join(tmpDir, 'manifest.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 });
 
@@ -409,16 +469,16 @@ export class BackupManager {
 
   // ── Restore ──
 
-  async restoreBackup(backupPath: string): Promise<RestoreResult> {
+  async restoreBackup(backupPath: string, options: RestoreOptions = {}): Promise<RestoreResult> {
     this._running++;
     try {
-      return await this._restoreBackup(backupPath);
+      return await this._restoreBackup(backupPath, options);
     } finally {
       this._running--;
     }
   }
 
-  private async _restoreBackup(backupPath: string): Promise<RestoreResult> {
+  private async _restoreBackup(backupPath: string, options: RestoreOptions): Promise<RestoreResult> {
     const start = Date.now();
 
     // Load and validate manifest
@@ -434,11 +494,27 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
 
+    if (manifest === null || typeof manifest !== 'object') {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
+    }
+
     // Before anything reads or writes by an entry's path: the manifest is not authenticated, and
     // a backup downloaded from Drive carries whatever its root's writers put there.
     const unrestorable = unrestorableEntry(manifest.files);
     if (unrestorable !== null) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
+    }
+
+    // The manifest decides what is written and whether it is decrypted, and anyone who can write
+    // into the backup (or the Drive folder it came from) can write the manifest. Without a MAC
+    // under this vault key, the restore needs the caller's explicit word.
+    const provenance = this.provenanceOf(manifest);
+    if (provenance !== 'verified' && options.allowUnverified !== true) {
+      return {
+        success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start,
+        code: 'unverified_backup', provenance,
+        error: `${UNVERIFIED_REASON[provenance]} Restore it only if you know where it came from, and confirm the restore without proof of origin.`,
+      };
     }
 
     // Refuse to restore an encrypted backup with no key: the decrypt branch
@@ -520,18 +596,15 @@ export class BackupManager {
           const srcFile = join(backupPath, entry.path);
           const destFile = join(this.lynoxDir, entry.path);
 
-          if (!existsSync(srcFile)) continue;
-
           // Ensure parent directory exists
           const destDir = join(destFile, '..');
           mkdirSync(destDir, { recursive: true, mode: 0o700 });
 
           const tmpFile = `${destFile}.restore-staging`;
-          if (needsDecrypt && key && isEncryptedBackupFile(srcFile)) {
-            decryptFile(srcFile, tmpFile, key);
-          } else {
-            copyFileSync(srcFile, tmpFile);
-          }
+          const raw = readEntryBytes(srcFile, entry, manifest.encrypted === true);
+          // A leftover temp would keep its own mode through the rename; start from none.
+          rmSync(tmpFile, { force: true });
+          writeFileSync(tmpFile, key !== null ? decryptBuffer(raw, key, entry.path) : raw, { mode: 0o600, flag: 'wx' });
           staged.push({ tmp: tmpFile, dest: destFile });
         }
         // Staged only once the data-dir set is, and committed only after it is swapped: a
@@ -584,6 +657,15 @@ export class BackupManager {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  private provenanceOf(manifest: BackupManifest): BackupProvenance {
+    if (!this.vaultKey) return 'no-key';
+    const auth: unknown = manifest.auth;
+    if (auth === undefined) return 'none';
+    const mac = (auth as { alg?: unknown; mac?: unknown } | null)?.mac;
+    if ((auth as { alg?: unknown } | null)?.alg !== 'hmac-sha256' || typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return 'mismatch';
+    return manifestMacMatches(manifest as unknown as Record<string, unknown>, mac, deriveManifestKey(this.vaultKey)) ? 'verified' : 'mismatch';
   }
 
   // ── List ──
@@ -789,9 +871,9 @@ export class BackupManager {
     const source = function* (): Iterable<StageEntry> {
       for (const entry of entries) {
         const srcFile = join(backupPath, entry.path);
-        if (!existsSync(srcFile)) continue;
         // Decrypted in memory: no plaintext beside the backup, which may be synced elsewhere.
-        const data = key !== null && isEncryptedBackupFile(srcFile) ? decryptFileToBuffer(srcFile, key) : readFileSync(srcFile);
+        const raw = readEntryBytes(srcFile, entry, key !== null);
+        const data = key !== null ? decryptBuffer(raw, key, entry.path) : raw;
         yield { rel: entry.path.slice(WORKSPACE_PREFIX.length), data };
       }
     };

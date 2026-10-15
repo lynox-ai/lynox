@@ -407,6 +407,29 @@ describe('Art. 17 erasure refuses while a writer is live (real engine)', () => {
     }
   }, 60_000);
 
+  it('answers a restore refused for want of a proof of origin with 409, and passes only a literal true on', async () => {
+    const bm = engineOf().getBackupManager();
+    if (bm === null) throw new Error('fixture: no backup manager');
+    const made = await bm.createBackup();
+    const id = made.path.split('/').pop()!;
+    const seen: unknown[] = [];
+    // Stubbed: a real successful restore ends the process to restart on the restored data.
+    const spy = vi.spyOn(bm, 'restoreBackup').mockImplementation(async (_path, options) => {
+      seen.push(options?.allowUnverified);
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: 0, code: 'unverified_backup', provenance: 'none', error: 'no proof of origin' };
+    });
+    try {
+      const plain = await call('POST', `/api/backups/${id}/restore`);
+      expect(plain.status).toBe(409);
+      expect(plain.body['code']).toBe('unverified_backup');
+      await call('POST', `/api/backups/${id}/restore`, { allow_unverified: 'true' });
+      await call('POST', `/api/backups/${id}/restore`, { allow_unverified: true });
+      expect(seen).toEqual([false, false, true]);
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
   it('refuses while a backup runs', async () => {
     const bm = engineOf().getBackupManager();
     if (bm === null) throw new Error('fixture: no backup manager');

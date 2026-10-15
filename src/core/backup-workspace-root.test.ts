@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BackupManager } from './backup.js';
@@ -56,7 +56,7 @@ describe('backup — the workspace root', () => {
     rmSync(ws('http-api/a.txt'));
     writeFileSync(ws('http-api/deep/er/b.bin'), 'changed');
     writeFileSync(ws('http-api/later.txt'), 'ZZ-later');
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.error).toBeUndefined();
     expect(restored.success).toBe(true);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a');
@@ -64,6 +64,72 @@ describe('backup — the workspace root', () => {
     expect(readFileSync(ws('http-api/later.txt'), 'utf8')).toBe('ZZ-later');
     // No temp of the stage left behind.
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
+  });
+
+  it('refuses a workspace file swapped after the verify pass, and leaves the live one', async () => {
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
+    const signed = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-ws');
+    const created = await signed.createBackup();
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-live');
+    const spy = vi.spyOn(signed, 'createBackup').mockImplementation(async () => {
+      writeFileSync(join(created.path, 'workspace', 'http-api', 'a.txt'), 'ZZ-swapped');
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const restored = await signed.restoreBackup(created.path);
+      expect(restored.success).toBe(false);
+      expect(restored.error).toMatch(/changed after it was verified/);
+      expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-live');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses a workspace file deleted after the verify pass instead of skipping it', async () => {
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
+    const signed = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-ws');
+    const created = await signed.createBackup();
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-live');
+    const spy = vi.spyOn(signed, 'createBackup').mockImplementation(async () => {
+      rmSync(join(created.path, 'workspace', 'http-api', 'a.txt'));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const restored = await signed.restoreBackup(created.path);
+      expect(restored.success).toBe(false);
+      expect(restored.error).toMatch(/changed after it was verified/);
+      expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-live');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stages the workspace bytes it checked, never a second read by name', async () => {
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
+    const signed = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-ws');
+    const created = await signed.createBackup();
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-live');
+    const src = join(created.path, 'workspace', 'http-api', 'a.txt');
+    const fifoDir = mkdtempSync(join(tmpdir(), 'lynox-fifo-ws-'));
+    writeFileSync(join(fifoDir, 'first'), 'ZZ-a');
+    writeFileSync(join(fifoDir, 'second'), 'ZZ-second-read');
+    let writer: ReturnType<typeof spawn> | null = null;
+    const spy = vi.spyOn(signed, 'createBackup').mockImplementation(async () => {
+      rmSync(src);
+      execFileSync('mkfifo', [src]);
+      // Every OPEN of the FIFO reads the next write: a second read by name would get 'second'.
+      writer = spawn('sh', ['-c', 'cat "$1" > "$3"; sleep 2; cat "$2" > "$3"', 'sh', join(fifoDir, 'first'), join(fifoDir, 'second'), src], { stdio: 'ignore' });
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const restored = await signed.restoreBackup(created.path);
+      expect(restored.success, String(restored.error)).toBe(true);
+      expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a');
+    } finally {
+      (writer as ReturnType<typeof spawn> | null)?.kill('SIGKILL');
+      rmSync(fifoDir, { recursive: true, force: true });
+      spy.mockRestore();
+    }
   });
 
   it('restores an encrypted backup, decrypting in memory with nothing left beside the backup', async () => {
@@ -134,7 +200,7 @@ describe('backup — the workspace root', () => {
     // A directory where the backup has a file: the workspace set fails in phase 1.
     rmSync(ws('http-api/a.txt'));
     mkdirSync(ws('http-api/a.txt'));
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(JSON.parse(readFileSync(join(data, 'config.json'), 'utf8'))).toEqual({ default_tier: 'deep' });
     expect(existsSync(join(data, 'config.json.restore-staging'))).toBe(false);
@@ -148,7 +214,7 @@ describe('backup — the workspace root', () => {
     expect(created.success).toBe(true);
     writeFileSync(ws('http-api/a.txt'), 'ZZ-a-live');
     mkdirSync(join(data, 'config.json.restore-staging'));
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
@@ -164,7 +230,7 @@ describe('backup — the workspace root', () => {
     rmSync(join(data, 'config.json'));
     mkdirSync(join(data, 'config.json'));
     writeFileSync(join(data, 'config.json', 'keep'), 'x');
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
@@ -218,7 +284,7 @@ describe('backup — the workspace root', () => {
     expect(created.manifest.files.map(f => f.path)).toContain('workspace/http-api/a.txt');
 
     rmSync(join(ext, 'http-api', 'a.txt'));
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.error).toBeUndefined();
     expect(restored.success).toBe(true);
     expect(readFileSync(join(ext, 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-ext');

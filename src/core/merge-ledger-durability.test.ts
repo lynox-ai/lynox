@@ -106,7 +106,7 @@ describe('merge ledger survives backup→restore and export→import', () => {
     rmSync(join(dir, 'sweeps'), { recursive: true, force: true });
     expect(existsSync(join(dir, 'sweeps'))).toBe(false);
 
-    const restored = await mgr.restoreBackup(made.path);
+    const restored = await mgr.restoreBackup(made.path, { allowUnverified: true });
     expect(restored.success).toBe(true);
     expect(existsSync(join(dir, 'sweeps'))).toBe(true);
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { pickBackupConfig, type BackupConfigFields } from './backup-config.js';
+import { pickBackupConfig, type BackupConfigFields, requestRestore } from './backup-config.js';
 
 describe('pickBackupConfig', () => {
 	it('does NOT re-assert backup_schedule, which this view has no control for', () => {
@@ -121,5 +121,52 @@ describe('fetchBackupConfig', () => {
 		const { fetchBackupConfig } = await import('./backup-config.js');
 		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ backup_retention_days: 7, backup_encrypt: true, managed: true }), { status: 200 })));
 		await expect(fetchBackupConfig('/api')).resolves.toEqual({ backup_retention_days: 7, backup_encrypt: true });
+	});
+});
+
+describe('requestRestore', () => {
+	afterEach(() => { vi.unstubAllGlobals(); });
+
+	const reply = (body: unknown, status: number) => vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status }));
+
+	it('sends no body until the user said yes, and turns the refusal into a question', async () => {
+		const fetchMock = reply({ success: false, code: 'unverified_backup', error: 'no proof of origin' }, 409);
+		vi.stubGlobal('fetch', fetchMock);
+		expect(await requestRestore('/api', 'b 1', false)).toEqual({ kind: 'ask', reason: 'no proof of origin', mismatch: false });
+		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(url).toBe('/api/backups/b%201/restore');
+		expect(init.body).toBeUndefined();
+	});
+
+	it('marks a signature that does not match apart from a missing one', async () => {
+		vi.stubGlobal('fetch', reply({ success: false, code: 'unverified_backup', provenance: 'mismatch', error: 'changed' }, 409));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'ask', reason: 'changed', mismatch: true });
+	});
+
+	it('sends allow_unverified: true once the user said yes, and does not ask again', async () => {
+		const fetchMock = reply({ success: false, code: 'unverified_backup', error: 'still refused' }, 409);
+		vi.stubGlobal('fetch', fetchMock);
+		expect(await requestRestore('/api', 'b1', true)).toEqual({ kind: 'failed', error: 'still refused' });
+		const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(JSON.parse(String(init.body))).toEqual({ allow_unverified: true });
+	});
+
+	it('reports a restore and any other refusal as they are', async () => {
+		vi.stubGlobal('fetch', reply({ success: true }, 200));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'restored' });
+		vi.stubGlobal('fetch', reply({ success: false, error: 'verification failed' }, 500));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'failed', error: 'verification failed' });
+	});
+});
+
+describe('BackupsView restore wiring', () => {
+	const src = readFileSync(new URL('./components/BackupsView.svelte', import.meta.url), 'utf-8');
+
+	it('restores only through requestRestore, and its second yes passes true', () => {
+		expect(src.match(/requestRestore\(/g) ?? []).toHaveLength(1);
+		expect(src.match(/restoreBackup\(backup\.backup_id, true\)/g) ?? []).toHaveLength(1);
+		expect(src).not.toContain('/restore`');
+		// A wrong signature gets its own warning AND its own button; a missing one the mild pair.
+		expect(src.match(/unverified\.mismatch \? 'backups\.restore_(mismatch|anyway)'/g) ?? []).toHaveLength(2);
 	});
 });

@@ -11329,7 +11329,7 @@ export class LynoxHTTPApi {
       }
     }, ownerOnly('create a backup'));
 
-    this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/backups/:id/restore', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('admin', 'POST', '/api/backups/:id/restore', async (_req, res, params, body) => {
       if (denyOnManagedInstance(res, 'backup restore')) return;
       const bm = engine.getBackupManager();
       if (!requireService(res, bm, 'Backup manager')) return;
@@ -11341,8 +11341,12 @@ export class LynoxHTTPApi {
         return;
       }
       try {
-        const result = await bm.restoreBackup(backupPath);
-        jsonResponse(res, result.success ? 200 : 500, result);
+        // `allow_unverified: true` is the caller's word that a backup without proof of origin may be
+        // restored. Only the literal `true` counts; the refusal says so with `code`, and the web UI
+        // asks before it sends this.
+        const allowUnverified = (body as { allow_unverified?: unknown } | null)?.allow_unverified === true;
+        const result = await bm.restoreBackup(backupPath, { allowUnverified });
+        jsonResponse(res, result.success ? 200 : result.code === 'unverified_backup' ? 409 : 500, result);
         // Auto-restart after successful restore so restored data takes effect
         if (result.success) {
           setTimeout(() => { process.exit(0); }, 500);

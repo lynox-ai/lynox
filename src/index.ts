@@ -93,6 +93,7 @@ export { LynoxError, ValidationError, ConfigError, ExecutionError, ToolError, No
 
 // === Backup ===
 export { BackupManager } from './core/backup.js';
+export type { BackupProvenance, RestoreOptions } from './core/backup.js';
 export type { BackupManifest, BackupResult, RestoreResult, BackupConfig } from './core/backup.js';
 export type { VerifyResult, BackupFileEntry } from './core/backup-verify.js';
 export { GDriveBackupUploader, fileRootPin } from './core/backup-upload-gdrive.js';

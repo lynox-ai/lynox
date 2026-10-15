@@ -2,7 +2,7 @@
 	import { getApiBase } from '../config.svelte.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
-	import { pickBackupConfig, fetchBackupConfig, type BackupConfigFields } from '../backup-config.js';
+	import { pickBackupConfig, fetchBackupConfig, requestRestore, type BackupConfigFields } from '../backup-config.js';
 
 	interface Backup { backup_id: string; version: string; created_at: string; encrypted: boolean; files: { path: string; size_bytes: number }[]; checksum: string; }
 
@@ -13,6 +13,8 @@
 	let creating = $state(false);
 	let restoring = $state<string | null>(null);
 	let confirmRestore = $state<string | null>(null);
+	/** A restore the engine refused for want of a proof of origin, with its reason, awaiting a second yes. */
+	let unverified = $state<{ id: string; reason: string; mismatch: boolean } | null>(null);
 	let error = $state('');
 
 	// Backup settings (loaded from config)
@@ -75,15 +77,17 @@
 		creating = false;
 	}
 
-	async function restoreBackup(backupId: string) {
+	async function restoreBackup(backupId: string, allowUnverified = false) {
 		restoring = backupId;
 		try {
-			const res = await fetch(`${getApiBase()}/backups/${encodeURIComponent(backupId)}/restore`, { method: 'POST' });
-			const data = (await res.json()) as { success: boolean; error?: string };
-			if (data.success) {
+			const outcome = await requestRestore(getApiBase(), backupId, allowUnverified);
+			unverified = null;
+			if (outcome.kind === 'restored') {
 				addToast(t('backups.restore_success'), 'success', 6000);
+			} else if (outcome.kind === 'ask') {
+				unverified = { id: backupId, reason: outcome.reason, mismatch: outcome.mismatch };
 			} else {
-				addToast(data.error ?? t('backups.restore_failed'), 'error', 6000);
+				addToast(outcome.error ?? t('backups.restore_failed'), 'error', 6000);
 			}
 			await loadBackups();
 		} catch {
@@ -142,7 +146,26 @@
 							<span>v{backup.version}</span>
 							<span>{formatSize(backup.files.reduce((s, f) => s + (f.size_bytes ?? 0), 0))}</span>
 						</div>
-						{#if confirmRestore === backup.backup_id}
+						{#if unverified?.id === backup.backup_id}
+							<div class="flex flex-col items-end gap-1.5">
+								<span class="text-xs text-warning">{t(unverified.mismatch ? 'backups.restore_mismatch' : 'backups.restore_unverified')}</span>
+								<div class="flex items-center gap-2">
+									<button
+										onclick={() => restoreBackup(backup.backup_id, true)}
+										disabled={restoring !== null}
+										class="rounded-[var(--radius-sm)] bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs text-warning hover:bg-warning/25 disabled:opacity-50"
+									>
+										{restoring === backup.backup_id ? t('backups.restoring') : t(unverified.mismatch ? 'backups.restore_anyway' : 'backups.restore_unverified_confirm')}
+									</button>
+									<button
+										onclick={() => unverified = null}
+										class="rounded-[var(--radius-sm)] border border-border px-2 py-0.5 text-xs text-text-muted hover:text-text"
+									>
+										{t('backups.cancel')}
+									</button>
+								</div>
+							</div>
+						{:else if confirmRestore === backup.backup_id}
 							<div class="flex items-center gap-2">
 								<span class="text-xs text-warning">{t('backups.restore_confirm')}</span>
 								<button

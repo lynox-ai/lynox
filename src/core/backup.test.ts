@@ -1,12 +1,30 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync, spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { BackupManager, isRestorableEntryPath } from './backup.js';
-import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from './backup-crypto.js';
+import { canonicalJson, deriveBackupKey, deriveManifestKey, encryptFile, decryptFile, isEncryptedBackupFile, manifestMac } from './backup-crypto.js';
 import { computeFileChecksum, verifySqliteIntegrity } from './backup-verify.js';
+
+/**
+ * Turns `path` into a FIFO fed by a writer that first sends `first` and then `second`: every OPEN
+ * reads the next one. A restore that reads a file once stages `first`; one that reads it again
+ * by name gets `second`. The pause lets the first reader see end-of-file before the second writer
+ * opens the FIFO; without it a single read can get both. The writer blocks on `second` until
+ * someone reads it; call the returned stop in a finally.
+ */
+function fifoServing(path: string, first: Buffer, second: Buffer): () => void {
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-fifo-src-'));
+  writeFileSync(join(dir, 'first'), first);
+  writeFileSync(join(dir, 'second'), second);
+  rmSync(path, { force: true });
+  execFileSync('mkfifo', [path]);
+  const writer = spawn('sh', ['-c', 'cat "$1" > "$3"; sleep 2; cat "$2" > "$3"', 'sh', join(dir, 'first'), join(dir, 'second'), path], { stdio: 'ignore' });
+  return () => { writer.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); };
+}
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-backup-test-'));
@@ -156,7 +174,7 @@ describe('BackupManager', () => {
     const made = await backup;
     expect(manager.busy).toBe(false);
 
-    const restore = manager.restoreBackup(made.path);
+    const restore = manager.restoreBackup(made.path, { allowUnverified: true });
     expect(manager.busy).toBe(true);
     await restore;
     expect(manager.busy).toBe(false);
@@ -174,7 +192,7 @@ describe('BackupManager', () => {
       seen = manager.busy;
       return { success: false, path: '', manifest: made.manifest, duration_ms: 0, error: 'stub' };
     });
-    await manager.restoreBackup(made.path);
+    await manager.restoreBackup(made.path, { allowUnverified: true });
     expect(seen).toBe(true);
     expect(manager.busy).toBe(false);
   });
@@ -282,7 +300,7 @@ describe('BackupManager', () => {
     // Modify the source data
     writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
 
-    const result = await manager.restoreBackup(backup.path);
+    const result = await manager.restoreBackup(backup.path, { allowUnverified: true });
     expect(result.success).toBe(true);
     expect(result.pre_restore_backup_path).toBeTruthy();
     expect(existsSync(result.pre_restore_backup_path)).toBe(true);
@@ -401,7 +419,7 @@ describe('restoreBackup safety guards', () => {
     // A manager holding a DIFFERENT key attempts the restore — checksum verify
     // passes (ciphertext intact) but decrypt would AES-GCM-fail mid-loop.
     const wrongKey = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: true }, 'vault-key-B-different');
-    const result = await wrongKey.restoreBackup(created.path);
+    const result = await wrongKey.restoreBackup(created.path, { allowUnverified: true });
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/does not match this backup/i); // the key pre-flight message
@@ -418,7 +436,7 @@ describe('restoreBackup safety guards', () => {
     // Corrupt a backup file so its checksum no longer matches the manifest.
     writeFileSync(join(created.path, 'history.db'), 'CORRUPTED');
 
-    const result = await manager.restoreBackup(created.path);
+    const result = await manager.restoreBackup(created.path, { allowUnverified: true });
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/verification failed/i);
     expect(liveRowCount()).toBe(2); // live DB never overwritten from a bad archive
@@ -451,7 +469,7 @@ describe('restoreBackup safety guards', () => {
     // I/O error / ENOSPC on a later file.)
     mkdirSync(join(lynoxDir, 'config.json.restore-staging'), { recursive: true });
 
-    const result = await manager.restoreBackup(created.path);
+    const result = await manager.restoreBackup(created.path, { allowUnverified: true });
     expect(result.success).toBe(false);
 
     // history.db was NEVER reverted over the live DB: live still has its drifted
@@ -532,7 +550,7 @@ describe('restoreBackup refuses manifest paths that leave their place', () => {
   it('restores the same backup when the added entry is a plain path (control)', async () => {
     const { manager, backupPath } = await backupWithEntry('memory/planted.txt', 'plain');
 
-    const result = await manager.restoreBackup(backupPath);
+    const result = await manager.restoreBackup(backupPath, { allowUnverified: true });
 
     expect(result.success).toBe(true);
     expect(readFileSync(join(lynoxDir, 'memory', 'planted.txt'), 'utf-8')).toBe('plain');
@@ -565,5 +583,260 @@ describe('restoreBackup refuses manifest paths that leave their place', () => {
     for (const bad of ['', '/etc/passwd', '../x', 'a/../b', 'a/./b', './a', 'a//b', 'a/', 'a/..', 'a\0b', 7, null, undefined]) {
       expect(isRestorableEntryPath(bad), String(bad)).toBe(false);
     }
+  });
+});
+
+describe('restoreBackup asks for the proof of origin', () => {
+  let lynoxDir: string;
+  let backupDir: string;
+  const KEY = 'vault-key-provenance';
+
+  beforeEach(() => {
+    lynoxDir = createTmpDir();
+    backupDir = join(lynoxDir, 'backups');
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+  });
+
+  afterEach(() => { rmSync(lynoxDir, { recursive: true, force: true }); });
+
+  const mgr = (encrypt: boolean, key: string | null = KEY): BackupManager =>
+    new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt }, key);
+
+  function readManifest(path: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(join(path, 'manifest.json'), 'utf-8')) as Record<string, unknown>;
+  }
+  function writeManifest(path: string, manifest: Record<string, unknown>): void {
+    writeFileSync(join(path, 'manifest.json'), JSON.stringify(manifest));
+  }
+  /** Drifts the live config so a restore that ran shows: the backup holds `balanced`. */
+  function driftLive(): void {
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
+  }
+  const liveTier = (): unknown => (JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>)['default_tier'];
+
+  it('signs every backup of an engine with a vault key, encrypted or not, and restores it without asking', async () => {
+    for (const encrypt of [false, true]) {
+      writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      const created = await mgr(encrypt).createBackup();
+      expect(created.success).toBe(true);
+      const manifest = readManifest(created.path);
+      expect(manifest['auth']).toEqual({ alg: 'hmac-sha256', mac: manifestMac(manifest, deriveManifestKey(KEY)) });
+      driftLive();
+
+      const result = await mgr(encrypt).restoreBackup(created.path);
+
+      expect(result.success, String(result.error)).toBe(true);
+      expect(liveTier()).toBe('balanced');
+    }
+  });
+
+  it('refuses a backup whose file list was changed, and restores it once the caller allows it', async () => {
+    const created = await mgr(false).createBackup();
+    const manifest = readManifest(created.path);
+    // An extra entry, with its file and a matching checksum: everything a forger can do without the key.
+    writeFileSync(join(created.path, 'planted.txt'), 'planted');
+    (manifest['files'] as unknown[]).push({ path: 'planted.txt', size_bytes: 7, checksum_sha256: computeFileChecksum(join(created.path, 'planted.txt')), type: 'file' });
+    writeManifest(created.path, manifest);
+    driftLive();
+
+    const refused = await mgr(false).restoreBackup(created.path);
+
+    expect(refused.success).toBe(false);
+    expect(refused.code).toBe('unverified_backup');
+    expect(refused.provenance).toBe('mismatch');
+    expect(refused.pre_restore_backup_path).toBe('');
+    expect(existsSync(join(lynoxDir, 'planted.txt'))).toBe(false);
+    expect(liveTier()).toBe('deep');
+
+    const allowed = await mgr(false).restoreBackup(created.path, { allowUnverified: true });
+    expect(allowed.success, String(allowed.error)).toBe(true);
+    expect(readFileSync(join(lynoxDir, 'planted.txt'), 'utf-8')).toBe('planted');
+  });
+
+  it('refuses an encrypted backup whose manifest was turned to encrypted: false', async () => {
+    const created = await mgr(true).createBackup();
+    writeManifest(created.path, { ...readManifest(created.path), encrypted: false });
+    driftLive();
+
+    const refused = await mgr(true).restoreBackup(created.path);
+
+    expect(refused.code).toBe('unverified_backup');
+    expect(refused.provenance).toBe('mismatch');
+    expect(liveTier()).toBe('deep');
+  });
+
+  it('refuses a backup without a signature, and one made under another vault key, until the caller allows it', async () => {
+    const unsigned = await mgr(false).createBackup();
+    const { auth: _auth, ...rest } = readManifest(unsigned.path);
+    writeManifest(unsigned.path, rest);
+    const none = await mgr(false).restoreBackup(unsigned.path);
+    expect(none.code).toBe('unverified_backup');
+    expect(none.provenance).toBe('none');
+    expect(none.error).toMatch(/no proof of origin/);
+
+    const foreign = await mgr(false, 'another-vault-key').createBackup();
+    const other = await mgr(false).restoreBackup(foreign.path);
+    expect(other.provenance).toBe('mismatch');
+    expect(other.error).toMatch(/does not match this vault key/);
+
+    driftLive();
+    const allowed = await mgr(false).restoreBackup(unsigned.path, { allowUnverified: true });
+    expect(allowed.success, String(allowed.error)).toBe(true);
+    expect(liveTier()).toBe('balanced');
+  });
+
+  it('asks on an engine without a vault key, and restores once the caller allows it', async () => {
+    const created = await mgr(false, null).createBackup();
+    expect(readManifest(created.path)['auth']).toBeUndefined();
+    driftLive();
+
+    const refused = await mgr(false, null).restoreBackup(created.path);
+    expect(refused.code).toBe('unverified_backup');
+    expect(refused.provenance).toBe('no-key');
+    expect(liveTier()).toBe('deep');
+
+    const allowed = await mgr(false, null).restoreBackup(created.path, { allowUnverified: true });
+    expect(allowed.success, String(allowed.error)).toBe(true);
+    expect(liveTier()).toBe('balanced');
+  });
+
+  it('takes only the literal true as the caller allowing it', async () => {
+    const created = await mgr(false, null).createBackup();
+    const loose = await mgr(false, null).restoreBackup(created.path, { allowUnverified: 'yes' as unknown as boolean });
+    expect(loose.code).toBe('unverified_backup');
+  });
+
+  it('refuses a plaintext file in an encrypted backup even when the caller allows an unverified one', async () => {
+    const created = await mgr(true).createBackup();
+    const manifest = readManifest(created.path);
+    // Swap the ciphertext of config.json for plaintext and fix its entry: no key needed for that.
+    writeFileSync(join(created.path, 'config.json'), JSON.stringify({ default_tier: 'planted' }));
+    const entry = (manifest['files'] as Array<Record<string, unknown>>).find(e => e['path'] === 'config.json')!;
+    entry['size_bytes'] = readFileSync(join(created.path, 'config.json')).length;
+    entry['checksum_sha256'] = computeFileChecksum(join(created.path, 'config.json'));
+    writeManifest(created.path, manifest);
+    driftLive();
+
+    const result = await mgr(true).restoreBackup(created.path, { allowUnverified: true });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/holds a file that is not/);
+    expect(liveTier()).toBe('deep');
+  });
+
+  it('refuses a file swapped after the verify pass, read once and checked as staged', async () => {
+    for (const encrypt of [false, true]) {
+      writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      const manager = mgr(encrypt);
+      const created = await manager.createBackup();
+      driftLive();
+      // The window between verify and staging is the safety backup; the swap lands inside it.
+      const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+        writeFileSync(join(created.path, 'config.json'), JSON.stringify({ default_tier: 'swapped' }));
+        return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+      });
+      try {
+        const result = await manager.restoreBackup(created.path);
+        expect(result.success, `encrypt=${String(encrypt)}`).toBe(false);
+        expect(result.error).toMatch(/changed after it was verified/);
+        expect(liveTier()).toBe('deep');
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it('stages the bytes it checked, never a second read of the file by name', async () => {
+    const manager = mgr(false);
+    const created = await manager.createBackup();
+    const genuine = readFileSync(join(created.path, 'config.json'));
+    driftLive();
+    let stop = (): void => {};
+    const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+      stop = fifoServing(join(created.path, 'config.json'), genuine, Buffer.from(JSON.stringify({ default_tier: 'second-read' })));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const result = await manager.restoreBackup(created.path);
+      expect(result.success, String(result.error)).toBe(true);
+      expect(liveTier()).toBe('balanced');
+    } finally {
+      stop();
+      spy.mockRestore();
+    }
+  });
+
+  it('refuses a file deleted after the verify pass instead of skipping it', async () => {
+    const manager = mgr(false);
+    const created = await manager.createBackup();
+    driftLive();
+    const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+      rmSync(join(created.path, 'config.json'));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const result = await manager.restoreBackup(created.path);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/changed after it was verified/);
+      expect(liveTier()).toBe('deep');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not let a leftover staging temp lend its mode to the restored file', async () => {
+    const created = await mgr(false).createBackup();
+    const stale = join(lynoxDir, 'config.json.restore-staging');
+    writeFileSync(stale, 'stale');
+    chmodSync(stale, 0o666);
+
+    const result = await mgr(false).restoreBackup(created.path);
+
+    expect(result.success, String(result.error)).toBe(true);
+    expect(statSync(join(lynoxDir, 'config.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('asks before it verifies the files: a backup without proof and with a missing file is a question, not a verify error', async () => {
+    const created = await mgr(false).createBackup();
+    const { auth: _auth, ...rest } = readManifest(created.path);
+    writeManifest(created.path, rest);
+    rmSync(join(created.path, 'config.json'));
+
+    const result = await mgr(false).restoreBackup(created.path);
+
+    expect(result.code).toBe('unverified_backup');
+  });
+
+  it('reads a malformed signature as a mismatch, without throwing', async () => {
+    const created = await mgr(false).createBackup();
+    const manifest = readManifest(created.path);
+    const mac = (manifest['auth'] as { mac: string }).mac;
+    for (const auth of [null, [], { alg: 'sha1', mac }, { alg: 'hmac-sha256', mac: 7 }, { alg: 'hmac-sha256', mac: mac.toUpperCase() }, { alg: 'hmac-sha256', mac: `${mac}zz` }]) {
+      writeManifest(created.path, { ...manifest, auth });
+      const result = await mgr(false).restoreBackup(created.path);
+      expect(result.provenance, JSON.stringify(auth)).toBe('mismatch');
+    }
+  });
+
+  it('does not sign with an empty vault key, and asks on restore', async () => {
+    const created = await mgr(false, '').createBackup();
+    expect(readManifest(created.path)['auth']).toBeUndefined();
+    expect((await mgr(false, '').restoreBackup(created.path)).provenance).toBe('no-key');
+  });
+
+  it('refuses a manifest that is JSON null instead of throwing', async () => {
+    const created = await mgr(false).createBackup();
+    writeFileSync(join(created.path, 'manifest.json'), 'null');
+    const result = await mgr(false).restoreBackup(created.path);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Invalid manifest.json');
+  });
+
+  it('keys the manifest MAC apart from the file cipher, and ignores key order and the auth field', () => {
+    expect(deriveManifestKey(KEY).equals(deriveBackupKey(KEY))).toBe(false);
+    expect(canonicalJson({ b: 1, a: [{ d: 2, c: 'x' }] })).toBe(canonicalJson({ a: [{ c: 'x', d: 2 }], b: 1 }));
+    const k = deriveManifestKey(KEY);
+    expect(manifestMac({ a: 1, auth: { mac: 'x' } }, k)).toBe(manifestMac({ a: 1 }, k));
+    expect(manifestMac({ a: 1 }, k)).not.toBe(manifestMac({ a: 2 }, k));
   });
 });
