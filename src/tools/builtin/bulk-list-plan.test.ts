@@ -111,3 +111,25 @@ describe('bulk_plan with source_list', () => {
     expect(status).not.toContain('not read to the end yet');
   });
 });
+
+describe('bulk_plan with source_list and judge', () => {
+  const judge = { rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } };
+  const judged = (list: Record<string, unknown>): Promise<string> => bulkPlanTool.handler({
+    target_system: 'http', target_host: HOST, source_list: { path: PATH, filters: { category: 12 }, ...list }, judge,
+  } as Parameters<typeof bulkPlanTool.handler>[0], agent());
+
+  it('takes the list without "after": every target planned with the rule\'s template', async () => {
+    const id = runIdOf(await judged({}));
+    expect(ledger.getListRun(id)!.source.after).toEqual({ status: null });
+    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 0 });
+  });
+
+  it('refuses "after" beside judge, and a rule that decides the id field', async () => {
+    expect(await judged({ after: { status: 'draft' } })).toMatch(/takes no "after"/);
+    expect(await bulkPlanTool.handler({
+      target_system: 'http', target_host: HOST, source_list: { path: PATH, filters: {} },
+      judge: { rule: 'x', schema: { id: { type: 'integer' } } },
+    } as Parameters<typeof bulkPlanTool.handler>[0], agent())).toMatch(/id field/);
+    expect(ledger.listRuns()).toEqual([]);
+  });
+});
