@@ -585,3 +585,19 @@ describe.skipIf(!LINUX)('openSubAnchor', () => {
     expect(code(() => readFileAt(anchor, 'nothing'))).toBe('ENOENT');
   });
 });
+
+describe.skipIf(!LINUX)('mkdirAt modes', () => {
+  it('gives a new directory exactly the mode asked for, nothing it had from mkdir', () => {
+    mkdirAt(anchor, 'ro', 0o500);
+    expect(statSync(join(ws, 'ro')).mode & 0o7777).toBe(0o500);
+    chmodSync(join(ws, 'ro'), 0o700);
+  });
+
+  it('keeps the set-group-ID bit a new directory inherits from its parent', () => {
+    chmodSync(ws, 0o2770);
+    mkdirAt(anchor, 'g/h', 0o750);
+    expect(statSync(join(ws, 'g')).mode & 0o7777).toBe(0o2750);
+    expect(statSync(join(ws, 'g', 'h')).mode & 0o7777).toBe(0o2750);
+  });
+});
+

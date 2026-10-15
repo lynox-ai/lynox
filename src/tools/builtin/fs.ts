@@ -125,7 +125,8 @@ type Target =
 /**
  * The process umask, as a write by name applies it: a new file is `0o666 & ~umask`, a new
  * directory `0o777 & ~umask`. Read from /proc, because `process.umask()` without an argument sets
- * it to 0 for a moment. If it cannot be read, the closed answer: owner only.
+ * it to 0 for a moment. If it cannot be read — a kernel before 4.7, or a system without /proc,
+ * such as macOS — the closed answer: owner only, where a write by name would follow the umask.
  */
 function processUmask(): number {
   try {

@@ -202,15 +202,23 @@ function assertLive(anchor: DirHandle): void {
   if (nlink === 0) throw new WorkspaceAccessError('GONE', `${show(anchor)} was removed while held open`);
 }
 
-/** fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. */
+/** The set-group-ID bit (not in `fs.constants`). */
+const S_ISGID = 0o2000;
+
+/**
+ * fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. A new
+ * directory under a set-group-ID parent inherits that bit from mkdir; it is kept, as a mkdir by
+ * name keeps it, so files made below stay in the parent's group.
+ */
 function setMode(dir: DirHandle, mode: number): void {
   const fd = IS_LINUX ? openSync(self(dir), constants.O_RDONLY | O_DIRECTORY) : dir.fd;
-  try { fchmodSync(fd, mode); } finally { if (fd !== dir.fd) closeSync(fd); }
+  try { fchmodSync(fd, mode | (fstatSync(fd).mode & S_ISGID)); } finally { if (fd !== dir.fd) closeSync(fd); }
 }
 
 /**
  * Walk to the directory named by `parts`, below `anchor`. With `create`, missing
- * components are made and given `dirMode` (with fchmod, not umask-masked); a
+ * components are made and given `dirMode` (with fchmod, not umask-masked; an inherited
+ * set-group-ID bit is kept); a
  * directory this call did not create keeps its mode. The caller closes the
  * returned handle with `closeDir` — it may be the anchor.
  */

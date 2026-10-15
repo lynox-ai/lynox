@@ -115,6 +115,17 @@ describe('file tools reach the workspace through its open directory', () => {
     expect(statSync(join(ws, 'deep')).mode & 0o777).toBe(statSync(join(ws, 'byname')).mode & 0o777);
   });
 
+  it('keeps the set-group-ID bit a new directory inherits, as a mkdir by name does', async () => {
+    // The test runs as a member of the directory's group (its own); otherwise the kernel clears
+    // the bit on fchmod whatever the mode says, and this would test nothing.
+    chmodSync(ws, 0o2775);
+    await writeFileTool.handler({ path: join(ws, 'shared', 'f.txt'), content: 'f' }, agent());
+    mkdirSync(join(ws, 'byname'));
+    expect(statSync(join(ws, 'byname')).mode & 0o2000).toBe(0o2000);
+    expect(statSync(join(ws, 'shared')).mode & 0o2000).toBe(0o2000);
+    expect(statSync(join(ws, 'shared')).gid).toBe(statSync(ws).gid);
+  });
+
   it('writes and edits a workspace file in place: same inode, so owner and permissions stay', async () => {
     writeFileSync(join(ws, 'keep.txt'), 'one');
     const ino = statSync(join(ws, 'keep.txt')).ino;
