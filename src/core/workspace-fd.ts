@@ -83,7 +83,7 @@ export interface EntryInfo {
 }
 
 export type WorkspaceErrorCode =
-  | 'BAD_PATH' | 'SYMLINK' | 'NOT_DIR' | 'NOT_FILE' | 'LIMIT' | 'MOUNT' | 'REMAINDER' | 'GONE' | 'PARTIAL' | 'UNSUPPORTED';
+  | 'BAD_PATH' | 'SYMLINK' | 'NOT_DIR' | 'NOT_FILE' | 'LIMIT' | 'MOUNT' | 'OVERLAP' | 'REMAINDER' | 'GONE' | 'PARTIAL' | 'UNSUPPORTED';
 
 /** Thrown for the refusals of this module, with a stable code for callers. */
 export class WorkspaceAccessError extends Error {
@@ -302,6 +302,20 @@ export function mountIdOf(fd: number): number | null {
   if (!IS_LINUX) return null;
   const m = /^mnt_id:\s*(\d+)$/m.exec(readFileSync(`/proc/self/fdinfo/${fd}`, 'utf8'));
   return m?.[1] !== undefined ? Number(m[1]) : null;
+}
+
+/**
+ * The Linux mount id of the entry at `path`, a link not followed, or null off Linux. For a check
+ * by path where no anchor is held (the data directory's own entries); the anchor walk uses the fd.
+ */
+export function mountIdAt(path: string): number | null {
+  if (!IS_LINUX) return null;
+  const fd = openSync(path, O_PATH | O_NOFOLLOW);
+  try {
+    return mountIdOf(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** What identifies "the same mount": the mount id on Linux, the device id elsewhere. */
@@ -527,6 +541,12 @@ export interface WalkResult {
   readonly bytes: number;
   /** Directories that sit on a different mount than the walked root. Not descended into. */
   readonly mountBoundaries: string[];
+  /**
+   * Directories (`''` for the walked one itself) that ARE the directory `watch` names, by device
+   * and inode: a bind mount shows a directory under a second path on the same mount, which no
+   * mount boundary reveals.
+   */
+  readonly watchedAt: string[];
 }
 
 const DEFAULT_LIMITS: WalkLimits = { maxDepth: 1024, maxEntries: Number.MAX_SAFE_INTEGER, maxBytes: Number.MAX_SAFE_INTEGER };
@@ -537,12 +557,24 @@ const DEFAULT_LIMITS: WalkLimits = { maxDepth: 1024, maxEntries: Number.MAX_SAFE
  * a limit throws (LIMIT) rather than truncating, so a caller can never mistake a
  * cut-off listing for the whole tree.
  */
-export function walk(anchor: WorkspaceAnchor, rel: string, limits: WalkLimits = DEFAULT_LIMITS): WalkResult {
+export function walk(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  limits: WalkLimits = DEFAULT_LIMITS,
+  watch?: { readonly dev: number; readonly ino: number },
+): WalkResult {
   const entries: WalkEntry[] = [];
   const mountBoundaries: string[] = [];
+  const watchedAt: string[] = [];
   let files = 0, dirs = 0, symlinks = 0, others = 0, bytes = 0;
   const root = walkDir(anchor, splitRel(rel));
   const rootMount = mountKey(root.fd);
+  const isWatched = (fd: number): boolean => {
+    if (watch === undefined) return false;
+    const st = fstatSync(fd);
+    return st.dev === watch.dev && st.ino === watch.ino;
+  };
+  if (isWatched(root.fd)) watchedAt.push('');
   const visit = (dir: DirHandle, prefix: string, prefixExact: boolean, depth: number): void => {
     for (const name of readNames(dir)) {
       const st = lstatOrNull(dir, name);
@@ -577,6 +609,7 @@ export function walk(anchor: WorkspaceAnchor, rel: string, limits: WalkLimits = 
             mountBoundaries.push(childRel);
             continue;
           }
+          if (isWatched(child.fd)) watchedAt.push(childRel);
           visit(child, childRel, childExact, depth + 1);
         } finally {
           closeSync(child.fd);
@@ -589,7 +622,7 @@ export function walk(anchor: WorkspaceAnchor, rel: string, limits: WalkLimits = 
   } finally {
     closeDir(root, anchor);
   }
-  return { entries, files, dirs, symlinks, others, bytes, mountBoundaries };
+  return { entries, files, dirs, symlinks, others, bytes, mountBoundaries, watchedAt };
 }
 
 export interface CopyCount {
@@ -609,10 +642,20 @@ export type CopyOutSink = (rel: string, fd: number, size: number) => void;
  * Mount boundaries are refused before anything is copied. A file that cannot be
  * read (EACCES) fails the copy: a backup must not be silently incomplete.
  */
-export function copyOut(anchor: WorkspaceAnchor, rel: string, sink: CopyOutSink, limits: WalkLimits = DEFAULT_LIMITS): CopyCount {
-  const listing = walk(anchor, rel, limits);
+export function copyOut(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  sink: CopyOutSink,
+  limits: WalkLimits = DEFAULT_LIMITS,
+  /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
+  refuse?: { readonly dev: number; readonly ino: number },
+): CopyCount {
+  const listing = walk(anchor, rel, limits, refuse);
   if (listing.mountBoundaries.length > 0) {
     throw new WorkspaceAccessError('MOUNT', `mount boundary below ${JSON.stringify(rel)}: ${listing.mountBoundaries.join(', ')}`);
+  }
+  if (listing.watchedAt.length > 0) {
+    throw new WorkspaceAccessError('OVERLAP', `the data directory is inside ${JSON.stringify(rel)} (at ${listing.watchedAt.map(p => p === '' ? '.' : p).join(', ')}), e.g. through a bind mount`);
   }
   const base = splitRel(rel);
   const skipped: string[] = [];

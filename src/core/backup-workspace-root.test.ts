@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { BackupManager } from './backup.js';
 import { reloadConfig } from './config.js';
 import { _resetWorkspaceAccess, workspaceAccess } from './workspace-access.js';
@@ -181,6 +181,19 @@ describe('backup — the workspace root', () => {
     expect(created.error).toMatch(/no longer the directory/);
   });
 
+  it('fails the backup when the data directory is inside the root, never copies it into itself', async () => {
+    // A manager on another data directory opens `<that>/workspace` by its resolved path: a link to the
+    // directory that holds the data directory stands in for a bind mount, which takes privileges.
+    const other = join(tmp, 'nest', 'other');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(other, 'store.txt'), 'ZZ-store');
+    symlinkSync(dirname(other), join(other, 'workspace'));
+    const created = await manager(other).createBackup();
+    expect(created.success).toBe(false);
+    expect(created.error).toMatch(/data directory is inside/);
+    expect(readdirSync(backupDir).filter(n => !n.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('a manager on another data directory backs up that directory\'s workspace, not this engine\'s', async () => {
     writeFileSync(ws('http-api/engine.txt'), 'ZZ-engine');
     const other = join(tmp, 'other');
@@ -191,5 +204,24 @@ describe('backup — the workspace root', () => {
     const paths = created.manifest.files.map(f => f.path);
     expect(paths).toContain('workspace/own.txt');
     expect(paths).not.toContain('workspace/http-api/engine.txt');
+  });
+
+  it('with an external root, backs up the root and restores into it, never into <data>/workspace (I2)', async () => {
+    const ext = join(tmp, 'volume');
+    mkdirSync(join(ext, 'http-api'), { recursive: true });
+    writeFileSync(join(ext, 'http-api', 'a.txt'), 'ZZ-ext');
+    rmSync(join(data, 'workspace'), { recursive: true });
+    process.env['LYNOX_WORKSPACE_ROOT'] = ext;
+    _resetWorkspaceAccess();
+    const created = await manager().createBackup();
+    expect(created.success).toBe(true);
+    expect(created.manifest.files.map(f => f.path)).toContain('workspace/http-api/a.txt');
+
+    rmSync(join(ext, 'http-api', 'a.txt'));
+    const restored = await manager().restoreBackup(created.path);
+    expect(restored.error).toBeUndefined();
+    expect(restored.success).toBe(true);
+    expect(readFileSync(join(ext, 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-ext');
+    expect(existsSync(join(data, 'workspace'))).toBe(false);
   });
 });

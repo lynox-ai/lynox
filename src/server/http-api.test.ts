@@ -17109,10 +17109,19 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   it('answers the workspace status as a failure when the root cannot be used, never with a guessed field', async () => {
     const other = mkdtempSync(join(tmpdir(), 'lynox-ws-root-other-'));
     try {
+      // Missing, and `/` (it holds the data directory): both refused by the root guard.
+      for (const unusable of [join(other, 'missing'), '/']) {
+        await withEnv({ ...MANAGED, LYNOX_WORKSPACE_ROOT: unusable }, async () => {
+          const res = await as(ADMIN, '/api/admin/workspace/status');
+          expect(res.status).toBe(500);
+          expect(((await res.json()) as { code?: string }).code).toBe('workspace_root_unusable');
+        });
+      }
+      // A directory of its own outside the data directory is a root, not a failure.
       await withEnv({ ...MANAGED, LYNOX_WORKSPACE_ROOT: other }, async () => {
         const res = await as(ADMIN, '/api/admin/workspace/status');
-        expect(res.status).toBe(500);
-        expect(((await res.json()) as { code?: string }).code).toBe('workspace_root_unusable');
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as { workspace_root_mode?: string }).workspace_root_mode).toBe('external');
       });
       // The user bearer does not reach it at all.
       await withEnv(MANAGED, async () => {

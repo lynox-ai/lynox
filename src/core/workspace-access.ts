@@ -67,8 +67,9 @@ export function workspaceAccessIfPresent(): WorkspaceAccess | null {
 /**
  * Whether `path` (followed if it is a link) is the anchored root itself. In the default mode the
  * data directory's `workspace` entry IS the root; the erasure empties it through the anchor and
- * must not remove it by name. (A `workspace` entry that is a link or a mount point is refused by
- * the erasure's scan before this matters.)
+ * must not remove it by name. Followed on purpose: a `workspace` entry that is a link or a mount
+ * point to the anchored directory is the root too (PRD I12d); the erasure's scan refuses a link
+ * whose target `unsafeRoot` rejects.
  */
 export function isAnchoredRoot(access: WorkspaceAccess, path: string): boolean {
   let byName;

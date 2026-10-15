@@ -1413,10 +1413,11 @@ export class Engine {
     // back to inline text later.
     if (this.context && this.context.source !== 'cli') {
       ensureWorkspaceRoot();
+      // Held from boot: backup, migration and the erasure reach the workspace only through it.
+      // Opened before the context directory, so a root it refuses gets nothing made in it.
+      workspaceAccess();
       const wsDir = ensureContextWorkspace(this.context);
       setTenantWorkspace(wsDir);
-      // Held from boot: backup, migration and the erasure reach the workspace only through it.
-      workspaceAccess();
     }
 
     // Generate session briefing

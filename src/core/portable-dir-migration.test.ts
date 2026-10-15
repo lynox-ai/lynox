@@ -10,6 +10,7 @@ import {
   encryptChunk, computeManifestHash, sha256, type MigrationChunkMeta,
 } from './migration-crypto.js';
 import { isPortableDirEntryName, GENERIC_PORTABLE_DIRS } from './data-dir-inventory.js';
+import { _resetWorkspaceAccess } from './workspace-access.js';
 
 /**
  * `apis/` and `workspace/` migrate through one GENERIC collector, because neither has
@@ -94,6 +95,18 @@ describe('portable directories survive a migration', () => {
     for (const c of chunks) importer.receiveChunk(c);
     expect(importer.restore().portableDirFilesImported).toBe(1);
     expect(readFileSync(join(dstDir, 'workspace', 'big.bin')).equals(big)).toBe(true);
+  });
+
+  it('refuses to export when the data directory is inside the workspace root, never copies it into itself', () => {
+    // `<data>/workspace` linked to the directory that holds the data directory stands in for a bind
+    // mount, which takes privileges: the root then contains the data directory.
+    const nest = tmp('lynox-pd-nest-');
+    const srcDir = join(nest, 'src');
+    mkdirSync(join(srcDir, 'apis'), { recursive: true });
+    writeFileSync(join(srcDir, 'apis', 'a.json'), '{}', 'utf-8');
+    symlinkSync(nest, join(srcDir, 'workspace'));
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY });
+    expect(() => exporter.export(Buffer.alloc(32, 1))).toThrow(/data directory is inside/);
   });
 
   it('refuses to ship a partial directory rather than truncating it silently', () => {
@@ -347,6 +360,33 @@ describe('portable directories survive a migration', () => {
     const importer = new MigrationImporter({ lynoxDir: tmp('lynox-pdwe-dst-'), vaultKey: DST_KEY });
     const result = exporter.export(handshake(importer));
     expect(result.skipped).toEqual(['workspace/link']);
+  });
+
+  it('workspace: an external root is exported and imported through the root, not <data>/workspace (P18 D6)', () => {
+    const saved = { data: process.env['LYNOX_DATA_DIR'], root: process.env['LYNOX_WORKSPACE_ROOT'] };
+    const srcDir = tmp('lynox-pdx-src-'); const srcRoot = tmp('lynox-pdx-srcroot-');
+    const dstDir = tmp('lynox-pdx-dst-'); const dstRoot = tmp('lynox-pdx-dstroot-');
+    writeFileSync(join(srcRoot, 'a.txt'), 'ZZ-ext');
+    try {
+      process.env['LYNOX_DATA_DIR'] = srcDir;
+      process.env['LYNOX_WORKSPACE_ROOT'] = srcRoot;
+      _resetWorkspaceAccess();
+      const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY });
+      const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_KEY });
+      const { manifest, chunks } = exporter.export(handshake(importer));
+      process.env['LYNOX_DATA_DIR'] = dstDir;
+      process.env['LYNOX_WORKSPACE_ROOT'] = dstRoot;
+      _resetWorkspaceAccess();
+      importer.setManifest(manifest);
+      for (const c of chunks) importer.receiveChunk(c);
+      expect(importer.restore().portableDirFilesImported).toBe(1);
+      expect(readFileSync(join(dstRoot, 'a.txt'), 'utf-8')).toBe('ZZ-ext');
+      expect(existsSync(join(dstDir, 'workspace'))).toBe(false);
+    } finally {
+      _resetWorkspaceAccess();
+      if (saved.data === undefined) delete process.env['LYNOX_DATA_DIR']; else process.env['LYNOX_DATA_DIR'] = saved.data;
+      if (saved.root === undefined) delete process.env['LYNOX_WORKSPACE_ROOT']; else process.env['LYNOX_WORKSPACE_ROOT'] = saved.root;
+    }
   });
 
   it('refuses a bundle naming a directory this build does not declare portable', () => {

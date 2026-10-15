@@ -7,8 +7,8 @@ import type { WorkspaceRoot } from './workspace-root.js';
 /**
  * The places that used to build `<data>/workspace` themselves (P18 D3) and the translation of the
  * old path (D7) go through the root. With the default root the two spellings are the same string,
- * so this hands them a root that is NOT `<data>/workspace` — the state this engine still refuses
- * at boot, reached here by replacing the root's resolver — and looks where they land.
+ * so this hands them a root that is NOT `<data>/workspace`, by replacing the root's resolver, and
+ * looks where they land.
  */
 let root: WorkspaceRoot;
 vi.mock('./workspace-root.js', async (importOriginal) => {

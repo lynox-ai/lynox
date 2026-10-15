@@ -20,12 +20,15 @@
  *    entry that is, or contains, a mount point holds it on another filesystem. Emptying
  *    either would reach outside the data dir, and unlinking the link would answer "all
  *    deleted" over data that is still there. So the scan reports them and the route
- *    refuses before anything is deleted. A mount is recognised by its device number; a
- *    bind mount from the SAME filesystem has the same one and is not recognised.
+ *    refuses before anything is deleted. A mount is recognised by its device number and, on
+ *    Linux, by its mount id: a bind mount or a second volume on the SAME filesystem has the
+ *    same device number, and only the mount id tells it apart.
  */
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
+import { unsafeRoot } from './workspace-root.js';
+import { mountIdAt } from './workspace-fd.js';
 
 /**
  * SQLite sidecars that belong to the database they extend — only a `sqlite` entry has them.
@@ -79,6 +82,17 @@ export interface WorkspaceErasure {
   readonly isRoot: (path: string) => boolean;
   /** Directories below the root on another mount, from the anchor walk. */
   readonly mountBoundaries: () => readonly string[];
+  /** Directories in the root (`''` for the root itself) that ARE the data dir, from the same walk. */
+  readonly dataDirAt: () => readonly string[];
+  /** The anchored root's device and inode, to find it inside the data dir (a bind mount). */
+  readonly rootIdentity?: { readonly dev: number; readonly ino: number } | undefined;
+}
+
+/** What the erasure's anchor walk finds (`_workspaceWalk` in the route), for `WorkspaceErasure`. */
+export interface WorkspaceWalk {
+  readonly mountBoundaries: readonly string[];
+  readonly dataDirAt: readonly string[];
+  readonly rootIdentity: { readonly dev: number; readonly ino: number };
 }
 
 /** The inventory name of the workspace row. */
@@ -137,20 +151,50 @@ function owedBy(cls: EntryClass, ack: { has(name: string): boolean }, name: stri
   }
 }
 
+/** Whether the entry at `path` (lstat `st`) sits on another mount than the data dir. */
+type OnOtherMount = (path: string, st: Stats) => boolean;
+
 /**
- * The first path inside `dir` (relative) that sits on another device than `dev`, or
+ * The data dir's mount, as a predicate: another device, or (Linux) another mount id. The device
+ * alone misses a bind mount or a second volume on the same filesystem.
+ */
+function otherMountThan(dir: string, dev: number, mountId: (path: string) => number | null): OnOtherMount {
+  return otherMount(dev, mountId(dir), mountId);
+}
+
+/**
+ * Asked of files too: a file bind-mounted into the data dir cannot be unlinked (EBUSY), and finding
+ * that in the scan keeps the erasure all-or-nothing instead of failing after the stores are emptied.
+ * An entry that cannot be asked counts as on another mount (refused, never removed), except one
+ * that is gone, which there is nothing left to remove.
+ */
+function otherMount(dev: number, own: number | null, mountId: (path: string) => number | null): OnOtherMount {
+  return (path, st) => {
+    if (st.dev !== dev) return true;
+    if (own === null) return false;
+    try {
+      return mountId(path) !== own;
+    } catch (err) {
+      return !isGone(err);
+    }
+  };
+}
+
+/**
+ * The first path inside `dir` (relative) that sits on another mount than the data dir, or
  * `null`. Walks with `lstat`, so a symlink inside is not followed — removing it only
  * removes the link.
  */
-function foreignDeviceInside(dir: string, dev: number, lstat: (path: string) => Stats): string | null {
+function foreignMountInside(dir: string, onOther: OnOtherMount, lstat: (path: string) => Stats): string | null {
   const stack = [''];
   while (stack.length > 0) {
     const rel = stack.pop()!;
     for (const child of readdirSync(join(dir, rel))) {
       const childRel = rel === '' ? child : join(rel, child);
-      const st = lstat(join(dir, childRel));
+      const path = join(dir, childRel);
+      const st = lstat(path);
       if (st.isSymbolicLink()) continue;
-      if (st.dev !== dev) return childRel;
+      if (onOther(path, st)) return childRel;
       if (st.isDirectory()) stack.push(childRel);
     }
   }
@@ -165,7 +209,7 @@ function foreignDeviceInside(dir: string, dev: number, lstat: (path: string) => 
  * take the entry out of the data dir instead of acknowledging it. One sentence for both
  * sends the operator the wrong way in one of them.
  */
-function linkedReason(cls: EntryClass, st: Stats, dataDirDev: number, path: string, lstat: (path: string) => Stats, walk: boolean): LinkedReason | null {
+function linkedReason(cls: EntryClass, st: Stats, onOther: OnOtherMount, path: string, lstat: (path: string) => Stats, walk: boolean): LinkedReason | null {
   // A SQLite store is emptied through the handle the engine holds open, which writes the
   // file wherever it lives — through a link or on another device alike.
   if (cls.kind === 'declared' && cls.entry.kind === 'sqlite') return null;
@@ -179,12 +223,12 @@ function linkedReason(cls: EntryClass, st: Stats, dataDirDev: number, path: stri
     const followsLink = cls.kind !== 'unknown' && !(cls.kind === 'declared' && cls.entry.erase.by === 'keep');
     return followsLink ? { reason: 'a symbolic link; its content is at the target, outside the data directory', remedy: elsewhere } : null;
   }
-  if (st.dev !== dataDirDev) return { reason: 'a mount point; its content is on another filesystem', remedy: elsewhere };
+  if (onOther(path, st)) return { reason: 'a mount point; its content is on another filesystem', remedy: elsewhere };
   if (walk && st.isDirectory()) {
     // Fail closed: a directory that cannot be read may hold a mount the removal would empty.
     let inside: string | null;
     try {
-      inside = foreignDeviceInside(path, dataDirDev, lstat);
+      inside = foreignMountInside(path, onOther, lstat);
     } catch (err) {
       return {
         reason: `could not be read to check for mount points inside (${err instanceof Error ? err.message : String(err)})`,
@@ -212,6 +256,8 @@ export interface DataDirScan {
   /** The data dir as resolved on disk, so a data dir that is itself a symlink compares correctly. */
   readonly dir: string;
   readonly dev: number;
+  /** The data dir's mount id (Linux), or null; with `dev`, what "on another mount" is measured against. */
+  readonly mnt: number | null;
   readonly unknown: readonly EntryIdentity[];
   /**
    * Entries the erasure would remove or empty — or would remove once acknowledged — that
@@ -238,6 +284,8 @@ export interface ScanOptions {
   readonly walk?: boolean | undefined;
   /** Injected only by tests: a mount cannot be created without privileges. */
   readonly lstat?: ((path: string) => Stats) | undefined;
+  /** Injected only by tests, for the same reason: the mount id of a path, a link not followed. */
+  readonly mountId?: ((path: string) => number | null) | undefined;
   /**
    * The workspace root. Without it the `workspace` row is treated by name, as a plain entry of
    * the data dir; the erase route passes it whenever the root exists or the engine holds it.
@@ -245,12 +293,77 @@ export interface ScanOptions {
   readonly workspace?: WorkspaceErasure | undefined;
 }
 
+/**
+ * The directories in `dir` (relative), at any depth, that are the directory `id`; symlinks are not
+ * followed, and another mount is not entered (the scan refuses it where the erasure would reach
+ * it). `skipTop` is a top-level name not to report or enter: the default root, which IS the root by
+ * design. An entry gone since the listing is skipped; a directory that cannot be read is returned
+ * as unreadable, for the caller to refuse with its name: it could hold the root.
+ */
+function directoriesWithIdentity(
+  dir: string,
+  id: { readonly dev: number; readonly ino: number },
+  skipTop: string | null,
+  onOther: OnOtherMount,
+): { found: string[]; unreadable: Array<{ path: string; cause: string }> } {
+  const found: string[] = [];
+  const unreadable: Array<{ path: string; cause: string }> = [];
+  const stack = [''];
+  while (stack.length > 0) {
+    const rel = stack.pop()!;
+    let dirents;
+    try {
+      dirents = readdirSync(join(dir, rel), { withFileTypes: true });
+    } catch (err) {
+      if (!isGone(err)) unreadable.push({ path: rel, cause: errorText(err) });
+      continue;
+    }
+    for (const d of dirents) {
+      if (!d.isDirectory()) continue;
+      const childRel = rel === '' ? d.name : join(rel, d.name);
+      if (rel === '' && (d.name === skipTop || OS_LITTER.has(d.name))) continue;
+      const path = join(dir, childRel);
+      let st: Stats;
+      try {
+        st = lstatSync(path);
+      } catch (err) {
+        if (!isGone(err)) unreadable.push({ path: childRel, cause: errorText(err) });
+        continue;
+      }
+      if (st.dev === id.dev && st.ino === id.ino) { found.push(childRel); continue; }
+      if (onOther(path, st)) continue;
+      stack.push(childRel);
+    }
+  }
+  return { found, unreadable };
+}
+
+const errorText = (err: unknown): string => (err as NodeJS.ErrnoException | null)?.code ?? (err instanceof Error ? err.message : String(err));
+
+/** Why a `<data>/workspace` link must not be emptied as the root (`unsafeRoot`), or null. */
+function linkedRootReason(path: string, dataDir: string): string | null {
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch (err) {
+    return `a symbolic link whose target could not be resolved (${err instanceof Error ? err.message : String(err)})`;
+  }
+  switch (unsafeRoot(real, dataDir)) {
+    case 'holds-data-dir': return `a symbolic link to ${real}, which is the data directory or contains it; emptying it would empty the data directory`;
+    case 'inside-data-dir': return `a symbolic link to ${real}, inside the data directory; emptying it would empty that entry`;
+    case null: return null;
+  }
+}
+
 export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirScan {
   const lstat = opts.lstat ?? lstatSync;
   const ack = opts.acknowledged ?? new Set<string>();
   const walk = opts.walk ?? true;
+  const mountId = opts.mountId ?? mountIdAt;
   const dir = realpathSync(dataDir);
   const dev = statSync(dir).dev;
+  const mnt = mountId(dir);
+  const onOther = otherMountThan(dir, dev, mountId);
   const unknown: EntryIdentity[] = [];
   const linked: LinkedEntry[] = [];
   const removedWithoutAsking: string[] = [];
@@ -268,6 +381,34 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
         remedy: 'This instance\'s data is there: erase it where it lives and remove the mount, or move the content into the workspace root.',
       });
     }
+    // Emptying the root must not empty the data dir, and erasing the data dir must not empty the
+    // root through another path. Paths alone cannot show either when a bind mount is involved: the
+    // same directory appears under a second, unrelated name. So by identity, both ways.
+    const dataDirAt = ws.dataDirAt();
+    if (dataDirAt.length > 0) {
+      linked.push({
+        name: WORKSPACE,
+        reason: `the workspace root contains the data directory (${dataDirAt.map(p => p === '' ? '.' : p).join(', ')}); emptying it would empty the data directory`,
+        remedy: 'Point the workspace at a directory of its own, outside the data directory, then erase.',
+      });
+    }
+    if (ws.rootIdentity !== undefined && walk) {
+      const { found, unreadable } = directoriesWithIdentity(dir, ws.rootIdentity, ws.external ? null : WORKSPACE, onOther);
+      if (found.length > 0) {
+        linked.push({
+          name: WORKSPACE,
+          reason: `the workspace root is also inside the data directory (${found.join(', ')}); erasing the data directory would empty it by that path`,
+          remedy: 'Point the workspace at a directory of its own, outside the data directory, then erase.',
+        });
+      }
+      for (const u of unreadable) {
+        linked.push({
+          name: u.path.split('/')[0]!,
+          reason: `${u.path} could not be read to check that the workspace root is not inside it (${u.cause})`,
+          remedy: 'Make it readable to this instance, or move it out of the data directory, then erase.',
+        });
+      }
+    }
   }
   for (const name of readdirSync(dir)) {
     const cls = classifyEntry(name, { externalWorkspace: ws?.external === true });
@@ -281,10 +422,21 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
       throw err;                   // the route answers 500, nothing erased
     }
     // The default root itself is emptied through the anchor, not removed by name: the root and
-    // the anchor the engine holds survive the erasure. A `<data>/workspace` that is a link or a
-    // mount point is not: its content is elsewhere, and it is refused below as before.
-    if (ws !== undefined && cls.kind === 'declared' && name === WORKSPACE && !st.isSymbolicLink() && st.dev === dev && ws.isRoot(path)) {
-      emptiedInPlace.push(name);
+    // the anchor the engine holds survive the erasure. That holds for a `<data>/workspace` that is
+    // a mount point or a link as well, as long as it IS the anchored root (followed): the anchor
+    // empties the directory it holds, wherever that lives. A link to the data directory, to a
+    // directory that contains it, or to one inside it is refused: emptying it would empty that.
+    if (ws !== undefined && cls.kind === 'declared' && name === WORKSPACE && ws.isRoot(path)) {
+      const unsafe = st.isSymbolicLink() ? linkedRootReason(path, dir) : null;
+      if (unsafe === null) {
+        emptiedInPlace.push(name);
+      } else {
+        linked.push({
+          name,
+          reason: unsafe,
+          remedy: 'Point the workspace at a directory of its own, outside the data directory, then erase.',
+        });
+      }
       continue;
     }
     const inPlace = cls.kind === 'declared' && cls.entry.erase.by === 'step';
@@ -294,14 +446,14 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
     // Asked of everything the erasure touches through a path: what it removes, what it
     // empties in place, and the unknown entries acknowledged for removal.
     if (!owedBy(cls, ack, name) && !inPlace) continue;
-    const found = linkedReason(cls, st, dev, path, lstat, walk);
+    const found = linkedReason(cls, st, onOther, path, lstat, walk);
     if (found !== null) linked.push({ name, ...found });
   }
   unknown.sort((a, b) => a.name.localeCompare(b.name));
   linked.sort((a, b) => a.name.localeCompare(b.name));
   removedWithoutAsking.sort((a, b) => a.localeCompare(b));
   emptiedInPlace.sort((a, b) => a.localeCompare(b));
-  return { dir, dev, unknown, linked, removedWithoutAsking, emptiedInPlace, litter };
+  return { dir, dev, mnt, unknown, linked, removedWithoutAsking, emptiedInPlace, litter };
 }
 
 /**
@@ -360,11 +512,14 @@ export function removeOwedEntries(
   lstat: (path: string) => Stats = lstatSync,
   /** As in `ScanOptions.workspace`: the root is skipped here and emptied through its anchor. */
   workspace?: WorkspaceErasure,
+  /** Injected only by tests, as `ScanOptions.mountId`. */
+  mountId: (path: string) => number | null = mountIdAt,
 ): RemoveOutcome {
   const removed: string[] = [];
   const failures: Array<{ name: string; reason: string }> = [];
   const ack = new Set(acknowledgedUnknown);
   const owed: Array<{ name: string; cls: EntryClass }> = [];
+  const onOther = otherMount(scan.dev, scan.mnt, mountId);
   let names: string[];
   try {
     names = readdirSync(scan.dir);
@@ -388,7 +543,7 @@ export function removeOwedEntries(
       continue;
     }
     // The scan refused these already; asked again because the stretch runs after an await.
-    const found = linkedReason(cls, st, scan.dev, path, lstat, true);
+    const found = linkedReason(cls, st, onOther, path, lstat, true);
     if (found !== null) {
       failures.push({ name, reason: `${found.reason}; not removed` });
       continue;

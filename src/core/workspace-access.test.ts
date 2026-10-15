@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isAnchoredRoot, workspaceAccess, workspaceAccessIfPresent, _resetWorkspaceAccess } from './workspace-access.js';
 import { emptyDir, WorkspaceAccessError } from './workspace-fd.js';
-import { WorkspaceRootError } from './workspace-root.js';
+import { getWorkspaceRoot, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
 
 describe('workspace access — the anchored root', () => {
   let tmp: string;
@@ -110,5 +110,73 @@ describe('workspace access — the anchored root', () => {
   it('throws WorkspaceRootError when the root cannot be opened', () => {
     writeFileSync(join(data, 'workspace'), 'not a directory');
     expect(() => workspaceAccess()).toThrow(WorkspaceRootError);
+  });
+
+  describe('a root the erasure must never empty is refused', () => {
+    const refuses = (root: string, text: string): void => {
+      process.env['LYNOX_WORKSPACE_ROOT'] = root;
+      expect(() => workspaceAccess()).toThrow(WorkspaceRootError);
+      expect(() => workspaceAccess()).toThrow(text);
+      // The CLI and the tools' confinement read the root by name, without the anchor: the same refusal.
+      expect(() => getWorkspaceRoot()).toThrow(text);
+    };
+
+    it('the data directory itself', () => { refuses(data, 'is the data directory'); });
+    it('a directory that contains the data directory', () => { refuses(tmp, 'or contains it'); });
+    it('/', () => { refuses('/', 'or contains it'); });
+    it('another directory inside the data directory', () => {
+      mkdirSync(join(data, 'secrets'));
+      refuses(join(data, 'secrets'), 'inside the data directory');
+    });
+    it('but not <data>/workspace itself, which is the default', () => {
+      mkdirSync(join(data, 'workspace'));
+      process.env['LYNOX_WORKSPACE_ROOT'] = join(data, 'workspace');
+      expect(workspaceAccess().root).toEqual({ path: join(data, 'workspace'), mode: 'default' });
+    });
+    it('and not a directory beside the data directory', () => {
+      const other = join(tmp, 'volume');
+      mkdirSync(other);
+      process.env['LYNOX_WORKSPACE_ROOT'] = other;
+      expect(workspaceAccess().root).toEqual({ path: other, mode: 'external' });
+    });
+
+    // A path segment that starts with `..` is not a climb: `/srv/..data` is inside `/srv`.
+    it('a directory that contains a data directory named `..something`', () => {
+      const dotted = join(tmp, '..lynox');
+      mkdirSync(dotted);
+      process.env['LYNOX_DATA_DIR'] = dotted;
+      refuses(tmp, 'or contains it');
+    });
+    it('a directory named `..something` inside the data directory', () => {
+      mkdirSync(join(data, '..x'));
+      refuses(join(data, '..x'), 'inside the data directory');
+    });
+
+    // A second spelling of the same directory (a case-insensitive file system; here a link that is
+    // not resolved) passes a path comparison; the identity along the ancestors does not.
+    it('by identity: a root that holds the data directory under another name', () => {
+      const alias = join(tmp, 'alias-of-tmp');
+      symlinkSync(tmp, alias);
+      expect(unsafeRoot(alias, data)).toBe('holds-data-dir');
+    });
+    it('by identity: a root inside a data directory named another way', () => {
+      const alias = join(tmp, 'alias-of-data');
+      symlinkSync(data, alias);
+      mkdirSync(join(data, 'secrets'));
+      expect(unsafeRoot(join(data, 'secrets'), alias)).toBe('inside-data-dir');
+    });
+    // When the identity cannot be read (a path that does not resolve), the path decides alone.
+    it('by path alone, when no identity can be read', () => {
+      const gone = join(tmp, 'gone');
+      expect(unsafeRoot(join(gone, 'data', 'secrets'), join(gone, 'data'))).toBe('inside-data-dir');
+      expect(unsafeRoot(gone, join(gone, 'data'))).toBe('holds-data-dir');
+      expect(unsafeRoot(join(gone, 'volume'), join(gone, 'data'))).toBeNull();
+    });
+    it('by identity: a directory beside the data directory stays allowed', () => {
+      const alias = join(tmp, 'alias-of-data');
+      symlinkSync(data, alias);
+      mkdirSync(join(tmp, 'volume'));
+      expect(unsafeRoot(join(tmp, 'volume'), alias)).toBeNull();
+    });
   });
 });

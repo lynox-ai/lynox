@@ -764,12 +764,14 @@ export class BackupManager {
       const destDir = join(tmpDir, WORKSPACE);
       mkdirSync(destDir, { recursive: true, mode: 0o700 });
       files.push({ path: WORKSPACE, size_bytes: 0, checksum_sha256: '', type: 'directory' });
+      // The data directory inside the root (a bind mount) would put every earlier backup into this one.
+      const data = statSync(this.lynoxDir);
       const count = copyOut(lease.access.anchor, '', (rel, fd) => {
         const dest = join(destDir, rel);
         mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
         copyFdToFile(fd, dest);
         files.push(this.fileEntry(tmpDir, `${WORKSPACE_PREFIX}${rel}`, 'file'));
-      });
+      }, undefined, { dev: data.dev, ino: data.ino });
       return count.skipped.map(rel => `${WORKSPACE_PREFIX}${rel}`);
     } finally {
       lease.release();

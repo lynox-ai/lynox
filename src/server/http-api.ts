@@ -9,7 +9,7 @@
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
-import { readFileSync, accessSync, existsSync } from 'node:fs';
+import { readFileSync, accessSync, existsSync, fstatSync, statSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, basename, dirname, join } from 'node:path';
@@ -112,7 +112,7 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
-import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure } from '../core/data-dir-erase.js';
+import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure, type WorkspaceWalk } from '../core/data-dir-erase.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
@@ -1521,12 +1521,17 @@ export class LynoxHTTPApi {
   private profileGrantsPending = 0;
 
   /**
-   * Directories below the workspace root that sit on another mount, from the anchor walk. A
-   * method so a test can stand in for a mount, which takes privileges to create.
+   * One anchor walk for the erasure: the directories below the workspace root that sit on another
+   * mount, those that ARE the data directory (by device and inode — a bind mount shows it under a
+   * second path), and the root's own identity, to look for it inside the data directory. A method
+   * so a test can stand in for what takes privileges to create.
    */
-  async _workspaceMountBoundaries(access: WorkspaceAccess): Promise<readonly string[]> {
+  async _workspaceWalk(access: WorkspaceAccess, dataDir: string): Promise<WorkspaceWalk> {
     const { walk } = await import('../core/workspace-fd.js');
-    return walk(access.anchor, '').mountBoundaries;
+    const data = statSync(dataDir);
+    const found = walk(access.anchor, '', undefined, { dev: data.dev, ino: data.ino });
+    const own = fstatSync(access.anchor.fd);
+    return { mountBoundaries: found.mountBoundaries, dataDirAt: found.watchedAt, rootIdentity: { dev: own.dev, ino: own.ino } };
   }
 
   private erasureBlockedBy(engine: Engine, isBackfillRunning: () => boolean): { code: string; error: string } | null {
@@ -11811,20 +11816,23 @@ export class LynoxHTTPApi {
         // answering with the stores emptied and the files left would be the false success.
         // A default root that never existed holds nothing: `null`, and the workspace is skipped.
         let wsAccess: WorkspaceAccess | null;
-        let wsBoundaries: readonly string[];
+        let wsWalk: WorkspaceWalk | null;
         try {
           wsAccess = workspaceAccessIfPresent();
-          wsBoundaries = wsAccess === null ? [] : await this._workspaceMountBoundaries(wsAccess);
+          wsWalk = wsAccess === null ? null : await this._workspaceWalk(wsAccess, dataDir);
         } catch (err) {
           process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
         const access = wsAccess;
-        const wsErasure: WorkspaceErasure | undefined = access === null ? undefined : {
+        const found = wsWalk;
+        const wsErasure: WorkspaceErasure | undefined = access === null || found === null ? undefined : {
           external: access.root.mode === 'external',
           isRoot: (path) => isAnchoredRoot(access, path),
-          mountBoundaries: () => wsBoundaries,
+          mountBoundaries: () => found.mountBoundaries,
+          dataDirAt: () => found.dataDirAt,
+          rootIdentity: found.rootIdentity,
         };
         let scan: ReturnType<typeof scanDataDir>;
         try {
@@ -12217,7 +12225,7 @@ export class LynoxHTTPApi {
         // The files the erasure owes, after every store is emptied and scrubbed; `backups`
         // last inside. The acknowledged unknown entries are re-checked against what the
         // caller was shown, here, in the synchronous stretch.
-        const rescan = (() => { try { return scanDataDir(dataDir, { walk: false, ...(wsErasure === undefined ? {} : { workspace: { ...wsErasure, mountBoundaries: () => [] } }) }); } catch { return null; } })();
+        const rescan = (() => { try { return scanDataDir(dataDir, { walk: false, ...(wsErasure === undefined ? {} : { workspace: { ...wsErasure, mountBoundaries: () => [], dataDirAt: () => [] } }) }); } catch { return null; } })();
         const ackStillValid = rescan !== null && sameUnknownSet(rescan.unknown, acknowledged);
         if (!ackStillValid && acknowledged.length > 0) note('data_dir#unknown_changed', new Error('the unknown entries changed after they were reported; none was removed'));
         // The workspace root is emptied through its anchor: bottom-up, never following a link,
