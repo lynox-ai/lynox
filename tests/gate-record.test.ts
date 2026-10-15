@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -358,6 +358,18 @@ describe('gate-record — which gates a diff requires', () => {
     it('lists the same approvers as the fixture', () => {
       // A name added here alone, or in the fixture alone, fails this.
       expect([...LEGAL_APPROVERS]).toEqual(fixture.approvers);
+    });
+
+    it('keeps every approver in lower case, as the name it is compared with', () => {
+      // The name is lower-cased before the lookup; an entry with a capital could never match.
+      for (const a of LEGAL_APPROVERS) expect(a).toBe(a.toLowerCase());
+    });
+
+    it('refuses a verdict it does not know, and nothing for `ok`', () => {
+      // Fails closed: a later version of the shared reader may return a verdict this script
+      // has no branch for.
+      expect(signOffErrors('expired', 'rafael 2026-10-15', true).join(' ')).toContain('which this check does not know');
+      expect(signOffErrors('ok', 'rafael 2026-10-15', true)).toEqual([]);
     });
 
     it.each(fixture.cases.map((c) => [c.value, c.verdict, c.why] as const))(

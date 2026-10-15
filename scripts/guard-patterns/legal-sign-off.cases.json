@@ -41,7 +41,7 @@
     {
       "value": "rafael 2026-10-15 (pending)",
       "verdict": "ok",
-      "why": "a LIMIT, not a sign-off: the line names an approver and a date, and no syntax check can tell it was not given"
+      "why": "name and date make the sign-off; text after the date is free"
     },
     {
       "value": "PENDING — wording not seen yet",
@@ -227,6 +227,31 @@
       "value": "rafael 2026-10-155",
       "verdict": "undated",
       "why": "a longer number is not a date"
+    },
+    {
+      "value": "rafael 2026-13-45",
+      "verdict": "undated",
+      "why": "no such month"
+    },
+    {
+      "value": "rafael 2026-02-30",
+      "verdict": "undated",
+      "why": "no such day"
+    },
+    {
+      "value": "rafael 2026-10-15abc",
+      "verdict": "undated",
+      "why": "a letter glued to the date"
+    },
+    {
+      "value": "rafael 2026-10-15١",
+      "verdict": "undated",
+      "why": "a digit of another script glued to the date"
+    },
+    {
+      "value": "rafael 2028-02-29",
+      "verdict": "ok",
+      "why": "a leap day"
     },
     {
       "value": "",
