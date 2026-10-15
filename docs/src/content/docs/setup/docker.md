@@ -60,7 +60,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `LYNOX_VAULT_KEY` | Recommended | Encryption key for secrets at rest |
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3000 in Docker, 3100 locally) |
-| `LYNOX_WORKSPACE` | No | CLI only: an existing directory that bash starts in and that the file tools are limited to (besides `/tmp` and the artifacts directory). A path that does not exist is ignored. Unset, the CLI's relative file writes go to the workspace root. The server ignores it and uses `<workspace root>/http-api`. |
+| `LYNOX_WORKSPACE` | No | CLI only: an existing directory that bash starts in and that the file tools are limited to (besides `/tmp` and the artifacts directory; reads also from `/app`). A path that does not exist is ignored. Unset, the CLI's file writes go to the workspace root. The server ignores it and uses `<workspace root>/http-api`. |
 | `LYNOX_WORKSPACE_ROOT` | No | Directory that holds the workspaces (default: `<data dir>/workspace`, i.e. `/home/lynox/.lynox/workspace` in the image). This version accepts only the default and refuses to start on any other directory. |
 | `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` (default) |
 | `GOOGLE_CLIENT_ID` | No | Google Workspace OAuth |
