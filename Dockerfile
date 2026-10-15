@@ -186,18 +186,23 @@ RUN groupadd -g 1002 lynox-ws && usermod -aG lynox-ws lynox \
 
 WORKDIR /app
 
+# The code belongs to root and the runtime user only reads it, so the process cannot
+# change what it runs on its next start. The fleet's read-only root filesystem already
+# stops that; a container started without it (`docker run`, an own compose file) did
+# not. Nothing writes under /app at runtime: caches go to $HOME/.cache.
+
 # Engine
-COPY --from=deps --chown=lynox:lynox /app/node_modules/ /app/node_modules/
-COPY --from=build-engine --chown=lynox:lynox /app/dist/ /app/dist/
-COPY --from=build-engine --chown=lynox:lynox /app/package.json /app/package.json
+COPY --from=deps /app/node_modules/ /app/node_modules/
+COPY --from=build-engine /app/dist/ /app/dist/
+COPY --from=build-engine /app/package.json /app/package.json
 
 # Web UI
-COPY --from=build-webui --chown=lynox:lynox /app/packages/web-ui/build/ /app/web-ui/
-COPY --from=build-webui --chown=lynox:lynox /app/packages/web-ui/node_modules/ /app/web-ui/node_modules/
-COPY --from=build-webui --chown=lynox:lynox /app/packages/web-ui/package.json /app/web-ui/package.json
+COPY --from=build-webui /app/packages/web-ui/build/ /app/web-ui/
+COPY --from=build-webui /app/packages/web-ui/node_modules/ /app/web-ui/node_modules/
+COPY --from=build-webui /app/packages/web-ui/package.json /app/web-ui/package.json
 
-COPY --chown=lynox:lynox entrypoint-webui.sh /entrypoint-webui.sh
-RUN chmod +x /entrypoint-webui.sh
+COPY entrypoint-webui.sh /entrypoint-webui.sh
+RUN chmod 0755 /entrypoint-webui.sh
 
 # Every program in the image is execute-only for the runtime user, so no
 # process in the container is dumpable. The kernel marks a process started from
