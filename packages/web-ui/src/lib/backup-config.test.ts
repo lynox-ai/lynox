@@ -166,5 +166,7 @@ describe('BackupsView restore wiring', () => {
 		expect(src.match(/requestRestore\(/g) ?? []).toHaveLength(1);
 		expect(src.match(/restoreBackup\(backup\.backup_id, true\)/g) ?? []).toHaveLength(1);
 		expect(src).not.toContain('/restore`');
+		// A wrong signature gets its own warning AND its own button; a missing one the mild pair.
+		expect(src.match(/unverified\.mismatch \? 'backups\.restore_(mismatch|anyway)'/g) ?? []).toHaveLength(2);
 	});
 });

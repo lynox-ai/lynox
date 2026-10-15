@@ -149,14 +149,13 @@
 						{#if unverified?.id === backup.backup_id}
 							<div class="flex flex-col items-end gap-1.5">
 								<span class="text-xs text-warning">{t(unverified.mismatch ? 'backups.restore_mismatch' : 'backups.restore_unverified')}</span>
-								{#if unverified.reason}<span class="text-xs text-text-subtle">{unverified.reason}</span>{/if}
 								<div class="flex items-center gap-2">
 									<button
 										onclick={() => restoreBackup(backup.backup_id, true)}
 										disabled={restoring !== null}
 										class="rounded-[var(--radius-sm)] bg-warning/15 border border-warning/30 px-2 py-0.5 text-xs text-warning hover:bg-warning/25 disabled:opacity-50"
 									>
-										{restoring === backup.backup_id ? t('backups.restoring') : t('backups.restore_unverified_confirm')}
+										{restoring === backup.backup_id ? t('backups.restoring') : t(unverified.mismatch ? 'backups.restore_anyway' : 'backups.restore_unverified_confirm')}
 									</button>
 									<button
 										onclick={() => unverified = null}

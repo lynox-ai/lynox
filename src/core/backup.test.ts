@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, statSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -764,6 +764,36 @@ describe('restoreBackup asks for the proof of origin', () => {
       stop();
       spy.mockRestore();
     }
+  });
+
+  it('refuses a file deleted after the verify pass instead of skipping it', async () => {
+    const manager = mgr(false);
+    const created = await manager.createBackup();
+    driftLive();
+    const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+      rmSync(join(created.path, 'config.json'));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const result = await manager.restoreBackup(created.path);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/changed after it was verified/);
+      expect(liveTier()).toBe('deep');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not let a leftover staging temp lend its mode to the restored file', async () => {
+    const created = await mgr(false).createBackup();
+    const stale = join(lynoxDir, 'config.json.restore-staging');
+    writeFileSync(stale, 'stale');
+    chmodSync(stale, 0o666);
+
+    const result = await mgr(false).restoreBackup(created.path);
+
+    expect(result.success, String(result.error)).toBe(true);
+    expect(statSync(join(lynoxDir, 'config.json')).mode & 0o777).toBe(0o600);
   });
 
   it('asks before it verifies the files: a backup without proof and with a missing file is a question, not a verify error', async () => {

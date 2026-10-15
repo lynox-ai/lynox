@@ -56,7 +56,13 @@ function unrestorableEntry(files: unknown): string | null {
  * file must be ciphertext: a plaintext one needs no key to plant.
  */
 function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
-  const raw = readFileSync(srcFile);
+  let raw: Buffer;
+  try {
+    raw = readFileSync(srcFile);
+  } catch {
+    // The verify pass found it; gone now means changed, not "skip it and report success".
+    throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
+  }
   if (raw.length !== entry.size_bytes || createHash('sha256').update(raw).digest('hex') !== entry.checksum_sha256) {
     throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
   }
@@ -590,15 +596,15 @@ export class BackupManager {
           const srcFile = join(backupPath, entry.path);
           const destFile = join(this.lynoxDir, entry.path);
 
-          if (!existsSync(srcFile)) continue;
-
           // Ensure parent directory exists
           const destDir = join(destFile, '..');
           mkdirSync(destDir, { recursive: true, mode: 0o700 });
 
           const tmpFile = `${destFile}.restore-staging`;
           const raw = readEntryBytes(srcFile, entry, manifest.encrypted === true);
-          writeFileSync(tmpFile, key !== null ? decryptBuffer(raw, key, entry.path) : raw, { mode: 0o600 });
+          // A leftover temp would keep its own mode through the rename; start from none.
+          rmSync(tmpFile, { force: true });
+          writeFileSync(tmpFile, key !== null ? decryptBuffer(raw, key, entry.path) : raw, { mode: 0o600, flag: 'wx' });
           staged.push({ tmp: tmpFile, dest: destFile });
         }
         // Staged only once the data-dir set is, and committed only after it is swapped: a
@@ -865,7 +871,6 @@ export class BackupManager {
     const source = function* (): Iterable<StageEntry> {
       for (const entry of entries) {
         const srcFile = join(backupPath, entry.path);
-        if (!existsSync(srcFile)) continue;
         // Decrypted in memory: no plaintext beside the backup, which may be synced elsewhere.
         const raw = readEntryBytes(srcFile, entry, key !== null);
         const data = key !== null ? decryptBuffer(raw, key, entry.path) : raw;
