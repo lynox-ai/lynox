@@ -1484,7 +1484,7 @@ function adoptionHosts(profile: ApiProfile): string[] {
 /**
  * Where a released value goes, as the owner is asked about it: each of {@link credentialEndpoints}
  * by its host, with the port when it is not the default, and for the token endpoint its path and
- * query too, since the binding holds the whole URL. Only https reaches the question (`not-https`).
+ * query too. Userinfo and a fragment are not shown. Only https reaches the question (`not-https`).
  */
 function releaseDestinations(profile: ApiProfile): string[] {
   const shown = new Set<string>();
