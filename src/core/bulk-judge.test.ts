@@ -457,6 +457,7 @@ describe('runBulkJudge over data-store rows', () => {
     expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
     spy.mockRestore();
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
     expect(start(id).ok).toBe(true);
     const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
     expect((await runBulkJudge(id, again.deps)).status).toBe('done');
