@@ -286,6 +286,28 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_before: 3 });
   });
 
+  it('a vault value inside a JSON column is found at any depth, a key included', async () => {
+    store.createCollection({
+      name: 'docs', scope, uniqueKey: ['sku'], columns: [{ name: 'sku', type: 'string' }, { name: 'meta', type: 'json' }],
+    });
+    store.insertRecords({ collection: 'docs', records: [
+      { sku: 'N', meta: { a: [{ b: 'pa"ss' }] } },
+      { sku: 'K', meta: { 'pa"ss': 1 } },
+      { sku: 'C', meta: { a: [{ b: 'clean' }] } },
+    ] });
+    writeFileSync(join(dir, 'workspace', 'd.csv'), 'target\nN\nK\nC');
+    const id = runIdOf(await bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'docs', source_file: 'd.csv', judge: { rule: 'x', schema: { meta: { type: 'string', maxLength: 20 } } } }, agent(),
+    ));
+    expect(start(id).ok).toBe(true);
+    const h = harness(() => ({ data: { meta: 'ok' }, costUsd: 0.01 }), { maskVault: (t) => t.replace('pa"ss', '***') });
+    await runBulkJudge(id, h.deps);
+    // Twin: the clean row is sent; the two holding the value are not.
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.user).toContain('clean');
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_before: 2 });
+  });
+
   it('a verdict carrying a credential is invalid secret_in_after', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
@@ -386,6 +408,20 @@ describe('runBulkJudge over data-store rows', () => {
     const s = ledger.getStatus(id)!;
     expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
     expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge booking failed: Error']);
+  });
+
+  it('a booking that fails on the last target still halts the run: it is not finished as judged', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    let n = 0;
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+      bookSpend: () => { if (++n === 2) throw new Error('SQLITE_BUSY'); },
+    });
+    const out = await runBulkJudge(id, h.deps);
+    expect(h.calls).toHaveLength(2);
+    expect(out.status).toBe('halted');
+    const s = ledger.getStatus(id)!;
+    expect([s.phase, s.haltReason, s.judge!.unjudged]).toEqual(['planned', BULK_HALT_REASONS.unavailable, 0]);
   });
 
   it('no allowed model halts judgeModel', async () => {
@@ -595,5 +631,8 @@ describe('judgeWorstCaseUsd — an upper bound on what one call can cost', () =>
     expect(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', user, schema, 256)).toBeGreaterThanOrEqual(realistic);
     expect(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', { big: 'y'.repeat(5_000) }, 256))
       .toBeGreaterThan(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', {}, 256));
+    // The reply is paid at the output price, up to its whole cap.
+    expect(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', schema, 4_096) - judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', schema, 0))
+      .toBeCloseTo((4_096 * p.output) / 1_000_000, 12);
   });
 });

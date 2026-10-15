@@ -685,9 +685,9 @@ export class BulkLedger {
   private pruneUnapproved(): void {
     const db = this.engineDb.getDb();
     // A run whose judge was started holds paid verdicts: not dropped for a newer plan (PRD
-    // bulk-loop §3.1) — its end is the owner's start of another one (superseded,
-    // which then joins this set) or the retention sweep. is the limit being set, not
-    // spend above zero: a run whose first call is in flight has spent nothing yet.
+    // bulk-loop §3.1) — its end is the owner's start of another one (superseded, which then
+    // joins this set) or the retention sweep. "Started" is the limit being set, not spend
+    // above zero: a run whose first call is in flight has spent nothing yet.
     const prunable = `kind = 'apply' AND (
          (phase IN ('previewed','planned') AND NOT (judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL))
          OR (phase = 'aborted' AND halt_reason = '${BULK_HALT_REASONS.superseded}'))`;

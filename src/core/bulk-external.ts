@@ -199,7 +199,7 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
 /**
  * Why an after-state cannot be written to an external target, or null. The checks every
  * planned after-state passes — and every verdict of a judged run before it is recorded (PRD
- * bulk-loop §3.1, 3.2 M4): one function, so a verdict cannot skip one a plan makes.
+ * bulk-loop §3.1): one function, so a verdict cannot skip one a plan makes.
  */
 export function refuseExternalAfter(
   key: string, after: unknown, scan: (text: string) => string | null,

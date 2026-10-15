@@ -81,8 +81,8 @@ export interface BulkJudgeDeps {
 }
 
 /**
- * The run's tier to the model the judge calls, and its client (PRD bulk-loop §3.1 "Modell und
- * Client“, 3.2 M5). The tier goes through `resolveRunModel` — the operator's blocklist on the
+ * The run's tier to the model the judge calls, and its client (PRD bulk-loop §3.1). The tier goes
+ * through `resolveRunModel` — the operator's blocklist on the
  * tier's effective model (hybrid slot included), `fast` checked again as the fallback, the tenant's
  * `max_tier` as the ceiling. Model id and client then come from one `resolveTierModel` snapshot,
  * so what is called is what was checked; the id is checked against the blocklist once more, which
@@ -154,6 +154,25 @@ export function judgeUserMessage(image: Record<string, unknown>): string {
 /** Input tokens a forced tool call adds beyond the system text, the message and the tool's schema:
  *  the tool's name and description and the provider's own framing. Generous on purpose. */
 export const JUDGE_TOOL_OVERHEAD_TOKENS = 1_000;
+
+/**
+ * Every string in a JSON value, keys included, at any depth — and inside a string that is
+ * itself JSON, as a data-store `json` column is read: there a value is escaped once more.
+ */
+function stringsIn(value: unknown, out: string[] = []): string[] {
+  if (typeof value === 'string') {
+    out.push(value);
+    if (/^\s*[[{]/.test(value)) {
+      let inner: unknown;
+      try { inner = JSON.parse(value); } catch { inner = undefined; }
+      if (inner !== undefined) stringsIn(inner, out);
+    }
+  } else if (Array.isArray(value)) for (const v of value) stringsIn(v, out);
+  else if (value !== null && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) { out.push(k); stringsIn(v, out); }
+  }
+  return out;
+}
 
 /** The most one call can cost, at the price a run is booked at (`getPricing`): every input token
  *  it can carry and every output token it may take. The input is counted in UTF-8 bytes — a token
@@ -285,9 +304,10 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     // A target that holds a credential is not sent to a model: refused, not masked — a masked
     // value in the verdict would be written back as the mask (PRD bulk-loop §4).
     // Only that it holds one is recorded, never what or where.
-    // Each text value too: a vault value holding a quote or a backslash is escaped in the JSON.
+    // Each text value too, at any depth: a vault value holding a quote or a backslash is escaped
+    // in the JSON, and escaped again inside a JSON column's text.
     const vaultHit = deps.maskVault(imageText) !== imageText
-      || Object.values(image).some((v) => typeof v === 'string' && deps.maskVault(v) !== v);
+      || stringsIn(image).some((v) => deps.maskVault(v) !== v);
     if (vaultHit || deps.scanSecret(imageText) !== null) {
       record({ invalid: 'secret_in_before' });
       continue;
@@ -312,6 +332,8 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     // Three bookings of one paid call, each on its own: a failure of one (a busy database) must
     // not take the others with it. The control plane first — its report never throws. A booking
     // that failed stops the run before its next paid call: what is not booked is not counted.
+    // That call stays uncounted for good — if the owner starts the run again, its limit and the
+    // daily limit see one call less than was paid, at most one per failed booking.
     const book = (costUsd: number, tokensIn: number, tokensOut: number): void => {
       if (!(costUsd > 0)) return;
       deps.report(gate.runId, costUsd, model.tier);

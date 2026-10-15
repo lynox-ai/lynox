@@ -8429,7 +8429,7 @@ export class LynoxHTTPApi {
         if (ledger.getStatus(params['id']!)?.judge != null) {
           // A judged run reports one metered cost per model call. On a tenant whose model key the
           // control plane does not supply, those reports are not debited and pile up until the
-          // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1, 3.2 L3).
+          // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
           const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
           if (billingTier && !cpSuppliesLLMKey(billingTier)) {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
