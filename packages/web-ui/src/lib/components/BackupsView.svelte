@@ -14,7 +14,7 @@
 	let restoring = $state<string | null>(null);
 	let confirmRestore = $state<string | null>(null);
 	/** A restore the engine refused for want of a proof of origin, with its reason, awaiting a second yes. */
-	let unverified = $state<{ id: string; reason: string } | null>(null);
+	let unverified = $state<{ id: string; reason: string; mismatch: boolean } | null>(null);
 	let error = $state('');
 
 	// Backup settings (loaded from config)
@@ -85,7 +85,7 @@
 			if (outcome.kind === 'restored') {
 				addToast(t('backups.restore_success'), 'success', 6000);
 			} else if (outcome.kind === 'ask') {
-				unverified = { id: backupId, reason: outcome.reason };
+				unverified = { id: backupId, reason: outcome.reason, mismatch: outcome.mismatch };
 			} else {
 				addToast(outcome.error ?? t('backups.restore_failed'), 'error', 6000);
 			}
@@ -148,7 +148,7 @@
 						</div>
 						{#if unverified?.id === backup.backup_id}
 							<div class="flex flex-col items-end gap-1.5">
-								<span class="text-xs text-warning">{t('backups.restore_unverified')}</span>
+								<span class="text-xs text-warning">{t(unverified.mismatch ? 'backups.restore_mismatch' : 'backups.restore_unverified')}</span>
 								{#if unverified.reason}<span class="text-xs text-text-subtle">{unverified.reason}</span>{/if}
 								<div class="flex items-center gap-2">
 									<button

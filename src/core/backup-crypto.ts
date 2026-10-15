@@ -92,8 +92,12 @@ export function decryptFile(srcPath: string, destPath: string, key: Buffer): voi
 
 /** Decrypt an NBAK file into memory, never onto disk. Same checks as `decryptFile`. */
 export function decryptFileToBuffer(srcPath: string, key: Buffer): Buffer {
-  const data = readFileSync(srcPath);
+  return decryptBuffer(readFileSync(srcPath), key, srcPath);
+}
 
+/** Decrypt NBAK bytes already read. `label` names the source in errors. */
+export function decryptBuffer(data: Buffer, key: Buffer, label: string): Buffer {
+  const srcPath = label;
   if (data.length < HEADER_LENGTH) {
     throw new Error(`Encrypted file too short: ${srcPath}`);
   }
@@ -117,6 +121,11 @@ export function decryptFileToBuffer(srcPath: string, key: Buffer): Buffer {
   decipher.setAuthTag(authTag);
 
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+/** Whether bytes already read start with the NBAK header. */
+export function isEncryptedBackupBuffer(data: Buffer): boolean {
+  return data.length >= FILE_MAGIC.length && data.subarray(0, FILE_MAGIC.length).equals(FILE_MAGIC);
 }
 
 /** Check if a file has the NBAK encrypted header. */

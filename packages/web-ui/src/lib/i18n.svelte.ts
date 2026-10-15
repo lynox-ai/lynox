@@ -659,6 +659,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'backups.restore_confirm': { de: 'Dieses Backup wirklich wiederherstellen? Ein Sicherheits-Backup wird vorher erstellt.', en: 'Restore this backup? A safety backup will be created first.' },
 	'backups.restore_success': { de: 'Backup wiederhergestellt. Engine wird neu gestartet…', en: 'Backup restored. Engine restarting…' },
 	'backups.restore_unverified': { de: 'Dieses Backup ist ohne Herkunftsnachweis. Es wurde nicht wiederhergestellt.', en: 'This backup has no proof of origin. It was not restored.' },
+	'backups.restore_mismatch': { de: 'Der Herkunftsnachweis dieses Backups passt nicht zu deinem Schlüssel: Es wurde verändert oder unter einem anderen Schlüssel erstellt. Es wurde nicht wiederhergestellt.', en: 'This backup\'s proof of origin does not match your key: it was changed, or made under another key. It was not restored.' },
 	'backups.restore_unverified_confirm': { de: 'Ohne Herkunftsnachweis wiederherstellen', en: 'Restore without proof of origin' },
 	'backups.restore_failed': { de: 'Wiederherstellung fehlgeschlagen.', en: 'Restore failed.' },
 	'backups.cancel': { de: 'Abbrechen', en: 'Cancel' },

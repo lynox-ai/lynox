@@ -132,10 +132,15 @@ describe('requestRestore', () => {
 	it('sends no body until the user said yes, and turns the refusal into a question', async () => {
 		const fetchMock = reply({ success: false, code: 'unverified_backup', error: 'no proof of origin' }, 409);
 		vi.stubGlobal('fetch', fetchMock);
-		expect(await requestRestore('/api', 'b 1', false)).toEqual({ kind: 'ask', reason: 'no proof of origin' });
+		expect(await requestRestore('/api', 'b 1', false)).toEqual({ kind: 'ask', reason: 'no proof of origin', mismatch: false });
 		const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 		expect(url).toBe('/api/backups/b%201/restore');
 		expect(init.body).toBeUndefined();
+	});
+
+	it('marks a signature that does not match apart from a missing one', async () => {
+		vi.stubGlobal('fetch', reply({ success: false, code: 'unverified_backup', provenance: 'mismatch', error: 'changed' }, 409));
+		expect(await requestRestore('/api', 'b1', false)).toEqual({ kind: 'ask', reason: 'changed', mismatch: true });
 	});
 
 	it('sends allow_unverified: true once the user said yes, and does not ask again', async () => {

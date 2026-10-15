@@ -706,6 +706,64 @@ describe('restoreBackup asks for the proof of origin', () => {
     expect(liveTier()).toBe('deep');
   });
 
+  it('refuses a file swapped after the verify pass, read once and checked as staged', async () => {
+    for (const encrypt of [false, true]) {
+      writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+      const manager = mgr(encrypt);
+      const created = await manager.createBackup();
+      driftLive();
+      // The window between verify and staging is the safety backup; the swap lands inside it.
+      const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+        writeFileSync(join(created.path, 'config.json'), JSON.stringify({ default_tier: 'swapped' }));
+        return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+      });
+      try {
+        const result = await manager.restoreBackup(created.path);
+        expect(result.success, `encrypt=${String(encrypt)}`).toBe(false);
+        expect(result.error).toMatch(/changed after it was verified/);
+        expect(liveTier()).toBe('deep');
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it('asks before it verifies the files: a backup without proof and with a missing file is a question, not a verify error', async () => {
+    const created = await mgr(false).createBackup();
+    const { auth: _auth, ...rest } = readManifest(created.path);
+    writeManifest(created.path, rest);
+    rmSync(join(created.path, 'config.json'));
+
+    const result = await mgr(false).restoreBackup(created.path);
+
+    expect(result.code).toBe('unverified_backup');
+  });
+
+  it('reads a malformed signature as a mismatch, without throwing', async () => {
+    const created = await mgr(false).createBackup();
+    const manifest = readManifest(created.path);
+    const mac = (manifest['auth'] as { mac: string }).mac;
+    for (const auth of [null, [], { alg: 'sha1', mac }, { alg: 'hmac-sha256', mac: 7 }, { alg: 'hmac-sha256', mac: mac.toUpperCase() }, { alg: 'hmac-sha256', mac: `${mac}zz` }]) {
+      writeManifest(created.path, { ...manifest, auth });
+      const result = await mgr(false).restoreBackup(created.path);
+      expect(result.provenance, JSON.stringify(auth)).toBe('mismatch');
+    }
+  });
+
+  it('does not sign with an empty vault key, and asks on restore', async () => {
+    const created = await mgr(false, '').createBackup();
+    expect(readManifest(created.path)['auth']).toBeUndefined();
+    expect((await mgr(false, '').restoreBackup(created.path)).provenance).toBe('no-key');
+  });
+
+  it('refuses a manifest that is JSON null instead of throwing', async () => {
+    const created = await mgr(false).createBackup();
+    writeFileSync(join(created.path, 'manifest.json'), 'null');
+    const result = await mgr(false).restoreBackup(created.path);
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Invalid manifest.json');
+  });
+
   it('keys the manifest MAC apart from the file cipher, and ignores key order and the auth field', () => {
     expect(deriveManifestKey(KEY).equals(deriveBackupKey(KEY))).toBe(false);
     expect(canonicalJson({ b: 1, a: [{ d: 2, c: 'x' }] })).toBe(canonicalJson({ a: [{ c: 'x', d: 2 }], b: 1 }));

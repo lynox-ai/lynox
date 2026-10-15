@@ -63,10 +63,11 @@ export async function fetchBackupConfig(apiBase: string): Promise<BackupConfigFi
 /**
  * What a restore request came to. `ask`: the engine refused because the backup's origin is not
  * shown, and the view must ask before it sends the request again with `allowUnverified`.
+ * `mismatch`: a signature is there and does not match, which is a stronger warning than none.
  */
 export type RestoreOutcome =
 	| { kind: 'restored' }
-	| { kind: 'ask'; reason: string }
+	| { kind: 'ask'; reason: string; mismatch: boolean }
 	| { kind: 'failed'; error: string | undefined };
 
 /**
@@ -79,8 +80,8 @@ export async function requestRestore(apiBase: string, backupId: string, allowUnv
 		method: 'POST',
 		...(allowUnverified ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_unverified: true }) } : {}),
 	});
-	const data = (await res.json()) as { success?: boolean; error?: string; code?: string };
+	const data = (await res.json()) as { success?: boolean; error?: string; code?: string; provenance?: string };
 	if (data.success === true) return { kind: 'restored' };
-	if (data.code === 'unverified_backup' && !allowUnverified) return { kind: 'ask', reason: data.error ?? '' };
+	if (data.code === 'unverified_backup' && !allowUnverified) return { kind: 'ask', reason: data.error ?? '', mismatch: data.provenance === 'mismatch' };
 	return { kind: 'failed', error: data.error };
 }

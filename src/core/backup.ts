@@ -9,9 +9,10 @@
 
 import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, deriveManifestKey, encryptFile, decryptFile, decryptFileToBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
+import { deriveBackupKey, deriveManifestKey, encryptFile, decryptBuffer, decryptFileToBuffer, isEncryptedBackupBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
@@ -46,6 +47,23 @@ function unrestorableEntry(files: unknown): string | null {
     if (!isRestorableEntryPath(path)) return JSON.stringify(path) ?? String(path);
   }
   return null;
+}
+
+/**
+ * Read a backup file once and check THOSE bytes against its entry. The restore verifies the
+ * archive first and stages it later, with the safety backup in between; a file swapped in that
+ * window would be copied unchecked if it were read again by name. In an encrypted backup every
+ * file must be ciphertext: a plaintext one needs no key to plant.
+ */
+function readEntryBytes(srcFile: string, entry: BackupFileEntry, encrypted: boolean): Buffer {
+  const raw = readFileSync(srcFile);
+  if (raw.length !== entry.size_bytes || createHash('sha256').update(raw).digest('hex') !== entry.checksum_sha256) {
+    throw new Error(`Backup file changed after it was verified — refusing to restore: ${entry.path}`);
+  }
+  if (encrypted && !isEncryptedBackupBuffer(raw)) {
+    throw new Error(`Backup is encrypted but holds a file that is not — refusing to restore: ${entry.path}`);
+  }
+  return raw;
 }
 
 /** Metadata stored alongside every backup. */
@@ -470,6 +488,10 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
 
+    if (manifest === null || typeof manifest !== 'object') {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
+    }
+
     // Before anything reads or writes by an entry's path: the manifest is not authenticated, and
     // a backup downloaded from Drive carries whatever its root's writers put there.
     const unrestorable = unrestorableEntry(manifest.files);
@@ -494,18 +516,6 @@ export class BackupManager {
     // plaintext DBs, silently corrupting them. Fail before touching anything.
     if (manifest.encrypted && !this.vaultKey) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Backup is encrypted but no vault key is available — refusing to restore (would overwrite live data with ciphertext).' };
-    }
-
-    // An encrypted backup holds ciphertext only. A plaintext file in it would be copied as it is,
-    // and putting one there needs no key, so one refuses the whole restore. (Its manifest can
-    // also say `encrypted: false`; that is what the MAC above is for.)
-    if (manifest.encrypted) {
-      const plain = manifest.files.find(
-        e => e.type !== 'directory' && existsSync(join(backupPath, e.path)) && !isEncryptedBackupFile(join(backupPath, e.path)),
-      );
-      if (plain !== undefined) {
-        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup is encrypted but holds a file that is not — refusing to restore: ${plain.path}` };
-      }
     }
 
     // Verify the backup's own integrity (size + checksum + SQLite integrity)
@@ -587,11 +597,8 @@ export class BackupManager {
           mkdirSync(destDir, { recursive: true, mode: 0o700 });
 
           const tmpFile = `${destFile}.restore-staging`;
-          if (needsDecrypt && key && isEncryptedBackupFile(srcFile)) {
-            decryptFile(srcFile, tmpFile, key);
-          } else {
-            copyFileSync(srcFile, tmpFile);
-          }
+          const raw = readEntryBytes(srcFile, entry, manifest.encrypted === true);
+          writeFileSync(tmpFile, key !== null ? decryptBuffer(raw, key, entry.path) : raw, { mode: 0o600 });
           staged.push({ tmp: tmpFile, dest: destFile });
         }
         // Staged only once the data-dir set is, and committed only after it is swapped: a
@@ -651,7 +658,7 @@ export class BackupManager {
     const auth: unknown = manifest.auth;
     if (auth === undefined) return 'none';
     const mac = (auth as { alg?: unknown; mac?: unknown } | null)?.mac;
-    if ((auth as { alg?: unknown } | null)?.alg !== 'hmac-sha256' || typeof mac !== 'string') return 'mismatch';
+    if ((auth as { alg?: unknown } | null)?.alg !== 'hmac-sha256' || typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return 'mismatch';
     return manifestMacMatches(manifest as unknown as Record<string, unknown>, mac, deriveManifestKey(this.vaultKey)) ? 'verified' : 'mismatch';
   }
 
@@ -860,7 +867,8 @@ export class BackupManager {
         const srcFile = join(backupPath, entry.path);
         if (!existsSync(srcFile)) continue;
         // Decrypted in memory: no plaintext beside the backup, which may be synced elsewhere.
-        const data = key !== null && isEncryptedBackupFile(srcFile) ? decryptFileToBuffer(srcFile, key) : readFileSync(srcFile);
+        const raw = readEntryBytes(srcFile, entry, key !== null);
+        const data = key !== null ? decryptBuffer(raw, key, entry.path) : raw;
         yield { rel: entry.path.slice(WORKSPACE_PREFIX.length), data };
       }
     };
