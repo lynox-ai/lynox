@@ -483,11 +483,17 @@ export interface OAuthClaimResponse {
   email?: string;
 }
 
-// === OAuth refresh — POST /internal/oauth/google/refresh (engine → CP) ===
+// === OAuth refresh — POST /internal/oauth/{google,microsoft}/refresh (engine → CP) ===
 
 /**
  * Refresh on behalf of an instance, so lynox's client secret never leaves the
- * control plane.
+ * control plane. One shape for both providers; each has its own route.
+ *
+ * When the provider's token endpoint refuses, the control plane answers with
+ * that endpoint's status and body unchanged (a status outside 400–599 becomes
+ * 502). The engine decides revoked vs. misconfigured vs. transient from them,
+ * and a rewritten body would let a control-plane fault read as a revoked grant.
+ * The body is the provider's and is never shown to the user.
  *
  * Authenticated exactly like the claim: `x-instance-secret`, matched against
  * `instances.instanceSecret` in constant time. The handle is bound on top of
@@ -507,16 +513,17 @@ export interface OAuthRefreshRequest {
  * ⚠ The engine MUST cache `access_token` until `expires_at`. That is not an
  * optimisation: with the refresh path routed through the control plane, an
  * uncached engine reaches for the CP on every expiry and the CP becomes a
- * runtime dependency of every Google call rather than of the refresh.
+ * runtime dependency of every provider call rather than of the refresh.
  */
 export interface OAuthRefreshResponse {
   access_token: string;
   /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
   expires_at: number;
   /**
-   * Present only when Google rotated the refresh token, which it may do on any
-   * refresh. The engine must replace its stored handle when this appears, or
-   * the next refresh presents a handle Google has already invalidated.
+   * Present only when the provider rotated the refresh token. Google may do so
+   * on any refresh; Microsoft does so on practically every one. The engine must
+   * replace its stored handle when this appears, or the next refresh presents a
+   * handle the provider has already invalidated.
    */
   refresh_handle?: string;
 }
@@ -589,34 +596,40 @@ export function isOAuthDeclineCode(value: unknown): value is OAuthDeclineCode {
   return typeof value === 'string' && (OAUTH_DECLINE_CODES as readonly string[]).includes(value);
 }
 
-// === OAuth claim by handle only — Microsoft (engine → CP) ===
+// === OAuth claim by handle only — POST /internal/oauth/microsoft/claim (engine → CP) ===
+
+/** The providers whose claim is {@link OAuthHandleClaimResponse}. Grows when one moves to it. */
+export type OAuthHandleProvider = 'microsoft';
 
 /**
  * The credential handoff for a provider whose refresh token never leaves the
- * control plane. Microsoft is the first; Google keeps {@link OAuthClaimResponse}
- * until its raw `refresh_token` retires.
+ * control plane, requested with {@link OAuthClaimRequest}. Microsoft is the
+ * first; Google keeps {@link OAuthClaimResponse} until its raw `refresh_token`
+ * retires.
  *
  * Its own type rather than an optional `refresh_token` on the Google one: that
  * field is required there, and loosening it would change a live wire for every
  * engine that reads it. Here the raw token has no field to land in, so neither
  * side can send or expect it.
+ *
+ * No golden fixture yet: fixtures come from the control plane's real
+ * serializer (`fixtures/README.md`), and it does not produce this shape yet.
  */
 export interface OAuthHandleClaimResponse {
-  /** Which broker minted the handle. The engine refreshes through that provider's route. */
-  provider: 'microsoft';
+  /**
+   * Which broker minted the handle. The engine refreshes through that
+   * provider's route, and rejects a claim whose provider is not the one it asked
+   * for.
+   */
+  provider: OAuthHandleProvider;
   access_token: string;
   /**
    * The refresh token, sealed to THIS instance by the control plane. Required:
    * it is the only way this grant is ever refreshed.
    *
    * Opaque by contract, like {@link OAuthClaimResponse.refresh_handle}.
-   *
-   * Refreshing it uses {@link OAuthRefreshRequest} / {@link OAuthRefreshResponse}
-   * at the provider's own refresh route. When the provider's token endpoint
-   * refuses, the control plane answers with that endpoint's status and body
-   * unchanged (a status outside 400–599 becomes 502). The engine decides
-   * revoked vs. misconfigured vs. transient from them, and a rewritten body
-   * would let a control-plane fault read as a revoked grant.
+   * Refreshed with {@link OAuthRefreshRequest} at the provider's refresh route;
+   * how a refusal comes back is stated there.
    */
   refresh_handle: string;
   /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
@@ -624,12 +637,15 @@ export interface OAuthHandleClaimResponse {
   scopes: string[];
   /**
    * The directory tenant the grant belongs to, taken from the id token the
-   * control plane verified. Optional: absent means unknown.
+   * control plane verified and compared against the tenant the connect started
+   * for. Required: a claim is never issued without that match.
    */
-  tid?: string;
+  tid: string;
   /**
-   * The account the grant belongs to, for display only. Never an identifier;
-   * the same caveats as {@link OAuthClaimResponse.email}.
+   * The account the grant belongs to, for display only: the mailbox address
+   * the provider reports, or its sign-in name where it has none. That fallback
+   * need not be a deliverable address. Never an identifier. Optional: absent
+   * means unknown.
    */
   email?: string;
 }

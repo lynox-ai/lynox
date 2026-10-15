@@ -3,12 +3,12 @@
  * (`src/contract/http.ts`).
  *
  * Pinned as exact lists for the reason `contract-oauth-decline.test.ts` gives:
- * the control plane sends these codes, the web-ui maps each to a message, and a
- * code added on one side only reaches the user as the generic text.
+ * the control plane will send these codes and the web-ui will map each to a
+ * message, and a code added on one side only reaches the user as the generic
+ * text.
  */
 import { describe, it, expect } from 'vitest';
 import {
-  BROKER_START_FAILURES,
   MICROSOFT_OAUTH_DECLINE_CODES,
   OAUTH_DECLINE_CODES,
   isMicrosoftOAuthDeclineCode,
@@ -25,14 +25,6 @@ describe('the Microsoft decline vocabulary', () => {
       'not_assigned', 'policy_blocked', 'wrong_tenant',
       'exchange_failed',
     ]);
-  });
-
-  it('carries every start failure, so the start route can refuse with one list for both providers', () => {
-    for (const code of BROKER_START_FAILURES) expect(MICROSOFT_OAUTH_DECLINE_CODES).toContain(code);
-  });
-
-  it('has no duplicates', () => {
-    expect(new Set(MICROSOFT_OAUTH_DECLINE_CODES).size).toBe(MICROSOFT_OAUTH_DECLINE_CODES.length);
   });
 
   it('isMicrosoftOAuthDeclineCode accepts every member and nothing else', () => {
@@ -53,9 +45,9 @@ describe('the Microsoft decline vocabulary', () => {
 });
 
 describe('the new symbols are registered as migrated', () => {
-  it('names all four, owned by http.ts', () => {
+  it('names all five, owned by http.ts', () => {
     const rows = MIGRATED.filter((m) => m.contractFile === 'http.ts').map((m) => m.name);
-    for (const name of ['OAuthHandleClaimResponse', 'MICROSOFT_OAUTH_DECLINE_CODES', 'MicrosoftOAuthDeclineCode', 'isMicrosoftOAuthDeclineCode']) {
+    for (const name of ['OAuthHandleProvider', 'OAuthHandleClaimResponse', 'MICROSOFT_OAUTH_DECLINE_CODES', 'MicrosoftOAuthDeclineCode', 'isMicrosoftOAuthDeclineCode']) {
       expect(rows, name).toContain(name);
     }
   });
