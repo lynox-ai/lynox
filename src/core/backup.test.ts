@@ -489,6 +489,9 @@ describe('restoreBackup refuses manifest paths that leave their place', () => {
     const created = await manager.createBackup();
     expect(created.success).toBe(true);
     const src = join(created.path, path);
+    // Every directory the path names must exist in the backup, so an unchecked restore can
+    // open it by name: `memory/..` resolves only through an existing `memory`.
+    mkdirSync(join(created.path, 'memory'), { recursive: true });
     mkdirSync(dirname(src), { recursive: true });
     writeFileSync(src, bytes);
     const manifestPath = join(created.path, 'manifest.json');
@@ -503,23 +506,27 @@ describe('restoreBackup refuses manifest paths that leave their place', () => {
     const outside = join(dirname(lynoxDir), name);
     escapees.push(outside, join(dirname(backupDir), name));
     const { manager, backupPath } = await backupWithEntry(`../${name}`, 'planted');
+    const backupsBefore = manager.listBackups().length;
 
     const result = await manager.restoreBackup(backupPath);
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/outside the backup/);
     expect(existsSync(outside)).toBe(false);
+    // Refused before the restore's own work began: no safety backup was taken.
+    expect(result.pre_restore_backup_path).toBe('');
+    expect(manager.listBackups().length).toBe(backupsBefore);
   });
 
   it('refuses a .. inside the path, which resolves inside the data dir but leaves its entry', async () => {
-    const { manager, backupPath } = await backupWithEntry('memory/../config.json', JSON.stringify({ default_tier: 'deep' }));
+    // A consistent backup: the bytes sit at their own file, so only the path is wrong.
+    const { manager, backupPath } = await backupWithEntry('memory/../planted.txt', 'planted');
 
     const result = await manager.restoreBackup(backupPath);
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/outside the backup/);
-    const cfg = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
-    expect(cfg['default_tier']).toBe('balanced');
+    expect(existsSync(join(lynoxDir, 'planted.txt'))).toBe(false);
   });
 
   it('restores the same backup when the added entry is a plain path (control)', async () => {
@@ -532,7 +539,7 @@ describe('restoreBackup refuses manifest paths that leave their place', () => {
   });
 
   it('verifyBackup reports the path instead of reading through it', async () => {
-    const { manager, backupPath } = await backupWithEntry('memory/../config.json', '{}');
+    const { manager, backupPath } = await backupWithEntry('memory/../planted.txt', 'planted');
     const result = manager.verifyBackup(backupPath);
     expect(result.valid).toBe(false);
     expect(result.errors.join(' ')).toMatch(/outside the backup/);
