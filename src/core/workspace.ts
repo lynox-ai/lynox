@@ -4,6 +4,7 @@ import { resolve, dirname, basename, join, isAbsolute, relative } from 'node:pat
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
+import { ensureWorkspaceContextDir, getWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath } from './workspace-root.js';
 
 let _cachedDir: string | null | undefined;
 let _tenantOverride: string | null = null;
@@ -39,9 +40,9 @@ export function getWorkspaceCwd(): string {
 }
 
 /** The tenant's FILE AREA root — the exact directory `GET /api/files/download`
- *  serves from: the isolation workspace when active, else `~/.lynox/workspace`. */
+ *  serves from: the isolation workspace when active, else the workspace root. */
 export function getFileAreaDir(): string {
-  return getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+  return getWorkspaceDir() ?? getWorkspaceRoot();
 }
 
 /**
@@ -58,7 +59,9 @@ export function getFileAreaDir(): string {
  */
 export function resolveFileAreaPath(filePath: string): string | null {
   const base = getFileAreaDir();
-  const resolved = resolve(base, filePath);
+  // A path history names under the old `<data>/workspace` is mapped to the root first, then
+  // confined like any other (identity unless the root is external).
+  const resolved = translateLegacyWorkspacePath(resolve(base, filePath), resolveWorkspaceRoot());
   // Logical path must be within the file area.
   if (resolved !== base && !resolved.startsWith(base + '/')) return null;
   // Real path (after symlink resolution) must also be within it. Canonicalize
@@ -134,8 +137,9 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
   const ws = getWorkspaceDir();
   if (!ws) return resolve(filePath);
 
-  // Resolve the path, following symlinks where possible
-  const resolved = resolve(filePath);
+  // Resolve the path, following symlinks where possible. A path under the old `<data>/workspace`
+  // is mapped to the root first, then confined like any other (identity unless the root is external).
+  const resolved = translateLegacyWorkspacePath(resolve(filePath), resolveWorkspaceRoot());
   let real: string;
   if (existsSync(resolved)) {
     real = realpathSync(resolved);
@@ -207,13 +211,12 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
 
 /**
  * Ensure the workspace directory for a context exists.
- * Creates it with mode 0o700 if missing.
+ * Creates it with mode 0o700 if missing, and throws `WorkspaceRootError` naming the path
+ * when it cannot be created, read, written or entered.
  * Returns the workspace directory path.
  */
 export function ensureContextWorkspace(context: LynoxContext): string {
-  const dir = context.workspaceDir;
-  ensureDirSync(dir);
-  return dir;
+  return ensureWorkspaceContextDir(context.workspaceDir);
 }
 
 /** Reset cached workspace dir (for testing). */

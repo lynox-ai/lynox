@@ -372,9 +372,6 @@ export function loadConfig(): LynoxUserConfig {
   if (apiBaseUrl) {
     merged.api_base_url = apiBaseUrl;
   }
-  if (process.env['LYNOX_WORKSPACE']) {
-    merged.workspace_dir = process.env['LYNOX_WORKSPACE'];
-  }
   if (process.env['LYNOX_EMBEDDING_PROVIDER']) {
     const ep = process.env['LYNOX_EMBEDDING_PROVIDER'];
     if (ep === 'onnx' || ep === 'local') {

@@ -124,6 +124,8 @@ export const LynoxUserConfigSchema = z.object({
   plugins:              z.record(z.string(), z.boolean()).optional(),
   agents_dir:           z.string().optional(),
   manifests_dir:        z.string().optional(),
+  // Read by nothing: the workspace is LYNOX_WORKSPACE (isolation) or LYNOX_WORKSPACE_ROOT. Still
+  // accepted so a config.json that carries it keeps loading; drop it one release later.
   workspace_dir:        z.string().optional(),
   user_id:              z.string().optional(),
   display_name:         z.string().optional(),

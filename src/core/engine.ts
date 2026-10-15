@@ -34,6 +34,7 @@ import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
+import { ensureWorkspaceRoot } from './workspace-root.js';
 
 import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
@@ -1405,8 +1406,11 @@ export class Engine {
     // Resolve context (CLI: project detection, others: explicit)
     this.context = resolveContext(this.config);
 
-    // Non-CLI sources always get isolated workspace
+    // Non-CLI sources always get isolated workspace. A root or context directory the engine
+    // cannot use stops the boot here, naming the path, instead of every upload quietly falling
+    // back to inline text later.
     if (this.context && this.context.source !== 'cli') {
+      ensureWorkspaceRoot();
       const wsDir = ensureContextWorkspace(this.context);
       setTenantWorkspace(wsDir);
     }
