@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, statSync 
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArtifactStore } from './artifact-store.js';
-import { EVICTION_MIN_CHARS } from './artifact-eviction.js';
 
 describe('ArtifactStore', () => {
   let dir: string;
@@ -198,6 +197,7 @@ describe('ArtifactStore — lostOnSave marks a file that holds the save placehol
   });
 
   const listed = (id: string) => store.list().find(a => a.id === id);
+  const LIMIT = 2048;
 
   it('marks the damaged artifact in list() and get(), and not the fine one', () => {
     const lost = store.save({ title: 'Pitch', content: PH, type: 'markdown' });
@@ -207,6 +207,7 @@ describe('ArtifactStore — lostOnSave marks a file that holds the save placehol
     expect(listed(under.id)?.lostOnSave).toBe(true);
     expect(listed(fine.id)?.lostOnSave).toBeUndefined();
     expect(store.get(lost.id)?.lostOnSave).toBe(true);
+    expect(store.get(under.id)?.lostOnSave).toBe(true);
     expect(store.get(fine.id)?.lostOnSave).toBeUndefined();
   });
 
@@ -214,13 +215,24 @@ describe('ArtifactStore — lostOnSave marks a file that holds the save placehol
     // A document that quotes the placeholder is still a document: the notice would hide it and
     // say "only a placeholder was stored", which is false.
     const pad = (n: number) => `${PH}\n${'x'.repeat(n - Buffer.byteLength(PH) - 1)}`;
-    const atEdge = store.save({ title: 'Edge', content: pad(EVICTION_MIN_CHARS) });
-    const over = store.save({ title: 'Over', content: pad(EVICTION_MIN_CHARS + 1) });
-    expect(Buffer.byteLength(store.get(atEdge.id)!.content)).toBe(EVICTION_MIN_CHARS);
+    const atEdge = store.save({ title: 'Edge', content: pad(LIMIT) });
+    const over = store.save({ title: 'Over', content: pad(LIMIT + 1) });
+    expect(Buffer.byteLength(store.get(atEdge.id)!.content)).toBe(LIMIT);
     expect(listed(atEdge.id)?.lostOnSave).toBe(true);
     expect(store.get(atEdge.id)?.lostOnSave).toBe(true);
     expect(listed(over.id)?.lostOnSave).toBeUndefined();
     expect(store.get(over.id)?.lostOnSave).toBeUndefined();
+  });
+
+  it('list() and get() agree on a file that is not valid UTF-8', () => {
+    // Decoding turns each invalid byte into U+FFFD (3 bytes), so the string is longer than the file.
+    const a = store.save({ title: 'Edge', content: 'x' });
+    const p = store.pathFor(a.id);
+    const head = Buffer.from(`${PH}\n`);
+    writeFileSync(p, Buffer.concat([head, Buffer.alloc(LIMIT - head.length - 2, 0x78), Buffer.from([0xff, 0xfe])]));
+    expect(statSync(p).size).toBe(LIMIT);
+    expect(listed(a.id)?.lostOnSave).toBe(true);
+    expect(store.get(a.id)?.lostOnSave).toBe(true);
   });
 
   it('never writes the mark into index.json', () => {

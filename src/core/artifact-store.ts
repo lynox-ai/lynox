@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
-import { containsEvictionMarker, EVICTION_MIN_CHARS } from './artifact-eviction.js';
+import { containsEvictionMarker } from './artifact-eviction.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
@@ -64,15 +64,18 @@ export interface ArtifactOverwrite {
   significant: boolean;
 }
 
-/** Eviction replaces only bodies longer than EVICTION_MIN_CHARS, with a
- *  reference of a few hundred bytes at most; a document lost that way left a
- *  file of about that size (measured on a real instance: 176–186 bytes). A larger file that contains the placeholder is a document that
+/** The placeholder forms are a few hundred bytes at most, so a document lost
+ *  by saving one left a file of about that size, a heading at most around it.
+ *  Its own number, not EVICTION_MIN_CHARS: that is a minimum BODY length in
+ *  chars, and lowering it must not stop lost files from being marked. A larger file that contains the placeholder is a document that
  *  quotes it, or one with a copied placeholder inside — it is still readable,
  *  and the notice the UI shows ("only a placeholder was stored") would be false. */
-const LOST_ON_SAVE_MAX_BYTES = EVICTION_MIN_CHARS;
+const LOST_ON_SAVE_MAX_BYTES = 2048;
 
-function isLostOnSave(content: string): boolean {
-  return Buffer.byteLength(content, 'utf-8') <= LOST_ON_SAVE_MAX_BYTES && containsEvictionMarker(content);
+/** `bytes` is the file's size on disk, the number list() reads by stat — not
+ *  the decoded string's length, which grows where the file is not valid UTF-8. */
+function isLostOnSave(bytes: number, content: string): boolean {
+  return bytes <= LOST_ON_SAVE_MAX_BYTES && containsEvictionMarker(content);
 }
 
 export class ArtifactStore {
@@ -305,8 +308,9 @@ export class ArtifactStore {
     const meta = this.index.find(a => a.id === id);
     if (!meta) return null;
     try {
-      const content = readFileSync(this.contentPath(id), 'utf-8');
-      return { ...meta, ...(isLostOnSave(content) ? { lostOnSave: true as const } : {}), content };
+      const raw = readFileSync(this.contentPath(id));
+      const content = raw.toString('utf-8');
+      return { ...meta, ...(isLostOnSave(raw.length, content) ? { lostOnSave: true as const } : {}), content };
     } catch {
       return null;
     }
