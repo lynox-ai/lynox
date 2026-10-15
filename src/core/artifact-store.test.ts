@@ -220,10 +220,14 @@ describe('ArtifactStore — lostOnSave marks a file that holds the save placehol
   it('reads a file again when its size changes at the same mtime', () => {
     const a = store.save({ title: 'Doc', content: '# A real document' });
     const p = store.pathFor(a.id);
+    // Whole seconds, set before the first read and again after the write: a mtime read back
+    // through `statSync().mtime` loses its sub-millisecond part and would not be the same.
+    const t = Math.floor(Date.now() / 1000) - 100;
+    utimesSync(p, t, t);
     expect(listed(a.id)?.lostOnSave).toBeUndefined();
-    const { mtime } = statSync(p);
     writeFileSync(p, PH);
-    utimesSync(p, mtime, mtime);
+    utimesSync(p, t, t);
+    expect(statSync(p).mtimeMs).toBe(t * 1000);
     expect(listed(a.id)?.lostOnSave).toBe(true);
   });
 
