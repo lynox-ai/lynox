@@ -61,7 +61,6 @@ jobs:
         # through a shell interpolation: the body is author-controlled text and
         # would otherwise be a command-injection sink in our own CI.
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
@@ -73,7 +72,9 @@ jobs:
           REPO_PRIVATE: ${{ github.event.pull_request.base.repo.private }}
         run: |
           set -euo pipefail
-          printf '%s' "$PR_BODY" > /tmp/pr-body.txt
+          # The body and title are NOT passed through `env`: Actions prints a step's env block,
+          # values included, into the log, and this repo's logs are public. The script reads them
+          # from the event payload file instead (`--event-file`), which is not printed.
           # Three dots: what the BRANCH changed, from the merge base. Two dots
           # compares the two trees, so once main moves ahead every file changed
           # there shows up as this PR's — which reds a docs-only PR the moment
@@ -121,7 +122,7 @@ jobs:
             exit 1
           fi
           node scripts/gate-record.mjs \
-            --body-file /tmp/pr-body.txt \
+            --event-file "$GITHUB_EVENT_PATH" \
             --head "$HEAD_SHA" \
             --files-file /tmp/pr-files.txt \
             --author "$PR_AUTHOR"

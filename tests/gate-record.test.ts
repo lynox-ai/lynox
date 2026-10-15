@@ -9,10 +9,13 @@
  * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -902,7 +905,8 @@ describe('gate-record — `closes:`, required with `none` allowed', () => {
     for (const value of ['DEF-' + 'example-single-id',
                          'DEF-a-row, DEF-b-row', // public-repo-guard:allow: fabricated ids, parser INPUT not a reference
                          'DEF-a-row · DEF-b-row']) { // public-repo-guard:allow: fabricated ids, parser INPUT not a reference
-      const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
+      // `visibility: 'private'`: the id shape is the subject, and only a private run accepts an id.
+      const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE, visibility: 'private' });
       expect(v.ok, `rejected ${value}`).toBe(true);
     }
   });
@@ -1004,7 +1008,7 @@ describe('gate-record — a real register id may carry a capital', () => {
     // answer. Core cannot check existence (the register is in the private repo),
     // which makes getting the SHAPE right the only thing standing between a typo
     // and a green tick here.
-    expect(evaluate({ body: record({ closes: 'DEF-' + 'example-camelCase-id' }), head: HEAD, files: CODE }).ok)
+    expect(evaluate({ body: record({ closes: 'DEF-' + 'example-camelCase-id' }), head: HEAD, files: CODE, visibility: 'private' }).ok)
       .toBe(true);
   });
 
@@ -1013,6 +1017,140 @@ describe('gate-record — a real register id may carry a capital', () => {
     for (const value of ['#1262', 'DEF_underscore', ['Def', 'wrong-prefix'].join('-'), 'nothing']) {
       expect(evaluate({ body: record({ closes: value }), head: HEAD, files: CODE }).ok, value).toBe(false);
     }
+  });
+});
+
+describe('gate-record — a public body names no register row', () => {
+  // Assembled, so this file carries no id-shaped literal.
+  const ID = ['DEF', 'example-row'].join('-');
+
+  it('takes only `none` in `closes:`, and does not print what was written there', () => {
+    const v = evaluate({ body: record({ closes: ID }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('takes only `none`');
+    // The CI log of a public repo is public: the refusal must not repeat the id.
+    expect(v.errors?.join(' ')).not.toContain(ID);
+    // Control: a private run still accepts it, so the refusal above is the visibility.
+    expect(evaluate({ body: record({ closes: ID }), head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
+  });
+
+  it('does not print a malformed value either', () => {
+    // A value that is not an id shape gets the same public refusal, not the id-shape message,
+    // which would repeat it.
+    const value = ['DEF', 'example_row'].join('_');
+    const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('takes only `none`');
+    expect(v.errors?.join(' ')).not.toContain(value);
+  });
+
+  it('asks for `none` when the field is missing, not for rows', () => {
+    const v = evaluate({ body: record().replace('closes: none\n', ''), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('write `closes: none`');
+    expect(v.errors?.join(' ')).not.toContain('name the register rows');
+  });
+
+  it('finds an id anywhere in the body, by line, and nothing that only looks like one', () => {
+    expect(registerIdLines(`a\nsee ${ID} here\nb`)).toEqual([2]);
+    expect(registerIdLines(`\`\`\`\n${ID}\n\`\`\``)).toEqual([2]);
+    expect(registerIdLines(`(${ID})`)).toEqual([1]);
+    // Case-insensitive: a pasted row file name or a typed id can arrive in lower case.
+    expect(registerIdLines(['def', 'lower-row'].join('-'))).toEqual([1]);
+    // Built at runtime: a literal of that shape trips this repo's own push guard.
+    for (const clean of [['UN', 'DEF', '-x'].join(''), 'undefined-x', 'DEF-', 'DEF -x', 'DEFAULT', 'no id here']) {
+      expect(registerIdLines(clean), clean).toEqual([]);
+    }
+  });
+
+  it('refuses a public body whose prose names a row, with the line and without the id', () => {
+    const body = `${record()}\n\nThis closes ${ID} in the register.`;
+    const v = evaluate({ body, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    const e = v.errors?.join(' ') ?? '';
+    expect(e).toContain('names a register row (line');
+    expect(e).not.toContain(ID);
+    // Control: the same record without the sentence passes.
+    expect(evaluate({ body: record(), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('reads the body of a docs PR too, where no record is demanded', () => {
+    const v = evaluate({ body: `Docs only. Settles ${ID}.`, head: HEAD, files: ['docs/getting-started.md'] });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('names a register row');
+  });
+
+  it('ships a template that passes its own rule', () => {
+    const template = readFileSync(fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)), 'utf8');
+    expect(registerIdLines(template)).toEqual([]);
+  });
+
+  it('refuses a title that names a row, and says it is the title', () => {
+    const v = evaluate({ body: record(), title: `Fix the thing (${ID})`, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('the TITLE names a register row');
+    expect(v.errors?.join(' ')).not.toContain(ID);
+    // Control: the same title without the id passes.
+    expect(evaluate({ body: record(), title: 'Fix the thing', head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('masks an id that another check would quote back', () => {
+    // `review:` and `gates:` refusals quote the field; the id in it must not reach the log.
+    for (const over of [{ review: `1 opus round, 2 findings, 1 fixed, 1 filed as ${ID}` }, { gates: `code-review, delta, ${ID}` }]) {
+      const v = evaluate({ body: record(over), head: HEAD, files: CODE });
+      expect(v.ok).toBe(false);
+      expect(v.errors?.join(' '), JSON.stringify(over)).not.toContain(ID);
+    }
+    expect(withoutRegisterIds(`a ${ID} b`)).toBe('a DEF-… b');
+    // Lower case is an id too, and the mask must take all of it, not just the first.
+    expect(withoutRegisterIds(`${ID.toLowerCase()} and ${ID}`)).toBe('DEF-… and DEF-…');
+  });
+
+  it('reads body and title from the event payload file, not from the environment', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gr-event-'));
+    try {
+      const p = join(dir, 'event.json');
+      writeFileSync(p, JSON.stringify({ pull_request: { title: 'T', body: 'B' } }));
+      expect(readEventPr(p)).toEqual({ body: 'B', title: 'T' });
+      writeFileSync(p, JSON.stringify({ pull_request: { title: 'T', body: null } }));
+      expect(readEventPr(p)).toEqual({ body: '', title: 'T' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the CLI reads body and title from --event-file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gr-cli-'));
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    const run = (pr: { title: string; body: string }) => {
+      const ev = join(dir, 'event.json');
+      const files = join(dir, 'files.txt');
+      writeFileSync(ev, JSON.stringify({ pull_request: pr }));
+      writeFileSync(files, CODE.join('\n'));
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      return spawnSync(process.execPath, [script, '--event-file', ev, '--head', HEAD, '--files-file', files, '--repo-visibility', 'public'], { encoding: 'utf8', env });
+    };
+    try {
+      const ok = run({ title: 'Fix the thing', body: record() });
+      expect(ok.status, ok.stdout + ok.stderr).toBe(0);
+      const badTitle = run({ title: `Fix ${ID}`, body: record() });
+      expect(badTitle.status).toBe(1);
+      expect(badTitle.stdout).toContain('the TITLE names a register row');
+      expect(badTitle.stdout).not.toContain(ID);
+      const badBody = run({ title: 'Fix the thing', body: `${record()}\nSee ${ID}.\n` });
+      expect(badBody.status).toBe(1);
+      expect(badBody.stdout).toContain('the body names a register row');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a private body and a bot body alone', () => {
+    const body = `${record()}\n\nThis closes ${ID}.`;
+    expect(evaluate({ body, head: HEAD, files: CODE, visibility: 'private' }).ok).toBe(true);
+    expect(evaluate({ body, head: HEAD, files: CODE, author: 'dependabot[bot]' }).ok).toBe(true);
   });
 });
 
@@ -1114,9 +1252,12 @@ describe('gate-record — boundaries a foreign mutation set walked straight thro
   // also the one whose SHAPE went unchecked, which is the delayed ignition again:
   // green for weeks, red the day a source file lands.
   it('a malformed `closes:` is refused on a docs PR too — not demanded is not unread', () => {
-    const v = evaluate({ body: record({ closes: '#1262' }), head: HEAD, files: DOCS });
+    const v = evaluate({ body: record({ closes: '#1262' }), head: HEAD, files: DOCS, visibility: 'private' });
     expect(v.ok).toBe(false);
     expect(v.errors?.join(' ')).toContain('is not a register id');
+    const pub = evaluate({ body: record({ closes: '#1262' }), head: HEAD, files: DOCS });
+    expect(pub.ok).toBe(false);
+    expect(pub.errors?.join(' ')).toContain('takes only `none`');
   });
 
   // `startsWith`, not `includes`. A pin taken from the MIDDLE of the SHA would

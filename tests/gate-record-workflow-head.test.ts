@@ -108,7 +108,7 @@ afterAll(() => {
  */
 function runStep(
   opts: { base?: string; head?: string; prNumber?: string; origin?: string; allBranches?: boolean } = {},
-): { code: number | null; log: string; handed: string | null; gitCalls: string[] } {
+): { code: number | null; log: string; handed: string | null; gitCalls: string[]; eventArg: string | null } {
   const dir = mkdtempSync(join(root, 'co-'));
   const co = join(dir, 'co');
   const clone = ['clone', '--quiet', '--no-local'];
@@ -131,6 +131,7 @@ function runStep(
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const seen = join(dir, 'files-handed-over');
+  const eventSeen = join(dir, 'event-arg');
   writeFileSync(
     join(bin, 'node'),
     [
@@ -138,6 +139,7 @@ function runStep(
       'prev=""',
       'for a in "$@"; do',
       `  if [ "$prev" = "--files-file" ]; then cp "$a" '${seen}'; fi`,
+      `  if [ "$prev" = "--event-file" ]; then printf '%s' "$a" > '${eventSeen}'; fi`,
       '  prev="$a"',
       'done',
       'exit 0',
@@ -160,7 +162,8 @@ function runStep(
     encoding: 'utf8',
     env: {
       PATH: `${bin}:/usr/bin:/bin`,
-      PR_BODY: 'irrelevant — the stub never reads it',
+      // The stub records which path the step hands over; it never opens it.
+      GITHUB_EVENT_PATH: '/nonexistent/event.json',
       BASE_SHA: opts.base ?? baseSha,
       HEAD_SHA: opts.head ?? headSha,
       PR_NUMBER: opts.prNumber ?? '7',
@@ -180,8 +183,36 @@ function runStep(
   } catch {
     gitCalls = [];
   }
-  return { code: r.status, log: `${r.stdout}${r.stderr}`, handed, gitCalls };
+  let eventArg: string | null = null;
+  try {
+    eventArg = readFileSync(eventSeen, 'utf8');
+  } catch {
+    eventArg = null;
+  }
+  return { code: r.status, log: `${r.stdout}${r.stderr}`, handed, gitCalls, eventArg };
 }
+
+describe('gate-record — the body never passes through the step env', () => {
+  // Actions prints a step's env block, values included, into the log, and this repo's logs are
+  // public: a body handed over as `PR_BODY` was printed verbatim. The script reads the payload file.
+  const READS_PR_TEXT = /pull_request\.(body|title)\b/;
+
+  it('no env value of the job reads the PR body or title', () => {
+    const steps = doc.jobs['gate-record']?.steps ?? [];
+    expect(steps.length).toBeGreaterThan(0);
+    const leaks = steps.flatMap((s) => Object.entries(s.env ?? {}))
+      .filter(([, v]) => READS_PR_TEXT.test(String(v)));
+    expect(leaks).toEqual([]);
+    // Control: the pattern does see the form that was there before.
+    expect(READS_PR_TEXT.test('${{ github.event.pull_request.body }}')).toBe(true);
+  });
+
+  it('the script is handed the event payload path', () => {
+    const r = runStep();
+    expect(r.code, `the step failed: ${r.log}`).toBe(0);
+    expect(r.eventArg).toBe('/nonexistent/event.json');
+  });
+});
 
 describe('gate-record — the head of a MERGED pull request', () => {
   it('the trigger still includes `edited` — without it this whole repair is pointless', () => {
