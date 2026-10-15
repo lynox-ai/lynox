@@ -3,10 +3,28 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node
 import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync, spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { BackupManager, isRestorableEntryPath } from './backup.js';
 import { canonicalJson, deriveBackupKey, deriveManifestKey, encryptFile, decryptFile, isEncryptedBackupFile, manifestMac } from './backup-crypto.js';
 import { computeFileChecksum, verifySqliteIntegrity } from './backup-verify.js';
+
+/**
+ * Turns `path` into a FIFO fed by a writer that first sends `first` and then `second`: every OPEN
+ * reads the next one. A restore that reads a file once stages `first`; one that reads it again
+ * by name gets `second`. The pause lets the first reader see end-of-file before the second writer
+ * opens the FIFO; without it a single read can get both. The writer blocks on `second` until
+ * someone reads it; call the returned stop in a finally.
+ */
+function fifoServing(path: string, first: Buffer, second: Buffer): () => void {
+  const dir = mkdtempSync(join(tmpdir(), 'lynox-fifo-src-'));
+  writeFileSync(join(dir, 'first'), first);
+  writeFileSync(join(dir, 'second'), second);
+  rmSync(path, { force: true });
+  execFileSync('mkfifo', [path]);
+  const writer = spawn('sh', ['-c', 'cat "$1" > "$3"; sleep 2; cat "$2" > "$3"', 'sh', join(dir, 'first'), join(dir, 'second'), path], { stdio: 'ignore' });
+  return () => { writer.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); };
+}
 
 function createTmpDir(): string {
   return mkdtempSync(join(tmpdir(), 'lynox-backup-test-'));
@@ -725,6 +743,26 @@ describe('restoreBackup asks for the proof of origin', () => {
       } finally {
         spy.mockRestore();
       }
+    }
+  });
+
+  it('stages the bytes it checked, never a second read of the file by name', async () => {
+    const manager = mgr(false);
+    const created = await manager.createBackup();
+    const genuine = readFileSync(join(created.path, 'config.json'));
+    driftLive();
+    let stop = (): void => {};
+    const spy = vi.spyOn(manager, 'createBackup').mockImplementation(async () => {
+      stop = fifoServing(join(created.path, 'config.json'), genuine, Buffer.from(JSON.stringify({ default_tier: 'second-read' })));
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const result = await manager.restoreBackup(created.path);
+      expect(result.success, String(result.error)).toBe(true);
+      expect(liveTier()).toBe('balanced');
+    } finally {
+      stop();
+      spy.mockRestore();
     }
   });
 

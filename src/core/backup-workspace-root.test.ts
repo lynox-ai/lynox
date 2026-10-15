@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BackupManager } from './backup.js';
@@ -81,6 +81,34 @@ describe('backup — the workspace root', () => {
       expect(restored.error).toMatch(/changed after it was verified/);
       expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-live');
     } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('stages the workspace bytes it checked, never a second read by name', async () => {
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
+    const signed = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: false }, 'vault-key-ws');
+    const created = await signed.createBackup();
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-live');
+    const src = join(created.path, 'workspace', 'http-api', 'a.txt');
+    const fifoDir = mkdtempSync(join(tmpdir(), 'lynox-fifo-ws-'));
+    writeFileSync(join(fifoDir, 'first'), 'ZZ-a');
+    writeFileSync(join(fifoDir, 'second'), 'ZZ-second-read');
+    let writer: ReturnType<typeof spawn> | null = null;
+    const spy = vi.spyOn(signed, 'createBackup').mockImplementation(async () => {
+      rmSync(src);
+      execFileSync('mkfifo', [src]);
+      // Every OPEN of the FIFO reads the next write: a second read by name would get 'second'.
+      writer = spawn('sh', ['-c', 'cat "$1" > "$3"; sleep 2; cat "$2" > "$3"', 'sh', join(fifoDir, 'first'), join(fifoDir, 'second'), src], { stdio: 'ignore' });
+      return { success: false, path: '', manifest: created.manifest, duration_ms: 0, error: 'stub' };
+    });
+    try {
+      const restored = await signed.restoreBackup(created.path);
+      expect(restored.success, String(restored.error)).toBe(true);
+      expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a');
+    } finally {
+      (writer as ReturnType<typeof spawn> | null)?.kill('SIGKILL');
+      rmSync(fifoDir, { recursive: true, force: true });
       spy.mockRestore();
     }
   });
