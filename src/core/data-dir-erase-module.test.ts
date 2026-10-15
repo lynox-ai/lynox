@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyEntry, parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir } from './data-dir-erase.js';
+import { classifyEntry, parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure } from './data-dir-erase.js';
 import { ERASE_BY_REMOVE, ERASE_KEPT } from './data-dir-inventory.js';
 
 describe('data-dir erasure — classification', () => {
@@ -281,5 +281,109 @@ describe('data-dir erasure — on disk', () => {
     expect(scan.unknown.map(u => u.name)).toEqual(['stray.bin']);
     expect(removeOwedEntries(scan, []).failures).toEqual([]);
     expect(readdirSync(join(dir, 'artifacts'))).toEqual([]);
+  });
+});
+
+describe('data-dir erasure — the workspace root (P18-2)', () => {
+  let dir: string;
+  let outside: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-dde-ws-'));
+    outside = mkdtempSync(join(tmpdir(), 'lynox-dde-ws-outside-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  const external = (boundaries: readonly string[] = []): WorkspaceErasure =>
+    ({ external: true, isRoot: () => false, mountBoundaries: () => boundaries });
+  const defaultRoot = (rootPath: string, boundaries: readonly string[] = []): WorkspaceErasure =>
+    ({ external: false, isRoot: (p) => statSync(p).ino === statSync(rootPath).ino, mountBoundaries: () => boundaries });
+  const leftover = (): void => {
+    mkdirSync(join(dir, 'workspace', 'http-api'), { recursive: true });
+    writeFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'ZZ-old');
+  };
+
+  it('classifies `workspace` as a leftover only while the root is external', () => {
+    expect(classifyEntry('workspace', { externalWorkspace: true })).toEqual({ kind: 'leftover' });
+    expect(classifyEntry('workspace').kind).toBe('declared');
+    expect(classifyEntry('workspace', { externalWorkspace: false }).kind).toBe('declared');
+  });
+
+  it('asks before removing a leftover, then removes it and does not make it again (I12a)', () => {
+    leftover();
+    const first = scanDataDir(dir, { workspace: external() });
+    expect(first.unknown.map(u => u.name)).toEqual(['workspace']);
+    expect(first.removedWithoutAsking).not.toContain('workspace');
+    expect(removeOwedEntries(first, [], undefined, external()).removed).not.toContain('workspace');
+    expect(readFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'utf8')).toBe('ZZ-old');
+
+    const acked = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external() });
+    expect(acked.linked).toEqual([]);
+    const out = removeOwedEntries(acked, ['workspace'], undefined, external());
+    expect(out.failures).toEqual([]);
+    expect(out.removed).toContain('workspace');
+    expect(existsSync(join(dir, 'workspace'))).toBe(false);
+  });
+
+  it('refuses a leftover that is a symlink and leaves its target as it was (I12b)', () => {
+    mkdirSync(join(outside, 'proj'));
+    writeFileSync(join(outside, 'proj', 'kept.txt'), 'ZZ-target');
+    symlinkSync(outside, join(dir, 'workspace'));
+    const scan = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external() });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.remedy).toMatch(/erase it where it lives/);
+    const out = removeOwedEntries(scan, ['workspace'], undefined, external());
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(existsSync(join(dir, 'workspace'))).toBe(true);
+    expect(readFileSync(join(outside, 'proj', 'kept.txt'), 'utf8')).toBe('ZZ-target');
+  });
+
+  it('refuses a leftover that holds a mount, with the erase-where-it-lives remedy (I12c)', () => {
+    leftover();
+    mkdirSync(join(dir, 'workspace', 'mnt'));
+    const real = statSync(dir);
+    const mountAt = (p: string): ReturnType<typeof statSync> => {
+      const st = lstatSync(p);
+      return p.endsWith('/workspace/mnt') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: real.dev + 1 }) : st;
+    };
+    const scan = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external(), lstat: mountAt });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/mnt/);
+    expect(scan.linked[0]!.remedy).toMatch(/erase it where it lives/);
+    const out = removeOwedEntries(scan, ['workspace'], mountAt, external());
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(readFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'utf8')).toBe('ZZ-old');
+  });
+
+  it('leaves the default root to its anchor, also through a symlink, and neither removes nor flags it', () => {
+    const real = join(outside, 'ws');
+    mkdirSync(join(real, 'http-api'), { recursive: true });
+    writeFileSync(join(real, 'http-api', 'a.txt'), 'ZZ-a');
+    symlinkSync(real, join(dir, 'workspace'));
+    const ws = defaultRoot(real);
+    const scan = scanDataDir(dir, { workspace: ws });
+    expect(scan.linked).toEqual([]);
+    expect(scan.emptiedInPlace).toContain('workspace');
+    expect(scan.removedWithoutAsking).not.toContain('workspace');
+    const out = removeOwedEntries(scan, [], undefined, ws);
+    expect(out.removed).not.toContain('workspace');
+    expect(out.failures).toEqual([]);
+    // Neither the link nor the root behind it was touched by name.
+    expect(lstatSync(join(dir, 'workspace')).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(real, 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-a');
+  });
+
+  it('refuses the whole erasure when the anchor walk finds a mount below the root (I1e)', () => {
+    mkdirSync(join(dir, 'workspace'));
+    const scan = scanDataDir(dir, { workspace: defaultRoot(join(dir, 'workspace'), ['proj/mnt']) });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/proj\/mnt/);
+    // An external root is walked the same way: the boundary comes from the anchor, not from a
+    // by-name scan of the data dir, which has no `workspace` here at all.
+    rmSync(join(dir, 'workspace'), { recursive: true });
+    const ext = scanDataDir(dir, { workspace: external(['proj/mnt']) });
+    expect(ext.linked.map(l => l.name)).toEqual(['workspace']);
   });
 });

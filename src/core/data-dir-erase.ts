@@ -60,7 +60,29 @@ export type EntryClass =
   | { readonly kind: 'temp'; readonly of: string }
   | { readonly kind: 'residue' }
   | { readonly kind: 'litter' }
+  /**
+   * `workspace` while the workspace root lives elsewhere (`LYNOX_WORKSPACE_ROOT`): files left at
+   * the old place. Acknowledged like an unknown entry, but this instance's data, so a link or a
+   * mount there refuses like an owed entry — and it is not recreated after removal.
+   */
+  | { readonly kind: 'leftover' }
   | { readonly kind: 'unknown' };
+
+/**
+ * How the erasure sees the workspace root, which may live outside the data dir and is reached
+ * through the anchor (`workspace-access.ts`), never by name.
+ */
+export interface WorkspaceErasure {
+  /** The root is not `<data>/workspace`: a `workspace` entry in the data dir is a leftover. */
+  readonly external: boolean;
+  /** Whether this path (followed if a link) is the anchored root itself. */
+  readonly isRoot: (path: string) => boolean;
+  /** Directories below the root on another mount, from the anchor walk. */
+  readonly mountBoundaries: () => readonly string[];
+}
+
+/** The inventory name of the workspace row. */
+const WORKSPACE = 'workspace';
 
 /** Only a vanished entry is skipped; any other error reaching it is reported. */
 const isGone = (err: unknown): boolean => (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
@@ -69,7 +91,8 @@ const BY_NAME = new Map(DATA_DIR_INVENTORY.map(e => [e.name, e]));
 
 const isResidue = (name: string): boolean => ENGINE_RESIDUE.some(re => re.test(name));
 
-export function classifyEntry(name: string): EntryClass {
+export function classifyEntry(name: string, opts: { readonly externalWorkspace?: boolean } = {}): EntryClass {
+  if (name === WORKSPACE && opts.externalWorkspace === true) return { kind: 'leftover' };
   const entry = BY_NAME.get(name);
   if (entry) return { kind: 'declared', entry };
   if (OS_LITTER.has(name)) return { kind: 'litter' };
@@ -108,7 +131,8 @@ function owedBy(cls: EntryClass, ack: { has(name: string): boolean }, name: stri
     // in flight (a CLI and a server sharing the data dir), and it holds what `keep` keeps.
     case 'temp': return BY_NAME.get(cls.of)?.erase.by !== 'keep';
     case 'residue': return true;
-    case 'unknown': return ack.has(name);
+    case 'unknown':
+    case 'leftover': return ack.has(name);
     case 'litter': return false;
   }
 }
@@ -214,6 +238,11 @@ export interface ScanOptions {
   readonly walk?: boolean | undefined;
   /** Injected only by tests: a mount cannot be created without privileges. */
   readonly lstat?: ((path: string) => Stats) | undefined;
+  /**
+   * The workspace root. Without it the `workspace` row is treated by name, as a plain entry of
+   * the data dir; the erase route always passes it.
+   */
+  readonly workspace?: WorkspaceErasure | undefined;
 }
 
 export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirScan {
@@ -227,10 +256,29 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
   const removedWithoutAsking: string[] = [];
   const emptiedInPlace: string[] = [];
   const litter: string[] = [];
+  const ws = opts.workspace;
+  // The root is emptied through the anchor, which refuses a mount below it: asked here, before
+  // anything is deleted, so the whole erasure stops instead of failing after the stores.
+  if (ws !== undefined) {
+    const boundaries = ws.mountBoundaries();
+    if (boundaries.length > 0) {
+      linked.push({
+        name: WORKSPACE,
+        reason: `the workspace root contains a mount point (${boundaries.join(', ')}); its content is on another filesystem`,
+        remedy: 'This instance\'s data is there: erase it where it lives and remove the mount, or move the content into the workspace root.',
+      });
+    }
+  }
   for (const name of readdirSync(dir)) {
-    const cls = classifyEntry(name);
+    const cls = classifyEntry(name, { externalWorkspace: ws?.external === true });
     if (cls.kind === 'litter') { litter.push(name); continue; }
     const path = join(dir, name);
+    // The default root itself — possibly through a link — is emptied through the anchor, not
+    // removed by name: the root and the anchor the engine holds survive the erasure.
+    if (ws !== undefined && cls.kind === 'declared' && name === WORKSPACE && ws.isRoot(path)) {
+      emptiedInPlace.push(name);
+      continue;
+    }
     let st: Stats;
     try {
       st = lstat(path);
@@ -239,7 +287,7 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
       throw err;                   // the route answers 500, nothing erased
     }
     const inPlace = cls.kind === 'declared' && cls.entry.erase.by === 'step';
-    if (cls.kind === 'unknown') unknown.push(identityOf(name, st));
+    if (cls.kind === 'unknown' || cls.kind === 'leftover') unknown.push(identityOf(name, st));
     else if (owedBy(cls, ack, name)) removedWithoutAsking.push(name);
     else if (inPlace) emptiedInPlace.push(name);
     // Asked of everything the erasure touches through a path: what it removes, what it
@@ -309,6 +357,8 @@ export function removeOwedEntries(
   acknowledgedUnknown: readonly string[],
   /** Injected only by tests: a mount cannot be created without privileges. */
   lstat: (path: string) => Stats = lstatSync,
+  /** As in `ScanOptions.workspace`: the root is skipped here and emptied through its anchor. */
+  workspace?: WorkspaceErasure,
 ): RemoveOutcome {
   const removed: string[] = [];
   const failures: Array<{ name: string; reason: string }> = [];
@@ -321,7 +371,8 @@ export function removeOwedEntries(
     return { removed, failures: [{ name: '.', reason: err instanceof Error ? err.message : String(err) }] };
   }
   for (const name of names) {
-    const cls = classifyEntry(name);
+    const cls = classifyEntry(name, { externalWorkspace: workspace?.external === true });
+    if (workspace !== undefined && cls.kind === 'declared' && name === WORKSPACE && workspace.isRoot(join(scan.dir, name))) continue;
     if (owedBy(cls, ack, name)) owed.push({ name, cls });
   }
   owed.sort((a, b) => Number(a.name === 'backups') - Number(b.name === 'backups'));
@@ -345,8 +396,8 @@ export function removeOwedEntries(
       // `rmSync` on a symlink removes the link itself, never its target.
       rmSync(path, { recursive: true, force: true });
       removed.push(name);
-      const entry = BY_NAME.get(name);
-      if (entry?.kind === 'dir' && st.isDirectory()) mkdirSync(path, { mode: st.mode & 0o777 });
+      // Keyed on the class, not the name: a `workspace` leftover is removed for good.
+      if (cls.kind === 'declared' && cls.entry.kind === 'dir' && st.isDirectory()) mkdirSync(path, { mode: st.mode & 0o777 });
     } catch (err) {
       failures.push({ name, reason: err instanceof Error ? err.message : String(err) });
     }
