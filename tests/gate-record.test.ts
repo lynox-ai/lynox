@@ -313,6 +313,37 @@ describe('gate-record — which gates a diff requires', () => {
     expect(undated.errors.join(' ')).toContain('ISO date');
   });
 
+  it('refuses a PENDING sign-off for the legal text, even when it carries a date', () => {
+    for (const approved of [
+      'PENDING — wording not seen yet, agreed 2026-10-15',
+      'pending rafael 2026-10-15',
+      'pendingapproval rafael 2026-10-02',
+    ]) {
+      const pending = evaluate({
+        body: record({ gates: 'legal', approved, delta: '', mutations: '' }),
+        head: HEAD, files: ['SUBPROCESSORS.md'],
+      });
+      expect(pending.ok, approved).toBe(false);
+      // The PENDING branch, not the date check: each value carries an ISO date.
+      expect(pending.errors.join(' '), approved).toContain('says the sign-off is PENDING');
+    }
+
+    // Undated, it is still the PENDING answer, not a format complaint.
+    const undated = evaluate({
+      body: record({ gates: 'legal', approved: 'PENDING — not seen yet', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(undated.errors.join(' ')).toContain('says the sign-off is PENDING');
+    expect(undated.errors.join(' ')).not.toContain('ISO date');
+
+    // The word anywhere but at the start is not the answer.
+    const named = evaluate({
+      body: record({ gates: 'legal', approved: 'rafael 2026-10-15, no longer pending', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(named.ok, JSON.stringify(named.errors)).toBe(true);
+  });
+
   it('characterises what the path map CANNOT see', () => {
     // Not an endorsement — a record of the floor's shape, so the next person
     // does not mistake a green check for "no security review needed".
