@@ -348,8 +348,9 @@ describe('gate-record — which gates a diff requires', () => {
   });
 
   describe('the legal sign-off, against the fixture both repos share', () => {
-    // The private repo's gate record reads the same file and must come to the same verdicts.
-    const fixture = JSON.parse(readFileSync(new URL('./fixtures/legal-approved.json', import.meta.url), 'utf8')) as {
+    // Both files live in scripts/guard-patterns/, which the private repo vendors byte-identically,
+    // so its gate record runs the same predicate against the same cases.
+    const fixture = JSON.parse(readFileSync(new URL('../scripts/guard-patterns/legal-sign-off.cases.json', import.meta.url), 'utf8')) as {
       approvers: string[];
       cases: { value: string; verdict: string; why: string }[];
     };
@@ -1969,6 +1970,13 @@ describe('scripts/guard-patterns/ — vendored by the private repo', () => {
     expect(files).toContain('prose-open-count.mjs');
     const mod = await import('../scripts/guard-patterns/prose-open-count.mjs');
     expect(mod.proseOpenCountLines).toBe(proseOpenCountLines);
+  });
+
+  it('holds the legal sign-off reader gate-record runs, and its cases', async () => {
+    expect(files).toEqual(expect.arrayContaining(['legal-sign-off.mjs', 'legal-sign-off.cases.json']));
+    const mod = await import('../scripts/guard-patterns/legal-sign-off.mjs');
+    expect(mod.approvedVerdict).toBe(approvedVerdict);
+    expect(mod.LEGAL_APPROVERS).toBe(LEGAL_APPROVERS);
   });
 
   // The private repo runs these files standalone; an import would break its copy, not this one.

@@ -35,6 +35,7 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { proseOpenCountLines } from './guard-patterns/prose-open-count.mjs';
+import { LEGAL_APPROVERS, approvedVerdict } from './guard-patterns/legal-sign-off.mjs';
 
 /**
  * The token that opens the record block, assembled rather than written.
@@ -166,38 +167,6 @@ export const SECURITY_PATHS = [
 const LEGAL_PATHS = [
   /^SUBPROCESSORS\.md$/,
 ];
-
-/**
- * Who may sign off on the wording of a binding customer text. A legal sign-off is a person's,
- * never a session's: a new name comes in through a change to this list, not through a line in
- * a PR body. The same list stands in the private repo's gate record, and both repos test it
- * against the same fixture (`tests/fixtures/legal-approved.json`).
- */
-export const LEGAL_APPROVERS = ['rafael'];
-
-/**
- * What an `approved:` value says, read from its START: an approver and an ISO date, in that
- * order, is a sign-off. Everything after the date is free text (a time, `2026-09-29/30`, where
- * it was given). Anything else is not a sign-off, however it is worded: a positive form, because
- * the ways to write "not yet" (`TBD`, `**PENDING**`, `ausstehend`, a lookalike letter) cannot be
- * listed, and each one with a date used to pass.
- *
- * ⚠ It reads the SYNTAX. A line that says `rafael 2026-10-15` without rafael having signed off
- * passes, and no format check can tell.
- *
- * @returns {'missing' | 'pending' | 'undated' | 'not-an-approver' | 'ok'}
- */
-export function approvedVerdict(raw) {
-  const approved = String(raw ?? '').trim();
-  if (!approved) return 'missing';
-  // `/^pending/i` has no `\b` on purpose: with one, `pendingapproval rafael 2026-10-02` finds no
-  // boundary and gets the wrong message.
-  if (/^pending/i.test(approved)) return 'pending';
-  const name = approved.split(/\s/, 1)[0].toLowerCase();
-  if (!LEGAL_APPROVERS.includes(name)) return 'not-an-approver';
-  // The date follows the name directly; a date later in the line ties nothing to the name.
-  return /^\S+\s+\d{4}-\d{2}-\d{2}(?!\d)/.test(approved) ? 'ok' : 'undated';
-}
 
 const DOC_ONLY = [/^docs\//, /\.md$/, /^\.github\/ISSUE_TEMPLATE\//, /^LICENSE$/];
 
@@ -530,6 +499,7 @@ function openCountRefusal(field, visibility) {
 
 // The prose scan lives in guard-patterns/ so the private repo can vendor the same file.
 export { proseOpenCountLines };
+export { LEGAL_APPROVERS, approvedVerdict };
 
 export function evaluate(input) {
   const verdict = evaluateRecord(input);
