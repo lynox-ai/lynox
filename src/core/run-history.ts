@@ -1452,6 +1452,24 @@ const MIGRATIONS: string[] = [
      id TEXT PRIMARY KEY,
      deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
    );`,
+  // v62: model spend of a bulk run's judge (PRD bulk-loop §3.1, `bulk_judge`), one row per paid
+  // call. The judge calls a model without a run of its own — a run per target is what the PRD
+  // avoids — so without this its spend would reach no daily or monthly limit: those count from
+  // this file (`getCostByDay` → `checkPersistentBudget`), and the ledger's `cost_usd` lives in
+  // engine.db. `created_at` is a timestamp, not a day, so the day is bucketed in the reader's
+  // timezone like every run. No foreign key to the bulk run (another database): a pruned or
+  // superseded run does not take its spend out of the day.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (62);
+   CREATE TABLE IF NOT EXISTS bulk_cost_days (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     run_id TEXT NOT NULL,
+     model_id TEXT NOT NULL,
+     tokens_in INTEGER NOT NULL DEFAULT 0,
+     tokens_out INTEGER NOT NULL DEFAULT 0,
+     cost_usd REAL NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_bulk_cost_days_created ON bulk_cost_days(created_at);`,
 ];
 
 export class RunHistory {
@@ -2196,7 +2214,49 @@ export class RunHistory {
       GROUP BY model_id ORDER BY cost_usd DESC
     `).all() as ModelBreakdownEntry[];
 
-    return { ...totals, user_turn_runs: totals.user_turn_runs ?? 0, cost_by_model: costByModel };
+    const judge = this.db.prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS cost_usd, COALESCE(SUM(tokens_in), 0) AS tokens_in, COALESCE(SUM(tokens_out), 0) AS tokens_out FROM bulk_cost_days`,
+    ).get() as { cost_usd: number; tokens_in: number; tokens_out: number };
+    return {
+      ...totals,
+      total_cost_usd: totals.total_cost_usd + judge.cost_usd,
+      total_tokens_in: totals.total_tokens_in + judge.tokens_in,
+      total_tokens_out: totals.total_tokens_out + judge.tokens_out,
+      user_turn_runs: totals.user_turn_runs ?? 0,
+      cost_by_model: this.withJudgeSpendByModel(costByModel),
+    };
+  }
+
+  /**
+   * Book one paid call of a bulk run's judge (`bulk_judge`, PRD bulk-loop §3.1). It has no run
+   * of its own, so this is the row the spend aggregates — and with them the daily and monthly
+   * limits — count it from. Never counted as a run or a turn.
+   */
+  recordBulkJudgeCost(entry: { runId: string; modelId: string; tokensIn: number; tokensOut: number; costUsd: number }): void {
+    this.db.prepare(
+      'INSERT INTO bulk_cost_days (run_id, model_id, tokens_in, tokens_out, cost_usd) VALUES (?, ?, ?, ?, ?)',
+    ).run(entry.runId, entry.modelId, entry.tokensIn, entry.tokensOut, entry.costUsd);
+  }
+
+  /** `byModel` with the judge's spend added per model; its calls add no run. */
+  private withJudgeSpendByModel(byModel: ModelBreakdownEntry[]): ModelBreakdownEntry[] {
+    const judge = this.db.prepare(
+      `SELECT model_id, COALESCE(SUM(cost_usd), 0) AS cost_usd, COALESCE(SUM(tokens_in), 0) AS tokens_in,
+         COALESCE(SUM(tokens_out), 0) AS tokens_out FROM bulk_cost_days GROUP BY model_id`,
+    ).all() as Array<{ model_id: string; cost_usd: number; tokens_in: number; tokens_out: number }>;
+    if (judge.length === 0) return byModel;
+    const out = byModel.map((e) => ({ ...e }));
+    for (const j of judge) {
+      const hit = out.find((e) => e.model_id === j.model_id);
+      if (hit) {
+        hit.cost_usd += j.cost_usd;
+        hit.tokens_in += j.tokens_in;
+        hit.tokens_out += j.tokens_out;
+      } else {
+        out.push({ model_id: j.model_id, cost_usd: j.cost_usd, run_count: 0, tokens_in: j.tokens_in, tokens_out: j.tokens_out, tokens_cache_read: 0, tokens_cache_write: 0 });
+      }
+    }
+    return out.sort((a, b) => b.cost_usd - a.cost_usd);
   }
 
   // === Cost queries (Sprint 5) ===
@@ -2223,7 +2283,7 @@ export class RunHistory {
     // headline "N runs" count; `run_count` stays all-rows for callers that need
     // the full count.
     const mod = `${-(opts?.tzOffsetMin ?? 0)} minutes`;
-    return this.db.prepare(`
+    const days_ = this.db.prepare(`
       SELECT date(created_at, ?) as day,
              COALESCE(SUM(cost_usd), 0) as cost_usd,
              COUNT(*) as run_count,
@@ -2233,11 +2293,23 @@ export class RunHistory {
         AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY date(created_at, ?) ORDER BY day DESC
     `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number; run_count: number; user_turns: number }>;
+    // The bulk judge's calls (v62), bucketed by the same shifted clock and window. They add
+    // spend to a day, never a run or a turn.
+    const judge = this.db.prepare(`
+      SELECT date(created_at, ?) as day, COALESCE(SUM(cost_usd), 0) as cost_usd FROM bulk_cost_days
+      WHERE created_at >= datetime('now', ?) GROUP BY date(created_at, ?)
+    `).all(mod, `-${days} days`, mod) as Array<{ day: string; cost_usd: number }>;
+    for (const j of judge) {
+      const hit = days_.find((d) => d.day === j.day);
+      if (hit) hit.cost_usd += j.cost_usd;
+      else days_.push({ day: j.day, cost_usd: j.cost_usd, run_count: 0, user_turns: 0 });
+    }
+    return days_.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
   }
 
 
   getCostByModel(): ModelBreakdownEntry[] {
-    return this.db.prepare(`
+    return this.withJudgeSpendByModel(this.db.prepare(`
       SELECT model_id,
              COALESCE(SUM(cost_usd), 0) as cost_usd,
              COUNT(*) as run_count,
@@ -2248,7 +2320,7 @@ export class RunHistory {
       FROM runs WHERE status != 'running' -- exclude in-flight (no finalized cost); failed counts
         AND run_type != 'pipeline_step' -- A2 overlay, excluded from spend
       GROUP BY model_id ORDER BY cost_usd DESC
-    `).all() as ModelBreakdownEntry[];
+    `).all() as ModelBreakdownEntry[]);
   }
 
   /**

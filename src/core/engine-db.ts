@@ -1121,6 +1121,24 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (35);
    ALTER TABLE bulk_runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0;
    ALTER TABLE bulk_runs ADD COLUMN cost_cap_usd REAL;`,
+
+  // v36: a run whose after-states a model decides, one target at a time (PRD bulk-loop §3.1,
+  // `bulk_judge`). On `bulk_runs`: `judge_rule` — the rule text, the output schema and the tier,
+  // encrypted with `enc()` like the images; `judge_rule_hash` — an HMAC over it under the same
+  // subkey as `rule_hash`, which the start and the approval present; `judge_started_at` — when
+  // the owner started the judge, from which an unapproved judged run's retention counts. On
+  // `bulk_targets`: `judged_at` — the target's verdict is recorded (read and unjudged is
+  // `before IS NOT NULL AND judged_at IS NULL`); `judge_claimed_at` + `judge_claim_token` — the
+  // claim a judge loop takes before it pays for a call, so a second loop after a lost lease
+  // does not pay for the same target, and a verdict is written only under its own token.
+  // All NULL on every run without a judge.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (36);
+   ALTER TABLE bulk_runs ADD COLUMN judge_rule TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN judge_rule_hash TEXT;
+   ALTER TABLE bulk_runs ADD COLUMN judge_started_at TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN judged_at TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN judge_claimed_at TEXT;
+   ALTER TABLE bulk_targets ADD COLUMN judge_claim_token TEXT;`,
 ];
 
 /**
