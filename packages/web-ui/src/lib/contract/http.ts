@@ -588,3 +588,78 @@ export type OAuthDeclineCode = (typeof OAUTH_DECLINE_CODES)[number];
 export function isOAuthDeclineCode(value: unknown): value is OAuthDeclineCode {
   return typeof value === 'string' && (OAUTH_DECLINE_CODES as readonly string[]).includes(value);
 }
+
+// === OAuth claim by handle only — Microsoft (engine → CP) ===
+
+/**
+ * The credential handoff for a provider whose refresh token never leaves the
+ * control plane. Microsoft is the first; Google keeps {@link OAuthClaimResponse}
+ * until its raw `refresh_token` retires.
+ *
+ * Its own type rather than an optional `refresh_token` on the Google one: that
+ * field is required there, and loosening it would change a live wire for every
+ * engine that reads it. Here the raw token has no field to land in, so neither
+ * side can send or expect it.
+ */
+export interface OAuthHandleClaimResponse {
+  /** Which broker minted the handle. The engine refreshes through that provider's route. */
+  provider: 'microsoft';
+  access_token: string;
+  /**
+   * The refresh token, sealed to THIS instance by the control plane. Required:
+   * it is the only way this grant is ever refreshed.
+   *
+   * Opaque by contract, like {@link OAuthClaimResponse.refresh_handle}.
+   *
+   * Refreshing it uses {@link OAuthRefreshRequest} / {@link OAuthRefreshResponse}
+   * at the provider's own refresh route. When the provider's token endpoint
+   * refuses, the control plane answers with that endpoint's status and body
+   * unchanged (a status outside 400–599 becomes 502). The engine decides
+   * revoked vs. misconfigured vs. transient from them, and a rewritten body
+   * would let a control-plane fault read as a revoked grant.
+   */
+  refresh_handle: string;
+  /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
+  expires_at: number;
+  scopes: string[];
+  /**
+   * The directory tenant the grant belongs to, taken from the id token the
+   * control plane verified. Optional: absent means unknown.
+   */
+  tid?: string;
+  /**
+   * The account the grant belongs to, for display only. Never an identifier;
+   * the same caveats as {@link OAuthClaimResponse.email}.
+   */
+  email?: string;
+}
+
+/**
+ * The CLOSED set of `microsoft_oauth_error` values the control plane appends when
+ * it sends the browser back to the instance without a grant. Every start failure;
+ * the two refusals of the address before any redirect (`no_tenant`: the domain
+ * resolves to no directory; `consumer_domain`: a personal-account domain); the
+ * user declining or consent being required (`access_denied`, `consent_required`);
+ * the directory refusing this user (`not_assigned`) or a policy blocking the
+ * sign-in (`policy_blocked`); a sign-in into a different directory than the
+ * address named (`wrong_tenant`); and everything else as `exchange_failed`.
+ * Microsoft's own vocabulary is open-ended and is never forwarded.
+ */
+export const MICROSOFT_OAUTH_DECLINE_CODES = [
+  ...BROKER_START_FAILURES,
+  'no_tenant',
+  'consumer_domain',
+  'access_denied',
+  'consent_required',
+  'not_assigned',
+  'policy_blocked',
+  'wrong_tenant',
+  'exchange_failed',
+] as const;
+
+export type MicrosoftOAuthDeclineCode = (typeof MICROSOFT_OAUTH_DECLINE_CODES)[number];
+
+/** Runtime membership test for a `microsoft_oauth_error` value read off a URL. */
+export function isMicrosoftOAuthDeclineCode(value: unknown): value is MicrosoftOAuthDeclineCode {
+  return typeof value === 'string' && (MICROSOFT_OAUTH_DECLINE_CODES as readonly string[]).includes(value);
+}
