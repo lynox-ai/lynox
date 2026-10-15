@@ -149,6 +149,12 @@ export interface BulkRunStatus {
   /** A list run's source and how far its read got; null on any other run. Planner-authored
    *  and engine-counted only — nothing the list's provider returned. */
   list: BulkListStatus | null;
+  /** Model spend booked for this run, in USD (PRD bulk-loop §3.3): actual, not estimated.
+   *  0 for a run that called no model. */
+  costUsd: number;
+  /** The most this run may spend on model calls, set by the owner at the start of a run
+   *  with a judge; null when none was set. */
+  costCapUsd: number | null;
 }
 
 export interface BulkListStatus {
@@ -259,6 +265,7 @@ interface RunRow {
   rule_hash: string; approval_checksum: string | null; max_targets: number | null; expires_at: string | null;
   contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
   list_source: string | null; list_state: ListState | null; list_page: number; list_calls: number; list_bytes: number;
+  cost_usd: number; cost_cap_usd: number | null;
 }
 
 /** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
@@ -969,6 +976,8 @@ export class BulkLedger {
       checksumBinding: this.engineDb.hashIsKeyed ? 'keyed' : 'unkeyed',
       haltReason: row.halt_reason,
       list: this.listStatus(row),
+      costUsd: row.cost_usd,
+      costCapUsd: row.cost_cap_usd,
     };
   }
 
