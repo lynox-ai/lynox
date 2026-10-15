@@ -386,8 +386,9 @@ This release contains security fixes. Upgrading is recommended for every instanc
   is billed once. A document uploaded into a private chat is not chunked into
   the knowledge archive, and a switch during a long ingest stops the remaining
   chunks. (#1715, #1716)
-- A durable entry remembers every chat that said it, with that chat's
-  wording. When one chat goes private, only its contribution goes: an entry
+- From this version on, a durable entry records every chat that says it,
+  with that chat's wording; an entry created before the upgrade has its first
+  chat as its only source. When one chat goes private, only its contribution goes: an entry
   also said elsewhere stays, in the remaining chat's words, trust and pin; an
   entry with no source left is deleted. `GET /api/export` lists each source's
   wording under `durable_knowledge.sources`, masked. A line of the `profile`
