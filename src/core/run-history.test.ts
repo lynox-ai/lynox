@@ -1818,6 +1818,29 @@ describe('RunHistory', () => {
       expect(s.by_kind).toEqual([expect.objectContaining({ kind: 'llm', cost_cents: 30, run_count: 2 })]);
     });
 
+    it('a window that ends mid-day has a bucket for its last day, and the spend there counts', () => {
+      const h = createHistory();
+      const llm = { taskText: 'A', modelTier: 'fast' as const, modelId: 'claude-haiku-4-5' };
+      // A rolling window (or a billing period) from mid-day to mid-day: three days touched.
+      insertAt(h, '2026-04-10 16:00:00', llm, { costUsd: 0.10, status: 'completed' });
+      insertAt(h, '2026-04-12 08:00:00', llm, { costUsd: 0.20, status: 'completed' });
+      const s = h.getUsageSummary({
+        startIso: '2026-04-10T15:00:00.000Z', endIso: '2026-04-12T09:30:00.000Z', source: 'rolling', label: '3d',
+      });
+      expect(s.daily).toEqual([
+        { date: '2026-04-10', cost_cents: 10 },
+        { date: '2026-04-11', cost_cents: 0 },
+        { date: '2026-04-12', cost_cents: 20 },
+      ]);
+      expect(s.used_cents).toBe(30);
+      expect(s.by_model).toEqual([expect.objectContaining({ cost_cents: 30, run_count: 2 })]);
+      // A window ending at midnight does not open the next day.
+      const m = h.getUsageSummary({
+        startIso: '2026-04-10T00:00:00.000Z', endIso: '2026-04-12T00:00:00.000Z', source: 'rolling', label: '2d',
+      });
+      expect(m.daily.map((d) => d.date)).toEqual(['2026-04-10', '2026-04-11']);
+    });
+
     it('a run list from an ISO date keeps that day\'s runs', () => {
       const h = createHistory();
       const llm = { taskText: 'A', modelTier: 'fast' as const, modelId: 'claude-haiku-4-5' };
