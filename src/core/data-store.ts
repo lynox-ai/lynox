@@ -14,6 +14,7 @@ import type {
   MemoryScopeRef,
 } from '../types/index.js';
 import type { SubjectColumnBridge } from './subject-store.js';
+import type { CollectionShape } from './crm-schema.js';
 
 // === Constants ===
 
@@ -25,10 +26,10 @@ const RESERVED_NAMES = new Set(['meta', 'collections', 'schema_version', 'sqlite
  * (people/companies/deals/interactions live in `crm.ts` with a typed schema).
  * The agent has historically created empty DataStore collections under these
  * names — they then show up in the UI alongside the real CRM tab and confuse
- * the user. Empty collections matching this set are dropped on engine startup
- * (see `dropEmptyCrmOverlaps`), and the web UI filters out any that survive a
- * mid-session re-creation (belt-and-suspenders). Non-empty collections are
- * preserved — a power user may have a legitimate "contacts" table.
+ * the user. Empty collections matching this set are dropped on every engine
+ * boot unless they have the CRM's current shape (see `dropEmptyCrmOverlaps`),
+ * and the web UI filters out any that survive (belt-and-suspenders). Non-empty
+ * collections are preserved — a power user may have a legitimate "contacts" table.
  */
 export const CRM_OVERLAP_NAMES: ReadonlySet<string> = new Set([
   'contacts', 'companies', 'people', 'deals', 'interactions',
@@ -952,18 +953,34 @@ export class DataStore {
   }
 
   /**
-   * One-shot at engine startup: drop empty CRM-shaped collections (see
-   * `CRM_OVERLAP_NAMES`) that the agent left behind in older sessions.
-   * Returns the dropped names so callers can log. Non-empty collections are
-   * preserved — they may hold legitimate user data.
+   * Runs on every engine boot. Drops each EMPTY collection with a CRM-overlap name (see
+   * `CRM_OVERLAP_NAMES`) unless it matches one of the `current` shapes exactly: same name,
+   * scope, columns and unique key, as `ds_collections` records them. A change to the DDL
+   * that `createCollection` emits for an unchanged shape does not reach a kept table (see
+   * `crm-schema.ts`). Returns the dropped names so callers can log.
+   *
+   * Two kinds are dropped: empty collections the agent created under these names in older
+   * sessions, and an empty CRM collection created by an older build (an older unique key
+   * on `contacts`, older columns), which `CRM.ensureSchema` then recreates in the current
+   * shape — the free migration. The CRM's own empty collections in their current shape
+   * are kept: dropping them only for the CRM to recreate them in the same boot logged a
+   * drop on every boot of an instance with an empty CRM, which hid a real one.
+   * Non-empty collections are always preserved — they may hold legitimate user data.
    */
-  dropEmptyCrmOverlaps(): string[] {
+  dropEmptyCrmOverlaps(current: readonly CollectionShape[]): string[] {
     const dropped: string[] = [];
-    const rows = this.db.prepare('SELECT name, record_count FROM ds_collections').all() as Array<{ name: string; record_count: number }>;
+    const rows = this.db.prepare('SELECT name, scope_type, scope_id, schema_json, unique_key, record_count FROM ds_collections').all() as Array<{
+      name: string; scope_type: string; scope_id: string; schema_json: string; unique_key: string | null; record_count: number;
+    }>;
     for (const r of rows) {
-      if (CRM_OVERLAP_NAMES.has(r.name) && r.record_count === 0) {
-        if (this.dropCollection(r.name)) dropped.push(r.name);
-      }
+      if (!CRM_OVERLAP_NAMES.has(r.name) || r.record_count !== 0) continue;
+      // Compared as `createCollection` stores them, so an unchanged shape matches byte for byte.
+      const isCurrent = current.some(c => c.name === r.name
+        && c.scope.type === r.scope_type && c.scope.id === r.scope_id
+        && JSON.stringify(c.columns) === r.schema_json
+        && (c.uniqueKey ? c.uniqueKey.join(',') : null) === r.unique_key);
+      if (isCurrent) continue;
+      if (this.dropCollection(r.name)) dropped.push(r.name);
     }
     return dropped;
   }

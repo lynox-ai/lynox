@@ -14,6 +14,7 @@ import type { DataStore } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
 import { SubjectStore, ambiguityError } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
+import { CRM_CONTACTS, CRM_DEALS, CRM_INTERACTIONS, createParamsOf } from './crm-schema.js';
 
 // ── Types ──
 
@@ -60,39 +61,6 @@ export type ContactRecord = ContactData & {
   _created_at?: string | undefined;
   _updated_at?: string | undefined;
 };
-
-const SCOPE = { type: 'global' as const, id: '' };
-
-const CONTACTS_SCHEMA = [
-  { name: 'name', type: 'string' as const },
-  { name: 'email', type: 'string' as const },
-  { name: 'phone', type: 'string' as const },
-  { name: 'company', type: 'string' as const },
-  { name: 'type', type: 'string' as const },
-  { name: 'source', type: 'string' as const },
-  { name: 'channel_id', type: 'string' as const },
-  { name: 'language', type: 'string' as const },
-  { name: 'notes', type: 'string' as const },
-  { name: 'tags', type: 'json' as const },
-];
-
-const DEALS_SCHEMA = [
-  { name: 'title', type: 'string' as const },
-  { name: 'contact_name', type: 'string' as const },
-  { name: 'value', type: 'number' as const },
-  { name: 'currency', type: 'string' as const },
-  { name: 'stage', type: 'string' as const },
-  { name: 'next_action', type: 'string' as const },
-  { name: 'due_date', type: 'date' as const },
-];
-
-const INTERACTIONS_SCHEMA = [
-  { name: 'contact_name', type: 'string' as const },
-  { name: 'type', type: 'string' as const },
-  { name: 'channel', type: 'string' as const },
-  { name: 'summary', type: 'string' as const },
-  { name: 'date', type: 'date' as const },
-];
 
 /**
  * Optional engine.db subject-graph wiring for the CRM (Foundation Rework v2,
@@ -193,26 +161,17 @@ export class CRM {
     const existing = new Set(this.ds.listCollections().map(c => c.name));
 
     if (!existing.has('contacts')) {
-      this.ds.createCollection({
-        name: 'contacts',
-        scope: SCOPE,
-        // Identity = email (unique). The display `name` can change freely
-        // (rename → same row, the autoincrement `_id` stays stable, so any
-        // history keyed on the contact survives). Two people with the same
-        // name but different emails are distinct rows; the same email saved
-        // again upserts. Email is normalised to lower-case on write
-        // (`upsertContact`) so the dedup — and the inbox contact-resolver's
-        // case-insensitive lookup — are consistent end-to-end.
-        columns: CONTACTS_SCHEMA,
-        uniqueKey: ['email'],
-      });
+      this.ds.createCollection(createParamsOf(CRM_CONTACTS));
     } else {
-      // A `contacts` collection already exists. The empty case is dropped on
-      // boot (`dropEmptyCrmOverlaps`) BEFORE this runs, so it gets recreated
-      // above with the email key — the free migration. A NON-empty legacy
-      // table (e.g. rows the agent inserted via data_store on older builds,
-      // when the prompt still steered to `data_store_insert into contacts`)
-      // survives with its original unique key. We do NOT auto-rebuild it (that
+      // A `contacts` collection already exists. An empty one in any other
+      // shape than `CRM_CONTACTS` (an older unique key, older columns) is
+      // dropped on boot (`dropEmptyCrmOverlaps`) BEFORE this runs, so it gets
+      // recreated above with the email key — the free migration. An empty one
+      // in the current shape is kept, so nothing is dropped and recreated on
+      // every boot. A NON-empty legacy table (e.g. rows the agent inserted
+      // via data_store on older builds, when the prompt still steered to
+      // `data_store_insert into contacts`) survives with its original unique
+      // key. We do NOT auto-rebuild it (that
       // is a real DataStore migration, the escalation path) — but a silent
       // degradation of the email-identity contract is worse than a visible
       // one, so surface the mismatch in the boot log.
@@ -227,20 +186,11 @@ export class CRM {
     }
 
     if (!existing.has('deals')) {
-      this.ds.createCollection({
-        name: 'deals',
-        scope: SCOPE,
-        columns: DEALS_SCHEMA,
-        uniqueKey: ['title', 'contact_name'],
-      });
+      this.ds.createCollection(createParamsOf(CRM_DEALS));
     }
 
     if (!existing.has('interactions')) {
-      this.ds.createCollection({
-        name: 'interactions',
-        scope: SCOPE,
-        columns: INTERACTIONS_SCHEMA,
-      });
+      this.ds.createCollection(createParamsOf(CRM_INTERACTIONS));
     }
 
     this._initialized = true;
