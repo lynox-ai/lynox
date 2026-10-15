@@ -8,7 +8,20 @@ import { tmpdir } from 'node:os';
  * so what lands in the workspace is exactly what the tool read.
  */
 type ExecCallback = (err: Error | null, stdout: string, stderr: string) => void;
-const h = vi.hoisted(() => ({ spawns: 0 }));
+const h = vi.hoisted(() => ({ spawns: 0, reads: 0, onFirstRead: null as null | (() => void) }));
+
+// readSync is counted, and can run a step at the first read: the moment between the size check
+// on the open file and the copy, which no static setup reaches.
+vi.mock('node:fs', async () => {
+  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+  return {
+    ...actual,
+    readSync: (...args: Parameters<typeof actual.readSync>) => {
+      if (h.reads++ === 0 && h.onFirstRead) h.onFirstRead();
+      return actual.readSync(...args);
+    },
+  };
+});
 
 vi.mock('node:child_process', async () => {
   const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
@@ -37,6 +50,8 @@ let outside: string;
 
 beforeEach(() => {
   h.spawns = 0;
+  h.reads = 0;
+  h.onFirstRead = null;
   ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-media-ws-')));
   outside = realpathSync(mkdtempSync('/tmp/lynox-media-out-'));
   setTenantWorkspace(ws);
@@ -105,11 +120,12 @@ describe('media_process reaches the files area through its open directory', () =
     expect(h.spawns).toBe(0);
   });
 
-  it('refuses a FIFO as the input without blocking, and a directory', async () => {
+  it('refuses a FIFO as the input without blocking, a directory, and the files area itself', async () => {
     execFileSync('mkfifo', [join(ws, 'pipe.mov')]);
     mkdirSync(join(ws, 'adir.mov'));
-    await expect(run('pipe.mov')).rejects.toThrow(/not a regular file/);
-    await expect(run('adir.mov')).rejects.toThrow(/not a regular file/);
+    for (const input of ['pipe.mov', 'adir.mov', '.', ws]) {
+      await expect(run(input), input).rejects.toThrow(/^input is not a regular file\.$/);
+    }
     expect(h.spawns).toBe(0);
   });
 
@@ -117,6 +133,17 @@ describe('media_process reaches the files area through its open directory', () =
     // Sparse: the size is what the open file says, not bytes on disk.
     execFileSync('truncate', ['-s', String(100 * 1024 * 1024 + 1), join(ws, 'big.mov')]);
     await expect(run('big.mov')).rejects.toThrow(/input is too large \(max 100 MB\)/);
+    // Refused by the open file's size, before a byte is copied.
+    expect(h.reads).toBe(0);
+    expect(h.spawns).toBe(0);
+    expect(landed()).toEqual([]);
+  });
+
+  it('stops copying an input that grows past the size limit after the size check', async () => {
+    writeFileSync(join(ws, 'grow.mov'), 'small');
+    h.onFirstRead = () => execFileSync('truncate', ['-s', String(100 * 1024 * 1024 + 1), join(ws, 'grow.mov')]);
+    await expect(run('grow.mov')).rejects.toThrow(/input is too large \(max 100 MB\)/);
+    expect(h.reads).toBeGreaterThan(1);
     expect(h.spawns).toBe(0);
     expect(landed()).toEqual([]);
   });

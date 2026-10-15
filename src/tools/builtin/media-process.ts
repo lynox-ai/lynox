@@ -281,9 +281,9 @@ function copyFromFd(fd: number, dest: string): void {
  */
 async function processAnchored(input: MediaProcessInput, anchor: WorkspaceAnchor, ws: string): Promise<string> {
   const mapped = toWorkspaceRel(resolve(ws, input.input), ws);
-  if (mapped.kind !== 'inside' || mapped.rel === '') {
-    throw new Error(`input '${input.input}' is outside your files area.`);
-  }
+  if (mapped.kind !== 'inside') throw new Error(`input '${input.input}' is outside your files area.`);
+  // The files area itself is a directory.
+  if (mapped.rel === '') throw new Error('input is not a regular file.');
   let fd: number;
   try {
     fd = openRead(anchor, mapped.rel);

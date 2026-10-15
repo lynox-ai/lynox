@@ -63,6 +63,22 @@ describe('batch_files reaches the workspace through its open directory', () => {
     expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('old target');
   });
 
+  it('refuses to read a file with a second name, also when nothing in it would change', async () => {
+    writeFileSync(join(outside, 'other.txt'), 'nothing to find');
+    linkSync(join(outside, 'other.txt'), join(ws, 'hard.txt'));
+    expect(await run({ find: 'old', replace: 'new' })).toMatch(/hard\.txt: it has more than one name/);
+  });
+
+  it('skips a file over the size limit, and names an unreadable file by its workspace path', async () => {
+    execFileSync('truncate', ['-s', String(10 * 1024 * 1024 + 1), join(ws, 'big.txt')]);
+    writeFileSync(join(ws, 'locked.txt'), 'old');
+    chmodSync(join(ws, 'locked.txt'), 0o000);
+    const out = await run({ find: 'old', replace: 'new' });
+    expect(out).toContain(`Skipped (too large): ${join(ws, 'big.txt')}`);
+    if (process.getuid?.() !== 0) expect(out).toContain(`Error transforming ${join(ws, 'locked.txt')}: EACCES: permission denied: ${join(ws, 'locked.txt')}`);
+    expect(out).not.toMatch(/\/proc\//);
+  });
+
   it('renames within the workspace, also one level up, and refuses a name that leaves it', async () => {
     mkdirSync(join(ws, 'sub'));
     writeFileSync(join(ws, 'sub', 'r.txt'), 'r');
@@ -120,6 +136,10 @@ describe('batch_files reaches the workspace through its open directory', () => {
     const out = await run({ directory: join(outside, 'src'), operation: 'rename', rename_pattern: rel });
     expect(out).toMatch(/lands in the workspace/);
     expect(existsSync(join(ws, 'landed-q.txt'))).toBe(false);
+    // A destination that reaches the workspace only through a link.
+    symlinkSync(ws, join(outside, 'ws-link'));
+    expect(await run({ directory: join(outside, 'src'), operation: 'move', destination: join(outside, 'ws-link', 'in') })).toMatch(/is in the workspace, the directory is not/);
+    expect(existsSync(join(ws, 'in'))).toBe(false);
     // The control: an outside directory is still batch_files' to work on.
     expect(await run({ directory: join(outside, 'src'), find: 'q', replace: 'Q' })).toContain('Transformed');
   });

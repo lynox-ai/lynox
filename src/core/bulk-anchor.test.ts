@@ -115,6 +115,17 @@ describe('bulk keys are paths relative to the workspace', () => {
     expect(ledger.getPreview(runId)[0]!.error).toBe('path_changed');
     expect(readFileSync(join(outside, 'x.txt'), 'utf8')).toBe('before');
   });
+
+  it('refuses a key that names no file in the workspace, as path_changed', async () => {
+    writeFileSync(join(outside, 'x.txt'), 'before');
+    for (const key of ['', '../outside/x.txt', 'a/../../outside/x.txt']) {
+      const runId = recordAbsolute([{ key, before: { absent: false, value: 'before' }, after: 'after' }]);
+      approve(runId);
+      await apply(runId);
+      expect(ledger.getPreview(runId)[0]!.error, JSON.stringify(key)).toBe('path_changed');
+    }
+    expect(readFileSync(join(outside, 'x.txt'), 'utf8')).toBe('before');
+  });
 });
 
 describe('bulk_plan does not follow links', () => {
