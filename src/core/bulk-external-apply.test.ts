@@ -1453,4 +1453,46 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
       restore();
     }
   });
+
+  // The worker asks whether a target is a connected account in every form of its host, as the
+  // tool does: a target written with a root dot is the same account as the profile without one.
+  it.each([
+    ['example-shop', 'not_granted'],
+    [undefined, 'sent'],
+  ] as const)('refuses an unmeasured write to a connected account named with a root dot (preset %s: %s)', async (presetId, outcome) => {
+    const s = shop();
+    const restore = serve(s);
+    formFixture.measured = false;
+    try {
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'], ...(presetId === undefined ? {} : { oauth: { preset_id: presetId } }) } as never,
+        custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-10-15T00:00:00.000Z' },
+      });
+      const vault = {
+        resolve: (n: string): string | null => (n === 'SHOP_TOKEN' ? TOKEN : null),
+        resolveSecretRefs: (x: unknown): unknown => x,
+        extractSecretNames: (): string[] => [],
+        isEnvironmentSecret: (): boolean => false,
+        listNames: (): string[] => ['SHOP_TOKEN'],
+      };
+      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => createToolContext({}) };
+      const factory = await (WorkerLoop.prototype as unknown as {
+        bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null) => ExternalClient | null>;
+      }).bulkClientFactory.call({ engine });
+      const target = `https://${HOST}./products/0`;
+      const c = factory(JSON.stringify(mintBulkContract(`${HOST}.`, [target])))!;
+      const result = await c.write(target, 'PATCH', { price: '15' });
+      if (outcome === 'not_granted') {
+        expect(result).toEqual({ kind: 'not_granted' });
+        expect(s.requests).toEqual([]);
+      } else {
+        expect(result.kind).not.toBe('not_granted');
+      }
+    } finally {
+      formFixture.measured = true;
+      restore();
+    }
+  });
 });
