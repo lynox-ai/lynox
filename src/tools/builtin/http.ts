@@ -2371,7 +2371,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // anything else is decided. Reads are not held.
     const claimant = isWriteMethod(gatedMethod) ? hostClaimant(input.url) : undefined;
     if (claimant !== undefined && (!toolContext?.apiStore || profilesOnHost(input.url, toolContext.apiStore).length === 0)) {
-      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`);
+      // The way out depends on who asks: a mandate does not write to a connected account at all
+      // (below), and a run without a profile store has nowhere to keep one.
+      const wayOut = !isOwnerPrincipal(agent.principal)
+        ? 'This session does not write there; propose the change as a task instead (task_create), which runs once the owner approves it.'
+        : !toolContext?.apiStore
+          ? 'This run has no api_profile store, so it cannot write there.'
+          : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
       const host = new URL(input.url).hostname.replace(/\.+$/, '');

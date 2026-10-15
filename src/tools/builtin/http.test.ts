@@ -1280,7 +1280,12 @@ describe('httpRequestTool', () => {
         // The provider's API host is a connected account by its host: a write there with no
         // profile on the host is refused before the mandate check, the contract and the approval.
         describe('a write to the bexio API with no profile on the host', () => {
-          const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
+          const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent.';
+          // The way out, by who asks: the owner sets up the profile, a run with no store cannot, a
+          // mandate proposes a task (it does not write to a connected account even with a profile).
+          const SET_UP = ' To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
+          const NO_STORE = ' This run has no api_profile store, so it cannot write there.';
+          const AS_TASK = ' This session does not write there; propose the change as a task instead (task_create), which runs once the owner approves it.';
           const bexioWrites: CapabilityContract = { ...withDelete, hostPatterns: ['api.bexio.com'], pathPatterns: ['/2.0/*'] };
           async function withEmptyStore(): Promise<void> {
             const { ApiStore } = await import('../../core/api-store.js');
@@ -1293,24 +1298,45 @@ describe('httpRequestTool', () => {
             await withProfile('bexio', 'https://api.crm.example/v1');
           }
           it.each([
-            ['an empty store, a POST with a header of its own', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', { Authorization: 'Bearer secret:BEXIO_TOKEN' }, {}],
-            ['an empty store, a DELETE', withEmptyStore, 'https://api.bexio.com/2.0/contact/7', 'DELETE', {}, {}],
-            ['no store, a POST', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, {}],
-            ['a profile on another host only, a POST', withOtherHostProfile, 'https://api.bexio.com/2.0/contact', 'POST', {}, {}],
-            ['an empty store, the host with a root dot', withEmptyStore, 'https://api.bexio.com./2.0/contact', 'POST', {}, {}],
-            ['an empty store, a GET with _method in the query', withEmptyStore, 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', {}, {}],
-            ['an empty store, a contract that grants the write', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { capabilityContract: bexioWrites }],
-            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }],
-          ] as const)('refuses %s, and nothing is asked or sent', async (_label, setUp, url, method, headers, extras) => {
+            ['an empty store, a POST with a header of its own', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', { Authorization: 'Bearer secret:BEXIO_TOKEN' }, {}, SET_UP],
+            ['an empty store, a DELETE', withEmptyStore, 'https://api.bexio.com/2.0/contact/7', 'DELETE', {}, {}, SET_UP],
+            ['no store, a POST', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, {}, NO_STORE],
+            ['a profile on another host only, a POST', withOtherHostProfile, 'https://api.bexio.com/2.0/contact', 'POST', {}, {}, SET_UP],
+            ['an empty store, the host with a root dot', withEmptyStore, 'https://api.bexio.com./2.0/contact', 'POST', {}, {}, SET_UP],
+            ['an empty store, a GET with _method in the query', withEmptyStore, 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', {}, {}, SET_UP],
+            ['an empty store, a contract that grants the write', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { capabilityContract: bexioWrites }, SET_UP],
+            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
+          ] as const)('refuses %s, with its way out, and the tool asks and sends nothing', async (_label, setUp, url, method, headers, extras, wayOut) => {
             await setUp();
             mockDnsPublic();
             const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
             vi.stubGlobal('fetch', fetchMock);
             const promptUser = vi.fn().mockResolvedValue('Allow');
             const out = await visible({ url, method, headers: { ...headers }, ...(method === 'POST' ? { body: '{"name_1":"x"}' } : {}) }, makeAgent({ promptUser, ...extras }));
-            expect(out).toContain(REFUSED);
+            expect(out).toContain(`${REFUSED}${wayOut}`);
             expect(promptUser).not.toHaveBeenCalled();
             expect(fetchMock).not.toHaveBeenCalled();
+          });
+
+          // An interactive write redirected onto the bexio API: the hop is refused, not asked, and
+          // the same write sent there directly is refused as above. Bodyless, so the cross-origin
+          // hop keeps its method (a body turns it into a read).
+          it('refuses an interactive DELETE redirected onto the bexio API at the hop, unasked, and the direct one too', async () => {
+            await withEmptyStore();
+            mockDnsPublic();
+            const fetchMock = vi.fn()
+              .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.bexio.com/2.0/contact/7' } }))
+              .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const agent = makeAgent({ promptUser });
+            const hop = await visible({ url: 'https://api.crm.example/v1/contact/7', method: 'DELETE' }, agent);
+            expect(hop).toContain('needs its own approval');
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect(promptUser).toHaveBeenCalledTimes(1);
+            expect(await visible({ url: 'https://api.bexio.com/2.0/contact/7', method: 'DELETE' }, agent)).toContain(REFUSED);
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect(promptUser).toHaveBeenCalledTimes(1);
           });
 
           // An Allow is not remembered for the host and asked again: the second write is refused
@@ -1605,6 +1631,20 @@ describe('httpRequestTool', () => {
           await handler({ url: 'https://api.bexio.com/2.0/contact/17', method: 'POST', body: '{"name_1":"Muster AG"}' }, makeAgent({ promptUser }));
           expect(sent(fetchMock)).toEqual(['POST /2.0/contact/17']);
           expect(promptUser).toHaveBeenCalledTimes(1);
+        });
+
+        // The outbound-effect table still names bexio's send path, for the question's note.
+        it('sending an invoice is asked with the note that it sends something', async () => {
+          await withBexio();
+          mockDnsPublic();
+          account({
+            '/2.0/kb_invoice/7': createMockResponse({ json: invoice }),
+            '/3.0/currencies/1': createMockResponse({ json: { id: 1, name: 'CHF' } }),
+          });
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ url: 'https://api.bexio.com/2.0/kb_invoice/7/send', method: 'POST', body: '{}' }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(flattenPrompt(promptUser.mock.calls[0]![0] as PromptText)).toContain('This sends or issues something and is asked every time.');
         });
       });
 
