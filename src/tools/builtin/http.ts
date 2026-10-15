@@ -165,7 +165,7 @@ export class RedirectRefusedAfterWrite extends Error {
         ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
           `Do not repeat the request: check the target system for whether it was carried out.`
         : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out. A request sent to that address directly asks first.`),
+          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
@@ -203,6 +203,13 @@ function presetProfilesOnHost(url: string, toolContext: ToolContext | undefined)
 /** {@link presetProfilesOnHost} against a store: the profiles that make `url`'s host a connected account. */
 export function connectedAccountProfiles(url: string, apiStore: NonNullable<ToolContext['apiStore']>): ApiProfile[] {
   return profilesOnHost(url, apiStore).filter((p) => p.auth?.oauth?.preset_id !== undefined);
+}
+
+/** The built-in provider whose API host `url` is on (`apiHosts`), whatever profiles exist: the
+ *  same predicate a profile is held to when it is saved (`presetNotFollowed`), asked for a
+ *  request that follows no provider. */
+function hostClaimant(url: string): OAuthPreset | undefined {
+  return presetNotFollowed({ base_url: url });
 }
 
 /** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
@@ -2357,6 +2364,24 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // share included, and the host is read without trailing root dots, which name the same
     // host to DNS and a different key to the profile map.
     const presetOnHost = isWriteMethod(gatedMethod) ? presetProfilesOnHost(input.url, toolContext) : [];
+    // A provider's API host (`apiHosts`) is a connected account by its host, not by a stored
+    // profile: a write there goes through a profile on the host, which `attachEngineManagedAuth`
+    // holds to the provider. With no profile on the host there is no account to read the write's
+    // context from and no credential of the engine's to send, so the write is refused before
+    // anything else is decided. Reads are not held.
+    const claimant = isWriteMethod(gatedMethod) ? hostClaimant(input.url) : undefined;
+    if (claimant !== undefined && (!toolContext?.apiStore || profilesOnHost(input.url, toolContext.apiStore).length === 0)) {
+      // The way out depends on who asks: a mandate does not write to a connected account at all
+      // (below), and with no profile on the host a task it proposed would be refused for the
+      // owner too until the owner connects the provider; a run without a profile store has
+      // nowhere to keep a profile.
+      const wayOut = !isOwnerPrincipal(agent.principal)
+        ? `This session does not write there. Tell the owner which change you would make: the owner first connects ${claimant.label} through that provider, and the change can then be proposed as a task (task_create) the owner approves.`
+        : !toolContext?.apiStore
+          ? 'This run has no api_profile store, so it cannot write there.'
+          : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
+    }
     if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
       const host = new URL(input.url).hostname.replace(/\.+$/, '');
       if (presetOnHost.length > 0) {
@@ -2928,7 +2953,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               writeMethodsNamed(redirectMethod, headers, nextUrl, hopBody).every((m) => contractGrants('http_request', { url: nextUrl, method: m }, contract)) &&
               !isOutboundEffectWrite(nextUrl, hop) &&
               // No contract grants a write to a connected account, on a hop either.
-              (!isWriteMethod(hop) || presetProfilesOnHost(nextUrl, toolContext).length === 0);
+              (!isWriteMethod(hop) || (presetProfilesOnHost(nextUrl, toolContext).length === 0 && hostClaimant(nextUrl) === undefined));
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {
