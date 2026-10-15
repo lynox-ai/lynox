@@ -289,6 +289,16 @@ describe('release_secret: the owner answers in person', () => {
     expect(question).toContain('…(50 more)');
   });
 
+  it('cuts a long bound value that is not a string', async () => {
+    const p = bearer({ auth: { type: 'oauth2', vault_keys: ['CRM_KEY'], oauth: { token_url: 'https://auth.crm.example/oauth/token', client_secret_key: 'CRM_KEY', grant_type: 'client_credentials', preset_params: { region: 'r'.repeat(250) } } } });
+    const apiStore = apis([p]);
+    ask(p);
+    let question = '';
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    expect(question).toContain('preset_params {"region":"rrr');
+    expect(question).toContain('…(63 more)');
+  });
+
   it('names a port other than the default in the question', async () => {
     const p = bearer({ base_url: 'https://api.crm.example:8443/v1' });
     const apiStore = apis([p]);
