@@ -88,6 +88,13 @@ export interface WorkspaceErasure {
   readonly rootIdentity?: { readonly dev: number; readonly ino: number } | undefined;
 }
 
+/** What the erasure's anchor walk finds (`_workspaceWalk` in the route), for `WorkspaceErasure`. */
+export interface WorkspaceWalk {
+  readonly mountBoundaries: readonly string[];
+  readonly dataDirAt: readonly string[];
+  readonly rootIdentity: { readonly dev: number; readonly ino: number };
+}
+
 /** The inventory name of the workspace row. */
 const WORKSPACE = 'workspace';
 

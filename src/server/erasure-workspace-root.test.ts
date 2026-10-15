@@ -9,6 +9,7 @@ import { reloadConfig } from '../core/config.js';
 import { scopeToDir } from '../core/scope-resolver.js';
 import type { Memory } from '../core/memory.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
+import type { WorkspaceWalk } from '../core/data-dir-erase.js';
 import { _resetWorkspaceAccess, workspaceAccess } from '../core/workspace-access.js';
 
 /**
@@ -27,8 +28,8 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
   const IS_ROOT = process.getuid?.() === 0;
 
   const root = (): string => join(dir, 'workspace');
-  const seams = (): { _workspaceWalk: (a: WorkspaceAccess, d: string) => Promise<{ readonly mountBoundaries: readonly string[]; readonly dataDirAt: readonly string[] }> } =>
-    api as unknown as { _workspaceWalk: (a: WorkspaceAccess, d: string) => Promise<{ readonly mountBoundaries: readonly string[]; readonly dataDirAt: readonly string[] }> };
+  const seams = (): { _workspaceWalk: (a: WorkspaceAccess, d: string) => Promise<WorkspaceWalk> } =>
+    api as unknown as { _workspaceWalk: (a: WorkspaceAccess, d: string) => Promise<WorkspaceWalk> };
 
   async function erase(): Promise<{ status: number; body: Record<string, unknown> }> {
     const res = await fetch(`${baseUrl}/api/data`, {
@@ -109,7 +110,7 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
     writeFileSync(join(root(), 'http-api', 'kept.txt'), 'ZZ-kept');
     const s = seams();
     const real = s._workspaceWalk;
-    s._workspaceWalk = async () => ({ mountBoundaries: ['proj/mnt'], dataDirAt: [] });
+    s._workspaceWalk = async (a, d) => ({ ...(await real.call(api, a, d)), mountBoundaries: ['proj/mnt'] });
     try {
       const res = await erase();
       expect(res.status).toBe(409);
@@ -132,7 +133,29 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
     expect((await s._workspaceWalk(access, join(root(), 'sub', 'deeper'))).dataDirAt).toEqual(['sub/deeper']);
     expect((await s._workspaceWalk(access, root())).dataDirAt).toEqual(['']);
     expect((await s._workspaceWalk(access, dir)).dataDirAt).toEqual([]);
+    expect((await s._workspaceWalk(access, dir)).rootIdentity).toEqual({ dev: statSync(root()).dev, ino: statSync(root()).ino });
     rmSync(join(root(), 'sub'), { recursive: true });
+  }, 60_000);
+
+  it('refuses with 409 when the root is also a directory inside the data directory, and erases nothing', async () => {
+    const intact = memoryMarker();
+    writeFileSync(join(root(), 'http-api', 'kept.txt'), 'ZZ-kept');
+    mkdirSync(join(dir, 'memory'), { recursive: true });
+    const s = seams();
+    const real = s._workspaceWalk;
+    // As if `<data>/memory` were the root's bind mount: the root's identity is found there.
+    s._workspaceWalk = async (a, d) => ({ ...(await real.call(api, a, d)), rootIdentity: { dev: statSync(join(dir, 'memory')).dev, ino: statSync(join(dir, 'memory')).ino } });
+    try {
+      const res = await erase();
+      expect(res.status).toBe(409);
+      const linked = res.body['linked'] as Array<{ name: string; reason: string }>;
+      expect(linked.find(l => l.name === 'workspace')?.reason).toMatch(/also inside the data directory \(memory\)/);
+    } finally {
+      s._workspaceWalk = real;
+    }
+    expect(intact()).not.toBeNull();
+    expect(readFileSync(join(root(), 'http-api', 'kept.txt'), 'utf8')).toBe('ZZ-kept');
+    rmSync(join(root(), 'http-api', 'kept.txt'));
   }, 60_000);
 
   it('refuses with 409 when the anchor walk finds the data directory inside the root, and erases nothing', async () => {
@@ -146,7 +169,7 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
     s._workspaceWalk = async (a, d) => {
       askedFor = d;
       const found = await real.call(api, a, d);
-      return { mountBoundaries: found.mountBoundaries, dataDirAt: ['srv/lynox'] };
+      return { ...found, dataDirAt: ['srv/lynox'] };
     };
     try {
       const res = await erase();

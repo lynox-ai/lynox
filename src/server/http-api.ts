@@ -112,7 +112,7 @@ import { mintBrokerStartToken } from '../integrations/google/broker-start-mint.j
 import { isBrokerMode, hasControlPlaneInstanceId } from '../integrations/google/broker-mode.js';
 import { hostPolicyOf } from '../core/tool-context.js';
 import { InputRequiredError, isInputRequired } from '../core/input-required.js';
-import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure } from '../core/data-dir-erase.js';
+import { parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure, type WorkspaceWalk } from '../core/data-dir-erase.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
 import { isSchedulableWorkflow } from '../orchestrator/human-in-the-loop.js';
 import { quiesceBoundedJsonl } from '../core/bounded-jsonl-log.js';
@@ -1522,14 +1522,16 @@ export class LynoxHTTPApi {
 
   /**
    * One anchor walk for the erasure: the directories below the workspace root that sit on another
-   * mount, and those that ARE the data directory (by device and inode — a bind mount shows it under
-   * a second path). A method so a test can stand in for both, which take privileges to create.
+   * mount, those that ARE the data directory (by device and inode — a bind mount shows it under a
+   * second path), and the root's own identity, to look for it inside the data directory. A method
+   * so a test can stand in for what takes privileges to create.
    */
-  async _workspaceWalk(access: WorkspaceAccess, dataDir: string): Promise<{ readonly mountBoundaries: readonly string[]; readonly dataDirAt: readonly string[] }> {
+  async _workspaceWalk(access: WorkspaceAccess, dataDir: string): Promise<WorkspaceWalk> {
     const { walk } = await import('../core/workspace-fd.js');
     const data = statSync(dataDir);
     const found = walk(access.anchor, '', undefined, { dev: data.dev, ino: data.ino });
-    return { mountBoundaries: found.mountBoundaries, dataDirAt: found.watchedAt };
+    const own = fstatSync(access.anchor.fd);
+    return { mountBoundaries: found.mountBoundaries, dataDirAt: found.watchedAt, rootIdentity: { dev: own.dev, ino: own.ino } };
   }
 
   private erasureBlockedBy(engine: Engine, isBackfillRunning: () => boolean): { code: string; error: string } | null {
@@ -11814,22 +11816,23 @@ export class LynoxHTTPApi {
         // answering with the stores emptied and the files left would be the false success.
         // A default root that never existed holds nothing: `null`, and the workspace is skipped.
         let wsAccess: WorkspaceAccess | null;
-        let wsWalk: { readonly mountBoundaries: readonly string[]; readonly dataDirAt: readonly string[] };
+        let wsWalk: WorkspaceWalk | null;
         try {
           wsAccess = workspaceAccessIfPresent();
-          wsWalk = wsAccess === null ? { mountBoundaries: [], dataDirAt: [] } : await this._workspaceWalk(wsAccess, dataDir);
+          wsWalk = wsAccess === null ? null : await this._workspaceWalk(wsAccess, dataDir);
         } catch (err) {
           process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
         const access = wsAccess;
-        const wsErasure: WorkspaceErasure | undefined = access === null ? undefined : {
+        const found = wsWalk;
+        const wsErasure: WorkspaceErasure | undefined = access === null || found === null ? undefined : {
           external: access.root.mode === 'external',
           isRoot: (path) => isAnchoredRoot(access, path),
-          mountBoundaries: () => wsWalk.mountBoundaries,
-          dataDirAt: () => wsWalk.dataDirAt,
-          rootIdentity: (() => { const st = fstatSync(access.anchor.fd); return { dev: st.dev, ino: st.ino }; })(),
+          mountBoundaries: () => found.mountBoundaries,
+          dataDirAt: () => found.dataDirAt,
+          rootIdentity: found.rootIdentity,
         };
         let scan: ReturnType<typeof scanDataDir>;
         try {
