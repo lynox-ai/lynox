@@ -80,13 +80,14 @@ function refuseUnsafeRoot(real: string): void {
     const cause = err instanceof Error ? err.message : String(err);
     throw new WorkspaceRootError(`Cannot check the workspace root ${real} against the data directory ${getLynoxDir()} (${cause}).`);
   }
-  if (isPathWithin(dataDir, real)) {
+  const unsafe = unsafeRoot(real, dataDir);
+  if (unsafe === 'holds-data-dir') {
     throw new WorkspaceRootError(
       `LYNOX_WORKSPACE_ROOT names ${real}, which is the data directory ${dataDir} or contains it. ` +
       'The erasure empties the workspace root, so it must be a directory of its own.',
     );
   }
-  if (isPathWithin(real, dataDir)) {
+  if (unsafe === 'inside-data-dir') {
     throw new WorkspaceRootError(
       `LYNOX_WORKSPACE_ROOT names ${real}, which is inside the data directory ${dataDir}. ` +
       'Use the default (unset it) or a directory outside the data directory.',
@@ -95,10 +96,24 @@ function refuseUnsafeRoot(real: string): void {
 }
 
 /**
+ * Why the directory `real` must not be emptied as a workspace root of the data directory
+ * `dataDir` (both resolved), or `null`: it is the data directory or contains it (`/` among
+ * them), or it lies inside it. One guard for an external root (refused at boot) and for a
+ * `<data>/workspace` that is a link (refused by the erasure, PRD I12d): the default root itself
+ * is inside the data directory by name and is never asked.
+ */
+export function unsafeRoot(real: string, dataDir: string): 'holds-data-dir' | 'inside-data-dir' | null {
+  if (isPathWithin(dataDir, real)) return 'holds-data-dir';
+  if (isPathWithin(real, dataDir)) return 'inside-data-dir';
+  return null;
+}
+
+/**
  * Whether `path` (followed if it is a link) is the anchored root itself. In the default mode the
  * data directory's `workspace` entry IS the root; the erasure empties it through the anchor and
- * must not remove it by name. (A `workspace` entry that is a link or a mount point is refused by
- * the erasure's scan before this matters.)
+ * must not remove it by name. Followed on purpose: a `workspace` entry that is a link or a mount
+ * point to the anchored directory is the root too (PRD I12d); the erasure's scan refuses a link
+ * whose target `unsafeRoot` rejects.
  */
 export function isAnchoredRoot(access: WorkspaceAccess, path: string): boolean {
   let byName;

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { classifyEntry, parseAcknowledged, removeBackupsOutside, removeOwedEntries, sameUnknownSet, scanDataDir, type WorkspaceErasure } from './data-dir-erase.js';
 import { ERASE_BY_REMOVE, ERASE_KEPT } from './data-dir-inventory.js';
 
@@ -371,17 +371,44 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     expect(readFileSync(join(dir, 'workspace', 'http-api', 'a.txt'), 'utf8')).toBe('ZZ-a');
   });
 
-  it('refuses a default root that is a symlink, as before: its content is at the target', () => {
+  it('empties a default root that is a symlink to a directory of its own through the anchor (I12d)', () => {
     const real = join(outside, 'ws');
     mkdirSync(real);
     symlinkSync(real, join(dir, 'workspace'));
-    const scan = scanDataDir(dir, { workspace: defaultRoot(real) });
+    const ws = defaultRoot(real);
+    const scan = scanDataDir(dir, { workspace: ws });
+    expect(scan.linked).toEqual([]);
+    expect(scan.emptiedInPlace).toContain('workspace');
+    const out = removeOwedEntries(scan, [], undefined, ws);
+    expect(out.removed).not.toContain('workspace');
+    expect(lstatSync(join(dir, 'workspace')).isSymbolicLink()).toBe(true);
+  });
+
+  it.each([
+    ['inside the data directory', (d: string): string => { mkdirSync(join(d, 'elsewhere')); return join(d, 'elsewhere'); }, /inside the data directory/],
+    ['the data directory itself', (d: string): string => d, /the data directory or contains it/],
+    ['a directory that contains the data directory', (d: string): string => dirname(d), /the data directory or contains it/],
+  ])('refuses a default root that is a symlink to %s, and empties nothing (I12d guard)', (_label, targetOf, reason) => {
+    const target = targetOf(dir);
+    symlinkSync(target, join(dir, 'workspace'));
+    const scan = scanDataDir(dir, { workspace: defaultRoot(target), walk: false });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(reason);
+    expect(scan.emptiedInPlace).not.toContain('workspace');
+  });
+
+  it('refuses a symlinked default that is not the anchored root, as an owed link', () => {
+    const real = join(outside, 'ws');
+    mkdirSync(real);
+    mkdirSync(join(outside, 'other'));
+    symlinkSync(real, join(dir, 'workspace'));
+    const scan = scanDataDir(dir, { workspace: defaultRoot(join(outside, 'other')) });
     expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
     expect(scan.linked[0]!.reason).toMatch(/symbolic link/);
     expect(scan.emptiedInPlace).not.toContain('workspace');
   });
 
-  it('refuses a default root that is a mount point, as before: its content is on another filesystem', () => {
+  it('empties a default root that is a mount point through the anchor (I12d)', () => {
     mkdirSync(join(dir, 'workspace'));
     const real = statSync(dir);
     const mountAt = (p: string): ReturnType<typeof statSync> => {
@@ -389,9 +416,21 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
       return p.endsWith('/workspace') ? Object.assign(Object.create(Object.getPrototypeOf(st) as object) as typeof st, st, { dev: real.dev + 1 }) : st;
     };
     const scan = scanDataDir(dir, { workspace: defaultRoot(join(dir, 'workspace')), lstat: mountAt });
+    expect(scan.linked).toEqual([]);
+    expect(scan.emptiedInPlace).toContain('workspace');
+  });
+
+  it('refuses a leftover holding a mount on the SAME device, by its mount id (bind mount, second volume)', () => {
+    leftover();
+    mkdirSync(join(dir, 'workspace', 'vol'));
+    // Same st_dev everywhere (no lstat injected): only the mount id tells the volume apart.
+    const mountId = (p: string): number => (p.endsWith('/workspace/vol') ? 2 : 1);
+    const scan = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external(), mountId });
     expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
-    expect(scan.linked[0]!.reason).toMatch(/mount point/);
-    expect(scan.emptiedInPlace).not.toContain('workspace');
+    expect(scan.linked[0]!.reason).toMatch(/vol/);
+    const out = removeOwedEntries(scan, ['workspace'], undefined, external(), mountId);
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(readFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'utf8')).toBe('ZZ-old');
   });
 
   it('refuses the whole erasure when the anchor walk finds a mount below the root (I1e)', () => {

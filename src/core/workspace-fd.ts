@@ -304,6 +304,20 @@ export function mountIdOf(fd: number): number | null {
   return m?.[1] !== undefined ? Number(m[1]) : null;
 }
 
+/**
+ * The Linux mount id of the entry at `path`, a link not followed, or null off Linux. For a check
+ * by path where no anchor is held (the data directory's own entries); the anchor walk uses the fd.
+ */
+export function mountIdAt(path: string): number | null {
+  if (!IS_LINUX) return null;
+  const fd = openSync(path, O_PATH | O_NOFOLLOW);
+  try {
+    return mountIdOf(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** What identifies "the same mount": the mount id on Linux, the device id elsewhere. */
 function mountKey(fd: number): string {
   const id = mountIdOf(fd);
