@@ -31,7 +31,7 @@ lynox stores all your data locally. Only the AI inference (the LLM request) leav
 | Web Search (SearXNG / DDG fallback) | ✅ | ✅ | ✅ | ✅ |
 | | | | | |
 | **Privacy** | | | | |
-| Data residency | US | EU (Paris) | Provider-dependent | 🏠 Your server |
+| Data residency | US | EU (hosted in the EU by default) | Provider-dependent | 🏠 Your server |
 | Training on data | ❌ Never | ❌ Never (per Mistral terms) | Provider-dependent | ❌ Never |
 | | | | | |
 | **Cost** | | | | |
@@ -306,7 +306,7 @@ For maximum data control, run lynox on a server close to your LLM provider — a
 
 | Setup | LLM | lynox | Data Residency |
 |-------|-----|-------|---------------|
-| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Everything in EU, no US CLOUD Act exposure |
+| **Hetzner + Mistral** | Mistral API (Paris) | Hetzner VPS (Falkenstein) | Server and AI provider are not US companies; Mistral may transfer data to its own sub-processors outside the EU |
 | **Fully local** | Ollama on your server | Docker on your server | The model call stays on your server |
 
 lynox runs as a single Docker container — any platform that runs containers can host it. See [Docker Deployment](/setup/docker/) for container configuration.

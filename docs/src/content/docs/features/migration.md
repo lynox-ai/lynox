@@ -42,7 +42,7 @@ The migration token is single-use, HMAC-signed, and expires in 30 minutes. A sec
 
 - You started self-hosted but want the operational simplicity of managed hosting (backups, updates, support)
 - You're moving from a personal server to a team-shared instance
-- Your self-hosted instance has data residency requirements that a managed EU instance now satisfies (Mistral Paris, Hetzner Falkenstein)
+- Your self-hosted instance has data residency requirements that a managed EU instance now satisfies (Mistral hosted in the EU by default, Hetzner in Germany)
 
 For the reverse direction (managed → self-hosted), use the export tooling under **Settings → Data → Export full archive**. The same encryption + chunking applies; you decrypt on your own machine before importing.
 

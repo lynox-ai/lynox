@@ -20,7 +20,7 @@ In the Web UI, **double-tap ⌘ (macOS) or Ctrl (Windows/Linux)** to start or st
 
 | Provider              | Speed (60 s clip) | German WER (business speech) | Cost        | Hosting                    | When to use                                                       |
 |-----------------------|-------------------|-------------------------------|-------------|----------------------------|-------------------------------------------------------------------|
-| **Mistral Voxtral**   | ~2 s              | ~10 % on mixed DE/EN          | $0.003/min  | Mistral La Plateforme (Paris) | Default for cloud and BYOK setups. Fast, EU-hosted, no training on your audio. |
+| **Mistral Voxtral**   | ~2 s              | ~10 % on mixed DE/EN          | $0.003/min  | Mistral La Plateforme (hosted in the EU by default) | Default for cloud and BYOK setups. Fast, EU-hosted, no training on your audio. |
 | **whisper.cpp**       | several seconds (CPU) | ~23 % on mixed DE/EN      | free        | Local (your server)        | Air-gapped self-host. OSS fallback when no Mistral key is set.    |
 
 Numbers come from an internal spike on ten self-recorded German-business-speech clips (from an internal design review). whisper.cpp uses the ggml-base model on CPU.
@@ -80,7 +80,7 @@ Both passes run in single-digit milliseconds. The glossary never leaves the lyno
 
 ## Privacy
 
-- Mistral-hosted audio: sent to Paris (EU) — no training, kept 30 rolling days to monitor abuse.
+- Mistral-hosted audio: sent to Mistral (hosted in the EU by default) — no training, kept 30 rolling days to monitor abuse.
 - whisper.cpp: audio never leaves the server; transient `/tmp` files are deleted after each transcription.
 - The Web UI shows a short privacy hint under the voice button indicating which provider is in use.
 - No audio is retained by lynox — only the final text goes into the thread history.
