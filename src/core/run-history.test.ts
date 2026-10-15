@@ -1800,6 +1800,33 @@ describe('RunHistory', () => {
       return id;
     }
 
+    it('counts the window\'s first day and not the day after it, in the form runs are stored in', () => {
+      const h = createHistory();
+      // `datetime('now')` text, as every run row is written — not ISO.
+      const llm = { taskText: 'A', modelTier: 'fast' as const, modelId: 'claude-haiku-4-5' };
+      insertAt(h, '2026-04-01 05:00:00', llm, { costUsd: 0.10, status: 'completed' });
+      insertAt(h, '2026-04-30 23:59:59', llm, { costUsd: 0.20, status: 'completed' });
+      insertAt(h, '2026-05-01 05:00:00', llm, { costUsd: 4.00, status: 'completed' });
+      insertAt(h, '2026-03-31 23:59:59', llm, { costUsd: 8.00, status: 'completed' });
+      const s = h.getUsageSummary({
+        startIso: '2026-04-01T00:00:00.000Z', endIso: '2026-05-01T00:00:00.000Z', source: 'calendar-month', label: 'Apr',
+      });
+      expect(s.used_cents).toBe(30);
+      expect(s.daily[0]).toEqual({ date: '2026-04-01', cost_cents: 10 });
+      expect(s.daily.at(-1)).toEqual({ date: '2026-04-30', cost_cents: 20 });
+      expect(s.by_model).toEqual([expect.objectContaining({ model_id: 'claude-haiku-4-5', cost_cents: 30, run_count: 2 })]);
+      expect(s.by_kind).toEqual([expect.objectContaining({ kind: 'llm', cost_cents: 30, run_count: 2 })]);
+    });
+
+    it('a run list from an ISO date keeps that day\'s runs', () => {
+      const h = createHistory();
+      const llm = { taskText: 'A', modelTier: 'fast' as const, modelId: 'claude-haiku-4-5' };
+      const on = insertAt(h, '2026-04-01 05:00:00', llm, { costUsd: 0.1, status: 'completed' });
+      insertAt(h, '2026-03-31 23:00:00', llm, { costUsd: 0.1, status: 'completed' });
+      expect(h.getRecentRuns(20, 0, { dateFrom: '2026-04-01T00:00:00.000Z' }).map((r) => r.id)).toEqual([on]);
+      expect(h.getRecentRuns(20, 0, { dateFrom: '2026-04-01' }).map((r) => r.id)).toEqual([on]);
+    });
+
     it('aggregates by_model, by_kind and used_cents within the window', () => {
       const h = createHistory();
       // Two LLM runs + one voice_tts run, all inside the window.

@@ -1817,7 +1817,7 @@ export class RunHistory {
     else { conditions.push("run_type != 'pipeline_step'"); }
     if (filters?.status) { conditions.push('status = ?'); params.push(filters.status); }
     if (filters?.model) { conditions.push('model_id = ?'); params.push(filters.model); }
-    if (filters?.dateFrom) { conditions.push('created_at >= ?'); params.push(filters.dateFrom); }
+    if (filters?.dateFrom) { conditions.push('created_at >= datetime(?)'); params.push(filters.dateFrom); }
     if (filters?.dateTo) { conditions.push("created_at < datetime(?, '+1 day')"); params.push(filters.dateTo); }
 
     if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
@@ -2413,6 +2413,10 @@ export class RunHistory {
     label: string;
   }): UsageSummary {
     const { startIso, endIso } = opts;
+    // `created_at` is SQLite `datetime('now')` text (`2026-10-01 05:00:00`); the bounds come as ISO
+    // (`2026-10-01T00:00:00.000Z`). Compared as text, the space sorts before the `T`: a row on the
+    // window's first day fell before it, and one on the day after its end inside it. `datetime(?)`
+    // brings each bound to the stored form before the compare.
 
     const byModelRows = this.db.prepare(`
       SELECT model_id,
@@ -2424,7 +2428,7 @@ export class RunHistory {
       FROM runs
       WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
-        AND created_at >= ? AND created_at < ?
+        AND created_at >= datetime(?) AND created_at < datetime(?)
       GROUP BY model_id
       ORDER BY cost_usd DESC
     `).all(startIso, endIso) as Array<{
@@ -2452,7 +2456,7 @@ export class RunHistory {
       FROM runs
       WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
-        AND created_at >= ? AND created_at < ?
+        AND created_at >= datetime(?) AND created_at < datetime(?)
       GROUP BY COALESCE(kind, 'llm')
       ORDER BY cost_usd DESC
     `).all(startIso, endIso) as Array<{
@@ -2467,7 +2471,7 @@ export class RunHistory {
       FROM runs
       WHERE status != 'running'
         AND run_type != 'pipeline_step' -- A2 overlay, never in usage/billing
-        AND created_at >= ? AND created_at < ?
+        AND created_at >= datetime(?) AND created_at < datetime(?)
       GROUP BY date(created_at)
       ORDER BY day ASC
     `).all(startIso, endIso) as Array<{ day: string; cost_usd: number }>;
