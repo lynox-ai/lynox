@@ -35,6 +35,15 @@ interface BulkStatusInput {
   run_id?: string | undefined;
 }
 
+/** USD to the cent. Spend is rounded DOWN, so a run just under its limit never reads as
+ *  having reached it; spend under a cent is "< $0.01", not "$0.00". */
+function formatUsd(usd: number, round: 'down' | 'nearest' = 'nearest'): string {
+  if (!Number.isFinite(usd) || usd < 0) return '(unknown)';
+  if (usd > 0 && usd < 0.01) return '< $0.01';
+  const cents = round === 'down' ? Math.floor(usd * 100 + 1e-9) : Math.round(usd * 100);
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
 function formatStatus(s: BulkRunStatus): string {
   const invalid = Object.entries(s.invalidReasons).map(([r, n]) => `${r} ${String(n)}`).join(', ');
   const lines = [
@@ -49,6 +58,10 @@ function formatStatus(s: BulkRunStatus): string {
     lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
       'such a field: leave it out, or make that change in the provider\'s own interface.');
+  }
+  // Model spend exists only on a run with a judge; every other run would print "$0" here.
+  if (s.costUsd > 0 || s.costCapUsd !== null) {
+    lines.push(`Model spend: ${formatUsd(s.costUsd, 'down')}${s.costCapUsd !== null ? ` of a ${formatUsd(s.costCapUsd)} limit` : ', no limit set'}.`);
   }
   if (s.writeMethod !== null) {
     lines.push(`Writes with ${s.writeMethod}.${s.probeConfirmed ? '' : ' It can be applied to one target first; more only after the user has checked that one.'}`);

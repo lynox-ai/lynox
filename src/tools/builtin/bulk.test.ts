@@ -139,6 +139,40 @@ describe('bulk_plan over workspace files', () => {
       .toEqual({ created_by: 'thread-1', principal: 'mandate:helper@example.invalid', mandate_id: 'grant-1' });
   });
 
+  it('shows a run\'s model spend and limit (PRD bulk-loop §3.3), and no spend line on a run without either', async () => {
+    writeFileSync(join(ws, 'one.md'), 'old\n');
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'one.md', after: 'new\n' }]));
+    const id = runIdOf(await bulkPlanTool.handler({ target_system: 'workspace', source_file: join(ws, 'plan.json') }, agent()));
+    const status = async (): Promise<string> => bulkStatusTool.handler({ run_id: id }, agent());
+    const set = (usd: number, cap: number | null): void => {
+      engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = ?, cost_cap_usd = ? WHERE id = ?').run(usd, cap, id);
+    };
+
+    // A run that called no model and has no limit: no line, and the ledger says 0 / null.
+    expect(ledger.getStatus(id)).toMatchObject({ costUsd: 0, costCapUsd: null });
+    expect(await status()).not.toContain('Model spend');
+
+    set(0.234, 2);
+    expect(ledger.getStatus(id)).toMatchObject({ costUsd: 0.234, costCapUsd: 2 });
+    expect(await status()).toContain('Model spend: $0.23 of a $2.00 limit.');
+
+    // Spend under a cent is not shown as nothing; no limit is said as such.
+    set(0.004, null);
+    expect(await status()).toContain('Model spend: < $0.01, no limit set.');
+
+    // Rounded down: a run just under its limit does not read as having reached it.
+    set(1.996, 2);
+    expect(await status()).toContain('Model spend: $1.99 of a $2.00 limit.');
+
+    // A value no booking can produce is not printed as an amount.
+    set(-0.004, 1);
+    expect(await status()).toContain('Model spend: (unknown) of a $1.00 limit.');
+
+    // A limit with nothing spent yet still shows.
+    set(0, 1.5);
+    expect(await status()).toContain('Model spend: $0.00 of a $1.50 limit.');
+  });
+
   it('returns no target key, value or diff to the model — from bulk_plan or bulk_status', async () => {
     const { source } = seed();
     const planned = await bulkPlanTool.handler({ target_system: 'workspace', source_file: source }, agent());
