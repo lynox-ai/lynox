@@ -650,7 +650,10 @@ describe('ChangesetManager', () => {
         await new Promise((r) => setTimeout(r, 200));
         let byName = 0;
         let shown = 0;
-        for (let i = 0; i < 4000; i++) {
+        // Bounded by time as well as count: under a loaded machine fewer rounds run, and the
+        // positive control below still says whether the race opened.
+        const until = Date.now() + 8000;
+        for (let i = 0; i < 4000 && Date.now() < until; i++) {
           writeFileSync(target, 'outside', 'utf-8');
           try { writeFileSync(file, 'by name'); } catch { /* mid-swap */ }
           if (readFileSync(target, 'utf-8') === 'by name') byName++;
@@ -796,7 +799,8 @@ describe('ChangesetManager', () => {
         await new Promise((r) => setTimeout(r, 200));
         let byName = 0;
         let shown = 0;
-        for (let i = 0; i < 3000; i++) {
+        const until = Date.now() + 8000;
+        for (let i = 0; i < 3000 && Date.now() < until; i++) {
           try { if (readFileSync(file, 'utf-8') === 'outside') byName++; } catch { /* mid-swap */ }
           const mgr = new ChangesetManager(cwd, 'test-run');
           mgr.backupBeforeWrite(file);

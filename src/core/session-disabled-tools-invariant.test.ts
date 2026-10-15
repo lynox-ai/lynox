@@ -218,8 +218,11 @@ vi.mock('../integrations/mail/context.js', () => ({
   }),
 }));
 
-vi.mock('./changeset.js', () => ({
-  ChangesetManager: vi.fn().mockImplementation(function () {
+// The session builds its changeset through `workspaceChangeset`; the stand-in calls the mocked
+// class with the workspace, as the real factory does.
+vi.mock('./changeset.js', async () => {
+  const { getWorkspaceCwd } = await import('./workspace.js');
+  const ChangesetManager = vi.fn().mockImplementation(function () {
     // @ts-expect-error mock constructor
     this.active = true;
     // @ts-expect-error mock constructor
@@ -234,8 +237,9 @@ vi.mock('./changeset.js', () => ({
     this.acceptAll = vi.fn();
     // @ts-expect-error mock constructor
     this.cleanup = vi.fn();
-  }),
-}));
+  });
+  return { ChangesetManager, workspaceChangeset: (runId: string) => new ChangesetManager(getWorkspaceCwd(), runId) };
+});
 
 vi.mock('./task-manager.js', () => ({
   TaskManager: vi.fn().mockImplementation(function () {
