@@ -172,6 +172,23 @@ function boundOf<T extends object>(table: Readonly<Record<string, FieldBearing>>
   return out;
 }
 
+/**
+ * The `bound` fields of `profile` that are set, by their path, as the owner is shown them when
+ * asked for a release. Read from the tables above, as {@link releaseBinding} is, so a field
+ * placed there later is shown without a second edit: the question names every field whose
+ * change ends the release.
+ */
+export function releaseBoundFields(profile: ApiProfile): Array<[string, unknown]> {
+  const out: Array<[string, unknown]> = [];
+  const add = (prefix: string, fields: Record<string, unknown>): void => {
+    for (const [key, value] of Object.entries(fields)) if (value !== null) out.push([`${prefix}${key}`, value]);
+  };
+  add('', boundOf(PROFILE_FIELDS, profile));
+  add('auth.', boundOf(AUTH_FIELDS, profile.auth));
+  add('auth.oauth.', boundOf(OAUTH_FIELDS, profile.auth?.oauth));
+  return out;
+}
+
 /** `value` as JSON with every object's keys sorted, so the same configuration always spells the same. */
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) =>
@@ -237,7 +254,7 @@ export function releaseBinding(profile: ApiProfile, name: string): string | null
 }
 
 /** Why `name` cannot be released to `profile`, or null when it can. */
-export type ReleaseObstacle = 'environment' | 'protected' | 'token' | 'not-sent' | 'preset' | 'other-mandate';
+export type ReleaseObstacle = 'environment' | 'protected' | 'token' | 'not-sent' | 'not-https' | 'preset' | 'other-mandate';
 
 function isPresetProfile(p: ApiProfile): boolean {
   return p.auth?.oauth?.preset_id !== undefined;
@@ -253,6 +270,9 @@ function isPresetProfile(p: ApiProfile): boolean {
  * - `token` — a token slot: a connection's tokens are read only by the profile that holds the
  *   grant, through its own consent.
  * - `not-sent` — the engine does not send it for `via` ({@link sendRole}).
+ * - `not-https` — one of {@link credentialEndpoints} is not https: the base, where the value or
+ *   the access token an OAuth client pair mints is sent, or the token endpoint the pair is
+ *   posted to.
  * - `preset` — a preset profile other than `via` reads it: a preset connection's credentials go
  *   to its provider through that profile, the owner's own preset profiles included.
  * - `other-mandate` — a profile another mandate wrote reads it.
@@ -267,6 +287,7 @@ export function releaseObstacle(
   if (isProtectedSecretWrite(name)) return 'protected';
   if (hasTokenSlotShape(name)) return 'token';
   if (sendRole(via, name) === null) return 'not-sent';
+  if (credentialEndpoints(via).some((e) => new URL(e).protocol !== 'https:')) return 'not-https';
   for (const p of apiStore.getAll()) {
     if (grantTokenNames(p).has(name)) return 'token';
     if (p.id === via.id || !collectVaultKeys(p).includes(name)) continue;
@@ -482,10 +503,15 @@ export function withheldFrom(
  * What a read says when the view withheld a name, in place of "the vault has no value": asking
  * for the value again would not change it, and a mandate cannot store one anyway.
  */
-export function withheldText(names: readonly string[]): string {
+export function withheldText(names: readonly string[], offBase = false): string {
   const shown = names.map((n) => `"${shapedForLog(n, VAULT_NAME_SHAPE, 64)}"`).join(' and ');
   const one = names.length === 1;
-  return `${shown} ${one ? 'is' : 'are'} not available to this profile. A profile set up in a mandate's session reads a vault name of the owner's only once the owner releases it to that profile, and the owner is asked when the profile is saved. Asking for the value with ask_secret does not change this.`;
+  // A request to another port or scheme of the base's host reaches the profile, but a release
+  // covers only the base: say so, or a release that exists reads as one that does not.
+  const where = offBase
+    ? ' This request does not go to the profile\'s base_url (its scheme, host and port), and a release, where one is given, covers only requests to the base.'
+    : '';
+  return `${shown} ${one ? 'is' : 'are'} not available to this profile${offBase ? ' for this request' : ''}. A profile set up in a mandate's session reads a vault name of the owner's only once the owner releases it to that profile, and the owner is asked when the profile is saved.${where} Asking for the value with ask_secret does not change this.`;
 }
 
 /**

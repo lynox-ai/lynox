@@ -3661,6 +3661,8 @@ describe('mandates and stored credentials', () => {
     req: { url: string; method?: string; body?: string },
     principal: RequestPrincipal,
     releases: 'all' | 'none' = 'all',
+    /** What the API answers (the token endpoint always answers 200). */
+    status = 200,
   ): Promise<{ calls: Array<{ url: string; auth: string | undefined }>; out: string }> {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);
@@ -3674,7 +3676,7 @@ describe('mandates and stored credentials', () => {
       if (url.includes('/token')) {
         return new Response(JSON.stringify({ access_token: 'FRESH', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
-      return new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response('{"ok":true}', { status, headers: { 'content-type': 'application/json' } });
     });
     const agent = makeAgent(apiStore, v as never, async () => 'Allow', undefined, principal, releases) as unknown as { toolContext: Record<string, unknown> };
     // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
@@ -3758,6 +3760,30 @@ describe('mandates and stored credentials', () => {
     const { calls } = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example:8443/v1/contacts' }, mandate);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.auth).toBeUndefined();
+  });
+
+  // The release exists for the base; the text must not read as if there were none.
+  it('says a release covers only the base when the request goes to another port, and not otherwise', async () => {
+    const basic: ApiProfile = { ...crmProfile({ auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['SETUP_USER', 'SETUP_PASS'] } }), created_by: M };
+    const OFF_BASE = 'does not go to the profile\'s base_url';
+    const elsewhere = await send([basic], vault({ SETUP_USER: 'u', SETUP_PASS: 'p' }), { url: 'https://api.crm.example:8443/v1/contacts' }, mandate);
+    expect(elsewhere.calls).toEqual([]);
+    expect(elsewhere.out).toContain(OFF_BASE);
+    expect(elsewhere.out).toContain('not available to this profile for this request');
+    const onBase = await send([basic], vault({ SETUP_USER: 'u', SETUP_PASS: 'p' }), { url: 'https://api.crm.example/v1/contacts' }, mandate, 'none');
+    expect(onBase.out).toContain('not available to this profile');
+    expect(onBase.out).not.toContain('for this request');
+    expect(onBase.out).not.toContain(OFF_BASE);
+  });
+
+  it('says the same for a bearer profile, in the hint shown with a 401', async () => {
+    const OFF_BASE = 'does not go to the profile\'s base_url';
+    const elsewhere = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example:8443/v1/contacts' }, mandate, 'all', 401);
+    expect(elsewhere.calls[0]?.auth).toBeUndefined();
+    expect(elsewhere.out).toContain(OFF_BASE);
+    const onBase = await send([bearer('SETUP_TOKEN', M)], vault({ SETUP_TOKEN: 'stored' }), { url: 'https://api.crm.example/v1/contacts' }, mandate, 'none', 401);
+    expect(onBase.out).toContain('not available to this profile');
+    expect(onBase.out).not.toContain(OFF_BASE);
   });
 
   it('a split Basic profile a mandate wrote sends nothing it was not released, and says withheld, not missing', async () => {

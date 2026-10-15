@@ -1820,7 +1820,7 @@ async function attachEngineManagedAuth(
     // rather than as a missing secret.
     if (!user || !pass) {
       const withheld = withheldFrom(vault, profile, apiStore, [userKey, passKey], readCtx);
-      if (withheld.length > 0) return { refusal: `Error: api_profile "${profile.id}": ${withheldText(withheld)}` };
+      if (withheld.length > 0) return { refusal: `Error: api_profile "${profile.id}": ${withheldText(withheld, !requestMatchesBase(profile, url))}` };
       const missing = [user ? null : userKey, pass ? null : passKey]
         .filter((k): k is string => typeof k === 'string')
         .map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80))
@@ -1868,7 +1868,7 @@ async function attachEngineManagedAuth(
     // which reads on the wire as a bad token rather than as a missing one.
     if (!token) {
       if (withheldFrom(vault, profile, apiStore, [tokenKey], readCtx).length > 0) {
-        return { hint: () => `api_profile "${profile.id}": ${withheldText([tokenKey])}` };
+        return { hint: () => `api_profile "${profile.id}": ${withheldText([tokenKey], !requestMatchesBase(profile, url))}` };
       }
       // `tokenKey` is `auth.vault_keys[0]` or a named slot — profile-controlled,
       // and this hint is appended outside the untrusted-data wrap. The comment
