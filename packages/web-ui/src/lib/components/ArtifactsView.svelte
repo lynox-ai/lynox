@@ -239,6 +239,9 @@
 										<span class="text-[10px] font-mono text-text-subtle" title={t('artifacts.version_hint')}>v{artifact.version}</span>
 									{/if}
 									<span class="text-[10px] text-text-subtle">{formatDate(artifact.updatedAt)}</span>
+									{#if artifact.lostOnSave}
+										<span class="text-[10px] text-warning" data-testid="artifact-lost-badge">{t('artifacts.lost_badge')}</span>
+									{/if}
 								</div>
 							</div>
 						</div>
@@ -287,18 +290,29 @@
 			<!-- eslint-disable-next-line svelte/no-useless-mustaches -- the mustache keeps the leading space, which Svelte trims at the start of an {#if} block -->
 			<span class="hidden sm:inline text-[10px] text-text-subtle whitespace-nowrap">{t('artifacts.updated')} {formatDateTime(selected.updatedAt)}{#if selected.version && selected.version > 1}{' · '}v{selected.version}{/if}</span>
 			<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{selected.type}</span>
-			{#if selected.type === 'html' || selected.type === 'markdown'}
+			{#if !selected.lostOnSave && (selected.type === 'html' || selected.type === 'markdown')}
 				<!-- Print = selectable PDF on desktop; hidden on mobile where iOS
 				     blocks auto-print (a real mobile PDF download is a server-side
 				     follow-up). Mobile keeps "Teilen" (share sheet → Save to Files). -->
 				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 hidden sm:inline-block" onclick={() => handlePrint(selected!)}>{t('artifacts.print')}</button>
 			{/if}
-			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.share')}</button>
+			{#if !selected.lostOnSave}
+				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.share')}</button>
+			{/if}
 		</div>
 
 		<!-- Artifact content -->
 		<div class="flex-1 overflow-hidden">
-			{#if selected.type === 'html' || selected.type === 'svg'}
+			{#if selected.lostOnSave}
+				<!-- The file holds the engine's placeholder, an English note addressed to the
+				     model, not a document: show what happened instead of rendering it. -->
+				<div class="p-6 overflow-auto h-full bg-bg">
+					<div class="max-w-xl mx-auto rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 p-4 space-y-2" role="status" data-testid="artifact-lost-notice">
+						<p class="text-sm font-medium text-text">{t('artifacts.lost_title')}</p>
+						<p class="text-sm text-text-muted">{t('artifacts.lost_body')}</p>
+					</div>
+				</div>
+			{:else if selected.type === 'html' || selected.type === 'svg'}
 				<iframe
 					srcdoc={injectArtifactPreview(selected.content)}
 					sandbox="allow-scripts"

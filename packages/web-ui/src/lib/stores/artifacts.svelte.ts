@@ -13,6 +13,9 @@ export interface ArtifactMeta {
 	/** Optional for back-compat with older API responses that predate the
 	 *  field; bumped on every save and on every external file-tool edit. */
 	version?: number;
+	/** Set by the engine when the stored file holds its placeholder for a
+	 *  saved body instead of a document — the document was lost on save. */
+	lostOnSave?: boolean;
 }
 
 export interface Artifact extends ArtifactMeta {

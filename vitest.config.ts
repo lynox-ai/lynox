@@ -1,4 +1,5 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath } from 'node:url';
 import { configDefaults, defineConfig } from 'vitest/config';
 import { ONLINE_TESTS_GLOB, onlineTestsSkipReason } from './scripts/vitest-online-opt-in.js';
 import { rejectSvelteModules } from './scripts/vitest-node-project-guard.js';
@@ -53,6 +54,14 @@ export default defineConfig({
         // on the two being one array passes there and fails here.
         // `svelte-compile-mode.svelte.test.ts` checks this project really compiles for the client.
         plugins: [svelte()],
+        // A component that imports SvelteKit's `$app/*` can be mounted here only if those resolve;
+        // outside a SvelteKit build nothing provides them, so they point at inert stubs.
+        resolve: {
+          alias: {
+            '$app/navigation': fileURLToPath(new URL('./scripts/vitest-app-stubs/navigation.ts', import.meta.url)),
+            '$app/stores': fileURLToPath(new URL('./scripts/vitest-app-stubs/stores.ts', import.meta.url)),
+          },
+        },
         test: {
           ...SHARED,
           name: 'browser-compile',

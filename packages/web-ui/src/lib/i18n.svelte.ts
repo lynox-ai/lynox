@@ -32,6 +32,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.back_to_chat': { de: 'Zurück zum Chat', en: 'Back to chat' },
 	'artifacts.saved': { de: 'Artifact gespeichert', en: 'Artifact saved' },
 	'artifacts.saved_chip': { de: 'In Artefakten gespeichert', en: 'Saved to artifacts' },
+	'artifacts.lost_badge': { de: 'Inhalt fehlt', en: 'Content missing' },
+	'artifacts.lost_title': { de: 'Der Inhalt dieses Dokuments ging beim Speichern verloren', en: 'This document’s content was lost when it was saved' },
+	'artifacts.lost_body': { de: 'Gespeichert wurde nur ein Platzhalter, kein Text. Bitte den Agenten, eine frühere Version wiederherzustellen, falls es eine gibt, oder das Dokument neu zu schreiben. Oder lösche diesen Eintrag.', en: 'Only a placeholder was stored, no text. Ask the agent to restore an earlier version, if there is one, or to write the document again. Or delete this entry.' },
 
 	// Threads
 	'threads.recent': { de: 'Letzte Chats', en: 'Recent Chats' },

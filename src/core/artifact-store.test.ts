@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArtifactStore } from './artifact-store.js';
@@ -178,5 +178,68 @@ describe('ArtifactStore', () => {
     expect(a.id).not.toBe('../../etc/passwd');
     expect(a.id).toMatch(/^[a-f0-9]{8}$/);
     expect(store.get(a.id)?.content).toBe('x');
+  });
+});
+
+describe('ArtifactStore — lostOnSave marks a file that holds the save placeholder', () => {
+  // The engine's placeholder as a damaged file holds it (measured on a real instance: 176 bytes).
+  const PH = '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]';
+  let dir: string;
+  let store: ArtifactStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-artifacts-lost-'));
+    store = new ArtifactStore(dir);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const listed = (id: string) => store.list().find(a => a.id === id);
+
+  it('marks the damaged artifact in list() and get(), and not the fine one', () => {
+    const lost = store.save({ title: 'Pitch', content: PH, type: 'markdown' });
+    const under = store.save({ title: 'Under a heading', content: `# Pitch\n\n${PH}\n`, type: 'markdown' });
+    const fine = store.save({ title: 'Fine', content: '# A real document', type: 'markdown' });
+    expect(listed(lost.id)?.lostOnSave).toBe(true);
+    expect(listed(under.id)?.lostOnSave).toBe(true);
+    expect(listed(fine.id)?.lostOnSave).toBeUndefined();
+    expect(store.get(lost.id)?.lostOnSave).toBe(true);
+    expect(store.get(fine.id)?.lostOnSave).toBeUndefined();
+  });
+
+  it('never writes the mark into index.json', () => {
+    const lost = store.save({ title: 'Pitch', content: PH });
+    store.list();
+    store.get(lost.id);
+    store.save({ title: 'Other', content: 'x' });
+    expect(readFileSync(join(dir, 'index.json'), 'utf-8')).not.toContain('lostOnSave');
+  });
+
+  it('reads a file again when its size changes at the same mtime', () => {
+    const a = store.save({ title: 'Doc', content: '# A real document' });
+    const p = store.pathFor(a.id);
+    expect(listed(a.id)?.lostOnSave).toBeUndefined();
+    const { mtime } = statSync(p);
+    writeFileSync(p, PH);
+    utimesSync(p, mtime, mtime);
+    expect(listed(a.id)?.lostOnSave).toBe(true);
+  });
+
+  it('reads a file again when its mtime changes at the same size', () => {
+    const fine = 'y'.repeat(Buffer.byteLength(PH));
+    const a = store.save({ title: 'Doc', content: fine });
+    const p = store.pathFor(a.id);
+    expect(listed(a.id)?.lostOnSave).toBeUndefined();
+    writeFileSync(p, PH);
+    const later = new Date(Date.now() + 5000);
+    utimesSync(p, later, later);
+    expect(listed(a.id)?.lostOnSave).toBe(true);
+    // And back: a repaired file loses the mark.
+    writeFileSync(p, fine);
+    const later2 = new Date(Date.now() + 10000);
+    utimesSync(p, later2, later2);
+    expect(listed(a.id)?.lostOnSave).toBeUndefined();
   });
 });
