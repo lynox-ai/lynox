@@ -40,7 +40,9 @@ gates the diff OWES, derived from the real file list, so leaving out a required
 - `gates` — which ran, from: `code-review`, `delta`, `security`, `prd`, `staging-walk`, `legal`.
   `legal` is required for `SUBPROCESSORS.md`, the one binding text `LEGAL_PATHS` covers, and
   then the record also needs `approved: <who> <YYYY-MM-DD>`, naming who signed off on the
-  WORDING. A binding customer text does not ship on an assistant's judgement, and a name
+  WORDING. While the sign-off does not exist, `approved: PENDING — <why>` is the true line,
+  and it blocks the merge. A record that lists `legal` needs the line even where the diff
+  does not owe the gate. A binding customer text does not ship on an assistant's judgement, and a name
   without a date cannot be told apart from a sign-off carried over from an earlier revision.
   `code-review` and `delta` are required for any code change. `security` is
   required when the diff touches one of the paths the check lists — every module

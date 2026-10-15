@@ -964,13 +964,29 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     }
   }
 
-  if (required.has('legal')) {
+  // A record that NAMES `legal` is read too, not only a diff that owes it: a sign-off the record
+  // claims has to be one.
+  if (claimed.has('legal') || required.has('legal')) {
     const approved = (f.approved ?? '').trim();
     if (!approved) {
       errors.push(
-        'this diff changes a binding customer text, so the record needs an `approved:` line',
+        required.has('legal')
+          ? 'this diff changes a binding customer text, so the record needs an `approved:` line'
+          : 'the record NAMES the `legal` gate, so it needs an `approved:` line — or take `legal` out of `gates:`',
         'naming who signed off on the WORDING and when (e.g. `approved: rafael 2026-08-01`).',
+        '`approved: PENDING — <why>` is a valid answer and blocks the merge rather than failing',
+        'the format: if the sign-off does not exist yet, saying so is the true line.',
         'Run `/legal-review` first — its findings are what the sign-off is given on.',
+      );
+    } else if (/^pending/i.test(approved)) {
+      // An explicit "not yet" is the true answer while the wording is unseen, so it blocks the
+      // merge. Before this branch it passed: the line only had to carry an ISO date, and
+      // `approved: PENDING — … agreed 2026-10-15` carries one. Rule and trigger are ported from the
+      // private repo's gate record. `/^pending/i` has no `\b` on purpose: with one,
+      // `pendingapproval rafael 2026-10-02` finds no boundary and its date reads as a sign-off.
+      errors.push(
+        `\`approved: ${approved}\` says the sign-off is PENDING — which is the honest answer, so this`,
+        'is NOT a format complaint. The merge waits for the sign-off, not for a better line.',
       );
     } else if (!/\d{4}-\d{2}-\d{2}/.test(approved)) {
       errors.push(`\`approved: ${approved}\` has no ISO date — a sign-off without one cannot be tied to this revision`);

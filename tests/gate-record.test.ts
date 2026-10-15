@@ -304,6 +304,9 @@ describe('gate-record — which gates a diff requires', () => {
     expect(missing.ok).toBe(false);
     // Matched on text unique to the MISSING branch — both errors mention `approved:`.
     expect(missing.errors.join(' ')).toContain('needs an `approved:` line');
+    // The diff OWES the gate here, so the message says so, not that the record only names it.
+    expect(missing.errors.join(' ')).toContain('this diff changes a binding customer text');
+    expect(missing.errors.join(' ')).not.toContain('NAMES');
 
     const undated = evaluate({
       body: record({ gates: 'legal', approved: 'rafael', delta: '', mutations: '' }),
@@ -311,6 +314,68 @@ describe('gate-record — which gates a diff requires', () => {
     });
     expect(undated.ok).toBe(false);
     expect(undated.errors.join(' ')).toContain('ISO date');
+  });
+
+  it('refuses a PENDING sign-off for the legal text, even when it carries a date', () => {
+    for (const approved of [
+      'PENDING — wording not seen yet, agreed 2026-10-15',
+      'pending rafael 2026-10-15',
+      'pendingapproval rafael 2026-10-02',
+    ]) {
+      const pending = evaluate({
+        body: record({ gates: 'legal', approved, delta: '', mutations: '' }),
+        head: HEAD, files: ['SUBPROCESSORS.md'],
+      });
+      expect(pending.ok, approved).toBe(false);
+      // The PENDING branch, not the date check: each value carries an ISO date.
+      expect(pending.errors.join(' '), approved).toContain('says the sign-off is PENDING');
+    }
+
+    // Undated, it is still the PENDING answer, not a format complaint.
+    const undated = evaluate({
+      body: record({ gates: 'legal', approved: 'PENDING — not seen yet', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(undated.errors.join(' ')).toContain('says the sign-off is PENDING');
+    expect(undated.errors.join(' ')).not.toContain('ISO date');
+
+    // The word anywhere but at the start is not the answer.
+    const named = evaluate({
+      body: record({ gates: 'legal', approved: 'rafael 2026-10-15, no longer pending', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(named.ok, JSON.stringify(named.errors)).toBe(true);
+  });
+
+  it('tells an author without an `approved:` line that PENDING is a valid answer', () => {
+    const missing = evaluate({
+      body: record({ gates: 'legal', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(missing.errors.join(' ')).toContain('`approved: PENDING — <why>` is a valid answer');
+  });
+
+  it('reads the sign-off of a record that names `legal` on a diff that does not owe it', () => {
+    const files = ['src/core/prompts.ts'];
+    // Positive control: the same record without `legal` passes on this diff.
+    expect(evaluate({ body: record(), head: HEAD, files }).ok).toBe(true);
+
+    const unsigned = evaluate({ body: record({ gates: 'code-review, delta, legal' }), head: HEAD, files });
+    expect(unsigned.ok).toBe(false);
+    expect(unsigned.errors.join(' ')).toContain('the record NAMES the `legal` gate');
+
+    const pending = evaluate({
+      body: record({ gates: 'code-review, delta, legal', approved: 'PENDING — not seen yet 2026-10-15' }),
+      head: HEAD, files,
+    });
+    expect(pending.ok).toBe(false);
+    expect(pending.errors.join(' ')).toContain('says the sign-off is PENDING');
+
+    const signed = evaluate({
+      body: record({ gates: 'code-review, delta, legal', approved: 'rafael 2026-10-15' }),
+      head: HEAD, files,
+    });
+    expect(signed.ok, JSON.stringify(signed.errors)).toBe(true);
   });
 
   it('characterises what the path map CANNOT see', () => {
