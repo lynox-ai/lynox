@@ -1,12 +1,14 @@
-import { openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
+import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
 import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
+import { toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
+import { openRead, openWrite, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -115,6 +117,132 @@ function refuseEvictionPlaceholder(written: string, realPath: string): void {
   );
 }
 
+/** A file the tool reaches: through the context workspace's open directory, or by a checked path. */
+type Target =
+  | { readonly kind: 'anchored'; readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }
+  | { readonly kind: 'path'; readonly path: string };
+
+/**
+ * The process umask, as a write by name applies it: a new file is `0o666 & ~umask`, a new
+ * directory `0o777 & ~umask`. Read from /proc, because `process.umask()` without an argument sets
+ * it to 0 for a moment. If it cannot be read — a kernel before 4.7, or a system without /proc,
+ * such as macOS — the closed answer: owner only, where a write by name would follow the umask.
+ */
+function processUmask(): number {
+  try {
+    const m = /^Umask:\s*([0-7]{1,4})$/m.exec(readFileSync('/proc/self/status', 'utf8'));
+    if (m?.[1] !== undefined) return parseInt(m[1], 8);
+  } catch { /* fall through */ }
+  return 0o077;
+}
+
+/**
+ * With isolation: a path in the context workspace is reached through its open directory, every
+ * component opened with O_NOFOLLOW, so a symlink on the way is refused instead of followed. Any
+ * other path keeps `validatePath` (`/tmp`, the artifacts directory, `/app` for reads) — but one that
+ * lands in the workspace through a link is refused: it would reach workspace files by name.
+ */
+function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
+  let base: ReturnType<typeof workspaceBase>;
+  try {
+    base = workspaceBase();
+  } catch (err) {
+    // Reaching the workspace directory itself failed (e.g. while the erasure makes it again, or the
+    // directory is a link): said so, by the workspace's path, and without the advice for a link at
+    // a file. A WorkspaceRootError (no code) is written for the model already and passes as it is.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (typeof code !== 'string') throw err;
+    const why = err instanceof WorkspaceAccessError ? err.message : errnoText(code, err);
+    throw new Error(
+      `The workspace directory ${getWorkspaceDir() ?? raw} cannot be reached (${why}). ` +
+      'The file tools cannot work until it can.',
+      { cause: err },
+    );
+  }
+  if (base === null) return { kind: 'path', path: validatePath(raw, operation) };
+  const mapped = toWorkspaceRel(raw, base.ws);
+  if (mapped.kind === 'inside') {
+    if (mapped.rel === '') throw new Error(`${raw} is the workspace directory itself, not a file.`);
+    if (raw.endsWith('/')) throw new Error(`${raw} names a directory, not a file.`);
+    return { kind: 'anchored', anchor: base.anchor, rel: mapped.rel, shown: mapped.shown };
+  }
+  const real = validatePath(mapped.abs, operation);
+  const wsReal = existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
+  if (isPathWithin(real, base.ws) || isPathWithin(real, wsReal)) {
+    throw new Error(`${raw} reaches the workspace through a link. Name the file by its path in the workspace (${base.ws}).`);
+  }
+  return { kind: 'path', path: real };
+}
+
+/** The description libuv puts after the code: words only, so no path can come along with it. */
+const ERRNO_DESCRIPTION = /^[A-Za-z][A-Za-z ]*$/;
+
+/**
+ * `CODE: description` from an errno whose message reads `CODE: description, syscall 'path'`, or
+ * the bare code for any other message: the path in it is the process-handle path, never shown.
+ */
+function errnoText(code: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : '';
+  const description = message.startsWith(`${code}: `) ? message.slice(code.length + 2).split(', ')[0] : '';
+  return description !== undefined && ERRNO_DESCRIPTION.test(description) ? `${code}: ${description}` : code;
+}
+
+/**
+ * An errno from an fd operation names the file by its workspace path, not by the process-handle
+ * path the walk opened it through: the model would copy that path, and it is refused.
+ */
+function anchoredError(shown: string, err: unknown): Error {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') {
+    return new Error(
+      `${err.message}. Links in the workspace are not followed; name the file it points to by its own path in the workspace.`,
+      { cause: err },
+    );
+  }
+  // Any other refusal of the walk itself already names the file by its workspace path.
+  if (!(err instanceof WorkspaceAccessError) && typeof code === 'string') {
+    return new Error(`${errnoText(code, err)}: ${shown}`, { cause: err });
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Write a workspace file IN PLACE through the workspace's open directory, as a write by name did:
+ * the same inode, so the file keeps its owner and permissions, and a file the engine may not write
+ * stays unwritten (EACCES). Like that write it truncates first, so a write that fails part-way
+ * (disk full) leaves the file partly written, and a new file that fails stays as far as it got;
+ * the kernel clears setuid/setgid on the write. A symlink
+ * at the file is refused, not written through. A file with more than one link is refused: the
+ * other name may be outside the workspace. The check sees the links as they are after the open;
+ * that nobody links in a file they could not read and write themselves is the kernel's rule
+ * (`fs.protected_hardlinks`). With `create`, a missing file (and missing directories) are made
+ * with the modes a write by name gives them: 0666 and 0777 less the umask.
+ */
+function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: string, create: boolean): void {
+  let fd: number;
+  try {
+    const umask = create ? processUmask() : 0;
+    ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask } : {}));
+  } catch (err) {
+    throw anchoredError(target.shown, err);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (st.nlink > 1) {
+      throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not write such a file.`);
+    }
+    // Only a file with content is cut, as O_TRUNC does: on ext4 a cut to zero makes the next close
+    // flush the file synchronously, which a fresh file does not need.
+    if (st.size > 0) ftruncateSync(fd, 0);
+    // On the fd just opened (offset 0): the same write a write by name does.
+    writeFileSync(fd, text, 'utf-8');
+  } catch (err) {
+    throw anchoredError(target.shown, err);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Resolve + boundary-validate a writable path with the same rules as
  *  write_file: validatePath when workspace isolation is active, else
  *  workspace-relative + escape-symlink rejection. Exported for the diff preview
@@ -172,8 +300,25 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
   handler: async (input: ReadFileInput): Promise<string> => {
     try {
       let filePath: string;
+      let fd: number;
       if (isWorkspaceActive()) {
-        filePath = validatePath(input.path, 'read');
+        const target = isolatedTarget(input.path, 'read');
+        if (target.kind === 'anchored') {
+          filePath = target.shown;
+          try {
+            fd = openRead(target.anchor, target.rel);
+          } catch (err) {
+            throw anchoredError(target.shown, err);
+          }
+          // A second name may be a file of the engine's outside the workspace, as for a write.
+          if (fstatSync(fd).nlink > 1) {
+            closeSync(fd);
+            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not read such a file.`);
+          }
+        } else {
+          filePath = target.path;
+          fd = openSync(filePath, 'r');
+        }
       } else {
         const resolved = resolve(input.path);
         // Reject symlinks that escape their parent directory (path traversal via symlink)
@@ -185,6 +330,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
           }
         }
         filePath = resolved;
+        fd = openSync(filePath, 'r');
       }
       // Wrap file content in untrusted-data envelope. The content originates
       // outside the agent's trust boundary (user-provided file, attacker-
@@ -196,7 +342,6 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
       // Open-once + fstat: same fd for stat and read closes the TOCTOU
       // window where an attacker could swap the file between two separate
       // path-based calls.
-      const fd = openSync(filePath, 'r');
       let content: string;
       try {
         const stats = fstatSync(fd);
@@ -264,30 +409,34 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       // basename; relative → workspace-relative but confined — a `..` must NOT
       // escape, see confineToWorkspace).
       // With active workspace: resolve normally (validatePath enforces boundaries)
-      let resolved: string;
       if (isWorkspaceActive()) {
-        resolved = resolve(input.path);
-      } else {
-        resolved = confineToWorkspace(input.path);
-      }
-      let realPath: string;
-      if (isWorkspaceActive()) {
-        realPath = validatePath(resolved, 'write');
-      } else {
-        // Reject symlinks that escape their parent directory (path traversal via symlink)
-        if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
-          const realTarget = realpathSync(resolved);
-          const parentDir = realpathSync(dirname(resolved));
-          if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
-            throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
-          }
+        const target = isolatedTarget(input.path, 'write');
+        if (target.kind === 'anchored') {
+          refuseEvictionPlaceholder(input.content, target.shown);
+          writeInPlace(target, input.content, true);
+          agent.sessionCounters.writeBytes += contentBytes;
+          return `Written to ${target.shown}`;
         }
-        realPath = existsSync(resolved)
-          ? realpathSync(resolved)
-          : existsSync(dirname(resolved))
-            ? join(realpathSync(dirname(resolved)), basename(resolved))
-            : resolved;
+        refuseEvictionPlaceholder(input.content, target.path);
+        mkdirSync(dirname(target.path), { recursive: true });
+        writeFileSync(target.path, input.content, 'utf-8');
+        agent.sessionCounters.writeBytes += contentBytes;
+        return `Written to ${target.path}`;
       }
+      const resolved = confineToWorkspace(input.path);
+      // Reject symlinks that escape their parent directory (path traversal via symlink)
+      if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
+        const realTarget = realpathSync(resolved);
+        const parentDir = realpathSync(dirname(resolved));
+        if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
+          throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
+        }
+      }
+      const realPath = existsSync(resolved)
+        ? realpathSync(resolved)
+        : existsSync(dirname(resolved))
+          ? join(realpathSync(dirname(resolved)), basename(resolved))
+          : resolved;
       refuseEvictionPlaceholder(input.content, realPath);
       mkdirSync(dirname(realPath), { recursive: true });
       writeFileSync(realPath, input.content, 'utf-8');
@@ -321,14 +470,44 @@ export const editFileTool: ToolEntry<EditFileInput> = {
   },
   handler: async (input: EditFileInput, agent: IAgent): Promise<string> => {
     try {
-      const realPath = resolveWritablePath(input.path);
-      if (!existsSync(realPath)) {
-        throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
-      }
       if (input.old_string === input.new_string) {
         throw new Error('old_string and new_string are identical — nothing to change.');
       }
-      const original = readFileSync(realPath, 'utf-8');
+      let target: Target;
+      if (isWorkspaceActive()) {
+        target = isolatedTarget(input.path, 'write');
+      } else {
+        target = { kind: 'path', path: resolveWritablePath(input.path) };
+      }
+      const realPath = target.kind === 'anchored' ? target.shown : target.path;
+      // In the workspace the read and the write both go through its open directory.
+      let original: string;
+      if (target.kind === 'anchored') {
+        let fd: number;
+        try {
+          fd = openRead(target.anchor, target.rel);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+          }
+          throw anchoredError(target.shown, err);
+        }
+        try {
+          // Before anything is compared: whether old_string matches would tell the content of a
+          // file read_file refuses.
+          if (fstatSync(fd).nlink > 1) {
+            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
+          }
+          original = readFileSync(fd, 'utf-8');
+        } finally {
+          closeSync(fd);
+        }
+      } else {
+        if (!existsSync(realPath)) {
+          throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+        }
+        original = readFileSync(realPath, 'utf-8');
+      }
       const segments = original.split(input.old_string);
       const matches = segments.length - 1;
       if (matches === 0) {
@@ -354,7 +533,11 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       if (agent.sessionCounters.writeBytes + delta > MAX_WRITE_BYTES_PER_SESSION) {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
-      writeFileSync(realPath, updated, 'utf-8');
+      if (target.kind === 'anchored') {
+        writeInPlace(target, updated, false);
+      } else {
+        writeFileSync(realPath, updated, 'utf-8');
+      }
       agent.sessionCounters.writeBytes += delta;
       const n = replaceAll ? matches : 1;
       return `Edited ${realPath} (${n} replacement${n === 1 ? '' : 's'})`;

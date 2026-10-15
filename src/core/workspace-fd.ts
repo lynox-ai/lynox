@@ -126,13 +126,14 @@ function readNames(dir: DirHandle): Buffer[] {
 
 /**
  * Split a relative path into components. Refuses absolute paths, empty components,
- * `.`, `..`, NUL and backslashes — `..` would climb out of the magic link.
+ * `.`, `..` and NUL — `..` would climb out of the magic link. A backslash is an ordinary
+ * character on Linux (the only platform with the race-free walk); only `/` separates.
  * The empty string means the anchor itself and yields no components.
  */
 export function splitRel(rel: string): string[] {
   if (rel === '') return [];
   if (rel.startsWith('/')) throw new WorkspaceAccessError('BAD_PATH', `absolute path refused: ${JSON.stringify(rel)}`);
-  if (rel.includes('\0') || rel.includes('\\')) throw new WorkspaceAccessError('BAD_PATH', 'path contains NUL or a backslash');
+  if (rel.includes('\0')) throw new WorkspaceAccessError('BAD_PATH', 'path contains NUL');
   const parts = rel.split('/');
   // One trailing slash is tolerated ("dir/"); any other empty component is not.
   if (parts.length > 1 && parts[parts.length - 1] === '') parts.pop();
@@ -201,15 +202,23 @@ function assertLive(anchor: DirHandle): void {
   if (nlink === 0) throw new WorkspaceAccessError('GONE', `${show(anchor)} was removed while held open`);
 }
 
-/** fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. */
+/** The set-group-ID bit (not in `fs.constants`). */
+const S_ISGID = 0o2000;
+
+/**
+ * fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. A new
+ * directory under a set-group-ID parent inherits that bit from mkdir; it is kept, as a mkdir by
+ * name keeps it, so files made below stay in the parent's group.
+ */
 function setMode(dir: DirHandle, mode: number): void {
   const fd = IS_LINUX ? openSync(self(dir), constants.O_RDONLY | O_DIRECTORY) : dir.fd;
-  try { fchmodSync(fd, mode); } finally { if (fd !== dir.fd) closeSync(fd); }
+  try { fchmodSync(fd, mode | (fstatSync(fd).mode & S_ISGID)); } finally { if (fd !== dir.fd) closeSync(fd); }
 }
 
 /**
  * Walk to the directory named by `parts`, below `anchor`. With `create`, missing
- * components are made and given `dirMode` (with fchmod, not umask-masked); a
+ * components are made and given `dirMode` (with fchmod, not umask-masked; an inherited
+ * set-group-ID bit is kept); a
  * directory this call did not create keeps its mode. The caller closes the
  * returned handle with `closeDir` — it may be the anchor.
  */
@@ -294,6 +303,18 @@ export function ensureSubAnchor(anchor: WorkspaceAnchor, name: string, dirMode: 
   const parts = splitRel(name);
   if (parts.length !== 1) throw new WorkspaceAccessError('BAD_PATH', `a sub-anchor is one component, got ${JSON.stringify(name)}`);
   const dir = walkDir(anchor, parts, { dirMode });
+  return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
+}
+
+/**
+ * Open the directory `rel` below `anchor` as its own anchor, every component with O_NOFOLLOW.
+ * Creates nothing: a missing component is ENOENT, a symlink on the way is refused. `rel` must
+ * name at least one component (the anchor itself is not handed out twice).
+ */
+export function openSubAnchor(anchor: WorkspaceAnchor, rel: string): WorkspaceAnchor {
+  const parts = splitRel(rel);
+  if (parts.length === 0) throw new WorkspaceAccessError('BAD_PATH', 'a sub-anchor needs at least one component');
+  const dir = walkDir(anchor, parts);
   return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
 }
 
@@ -408,6 +429,60 @@ export function readFileAt(anchor: WorkspaceAnchor, rel: string, maxBytes = Numb
     return Buffer.concat(chunks, total);
   } finally {
     closeSync(fd);
+  }
+}
+
+export interface OpenWriteOptions {
+  /** Create the file with this mode (fchmod, not umask-masked) when it does not exist; omit to require it. */
+  readonly createMode?: number | undefined;
+  /** Mode for directories created on the way; omit to require that they exist. */
+  readonly dirMode?: number | undefined;
+}
+
+function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
+  const code = errno(err);
+  if (code === 'ELOOP') throw new WorkspaceAccessError('SYMLINK', `${show(dir, leaf)} is a symlink`);
+  if (code === 'ENXIO' || code === 'ENODEV' || code === 'EAGAIN' || code === 'EWOULDBLOCK' || code === 'EISDIR') {
+    throw new WorkspaceAccessError('NOT_FILE', `${show(dir, leaf)} is not a regular file`);
+  }
+  throw err;
+}
+
+/**
+ * Open a regular file for writing IN PLACE, without truncating it: the same inode, so its owner,
+ * mode, ACLs and the kernel's permission check stay as they are (a read-only file is EACCES, as
+ * with a plain write by name). A symlink at the file is refused (O_NOFOLLOW), and so are FIFOs,
+ * sockets and devices — a device is refused only after its open, which may have an effect of its
+ * own; making one in the workspace needs root. With `createMode`, a missing file is created with
+ * O_EXCL. The caller truncates, writes and closes the fd.
+ */
+export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteOptions = {}): { fd: number; created: boolean } {
+  const { dirParts, leaf } = splitLeaf(rel);
+  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
+  try {
+    let fd: number;
+    let created = false;
+    try {
+      fd = openSync(at(dir, leaf), constants.O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+    } catch (err) {
+      if (errno(err) !== 'ENOENT' || opts.createMode === undefined) refuseWriteOpen(dir, leaf, err);
+      try {
+        fd = openSync(at(dir, leaf), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600);
+        created = true;
+      } catch (createErr) {
+        refuseWriteOpen(dir, leaf, createErr);
+      }
+    }
+    try {
+      if (!fstatSync(fd).isFile()) throw new WorkspaceAccessError('NOT_FILE', `${show(dir, leaf)} is not a regular file`);
+      if (created && opts.createMode !== undefined) fchmodSync(fd, opts.createMode);
+    } catch (err) {
+      closeSync(fd);
+      throw err;
+    }
+    return { fd, created };
+  } finally {
+    closeDir(dir, anchor);
   }
 }
 

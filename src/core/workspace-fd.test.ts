@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-  anchorFromFd, closeAnchor, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor, stageIn, STAGE_PREFIX,
+  anchorFromFd, closeAnchor, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor, openSubAnchor, stageIn, STAGE_PREFIX,
   readFileAt, removeStaleStages, renameAt, splitRel, statEntry, walk, writeFileAt, WorkspaceAccessError, type WorkspaceAnchor,
 } from './workspace-fd.js';
 
@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 describe('splitRel', () => {
-  it.each(['/abs', 'a/../b', '..', './a', 'a//b', 'a/./b', 'a\0b', 'a\\b'])('refuses %j', (rel) => {
+  it.each(['/abs', 'a/../b', '..', './a', 'a//b', 'a/./b', 'a\0b'])('refuses %j', (rel) => {
     expect(code(() => splitRel(rel))).toBe('BAD_PATH');
   });
   it('names an absolute path as such, for callers that pass one by mistake', () => {
@@ -58,6 +58,8 @@ describe('splitRel', () => {
     expect(splitRel('a/b/c')).toEqual(['a', 'b', 'c']);
     expect(splitRel('a/b/')).toEqual(['a', 'b']);
     expect(splitRel('')).toEqual([]);
+    // A backslash is an ordinary character in a Linux name; only `/` separates.
+    expect(splitRel('a\\b/c')).toEqual(['a\\b', 'c']);
   });
 });
 
@@ -561,3 +563,41 @@ it.runIf(LINUX)('an O_PATH anchor survives a parent the process can no longer tr
     closeSync(a.fd);
   }
 });
+
+describe.skipIf(!LINUX)('openSubAnchor', () => {
+  it('opens a directory below the anchor as an fd of its own, creating nothing', () => {
+    mkdirSync(join(ws, 'a', 'b'), { recursive: true });
+    const sub = openSubAnchor(anchor, 'a/b');
+    try {
+      expect(sub.fd).not.toBe(anchor.fd);
+      writeFileAt(sub, 'x.txt', 'x', { fileMode: 0o600 });
+      expect(readFileSync(join(ws, 'a', 'b', 'x.txt'), 'utf8')).toBe('x');
+    } finally {
+      closeAnchor(sub);
+    }
+    expect(code(() => openSubAnchor(anchor, 'missing'))).toBe('ENOENT');
+    expect(existsSync(join(ws, 'missing'))).toBe(false);
+  });
+
+  it('refuses an empty path: it would hand back the anchor itself, which the caller then closes', () => {
+    expect(code(() => openSubAnchor(anchor, ''))).toBe('BAD_PATH');
+    expect(() => statSync(ws)).not.toThrow();
+    expect(code(() => readFileAt(anchor, 'nothing'))).toBe('ENOENT');
+  });
+});
+
+describe.skipIf(!LINUX)('mkdirAt modes', () => {
+  it('gives a new directory exactly the mode asked for, nothing it had from mkdir', () => {
+    mkdirAt(anchor, 'ro', 0o500);
+    expect(statSync(join(ws, 'ro')).mode & 0o7777).toBe(0o500);
+    chmodSync(join(ws, 'ro'), 0o700);
+  });
+
+  it('keeps the set-group-ID bit a new directory inherits from its parent', () => {
+    chmodSync(ws, 0o2770);
+    mkdirAt(anchor, 'g/h', 0o750);
+    expect(statSync(join(ws, 'g')).mode & 0o7777).toBe(0o2750);
+    expect(statSync(join(ws, 'g', 'h')).mode & 0o7777).toBe(0o2750);
+  });
+});
+

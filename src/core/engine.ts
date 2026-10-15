@@ -34,6 +34,7 @@ import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
+import { closeWorkspaceBase } from './workspace-rel.js';
 import { ensureWorkspaceRoot } from './workspace-root.js';
 import { workspaceAccess } from './workspace-access.js';
 
@@ -2997,6 +2998,8 @@ export class Engine {
       try { await this.knowledgeLayer.close(); } catch { /* ignore */ }
       this.knowledgeLayer = null;
     }
+    // The context workspace's open directory, held by the file tools.
+    closeWorkspaceBase();
     // Flush Bugsink events before shutdown
     try {
       const { shutdownErrorReporting } = await import('./error-reporting.js');
