@@ -101,7 +101,7 @@ npx @lynox-ai/core
 git clone https://github.com/lynox-ai/lynox.git
 cd lynox && pnpm install
 pnpm run build
-node dist/index.js --http-api          # engine HTTP API on :3100
+LYNOX_ALLOWED_ORIGINS=http://localhost:5173 node dist/index.js --http-api   # engine HTTP API on :3100; trusts the dev UI's port
 
 # In another terminal:
 cd packages/web-ui && pnpm run dev     # web UI on :5173, talks to :3100

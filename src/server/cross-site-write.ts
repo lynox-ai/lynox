@@ -79,10 +79,11 @@ export const NO_SECRET_HOST_REFUSAL =
   + 'set LYNOX_HTTP_SECRET.';
 
 export const CROSS_SITE_WRITE_REFUSAL =
-  'Refused: this server runs without LYNOX_HTTP_SECRET and accepts changes from a browser only on '
-  + 'localhost, on its own IP address, or from an origin listed in LYNOX_ALLOWED_ORIGINS. '
-  + 'Reached by a host name or through a proxy that rewrites the host, add the origin the browser '
-  + 'shows to LYNOX_ALLOWED_ORIGINS, or set LYNOX_HTTP_SECRET.';
+  'Refused: this server runs without LYNOX_HTTP_SECRET and accepts changes from a browser only from '
+  + 'its own pages (on localhost or its IP address, on its own port) or from an origin listed in '
+  + 'LYNOX_ALLOWED_ORIGINS. Sent from another local port, reached by a host name, or through a proxy '
+  + 'that rewrites the host, add the origin the browser shows to LYNOX_ALLOWED_ORIGINS, or set '
+  + 'LYNOX_HTTP_SECRET.';
 
 export function hostRefusal(input: { host: string | undefined; allowedOrigins: readonly string[] }): string | null {
   const host = input.host;
@@ -150,8 +151,8 @@ export function crossSiteWriteRefusal(input: {
 
 export const AMBIENT_CROSS_SITE_REFUSAL =
   'Refused: the browser says another site sent this request, and it carries a sign-in the browser '
-  + 'adds on its own. Send it from this instance\'s own pages, from localhost, or from an origin '
-  + 'listed in LYNOX_ALLOWED_ORIGINS.';
+  + 'adds on its own. Send it from this instance\'s own pages or from an origin listed in '
+  + 'LYNOX_ALLOWED_ORIGINS.';
 
 /**
  * 3. `ambientCrossSiteRefusal` — a request whose credential the browser attaches on its own, so

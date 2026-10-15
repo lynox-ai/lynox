@@ -3152,8 +3152,8 @@ export class LynoxHTTPApi {
     }
 
     // Without a secret every request below is admin, so a write is accepted from a browser only
-    // where the browser says it came from this server, localhost, or an allowed origin. The rule
-    // and its cases are in `cross-site-write.ts`.
+    // where the browser says it came from this server (by address, on its own port) or an allowed
+    // origin. The rule and its cases are in `cross-site-write.ts`.
     if (!secret) {
       const refusal = crossSiteWriteRefusal({
         method,
