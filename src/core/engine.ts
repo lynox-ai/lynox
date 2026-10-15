@@ -114,6 +114,7 @@ import {
 } from './engine-init.js';
 import { submitBatch, pollBatch } from './batch.js';
 import { DataStore } from './data-store.js';
+import { CRM_COLLECTIONS } from './crm-schema.js';
 import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
@@ -1749,21 +1750,24 @@ export class Engine {
       this._dataStore = new DataStore();
       this._toolContext.dataStore = this._dataStore;
       // Drop empty CRM-shaped collections (`contacts` / `deals` / `interactions`
-      // …). Meant for the ones older agent sessions left behind, which duplicate
-      // the dedicated CRM tab in the UI. On an instance whose CRM is still empty
-      // it also drops the CRM's OWN collections, which `CRM.ensureSchema`
-      // recreates later in this boot. Non-empty ones are preserved.
-      const droppedOverlaps = this._dataStore.dropEmptyCrmOverlaps();
+      // …) that are not in the CRM's current shape: the ones older agent sessions
+      // left behind, which duplicate the dedicated CRM tab in the UI, and empty CRM
+      // collections from an older build, which `CRM.ensureSchema` recreates later
+      // in this boot. The CRM's own empty collections in their current shape are
+      // kept, so an instance whose CRM is still empty logs nothing here.
+      const droppedOverlaps = this._dataStore.dropEmptyCrmOverlaps(CRM_COLLECTIONS);
       if (droppedOverlaps.length > 0) {
-        process.stderr.write(`[lynox] DataStore: dropped ${String(droppedOverlaps.length)} empty CRM-overlap collection(s): ${droppedOverlaps.join(', ')}\n`);
+        process.stderr.write(`[lynox] DataStore: dropped ${String(droppedOverlaps.length)} empty CRM-overlap collection(s) not in the CRM's current shape: ${droppedOverlaps.join(', ')}\n`);
       }
       // Registered as soon as the store exists — all six, unconditionally. This
       // used to wait for `listCollections().length > 0`, which an instance with
-      // neither a table of its own nor a CRM record never reaches: the drop just
-      // above removes the CRM's empty collections, and the CRM recreates them
-      // only later in boot (`_initPipelineAndBackup` → `CRM.ensureSchema`). So the
-      // tool that creates a table was offered only once a table already existed,
-      // and no agent on a new instance could create its first one.
+      // neither a table of its own nor a CRM record never reached: a fresh store is
+      // empty here (the CRM creates its collections only later in boot,
+      // `_initPipelineAndBackup` → `CRM.ensureSchema`), and until the drop above
+      // spared the CRM's current shape it removed them again on every later boot.
+      // So the tool that creates a table was offered only once a table already
+      // existed, and no agent on a new instance could create its first one. The
+      // count is no signal either way: it must not gate the registration.
       //
       // All six at once, not create first and the rest later: an agent keeps the
       // tool list it was built with for the whole turn, so a table created

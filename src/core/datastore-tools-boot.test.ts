@@ -136,18 +136,15 @@ describe('Engine boot — a fresh instance can create its first table', () => {
     expect(queried).toContain('Druckerei Süd');
   });
 
-  it('keeps all six through the boot that drops the CRM\'s empty collections', async () => {
-    // The drop-then-recreate cycle is what hid the tools: boot 1 lets the CRM create its
-    // collections, EMPTY; boot 2 drops them before the old check ran. Both halves of that are
-    // asserted — the empty collection after boot 1 and the drop in boot 2 — or a second boot
-    // with nothing to drop would pass this for the wrong reason. If the drop is ever changed to
-    // spare the CRM's own collections, this test goes red on purpose: it then checks nothing
-    // that test 1 does not.
+  it('drops nothing on a second boot of an instance whose CRM is still empty', async () => {
+    // Until the drop learnt the CRM's current shape, every boot after the first
+    // dropped the CRM's own empty collections only for the CRM to recreate them later in the
+    // same boot, and logged it as a drop. Both halves are asserted: boot 1 must leave an empty
+    // CRM collection behind, or boot 2 has nothing it could drop and passes for the wrong reason.
     freshDataDir();
     const first = await boot();
-    const crmOwned = first.getDataStore()?.listCollections().filter(c => c.name === 'contacts') ?? [];
-    expect(crmOwned, 'boot 1 must leave an empty CRM collection behind, or boot 2 drops nothing').toHaveLength(1);
-    expect(crmOwned[0]?.recordCount).toBe(0);
+    const before = first.getDataStore()?.getCollectionInfo('contacts');
+    expect(before?.recordCount, 'boot 1 must leave an empty CRM collection behind, or boot 2 drops nothing').toBe(0);
     await first.shutdown();
     engines.splice(engines.indexOf(first), 1);
 
@@ -155,7 +152,39 @@ describe('Engine boot — a fresh instance can create its first table', () => {
     try {
       const second = await boot();
       expect(drop, 'boot 2 must run the drop').toHaveBeenCalledTimes(1);
-      expect(drop.mock.results[0]?.value, 'boot 2 must actually drop the CRM\'s empty collection').toContain('contacts');
+      expect(drop.mock.results[0]?.value, 'boot 2 must keep the CRM\'s own empty collections').toEqual([]);
+      // Kept, not dropped and recreated: the same row, created in boot 1.
+      expect(second.getDataStore()?.getCollectionInfo('contacts')?.createdAt).toBe(before?.createdAt);
+      const names = second.getRegistry().getEntries().map(e => e.definition.name);
+      for (const t of DATA_STORE_TOOLS) {
+        expect(names, `${t} must be registered on a second boot`).toContain(t);
+      }
+    } finally {
+      drop.mockRestore();
+    }
+  });
+
+  it('drops an empty contacts collection with an older unique key, and the CRM recreates it on email', async () => {
+    // The free migration in `CRM.ensureSchema` must survive the fix: an empty `contacts` from an
+    // older build is not in the current shape, so the boot drops it and the CRM recreates it
+    // keyed on email. All six tools must come through the boot that drops it.
+    freshDataDir();
+    const first = await boot();
+    const ds = first.getDataStore()!;
+    ds.dropCollection('contacts');
+    ds.createCollection({
+      name: 'contacts', scope: { type: 'global', id: '' },
+      columns: [{ name: 'name', type: 'string' }, { name: 'email', type: 'string' }], uniqueKey: ['name'],
+    });
+    await first.shutdown();
+    engines.splice(engines.indexOf(first), 1);
+
+    const drop = vi.spyOn(DataStore.prototype, 'dropEmptyCrmOverlaps');
+    try {
+      const second = await boot();
+      expect(drop.mock.results[0]?.value, 'the stale contacts collection must be dropped').toEqual(['contacts']);
+      // Recreated in the same boot (`_initPipelineAndBackup` → `CRM.ensureSchema`).
+      expect(second.getDataStore()?.getCollectionInfo('contacts')?.uniqueKey).toEqual(['email']);
       const names = second.getRegistry().getEntries().map(e => e.definition.name);
       for (const t of DATA_STORE_TOOLS) {
         expect(names, `${t} must survive the boot-time drop`).toContain(t);

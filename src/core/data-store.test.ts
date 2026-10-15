@@ -9,6 +9,8 @@ import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
 import { EngineDb } from './engine-db.js';
 import { channels } from './observability.js';
 import type { MemoryScopeRef } from '../types/index.js';
+import type { CollectionShape } from './crm-schema.js';
+import { CRM_COLLECTIONS, createParamsOf } from './crm-schema.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
 
@@ -1044,12 +1046,22 @@ describe('DataStore', () => {
   });
 
   describe('dropEmptyCrmOverlaps', () => {
+    const contactsNow: CollectionShape = {
+      name: 'contacts', scope: { type: 'global' as const, id: '' },
+      columns: [{ name: 'name', type: 'string' as const }, { name: 'email', type: 'string' as const }],
+      uniqueKey: ['email'],
+    };
+    const interactionsNow: CollectionShape = {
+      name: 'interactions', scope: { type: 'global' as const, id: '' },
+      columns: [{ name: 'summary', type: 'string' as const }],
+    };
+
     it('drops empty CRM-shaped collections and reports their names', () => {
       ds.createCollection({ name: 'contacts', scope, columns: [{ name: 'email', type: 'string' }] });
       ds.createCollection({ name: 'deals', scope, columns: [{ name: 'amount', type: 'number' }] });
       ds.createCollection({ name: 'sales_data', scope, columns: [{ name: 'q', type: 'string' }] });
 
-      const dropped = ds.dropEmptyCrmOverlaps();
+      const dropped = ds.dropEmptyCrmOverlaps([]);
       expect(dropped.sort()).toEqual(['contacts', 'deals']);
       expect(ds.getCollectionInfo('contacts')).toBeNull();
       expect(ds.getCollectionInfo('deals')).toBeNull();
@@ -1060,13 +1072,58 @@ describe('DataStore', () => {
     it('preserves a CRM-shaped collection with data — the user may rely on it', () => {
       ds.createCollection({ name: 'contacts', scope, columns: [{ name: 'email', type: 'string' }] });
       ds.insertRecords({ collection: 'contacts', records: [{ email: 'alice@example.com' }] });
-      ds.dropEmptyCrmOverlaps();
+      ds.dropEmptyCrmOverlaps([]);
       expect(ds.getCollectionInfo('contacts')).not.toBeNull();
     });
 
     it('returns empty array when nothing matches', () => {
       ds.createCollection({ name: 'monthly_kpis', scope, columns: [{ name: 'revenue', type: 'number' }] });
-      expect(ds.dropEmptyCrmOverlaps()).toEqual([]);
+      expect(ds.dropEmptyCrmOverlaps([])).toEqual([]);
+    });
+
+    it('keeps an empty collection in exactly a current shape, with and without a unique key', () => {
+      ds.createCollection(contactsNow);
+      ds.createCollection(interactionsNow);
+      expect(ds.dropEmptyCrmOverlaps([contactsNow, interactionsNow])).toEqual([]);
+      expect(ds.getCollectionInfo('contacts')).not.toBeNull();
+      expect(ds.getCollectionInfo('interactions')).not.toBeNull();
+    });
+
+    it('drops an empty collection that differs from the current shape in one part only', () => {
+      const variants: Array<[string, CollectionShape]> = [
+        ['an older unique key', { ...contactsNow, uniqueKey: ['name'] }],
+        ['no unique key', { ...contactsNow, uniqueKey: undefined }],
+        ['other columns', { ...contactsNow, columns: [...contactsNow.columns, { name: 'phone', type: 'string' as const }] }],
+        ['another scope type', { ...contactsNow, scope: { type: 'context' as const, id: '' } }],
+        ['another scope id', { ...contactsNow, scope: { type: 'global' as const, id: 'p1' } }],
+      ];
+      for (const [what, stale] of variants) {
+        ds.createCollection(stale);
+        expect(ds.dropEmptyCrmOverlaps([contactsNow]), what).toEqual(['contacts']);
+        expect(ds.getCollectionInfo('contacts'), what).toBeNull();
+      }
+    });
+
+    it('pins the DDL createCollection emits for the CRM\'s shapes — a change here does not reach kept empty tables', () => {
+      // A kept empty CRM collection keeps the DDL it was created with. If this snapshot
+      // has to change, existing empty CRM tables will NOT get the new DDL from the boot
+      // drop any more (crm-schema.ts): ship a migration for them with the change.
+      for (const shape of CRM_COLLECTIONS) ds.createCollection(createParamsOf(shape));
+      const ddl = (ds['db'] as Database.Database)
+        .prepare("SELECT name, sql FROM sqlite_master WHERE tbl_name IN ('ds_contacts','ds_deals','ds_interactions') ORDER BY name")
+        .all();
+      expect(ddl).toEqual([
+        { name: 'ds_contacts', sql: 'CREATE TABLE "ds_contacts" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "name" TEXT, "email" TEXT, "phone" TEXT, "company" TEXT, "type" TEXT, "source" TEXT, "channel_id" TEXT, "language" TEXT, "notes" TEXT, "tags" TEXT)' },
+        { name: 'ds_deals', sql: 'CREATE TABLE "ds_deals" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "title" TEXT, "contact_name" TEXT, "value" REAL, "currency" TEXT, "stage" TEXT, "next_action" TEXT, "due_date" TEXT)' },
+        { name: 'ds_interactions', sql: 'CREATE TABLE "ds_interactions" (_id INTEGER PRIMARY KEY AUTOINCREMENT, _created_at TEXT NOT NULL, _updated_at TEXT NOT NULL, "contact_name" TEXT, "type" TEXT, "channel" TEXT, "summary" TEXT, "date" TEXT)' },
+        { name: 'idx_contacts_ukey', sql: 'CREATE UNIQUE INDEX "idx_contacts_ukey" ON "ds_contacts" ("email")' },
+        { name: 'idx_deals_ukey', sql: 'CREATE UNIQUE INDEX "idx_deals_ukey" ON "ds_deals" ("title", "contact_name")' },
+      ]);
+    });
+
+    it('drops an empty collection whose current shape belongs to another name', () => {
+      ds.createCollection({ ...contactsNow, name: 'people' });
+      expect(ds.dropEmptyCrmOverlaps([contactsNow])).toEqual(['people']);
     });
   });
 
