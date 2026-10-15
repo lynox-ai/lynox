@@ -493,7 +493,7 @@ export interface OAuthClaimResponse {
  * that endpoint's status and body unchanged (a status outside 400–599 becomes
  * 502). The engine decides revoked vs. misconfigured vs. transient from them,
  * and a rewritten body would let a control-plane fault read as a revoked grant.
- * The body is the provider's and is never shown to the user.
+ * The body is the provider's; it is not meant for display.
  *
  * Authenticated exactly like the claim: `x-instance-secret`, matched against
  * `instances.instanceSecret` in constant time. The handle is bound on top of
@@ -521,9 +521,11 @@ export interface OAuthRefreshResponse {
   expires_at: number;
   /**
    * Present only when the provider rotated the refresh token. Google may do so
-   * on any refresh; Microsoft does so on practically every one. The engine must
-   * replace its stored handle when this appears, or the next refresh presents a
-   * handle the provider has already invalidated.
+   * on any refresh; Microsoft does so on every one. The engine must replace its
+   * stored handle when this appears. What happens otherwise differs: Google
+   * invalidates the old token, so the next refresh fails; Microsoft leaves the
+   * old one valid until its own lifetime ends, so a handle that is not replaced
+   * fails later and without warning.
    */
   refresh_handle?: string;
 }
