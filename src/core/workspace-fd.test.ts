@@ -270,6 +270,32 @@ describe('emptyDir', () => {
 });
 
 /**
+ * Mount boundaries need a real mount; an unprivileged test cannot make one. /dev
+ * carries several (shm, pts, mqueue) wherever this runs on Linux, so walk it
+ * read-only. The emptyDir case runs only unprivileged: a mutant that drops the
+ * refusal must not be able to delete anything under /dev.
+ */
+const DEV_SHM_IS_MOUNT = LINUX && / \/dev\/shm /.test(readFileSync('/proc/self/mountinfo', 'utf8'));
+describe.runIf(DEV_SHM_IS_MOUNT)('mount boundaries', () => {
+  let dev: WorkspaceAnchor;
+  beforeEach(() => { dev = openAnchor('/dev'); });
+  afterEach(() => { closeAnchor(dev); });
+  it('walk reports a mount below and does not descend into it', () => {
+    const r = walk(dev, '');
+    expect(r.mountBoundaries).toContain('shm');
+    expect(r.entries.some((e) => e.rel.startsWith('shm/'))).toBe(false);
+  });
+  it('copyOut refuses before copying anything', () => {
+    let copied = 0;
+    expect(code(() => copyOut(dev, '', () => { copied++; }))).toBe('MOUNT');
+    expect(copied).toBe(0);
+  });
+  it.runIf(process.getuid?.() !== 0)('emptyDir refuses before deleting anything', () => {
+    expect(code(() => emptyDir(dev, ''))).toBe('MOUNT');
+  });
+});
+
+/**
  * The race the primitive exists for: a second process flips `d` between a real
  * directory and a symlink to the engine's files while the engine reads and writes
  * `d/...`. The positive control runs the same loop by name and must catch the
