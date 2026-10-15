@@ -2559,7 +2559,7 @@ export class RunHistory {
              COALESCE(SUM(tokens_in), 0) as tokens_in,
              COALESCE(SUM(tokens_out), 0) as tokens_out
       FROM bulk_cost_days
-      WHERE created_at >= ? AND created_at < ?
+      WHERE created_at >= datetime(?) AND created_at < datetime(?)
       GROUP BY model_id, date(created_at)
     `).all(startIso, endIso) as Array<{ model_id: string; day: string; cost_usd: number; tokens_in: number; tokens_out: number }>;
     for (const j of judgeRows) {

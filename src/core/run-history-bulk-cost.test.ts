@@ -85,8 +85,7 @@ describe('RunHistory — the bulk judge\'s spend (bulk_cost_days)', () => {
     h.updateRun(id, { costUsd: 0.5, tokensIn: 10, tokensOut: 1, status: 'completed' });
     h.recordBulkJudgeCost({ runId: 'b1', modelId: 'claude-haiku-4-5', tokensIn: 100, tokensOut: 5, costUsd: 0.25 });
     h.recordBulkJudgeCost({ runId: 'b1', modelId: 'acme-local-7b', tokensIn: 200, tokensOut: 30, costUsd: 1 });
-    // Yesterday to tomorrow: the window compares ISO bounds against `datetime('now')` text, as for
-    // runs, so a row on the window's first day is not in it — the same for both.
+    // Yesterday to tomorrow.
     const today = new Date(); today.setUTCHours(0, 0, 0, 0);
     const start = new Date(today.getTime() - 24 * 3600_000);
     const end = new Date(today.getTime() + 24 * 3600_000);
@@ -103,6 +102,18 @@ describe('RunHistory — the bulk judge\'s spend (bulk_cost_days)', () => {
     expect(u.by_kind).toEqual([{ kind: 'llm', cost_cents: 175, unit_count: 346, unit_label: 'tokens', run_count: 1 }]);
     // The headline matches what the daily limit counts.
     expect(h.getCostByDay(1)[0]!.cost_usd).toBeCloseTo(1.75, 12);
+  });
+
+  it('counts a call on the window\'s first day and none on the day after, from the stored timestamp', () => {
+    const h = history();
+    const insert = h.getDb().prepare(`INSERT INTO bulk_cost_days (created_at, run_id, model_id, tokens_in, tokens_out, cost_usd) VALUES (?, 'b1', 'm', 0, 0, ?)`);
+    insert.run('2026-04-01 05:00:00', 0.25);
+    insert.run('2026-05-01 05:00:00', 1);
+    const u = h.getUsageSummary({ startIso: '2026-04-01T00:00:00.000Z', endIso: '2026-05-01T00:00:00.000Z', source: 'rolling', label: 'april' });
+    expect(u.used_cents).toBe(25);
+    expect(u.daily[0]).toEqual({ date: '2026-04-01', cost_cents: 25 });
+    expect(u.daily.at(-1)!.date).toBe('2026-04-30');
+    expect(u.by_model.map((m) => [m.model_id, m.cost_cents])).toEqual([['m', 25]]);
   });
 
   it('reaches the daily limit', () => {
