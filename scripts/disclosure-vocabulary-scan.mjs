@@ -27,9 +27,10 @@
  * not warn either: moving a file or a block must not report every sentence in it.
  * Compared after trimming, so re-indenting a block is still a move.
  *
- * NOT covered, stated rather than implied: wording outside the lists below, a
- * sentence broken across two lines, commit messages and pull-request text. Bounded,
- * not exact.
+ * NOT covered, stated rather than implied: wording outside the lists below and a
+ * sentence broken across two lines. Bounded, not exact. Pull-request text and commit
+ * messages are read with the same lists by `gate-record.mjs` (`proseWarnings` below),
+ * as a warning in the check, not here.
  */
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
@@ -73,11 +74,48 @@ export const PUTS_WORK_OFF = [
   /\b(findings?|gaps?|holes?|defects?)\b[^.]{0,30}\b(remains?|stays?|is|are|left|still) open\b/i,
   /\b((for|in|until) a later (change|PR|pull request|piece|release)|left for (a )?later)\b/i,
   /\bnot (addressed|handled|fixed|covered|touched|built|solved) here\b/i,
+  // Work handed to a named later piece: `comes with the admin route of the next change`,
+  // `is a separate change`. Not `by a later change`, which describes an owner's later edit.
+  /\b(of|in|with|into) (a|the) (next|separate|later|future|subsequent) (change|PR|pull request|piece)\b|\b(is|are) a separate (change|PR|pull request)\b/i,
+  // A list of what is left open, under its own heading: `What this does not cover`,
+  // `## Not covered`, `**Not covered:**`. Not `not covered by an approval`, a rule's scope.
+  /\bwhat (this|it) (PR |change |fix )?does(n't| not) cover\b/i,
+  /^[\s#*/>-]*not covered\b(?!\s+by\b)/i,
   // About a defect, not a pre-existing record: followed by a defect noun, or standing as
   // the statement itself (`pre-existing.`, `is pre-existing`, `PRE-EXISTING and filed`).
   /\bpre-?existing\b(?=[^.]{0,40}\b(gaps?|holes?|defects?|bugs?|problems?|issues?|findings?|violations?)\b)/i,
   /\b(is|was|are|were|it's)\s+pre-?existing\b|\bpre-?existing\s*([.;:]|and filed)/i,
 ];
+
+/**
+ * The form this repo's PR text is told to use for findings handled elsewhere
+ * (`findings filed privately`, the `gate-record` template). It names no gap and no record,
+ * so prose reading leaves it out; every other word on the line is still read.
+ */
+const PRESCRIBED_FORM = /\b(findings?\s+)?(were\s+|are\s+|is\s+)?filed privately\b/gi;
+
+/**
+ * The lines of a pull request's title, body or commit messages that say one of the
+ * above, by 1-based line number. Fenced blocks are skipped: the `gate-record` record and
+ * quoted output are not prose. Gives line numbers and kinds only, never the text, so a
+ * caller can report a hit in a public log without repeating it.
+ */
+export function proseWarnings(text) {
+  const out = [];
+  let fence = null;
+  String(text ?? '').split('\n').forEach((raw, i) => {
+    const open = /^\s*(`{3,}|~{3,})/.exec(raw);
+    if (open) {
+      if (fence === null) fence = open[1];
+      else if (open[1][0] === fence[0] && open[1].length >= fence.length) fence = null;
+      return;
+    }
+    if (fence !== null) return;
+    const kind = kindOf(raw.replace(PRESCRIBED_FORM, ''));
+    if (kind !== null) out.push({ line: i + 1, kind });
+  });
+  return out;
+}
 
 /** What a line says, as a kind, or null. A line naming a record is reported as that. */
 export function kindOf(line) {

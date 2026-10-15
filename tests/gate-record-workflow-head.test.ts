@@ -108,7 +108,7 @@ afterAll(() => {
  */
 function runStep(
   opts: { base?: string; head?: string; prNumber?: string; origin?: string; allBranches?: boolean } = {},
-): { code: number | null; log: string; handed: string | null; gitCalls: string[]; eventArg: string | null } {
+): { code: number | null; log: string; handed: string | null; gitCalls: string[]; eventArg: string | null; commits: string | null } {
   const dir = mkdtempSync(join(root, 'co-'));
   const co = join(dir, 'co');
   const clone = ['clone', '--quiet', '--no-local'];
@@ -132,6 +132,7 @@ function runStep(
   mkdirSync(bin);
   const seen = join(dir, 'files-handed-over');
   const eventSeen = join(dir, 'event-arg');
+  const commitsSeen = join(dir, 'commits-handed-over');
   writeFileSync(
     join(bin, 'node'),
     [
@@ -140,6 +141,7 @@ function runStep(
       'for a in "$@"; do',
       `  if [ "$prev" = "--files-file" ]; then cp "$a" '${seen}'; fi`,
       `  if [ "$prev" = "--event-file" ]; then printf '%s' "$a" > '${eventSeen}'; fi`,
+      `  if [ "$prev" = "--commits-file" ]; then cp "$a" '${commitsSeen}'; fi`,
       '  prev="$a"',
       'done',
       'exit 0',
@@ -189,7 +191,13 @@ function runStep(
   } catch {
     eventArg = null;
   }
-  return { code: r.status, log: `${r.stdout}${r.stderr}`, handed, gitCalls, eventArg };
+  let commits: string | null = null;
+  try {
+    commits = readFileSync(commitsSeen, 'utf8');
+  } catch {
+    commits = null;
+  }
+  return { code: r.status, log: `${r.stdout}${r.stderr}`, handed, gitCalls, eventArg, commits };
 }
 
 describe('gate-record — the body never passes through the step env', () => {
@@ -211,6 +219,14 @@ describe('gate-record — the body never passes through the step env', () => {
     const r = runStep();
     expect(r.code, `the step failed: ${r.log}`).toBe(0);
     expect(r.eventArg).toBe('/nonexistent/event.json');
+  });
+
+  it("the script is handed the PR's own commit messages, and not the base's", () => {
+    // A squash merge takes them as the message on main, so their wording is read too.
+    const r = runStep();
+    expect(r.code, `the step failed: ${r.log}`).toBe(0);
+    const messages = (r.commits ?? '').split('\x1e').map((x) => x.split('\x1f')[1]?.trim()).filter(Boolean);
+    expect(messages).toEqual(['head']);
   });
 });
 

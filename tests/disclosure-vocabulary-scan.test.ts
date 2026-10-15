@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { kindOf, warningsIn } from '../scripts/disclosure-vocabulary-scan.mjs';
+import { kindOf, warningsIn, proseWarnings } from '../scripts/disclosure-vocabulary-scan.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/disclosure-vocabulary-scan.mjs', import.meta.url));
 // Hermetic git: a developer's global config must not decide what the diff looks like.
@@ -83,6 +83,33 @@ describe('what it warns about', () => {
   it('a word spelled with an invisible character or in fullwidth letters', () => {
     expect(kindOf('// fi\u200Bled rather than built here')).toBe('marks work as put off');
     expect(kindOf('// \uFF46\uFF49\uFF4C\uFF45\uFF44 rather than built here')).toBe('marks work as put off');
+  });
+
+  // The forms of the leaked PR sentences none of the lists above caught: work handed to a
+  // named later piece, and a list of what is left open under its own heading.
+  it('work handed to a named later piece, and a heading over what is left open', () => {
+    for (const line of [
+      '- Marking it revoked comes with the admin route of the next change.',
+      '// Moving the call sites onto it is a separate change.',
+      '## What this does not cover',
+      '**What this PR does not cover.** A step without a template',
+      '## Not covered',
+      '**Not covered:** a test that builds an absolute path',
+      '// Not covered: an in-place rewrite',
+    ]) {
+      expect(kindOf(line), line).toBe('marks work as put off');
+    }
+  });
+
+  it('not a rule\'s scope or an owner\'s later edit, which share those words', () => {
+    for (const line of [
+      '- two overrides are not covered by an approval for one;',
+      '// an approval for PATCH does not cover a POST with a PATCH override',
+      '// a schedule the owner took over is not held again by a later change of the owner\'s own',
+      '// the next change to the file bumps its version',
+    ]) {
+      expect(kindOf(line), line).toBeNull();
+    }
   });
 
   it('not product or domain sentences that share a word', () => {
@@ -226,5 +253,35 @@ describe('the hook', () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe('proseWarnings — pull-request text and commit messages', () => {
+  it('names the line, never the text', () => {
+    const w = proseWarnings('Summary.\n\nMarking it comes with the next change.\nDone.');
+    expect(w).toEqual([{ line: 3, kind: 'marks work as put off' }]);
+    expect(JSON.stringify(w)).not.toContain('next change');
+  });
+
+  it('skips fenced blocks: the gate record and quoted output are not prose', () => {
+    const body = 'Text.\n```gate-record\nreview: 1 opus round, a later change\n```\n~~~\n## Not covered\n~~~\nEnd.';
+    expect(proseWarnings(body)).toEqual([]);
+    // Control: the same line outside the fence is read.
+    expect(proseWarnings('## Not covered')).toEqual([{ line: 1, kind: 'marks work as put off' }]);
+  });
+
+  it('a fence is closed only by its own kind and at least its own length', () => {
+    const body = '````\n```\n## Not covered\n````\n## Not covered';
+    expect(proseWarnings(body)).toEqual([{ line: 5, kind: 'marks work as put off' }]);
+  });
+
+  it('leaves out the prescribed `findings filed privately`, and reads the rest of its line', () => {
+    expect(proseWarnings('Further findings filed privately.')).toEqual([]);
+    expect(proseWarnings('Findings were filed privately or fixed in the next commit.')).toEqual([]);
+    expect(proseWarnings('Findings filed privately; the rest is its own PR.')).toEqual([
+      { line: 1, kind: 'marks work as put off' },
+    ]);
+    // Control: `filed` without `privately` still warns.
+    expect(proseWarnings('The rest is filed.')).toEqual([{ line: 1, kind: 'marks work as put off' }]);
   });
 });
