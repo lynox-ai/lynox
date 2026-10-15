@@ -1876,3 +1876,10 @@ describe('scripts/guard-patterns/ — vendored by the private repo', () => {
     expect(src).not.toMatch(/^\s*import(?!\.meta)\b|\bimport\s*\(|\bexport\b[^;]*?\bfrom\s*['"]|\brequire\s*\(|getBuiltinModule/m);
   });
 });
+
+describe('proseOpenCountLines — a hyphen before the number', () => {
+  it('reads `step-2 filed` as no count, whichever hyphen it is written with', () => {
+    for (const h of ['-', '‐', '‑']) expect(proseOpenCountLines(`See step${h}2 filed under docs.`), JSON.stringify(h)).toEqual([]);
+    expect(proseOpenCountLines('See step 2 filed under docs.')).toEqual([1]);
+  });
+});

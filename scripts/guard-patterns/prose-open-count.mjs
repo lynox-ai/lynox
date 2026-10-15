@@ -15,7 +15,7 @@
  * bodies: 0 hits, while 50 of them say "filed" in the number-free form this repo prescribes.
  * What it leaves out, and why, is the calibration:
  *   · `0` — `0 filed` means nothing is open;
- *   · a `#`, `.`, `-` or word character before the number — `core#1274 filed` is a PR that filed,
+ *   · a `#`, `.`, `-` (also the Unicode hyphens U+2010/U+2011) or word character before the number — `core#1274 filed` is a PR that filed,
  *     and with paragraphs joined, a date ending one line must not meet the next (a bare
  *     `step 2` ending one still does — joined, it reads as a count, and nothing says otherwise);
  *   · `deferred` and `issues`, which hit "9 of 17 deferred tools" and "the 3 issues filed by users".
@@ -29,10 +29,10 @@
  */
 export const PROSE_OPEN_NOUN = String.raw`(?:findings?|Befunde?|defects?|gaps?|Lücken?)`;
 export const PROSE_OPEN_COUNT = new RegExp([
-  String.raw`(?<![#\w.-])[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?(?:${PROSE_OPEN_NOUN}\s+)?(?:(?:were|was|are|is|have\s+been|has\s+been|got)\s+)?filed\b`,
+  String.raw`(?<![#\w.\u2010\u2011-])[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?(?:${PROSE_OPEN_NOUN}\s+)?(?:(?:were|was|are|is|have\s+been|has\s+been|got)\s+)?filed\b`,
   String.raw`\bfiled\s+[1-9]\d*\s+(?:(?:open|security|review|code)\s+)?${PROSE_OPEN_NOUN}`,
-  String.raw`(?<![#\w.-])[1-9]\d*\s+(?:open|offene[nr]?)\s+${PROSE_OPEN_NOUN}\b`,
-  String.raw`(?<![#\w.-])[1-9]\d*\s+${PROSE_OPEN_NOUN}\s+(?:(?:are|is|sind|ist)\s+)?(?:(?:remain|remains|left|still|stay|stays|bleib\w*|noch)\s+)*(?:open|offen|unresolved|ungelöst)\b`,
+  String.raw`(?<![#\w.\u2010\u2011-])[1-9]\d*\s+(?:open|offene[nr]?)\s+${PROSE_OPEN_NOUN}\b`,
+  String.raw`(?<![#\w.\u2010\u2011-])[1-9]\d*\s+${PROSE_OPEN_NOUN}\s+(?:(?:are|is|sind|ist)\s+)?(?:(?:remain|remains|left|still|stay|stays|bleib\w*|noch)\s+)*(?:open|offen|unresolved|ungelöst)\b`,
 ].join('|'), 'i');
 /** A line that quotes the form on purpose (a PR about this check) opts out, as in public-repo-guard. */
 export const PROSE_ALLOW = ['public-repo-guard', 'allow'].join(':');
