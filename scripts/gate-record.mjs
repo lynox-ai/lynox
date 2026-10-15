@@ -700,7 +700,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
   // nothing breaks if they do: each governs its own repo's records. pro's copy landed first
   // (pro#1406); this is the same field with the same accepted shapes, so a record written for one
   // repo is valid in the other. (The prose scan is the opposite case: a weaker copy lets public
-  // text through, so it has ONE source in guard-patterns/, vendored by pro.)
+  // text through, so it has ONE source in guard-patterns/, for pro to vendor.)
   //
   // ⛔ WHY THIS FIELD EXISTS, and it is a measured reason rather than a tidiness one.
   //
