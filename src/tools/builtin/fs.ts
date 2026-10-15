@@ -137,9 +137,17 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
   try {
     base = workspaceBase();
   } catch (err) {
-    // Reaching the workspace itself failed (e.g. while the erasure makes it again): named by the
-    // workspace's path, like any other fd error.
-    throw anchoredError(getWorkspaceDir() ?? raw, err);
+    // Reaching the workspace directory itself failed (e.g. while the erasure makes it again, or the
+    // directory is a link): said so, by the workspace's path, and without the advice for a link at
+    // a file. A WorkspaceRootError (no code) is written for the model already and passes as it is.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (typeof code !== 'string') throw err;
+    const why = err instanceof WorkspaceAccessError ? err.message : errnoText(code, err);
+    throw new Error(
+      `The workspace directory ${getWorkspaceDir() ?? raw} cannot be reached (${why}). ` +
+      'The file tools cannot work until it can.',
+      { cause: err },
+    );
   }
   if (base === null) return { kind: 'path', path: validatePath(raw, operation) };
   const mapped = toWorkspaceRel(raw, base.ws);
@@ -156,6 +164,19 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
   return { kind: 'path', path: real };
 }
 
+/** The description libuv puts after the code: words only, so no path can come along with it. */
+const ERRNO_DESCRIPTION = /^[A-Za-z][A-Za-z ]*$/;
+
+/**
+ * `CODE: description` from an errno whose message reads `CODE: description, syscall 'path'`, or
+ * the bare code for any other message: the path in it is the process-handle path, never shown.
+ */
+function errnoText(code: string, err: unknown): string {
+  const message = err instanceof Error ? err.message : '';
+  const description = message.startsWith(`${code}: `) ? message.slice(code.length + 2).split(', ')[0] : '';
+  return description !== undefined && ERRNO_DESCRIPTION.test(description) ? `${code}: ${description}` : code;
+}
+
 /**
  * An errno from an fd operation names the file by its workspace path, not by the process-handle
  * path the walk opened it through: the model would copy that path, and it is refused.
@@ -169,10 +190,8 @@ function anchoredError(shown: string, err: unknown): Error {
     );
   }
   // Any other refusal of the walk itself already names the file by its workspace path.
-  // An errno message reads `CODE: description, syscall 'path'`: keep the description, swap the path.
-  if (!(err instanceof WorkspaceAccessError) && typeof code === 'string' && err instanceof Error && err.message.startsWith(`${code}: `)) {
-    const description = err.message.slice(code.length + 2).split(', ')[0];
-    return new Error(`${code}: ${description}: ${shown}`, { cause: err });
+  if (!(err instanceof WorkspaceAccessError) && typeof code === 'string') {
+    return new Error(`${errnoText(code, err)}: ${shown}`, { cause: err });
   }
   return err instanceof Error ? err : new Error(String(err));
 }

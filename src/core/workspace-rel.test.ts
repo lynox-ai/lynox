@@ -242,15 +242,22 @@ describe('workspaceBase', () => {
     // The erasure's window: emptied, not yet made again.
     rmSync(ws, { recursive: true });
     const err = await writeFileTool.handler({ path: join(ws, 'x.txt'), content: 'x' }, agent()).then(() => null, (e: unknown) => e as Error);
-    expect(err?.message).toBe(`write_file: ENOENT: no such file or directory: ${ws}`);
+    expect(err?.message).toBe(
+      `write_file: The workspace directory ${ws} cannot be reached (ENOENT: no such file or directory). ` +
+      'The file tools cannot work until it can.',
+    );
     expect(existsSync(ws)).toBe(false);
 
-    // A link put where the directory was is refused, with the advice the other link refusals give.
+    // A link put where the directory was is refused as a fault of the setup. Not with the advice
+    // for a link at a file: what this link points to is no workspace path the model could name.
     const foreign = join(tmp, 'foreign');
     mkdirSync(foreign);
     symlinkSync(foreign, ws);
-    await expect(writeFileTool.handler({ path: join(ws, 'x.txt'), content: 'x' }, agent()))
-      .rejects.toThrow(/http-api is a symlink.*name the file it points to by its own path/);
+    const linked = await writeFileTool.handler({ path: join(ws, 'x.txt'), content: 'x' }, agent()).then(() => null, (e: unknown) => e as Error);
+    expect(linked?.message).toBe(
+      `write_file: The workspace directory ${ws} cannot be reached (${ws} is a symlink). ` +
+      'The file tools cannot work until it can.',
+    );
     expect(readdirSync(foreign)).toEqual([]);
   });
 
