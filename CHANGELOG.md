@@ -1,5 +1,851 @@
 # Changelog
 
+## 2.16.0 — 2026-10-16
+
+This release contains security fixes. Upgrading is recommended for every instance.
+
+### Upgrade notes
+
+- On first start `engine.db` moves from schema **27** to **36**, `history.db`
+  from **58** to **62** and `agent-memory.db` from **6** to **7**. Every step
+  is additive and there is no down path. `engine.db` gains
+  `knowledge_entries.source_thread_deleted_at` (v28), the tables
+  `entry_sources`, `profile_seeds` and `profile_seed_backfill` (v29): existing
+  knowledge entries get the conversation they came from as their source in
+  `entry_sources` at migration, and `profile_seeds` is filled once from the
+  profile block when the engine first opens its knowledge store. Then
+  `subject_mints` (v30), `bulk_runs.principal` and `mandate_id` (v31), the
+  `bulk_runs.list_*` columns (v32), `connection_grants` (v33),
+  `audit_log.recorded_at` (v34), `bulk_runs.cost_usd` and `cost_cap_usd` (v35)
+  and the bulk judge columns on `bulk_runs` and `bulk_targets` (v36).
+  `history.db` gains `pending_prompts.closed_reason` (v59),
+  `pending_prompts.mandate_id` (v60) and the tables `deleted_threads` (v61)
+  and `bulk_cost_days` (v62). `agent-memory.db` gains
+  `memories.source_thread_deleted_at` (v7). The push-subscription store gains
+  `created_by` and `mandate_id` columns. The mail state does not change.
+  (#1689, #1693, #1698, #1700, #1718, #1738, #1743, #1746, #1757, #1793,
+  #1802, #1819, #1846)
+- On an instance provisioned by the hosting control plane (a hosted billing
+  tier in `LYNOX_BILLING_TIER` or the legacy `LYNOX_MANAGED_MODE`, or
+  `LYNOX_MANAGED_INSTANCE_ID` set), the owner signs in once more after the
+  update: a session cookie without the owner's principal is refused there.
+  Self-hosted instances keep accepting the old cookie and move it to the new
+  form on the next refresh. (#1722)
+- Backups made by an engine with a vault key are now signed. A restore of a
+  backup without a signature (every backup made before this release, and one
+  made without a vault key), with one that does not match, or on an engine
+  without a vault key answers 409 with `code: 'unverified_backup'`
+  until it is sent again with `allow_unverified: true`. The web UI asks before
+  it sends that. (#1850)
+- A request body without a `Content-Type` is refused with 415. API clients
+  that send JSON must send `Content-Type: application/json`. (#1762)
+- A server without `LYNOX_HTTP_SECRET` answers only when the `Host` header is
+  `localhost`, an IP address, the host of an origin listed in
+  `LYNOX_ALLOWED_ORIGINS`, or missing; other requests, the health route
+  included, get 403 with a sentence naming both remedies. Such a server takes
+  writes from a browser on localhost only from its own port. For the web UI's
+  dev server, start the engine with
+  `LYNOX_ALLOWED_ORIGINS=http://localhost:5173`. Entries of
+  `LYNOX_ALLOWED_ORIGINS` that are not an http(s) origin are named at start
+  and ignored. (#1759, #1825)
+- A model id with a `[1m]` suffix is now sent as its base id, without the
+  `context-1m` beta header, and gets the base model's context window:
+  `claude-sonnet-4-6[1m]` now has 200k tokens, `claude-opus-4-6[1m]` and
+  `claude-opus-4-7[1m]` keep 1M. (#1787)
+- A write `http_request` sends to an account connected through a built-in
+  sign-in provider is asked about every time, also for the owner. No
+  capability contract or workflow grant covers it, so an unattended run with
+  no one to ask no longer writes there through `http_request`; an approved
+  bulk run writes there only in a measured form. (#1791)
+- Workflow pre-approval is removed. A manifest step that carries
+  `pre_approve` is refused by validation and at run time; remove the field.
+  Library users: see Removed below. (#1789)
+- The bexio preset no longer allows read access to bills, expenses, bank
+  accounts, bank payments, transactions or the file archive. A profile that
+  still names one of these scopes gets no connect link, and `fetch_token`
+  does not renew its token, until the scope is removed with `api_setup
+  update`. A profile on `api.bexio.com` that does not go through the preset
+  can no longer write there. (#1812, #1821)
+- `POST /api/sessions/:id/changeset/review` must send back the `runId` of the
+  changeset it answers; without it, or with an earlier run's id, it answers
+  409. (#1732)
+- `pipeline_prompt_budget` is capped at 10 prompts per workflow run, whatever
+  the configured value. (#1694)
+- Approving an external bulk run that writes to a form nobody has measured
+  needs `"unmeasuredConfirmed": true`; without it the approval answers 409
+  `unmeasured_unconfirmed`. Bulk runs ship switched off
+  (`bulk_runs_enabled`). (#1774)
+- The Drive backup uploader no longer finds its `lynox-backups` folder by
+  name. The first upload after the update creates a new root folder once;
+  backups in the earlier folder stay in Drive but no longer appear in the
+  restore list. (#1758, #1784)
+- `magistral-medium-2509` and `magistral-small-2509` are removed from the
+  model registry. With a `tier_preset` set, a `tier_set` slot in
+  `config.json` that names one stops the engine from starting; replace
+  such a slot before updating. (#1768)
+- On an instance the control plane provisioned, engine plugins are not
+  loaded, whatever `LYNOX_FEATURE_PLUGINS` says, and the
+  `LYNOX_HTTP_ADMIN_SECRET` bearer reaches only the control plane's own
+  routes. (#1753, #1783, #1813)
+- A custom OAuth2 API profile whose `token_url` or request URL is plain
+  `http:` stops working, including on a private network or loopback; move it
+  to https. (#1856)
+
+### Added: a scheduled workflow can ask its owner and wait for the answer
+
+- A saved workflow whose steps ask questions only through `ask_user` can now
+  be scheduled. Workflows that may ask for a secret (`ask_secret`) or ask a
+  person another way (`ask_human`) stay unschedulable. One check decides this
+  for the scheduler, `task_create`, the schedule preview, `POST /api/tasks`
+  and the workflow library listing. (#1690, #1694, #1699)
+- During a scheduled run, a step's question is stored, written to a thread of
+  its own (one per run, marked unread) and sent to the owner as a
+  notification. The run waits for the answer; steps of a parallel phase ask
+  one at a time. A question waits up to 24 hours. A question that expires
+  unanswered ends the run as failed before the next step ("Question not
+  answered: …"), one that could not be put to the owner ends it with
+  "Question not asked: …"; in both cases the owner gets the failure
+  escalation. The
+  owner's stop withdraws an open question and ends the run as stopped. Time
+  spent waiting does not count toward the workflow's wall clock or the step
+  timeout. (#1694)
+- Asking gives a step no way to approve anything: the question goes through a
+  channel of its own that no consent gate or guard reads. Such a step keeps
+  `ask_user` and loses `ask_secret` and `ask_human`. (#1690)
+- A value of `pipeline_prompt_budget` that is not a finite number falls back
+  to the default of 5. (#1694)
+- Such a workflow runs on its schedule or from an interactive chat: `POST
+  /api/workflows/:id/run` answers 403 for it, `run_workflow` from an
+  autonomous caller refuses it, the library shows no Run button for it, and
+  `task_create` points to the library. The library's schedule dialog lists the
+  steps that may ask and says that each answer is waited for up to 24 hours
+  and that the schedule starts no other run while one waits. `update_workflow`
+  says when an edit takes a workflow off its schedule. The workflow listing
+  carries `schedulable` and `askingSteps`; against an engine without
+  `schedulable` the web UI keeps the old rule. (#1699)
+
+### Added: what a person the owner lets in holds ends with their access
+
+- A request whose session belongs to a person the owner let in is refused
+  with 403 and `code: 'mandate_revoked'` when that access has no recorded end,
+  has passed its end or was revoked. The end is recorded first, so a revoke
+  cannot be undone by a later login. On that code the web UI shows its
+  session-expired notice with a link to sign in again. (#1733)
+- Questions such a person's runs asked close when the access ends: at boot,
+  every 5 minutes, and at once when a revoke is recorded, with
+  `closed_reason = 'mandate_ended'`; the run waiting on one is released. Each
+  question records the access it was asked under, and an answer given under a
+  later access for the same address is refused (403). An answer that arrives
+  after the access ended is not used. A question from such a person stored
+  before this release counts as ended. (#1738)
+- With `bulk_runs_enabled` on, bulk runs such a person planned and nobody
+  approved end with the access, as
+  `aborted` with the halt reason "the access that planned this run has ended
+  before it was approved"; approve and resume answer such a run 409
+  `mandate_ended`. Every new run records who planned it. A run from before
+  this release counts as the owner's only when it was planned after
+  2026-10-12 09:33:19 (UTC), in a conversation the owner started; any other
+  such run ends. Approved runs are never ended this way. (#1743)
+- Running work of such a person ends with the access, on a revoke and every
+  5 minutes: their chat runs, the worker runs they started or whose question
+  they answered, and the live run streams they follow. Runs are matched on who
+  started them, so the owner's run in a conversation such a person created
+  goes on. A chat run checks the access again once it is registered, a worker
+  turn just before the model call. (#1750)
+- Push subscriptions such a session added are tied to its access: after it
+  ends nothing is sent to them, and they are removed at the next send or
+  change. Such a session may turn on push for its own device, keeps at
+  most 5 subscriptions, never replaces the owner's, and removes and tests only
+  its own. (#1700)
+- New admin route `POST /api/admin/mandates/revoke` with
+  `{ "revoked_mandate_ids": string[] }` (at most 1000 ids). It applies the
+  list idempotently and answers `{ "newly_revoked": n }`; 400
+  `invalid_revocation` when the list cannot be read, then applying none of it,
+  and 503 `mandate_ends_unavailable` without `engine.db`. (#1753)
+- The web UI renews such a person's session before it ends, through
+  `POST /auth/renew`, 4 minutes and again 1 minute before the end. The server
+  asks the control plane only within the last 5 minutes, at most once per
+  access every 30 seconds, with a 5-second timeout; without a valid answer the
+  session ends at its time as before. Renewal stops 8 hours after the login,
+  and a session created before this release is not renewed. The route answers
+  403 to a request that does not come from the instance's own pages, and
+  renews only where `LYNOX_MANAGED_INSTANCE_ID` and
+  `LYNOX_MANAGED_CONTROL_PLANE_URL` are set. Logging out stops the renewal in
+  every tab. The owner's session is not touched. (#1769)
+
+### Added: the trail of a person the owner lets in
+
+- Every GET or HEAD such a person's session makes to an `/api/` route it may
+  read writes a `read` row to the instance log before the route answers: the
+  route as registered, the request path and the values of the query parameters
+  the route selects its data by. Other query values are left out and
+  credential-shaped values are masked. A read whose row cannot be written is
+  answered 503 and not run. The owner's reads write nothing. (#1777)
+- Every other request of such a session that reaches its route writes an
+  `attempt` row before the route runs and an outcome row after it: `done` for
+  2xx, `refused` for any other answer the route gives below 500, `failed` for
+  a 5xx or no answer. The row's target is the request path, masked where it
+  holds a secret's shape; a chat request's outcome row follows when its run
+  ends. These rows replace the per-route rows of the workflow delete, the
+  task delete and the hand start of a trigger. A change whose attempt row
+  cannot be written is answered 503 and not made. Such a person's OAuth
+  consent writes its attempt row before the token exchange. (#1779)
+
+### Added: erase one person from memory
+
+- The owner can erase one person from the subjects view (a person subject,
+  not the owner's own). `POST /api/privacy/person-erasure/preview` with
+  `{ subjectId }` lists what would be removed, text included. Entries bound to
+  the person always go; name matches are only shown and go only when the owner
+  selects them. `POST /api/privacy/person-erasure` erases that set; it needs
+  `"confirm": "ERASE_PERSON"` and the preview's `plan`, and answers 409
+  `plan_changed` when the set changed since the preview. Both answers carry
+  `Cache-Control: no-store`. (#1763)
+- The erasure is refused with 409 while a chat runs (`runs_active`) or
+  `DELETE /api/data` erases the instance (`erasure_in_progress`), with 503
+  `stores_unavailable` when the memory stores are not open, with 503
+  `key_unavailable` when stored text cannot be decrypted, and with 503
+  `audit_unavailable` when the audit log cannot be written. The audit log
+  gets an attempt and an outcome row with ids and counts only. A failed step
+  answers 500 with the steps done and the one that failed; previewing and
+  erasing again finishes the job. Deletes run with SQLite `secure_delete` on,
+  and afterwards the write-ahead logs are folded in and truncated; `scrubbed`
+  in the result says whether that finished. The erasure removes the person's
+  subject, the knowledge entries and memories bound to them and the selected
+  name matches, and takes their text out of the profile block; every preview
+  and every result states its scope, and the instance log records the
+  erasure by ids only. On an instance
+  the control plane provisioned, both routes refuse every bearer token with
+  403 (`session_required`, or the control plane's own refusal for its admin
+  bearer). Erasing the last person keeps the result panel open.
+  (#1763, #1776)
+- `deleteEntry` and `deleteBySubject` remove the erased text from the profile
+  block before they delete the rows. If that step fails, the call throws and
+  the rows stay, so a retry finishes the job. (#1748)
+
+### Added: bulk runs (behind `bulk_runs_enabled`)
+
+- `bulk_plan` takes `source_list` for `target_system: "http"`, beside
+  `source_file` and `source_collection`; exactly one is required. The one list
+  form is WooCommerce products (`/wp-json/wc/v3/products`), with filter values
+  for `category`, `tag`, `status`, `sku`, `type` and `stock_status`, an
+  `id_field` and the `after` fields to set on every element. The engine
+  builds the page address itself, and links in the response are never
+  followed. (#1746, #1752)
+- Nothing is read when such a run is planned. Once the owner starts it, the
+  engine reads the list page by page (50 per page, ordered by id, at most
+  4 MiB per page) and halts so the owner can review the targets; each target
+  is read only after a second start. `GET /api/bulk/runs/:id` returns
+  `listFirstPage`, `listStartChecksum` and a `listNote` saying that a list
+  read page by page can miss or skip elements that move while it is read.
+  `POST /api/bulk/runs/:id/resume` needs `listChecksum` for a list still to be
+  read. What the list holds is never shown to the model. (#1746)
+- Write forms whose effect on unsent fields was measured on a real provider
+  decide whether a run is "measured": WooCommerce products (PUT, PATCH and
+  POST to `/wp-json/wc/v3/products/<id>`) and bexio contacts (POST to
+  `/2.0/contact/<id>` on `api.bexio.com`). Approving an unmeasured apply run
+  needs `"unmeasuredConfirmed": true`, and such a run needs a confirmed probe
+  of its own before it writes more than one target. `GET /api/bulk/runs/:id`
+  returns `writeFormNote` and `writeFormConfirmation`, and the run's status
+  carries `writeForm`. An undo restores under its source run's confirmation.
+  (#1774)
+- `bulk_plan` takes `judge` instead of per-target `after` values: a rule (up
+  to 4000 characters), a schema of up to 20 fields and a model tier (`fast` by
+  default). It applies to `data_store` and `http` targets. No model is called
+  until the owner starts the judging with a spend limit (`costCapUsd`) and the
+  rule's hash (`judgeRuleHash`); for a list run that is the start after the
+  list was read. Then one model call per target, with no agent tools and a
+  structured answer only, decides that target's fields, and the owner approves
+  the verdicts before anything is written. Only the schema's fields are sent,
+  and only when they hold nothing shaped like a credential. A second judged
+  run while one is started and unapproved needs `supersedes` with that run's
+  id (else 409 `supersede_required`); starting it ends that run, and what it
+  spent stays booked. (#1846)
+- Every judge call is checked against the run's limit and the daily and
+  monthly limits before it is made and booked when answered; the spend counts
+  toward those limits and appears in the usage summary. On a hosted instance
+  whose model key the control plane does not supply, starting a judged run
+  answers 409 `judge_unavailable`.
+  `bulk_status` shows a run's model spend and limit and how many targets have
+  no verdict yet; `GET /api/bulk/runs/:id` adds `judgeModel`, and for the
+  owner `judgeRule` and `judgeRuleHash`. A judged run started and never
+  approved is deleted with its encrypted before-states 30 days after its
+  start. A failure after a target's paid call releases the target and halts
+  the run, so a restart judges it again. (#1819, #1846, #1851)
+- A bulk run refuses an after-state that sets a field whose value has an
+  effect at the provider: a WooCommerce order's `status`, `set_paid` or
+  `customer_id`, a customer's `password` or `email`, any write to a
+  WooCommerce webhook,
+  and bexio payments and order repetitions. Such targets are marked
+  `effect_field`, and the same check runs on every write the run sends. A list
+  run whose list path is no longer offered halts. (#1760)
+- A bulk run writes to an account connected through a built-in provider only
+  in a measured form, after the person approved the run as a whole; an
+  unmeasured write there is refused when sent, even after
+  `unmeasuredConfirmed`. (#1791)
+
+### Added: bexio writes
+
+- The bexio preset allows five write scopes: `contact_edit`, `note_edit`,
+  `task_edit`, `kb_offer_edit` and `kb_invoice_edit`, requested only when the
+  profile names them. A profile that names `note_edit`, `task_edit`,
+  `kb_offer_edit` or `kb_invoice_edit` must also name `contact_show` or
+  `contact_edit`. (#1791, #1794)
+- Before a write to a connected bexio account is asked about, lynox reads the
+  account and shows what the write concerns: an existing invoice or quote by
+  number, recipient and total (an invoice also by its open amount), a new one
+  by recipient and the sum of its positions, and any other `/2.0/` write whose
+  body names a `contact_id` by that contact's name. Other writes (a contact
+  itself, a note or task edit without `contact_id`, paths outside `/2.0/`) are
+  asked with the body only, as before. The write is refused without asking
+  when such a reading fails, when a position cannot be summed, when a new
+  invoice or quote names no `contact_id` or `currency_id`, when an edit of one
+  has a body that is not a JSON object or changes its currency, when the path
+  is percent-encoded or routes ambiguously, or when a `/2.0/` path targets
+  another `kb_` document type. (#1794)
+- Before a connect that asks for write access, the connect link first shows a
+  page on the instance with bexio's customer text and the write scopes it
+  asks for; the person continues to bexio only from that page. A confirmation
+  without `Sec-Fetch-Site: same-origin` is refused (403), and one whose
+  profile now asks for a different set of scopes than when the page was shown
+  answers 409. (#1812)
+
+### Added: bash in a separate shell container, when configured
+
+- When `LYNOX_SHELL_EXEC_SOCKET` is set, the `bash` tool sends each command
+  over that unix socket to an exec daemon in a separate container
+  (`dist/shell-sidecar/exec-daemon.js`, same image) instead of running it in
+  the engine's container. There is no fallback: with the socket set, a missing
+  or refusing daemon fails the call, and a set but empty value is an error.
+  Unset, `bash` runs in the engine as before. In this mode each call starts in
+  the sidecar's workspace directory (`LYNOX_EXEC_WORKSPACE`, default
+  `/workspace`), and two `bash` calls of one turn can run side by side.
+  (#1816)
+- The daemon runs each call as a uid of its own from a pool, and reuses a uid
+  only after it has killed every process of it and removed what it left in IPC
+  objects, `/dev/shm`, `/dev/mqueue` and its call directory. A call gets
+  `HOME` and `TMPDIR` in its own call directory and a fixed `PATH`; engine
+  path variables are dropped. A call's time limit is at most 15 minutes; a
+  `timeout_ms` of 0, unlimited in the engine, becomes 15 minutes. The
+  daemon's own settings (`LYNOX_EXEC_*`) are read by the sidecar only. The
+  image adds `tini`, a group `lynox-ws` (gid 1002), which the engine user
+  `lynox` joins, and `/run/lynox-exec`.
+  (#1816)
+
+### Added: a workspace root outside the data directory
+
+- `LYNOX_WORKSPACE_ROOT` names the directory that holds the workspaces.
+  Unset or empty, it is `<data dir>/workspace` as before, created when
+  missing. A `LYNOX_WORKSPACE_ROOT` that does not exist or is not a directory,
+  a root that cannot be read or entered, or a context directory below it that
+  cannot be read, written or entered stops a server boot with a message naming
+  the path. A root that is the data
+  directory, contains it or lies inside it is refused, by path and by device
+  and inode. A path naming the old `<data dir>/workspace` location is mapped
+  onto the configured root by the file tools and the file area once
+  `<data dir>/workspace` is empty; while it still holds files, such a path is
+  refused. (#1823, #1845)
+- Backup, migration export and import and the data erasure reach the
+  workspace through a directory handle opened on the root at boot and do not
+  follow symbolic links below it; a root moved or replaced after boot makes
+  them fail until the engine is restarted. `GET /api/admin/workspace/status`
+  (admin scope; on an instance the control plane provisioned, its admin bearer
+  reaches it) reports `workspace_root_mode`, `workspace_root_is_mount` and
+  `workspace_legacy_pending`, or answers 500 `workspace_root_unusable`.
+  `node dist/scripts/data-dir-sweep.js` takes `--workspace-root=PATH` (else
+  `LYNOX_WORKSPACE_ROOT`) and, with an external root, reports files left under
+  `<data dir>/workspace`; it exits 1 when it finds any.
+  (#1823, #1824, #1839, #1845)
+- `LYNOX_WORKSPACE` is read by the CLI only and is no longer copied into the
+  `workspace_dir` config key, which nothing read; `workspace_dir` is still
+  accepted in `config.json`. (#1823)
+
+### Added: other
+
+- The schedules view shows a "Running" badge and a "Stop run" button on a
+  trigger whose run can be stopped. `GET /api/triggers` marks each row with
+  `running` and `stoppable`; a person the owner lets in gets both only for
+  runs they started. `POST /api/tasks/:id/stop` now answers its 409 with a
+  `code` (`not_running`, `unstoppable` or `ambiguous_id`), and the view gives
+  a sentence for each. (#1764)
+- `validateAgainstSchema` accepts `minLength` / `maxLength` on strings,
+  counted in code points, and `additionalProperties: false` on objects; both
+  are opt-in. (#1773)
+- The tier vocabulary gains the value `managed_max` for `LYNOX_BILLING_TIER`
+  (and the legacy `LYNOX_MANAGED_MODE`), a tier on which the control plane
+  supplies the LLM key. The web UI reads the tier through one check. (#1805)
+- Requests to `api.fireworks.ai` carry a `prompt_cache_isolation_key` derived
+  from the instance's cache-key salt. (#1818)
+- The artifact list and `GET` of an artifact mark `lostOnSave` when the
+  stored file (at most 2 KB) holds the engine's placeholder for a saved body;
+  the list badges it "Content missing", and the view shows a notice instead of
+  rendering it and hides print and share. (#1844)
+
+### Changed: private mode
+
+- A memory write already in flight when a chat switches to private mode is
+  dropped; an extraction already paid for
+  is billed once. A document uploaded into a private chat is not chunked into
+  the knowledge archive, and a switch during a long ingest stops the remaining
+  chunks. (#1715, #1716)
+- A durable entry remembers every chat that said it, with that chat's
+  wording. When one chat goes private, only its contribution goes: an entry
+  also said elsewhere stays, in the remaining chat's words, trust and pin; an
+  entry with no source left is deleted. `GET /api/export` lists each source's
+  wording under `durable_knowledge.sources`, masked. A line of the `profile`
+  block is removed only when it was seeded from the removed entry. (#1718)
+- Subjects a chat created are removed when it goes private, once nothing else
+  holds them. (#1698)
+- A workflow started from a chat runs its steps in that chat's private mode,
+  read live, including nested pipelines, saved-workflow runs and their
+  retries. What a workflow step or a `spawn_agent` child stores is recorded
+  under the chat it runs for and goes when that chat goes private. A
+  sub-agent running when the switch is flipped stops capturing too. Scheduled
+  and headless runs carry no chat and are unchanged. (#1721, #1736, #1741)
+- The chat header's switch shows "off" with an error toast when the request
+  got no answer, or a server error that names no stored state. The toggle
+  explains what private mode keeps and that workflows saved in the chat run
+  later without private mode. (#1721, #1761)
+
+### Changed: deleting a conversation
+
+- `DELETE /api/threads/:id` still keeps the durable entries and memories
+  captured in that conversation, and now stamps them `source_thread_deleted_at`
+  (`KnowledgeEntry.sourceThreadDeletedAt`); they stay recallable. If marking
+  fails, the route answers 500 and the conversation is not deleted. (#1689)
+- A deleted conversation's id is recorded, and no thread is created under it
+  again; `POST /api/sessions` answers 410 `thread_deleted` for it, and the web
+  UI says the conversation was deleted and marks its queued turns as failed.
+  Questions a running workflow waits on there are withdrawn and the run ends
+  ("Question withdrawn"; a scheduled one as `stopped`, without retry or
+  escalation). An escalation or a worker answer whose conversation was deleted
+  continues in a new one. (#1757)
+
+### Changed: questions
+
+- When the user closes an `ask_user` question or it expires, the model gets a
+  sentence saying so and telling it not to act on any option. In a batch, an
+  unanswered question reads `(no answer)`, and a plan in `plan_task` that got
+  no answer approves nothing. (#1697)
+- `plan_task` is exempt from the 15-minute tool timeout, like `ask_user`. When
+  another tool times out while its question is open, that question is
+  withdrawn, and this does not count as the user's denial for the rest of the
+  batch. (#1697)
+- An answer to a question an engine restart closed gets 410 with code
+  `process_restarted`. `POST /api/triggers/:id/run` refused as already running
+  names `leaseUntil`. (#1693)
+- Answering a secret question or a mail connection by `promptId` settles
+  exactly that question: an unknown id answers 404, one of another session or
+  kind 409, an expired one with the reason it was closed, an answered one 200,
+  and one that can no longer be settled 410. Only a request without a
+  `promptId` settles the open one. (#1696)
+
+### Changed: changeset review
+
+- `GET /api/sessions/:id/changeset` and the `changeset_ready` event carry a
+  `runId`, which the review must send back (see Upgrade notes); the review
+  answers 409 while a run is in progress. (#1730, #1732)
+- A file that was backed up but not changed is not reported, and the
+  changeset is settled when its run ends, so "Rollback all" resets only what
+  the review showed. An existing file whose read or copy failed stays
+  `modified` and is not deleted by "Rollback all". The changeset is relative
+  to the workspace. (#1691, #1730)
+- Only files a write tool can change are tracked: the workspace, `/tmp` and
+  the artifacts directory. An artifact edited with `edit_file` can be reviewed
+  and rolled back. The diff preview reads the file as the write tool resolves
+  the path. (#1836)
+- In the web UI, a typed message, a voice transcript and a retry are kept when
+  an open review holds the send, and the automatic re-send on reconnect waits
+  for the review. (#1691, #1732)
+
+### Changed: deleting a schedule while it runs
+
+- `DELETE /api/tasks/:id` on a schedule whose `run_workflow` or `run_agent`
+  run is in flight also stops that run when the caller may stop it. The
+  response carries `run`: `stopped`, `not_running`, `effect_kept`,
+  `not_stopped`, `unstoppable_now` or `stop_failed`. (#1695)
+
+### Changed: models and pricing
+
+- Every Anthropic and Vertex client the engine builds drops or rewrites
+  request fields a model rejects, from rules on the model's capability entry
+  (sampling fields, `thinking: {type: 'disabled'}`, a forced `tool_choice`
+  becomes `auto` with an instruction). Message batches, the endpoint key test
+  and the Docker installer's key check are shaped the same way; a batch that
+  forces a tool on a model that rejects it is refused before sending. Ids not
+  in the capability table get no rules; a `[1m]` suffix is still removed.
+  (#1681, #1781)
+- The capability table gains `claude-opus-5-5`, `claude-sonnet-5-5` and
+  `claude-haiku-5-5` with prices; they are not offered in a model selector.
+  The `[1m]` variants no longer have entries of their own (see Upgrade notes);
+  the first request with such an id writes one line to stderr. (#1681, #1787)
+- A forced-tool reply that skipped the tool or was cut off at `max_tokens` is
+  booked once and reported on stderr at every site that forces a tool; the
+  search reranker then reports `skipReason: 'cut-off'`. A plan reply without a
+  plan and a refused structured extraction are booked too. The follow-up
+  suggestion budget is 960 tokens (was 512). (#1681, #1705)
+- A helper call aborted before its reply counts toward the run ceiling and
+  the session cap with an upper bound of its cost; it is not debited to the
+  customer. The search reranker's timeout now aborts its request. (#1706)
+- Six Fireworks ids the provider no longer serves leave the model picker
+  (`glm-5p2`, `deepseek-v4-pro`, `deepseek-v4-flash-0731`, `qwen3p7-plus`,
+  `kimi-k2p6`, `kimi-k2p7-code`); they keep their prices. A tier slot that
+  names one shows the tile's first model in the settings editor, and the next
+  save of that page stores it. DeepSeek v4.1 Flash
+  on Fireworks is priced at $0.30 input, $0.006 cached and $1.20 output per 1M
+  tokens (was $0.22 / $0.007 / $0.66). (#1735, #1767)
+- Retired Mistral ids that Mistral answers with a successor are priced, and
+  given the window, of the model that answers (`mistral-medium-2508` and
+  `mistral-medium-latest` as `mistral-medium-2604`, `ministral-8b-2410` and
+  `open-mistral-nemo` as `ministral-8b-2512`, `ministral-3b-2410` as
+  `ministral-3b-2512`, `magistral-small-latest` as `mistral-small-2603`).
+  `mistral-small-2603` is priced at $0.15 / $0.60 with a 262 144-token window;
+  `ministral-3b-2512` has 131 072 tokens (was 262 144).
+  `magistral-medium-2509` and `magistral-small-2509` are removed from the
+  table (see Upgrade notes). (#1768)
+- The inbox classifier's default Mistral model is `mistral-small-2603`
+  instead of `mistral-small-latest`, with its cost rates taken from the model
+  registry ($0.15 input, was $0.20). The installer and setup banner offer
+  `codestral-2508` instead of `codestral-latest`. (#1768, #1772)
+
+### Changed: exports and logs
+
+- `GET /api/export` includes every flat-file memory scope (`memory_scopes`,
+  also when memory is off) and every contact, deal and DataStore row; the
+  contact, deal and DataStore rows are read from one shared budget of
+  250 000 rows. `contacts_may_be_incomplete` and `deals_may_be_incomplete`
+  say when that budget ran out, `datastore_may_be_incomplete` also when a
+  collection could not be read, and `memory_scopes_may_be_incomplete` when a
+  memory file or directory could not be read.
+  (#1714, #1745)
+- The debug export's durable-knowledge block gains `status_counts`. (#1751)
+- The opt-in measurement logs and the wire capture are written to the
+  configured data directory, also with `--data-dir`, and are removed by
+  `DELETE /api/data` instead of blocking it with 409. (#1704)
+- The vault rotation route re-keys the vault in the configured data
+  directory, and the prompt-cache salt follows `--data-dir`. (#1817)
+
+### Changed: Google
+
+- When a Google connect comes back without access, the Google settings card
+  says why, also on a self-hosted setup, which no longer shows Google's raw
+  error page. A revoked-grant message mentions that a Workspace admin may
+  have blocked the app. (#1740)
+- The Drive uploader keeps the id of its `lynox-backups` root in
+  `gdrive-backup-root` in the data directory and finds the root only through
+  it, never by its name. Without a
+  stored id, or when the stored folder is gone, in the bin, no longer the
+  user's or the account changed, it creates a new root. A failed Drive lookup
+  or a pin that cannot be read or written fails the upload. Disconnecting
+  Google deletes the backup files lynox uploaded and the user owns, in every
+  folder named `lynox-backups`. `fileRootPin` and `RootFolderPin` are
+  exported, and `GDriveBackupUploader` takes an optional `{ rootPin }`;
+  without one it refuses to upload. (#1758, #1784)
+- The `create_event` confirmation lists every field the request sends, and
+  the `update_event` confirmation each changed field and whether the guest
+  list is replaced or cleared; the request is built from the object shown.
+  `update_event` refuses an `updates` field outside a fixed list, and both
+  refuse a guest without an email address. (#1811)
+
+### Changed: API profiles
+
+- Each API profile carries a grant, an id for one epoch of its credentials,
+  recorded in `engine.db`. A new grant starts when the profile is created, on
+  a new OAuth consent, when a save changes the credentials or where they go,
+  when a credential it reads is stored or found changed at boot, and on a
+  token renewal the grant did not record. Existing profiles get one at the
+  first boot. After a new consent the grant record is built new.
+  `GET /api/api-profiles` and `GET /api/api-profiles/:id` do not return the
+  grant's credential fingerprints. (#1793, #1795, #1807)
+- A profile that keeps its OAuth client id or secret under one of its own
+  token names is refused on save and not registered at boot; `fetch_token`
+  refuses an `output_secret_name` that is the client id or secret slot.
+  Saving a profile under an id another kind of connection uses is refused.
+  (#1806, #1815)
+
+### Changed: backup, restore, migration and erasure of the workspace
+
+- A backup skips FIFOs, sockets, devices and names that are not valid UTF-8
+  in the workspace, as it already skipped symbolic links, and lists all of
+  them as `skipped`. A
+  workspace file that cannot be read, or a mount below the root, fails the
+  backup. (#1839)
+- A restore stages the workspace files inside the root and commits them only
+  after the data-directory files are swapped in. An encrypted backup's
+  workspace files and the key check are decrypted in memory. The migration
+  export names files it could not carry as `skipped`, and the import names a
+  path the target cannot store. (#1839)
+- The data erasure empties the workspace root in place, follows no link below
+  it, refuses before deleting anything when a mount is below it or when bind
+  mounts make root and data directory overlap, and fails with
+  `failed: ["workspace"]` when it cannot reach the root. (#1839, #1845)
+
+### Changed: other
+
+- An uploaded document cut at the extraction limit says so in its first line
+  ("CUT: only the first N of M chars are included"). (#1755)
+- The `mail_send` and `mail_reply` previews quote the account id and add the
+  display name the recipient sees. (#1770)
+- `GET /api/files` answers a failed listing with an error (404, 400 or 500)
+  instead of an empty folder, and a path with a NUL byte with 400. (#1822)
+- On boot, empty CRM collections in the CRM's current shape are kept instead
+  of being dropped and recreated. (#1834)
+- The voice settings say that a chosen voice is used for every language.
+  (#1703)
+
+### Removed: workflow pre-approval
+
+- Workflow manifest steps can no longer pre-approve tool calls: a step that
+  carries `pre_approve` is refused by `validateManifest` and `runManifest`; a
+  warned call is asked about when someone is watching and refused in an
+  unattended run. The pre-approval tables in `history.db` stay; nothing writes
+  them. The CLI pre-approval dialog and the `lynox:preapproval:*` diagnostics
+  channels are removed. (#1789)
+- Breaking for library users: `extractMatchString`, `matchesPreApproval`,
+  `buildApprovalSet` and `isCriticalTool` are no longer exported
+  (`globToRegex` still is); `AgentConfig` loses `preApproval` and `audit`,
+  `ManifestStep` loses `pre_approve`, `spawnInline` / `spawnViaAgent` lose
+  their `preApproval` parameter, the types `PreApprovalPattern`,
+  `PreApprovalSet` and `PreApproveAuditLike` are gone, and `RunHistory` loses
+  its five `*PreApproval*` methods. (#1789)
+
+### Security: what a session of a person the owner lets in may do
+
+- Adding a passkey, creating a device link code and revealing the access token
+  or the vault key are owner-only; any other session gets 403, and the passkey
+  `status` reports `canRegister`. (#1688)
+- The owner's session cookie carries a signed owner principal
+  (`LOGIN_PRINCIPAL_VERSION` 2; see Upgrade notes). (#1722)
+- Every user route, GET included, declares what such a session may do;
+  `GET /api/google/oauth-url` is owner-only. Such a session's GET and HEAD
+  requests are subject to the cross-site check before their read is written
+  to the trail. (#1717, #1826)
+- An owner's vault name is released to such a person's profile only when
+  every address it goes to is https. The release question names every field
+  whose change ends the release and that the profile also sends it for the
+  owner's own and bulk runs. (#1849)
+- The managed login page takes any address, and a rejected code shows its
+  own text. (#1731)
+
+### Security: the control plane's access
+
+- On an instance the control plane provisioned, its admin bearer reaches only
+  `GET /api/export`, `POST /api/admin/mandates/revoke`,
+  `GET /api/admin/google/status`, `POST /api/admin/google/revoke` and
+  `GET /api/admin/workspace/status`; every other route answers 403. Its
+  requests act as a principal of their own. Registering a fixed-path route
+  twice fails the boot. Self-hosted instances are unchanged. (#1753,
+  #1783, #1823)
+- Every request of the admin bearer and the migration token that reaches a
+  route writes an `attempt` row and an outcome row to the instance log, with
+  the actor `cp-admin` or `cp-migration` and ids only; `recorded_at` is when a
+  row was written, `ts` when the act happened. Refusals of the admin bearer on
+  other routes are rate limited. The export's answer carries
+  `X-Lynox-Audit-Target` and a `Content-Length`. (#1802)
+- The control plane's Google revoke answers 400 `drive_deletion_owner_only`
+  for any `delete_drive_backups` value but `false`. (#1780)
+
+### Security: requests a browser sends on its own
+
+- Without `LYNOX_HTTP_SECRET`, a write from a browser is refused unless its
+  `Origin` is an allowed origin or this server itself, reached as `localhost`
+  or by IP address, on its own port; requests with neither `Origin` nor
+  `Sec-Fetch-Site` (curl, the CLI, MCP clients) pass this check but still meet
+  the `Host` check (see Upgrade notes), and an `Origin` of `null` is never
+  allowed.
+  (#1759, #1825)
+- A request another site made the browser send, signed in by the session
+  cookie or sent to a server without a secret, is refused with 403 when it
+  writes or when it is a GET or HEAD on a route that does more than read.
+  Bearer tokens are not affected. (#1762)
+- The Google sign-in loopback callback checks the flow's state before it
+  reads anything else. (#1825)
+
+### Security: the `http_request` write gate
+
+- Every header of the `X-Forwarded-*`, `X-Original-*` and `X-Rewrite-*`
+  families is refused on a write; `X-Forwarded-For` and `X-RapidAPI-Host` stay
+  allowed. (#1737)
+- The write gate reads method overrides in more forms. A write that names
+  several methods is gated as all of them, and one whose method cannot be
+  determined is gated as the strongest method.
+  (#1701, #1709, #1756, #1765, #1798)
+- The gate reads a request again after the engine attached a profile's
+  credential, in `http_request` and in bulk runs; a request whose method,
+  named writes or re-targeting header changed is not sent. (#1797)
+- An approved write is not followed as a write across a redirect that changes
+  scheme or port, except plain http upgraded to https on the default ports.
+  (#1734)
+- A write approval question hides any part that decodes to a stored secret.
+  (#1742)
+- An API profile's `auth.header_name` may not be a method-override header, a
+  re-targeting header, `Content-Type` or `Content-Encoding`. (#1766, #1798)
+- A reviewed workflow grant whose step templates set a header a run under it
+  may not send is refused when accepted; the refusal names the headers (up to
+  three, the rest counted). (#1712)
+- A profile on a built-in provider's API host must go through that provider:
+  another profile there is refused on save, and a write through one saved
+  earlier is refused before its credential is attached. A write to such a
+  host with no profile is refused, and a redirect onto it is not followed.
+  (#1821, #1835)
+- A write to a connected account is refused when its path or query is
+  percent-encoded, too long to show or not plain `key=value` pairs, or when it
+  sets a header other than `content-type: application/json` (optionally with
+  `; charset=utf-8`) or `accept: application/json` / `*/*`. A provider profile
+  that names its own token header is refused. A write whose body the question
+  cannot show whole is refused. (#1791, #1812)
+
+### Security: shell, files and the image
+
+- Every rule in the bash danger list states what happens in an unattended
+  run. Commands that reach another system, run fetched or decoded code, read
+  `/proc`, or change services, cron, firewall or users are asked about in an
+  unattended run and refused where there is no one to ask; a capability
+  contract lifts the question, except for rules blocked outright (such as
+  `git push`). In a chat, rules only the unattended list held are
+  asked about too. (#1687)
+- The bash danger check normalizes line breaks and line continuations before
+  it matches a command. (#1782)
+- The secret-file rule of the bash and file guards is built from the
+  data-dir inventory. (#1707, #1713)
+- The file area refuses a dangling symbolic link and a missing path below a
+  link that points out of it. (#1822)
+- In the Docker image every program is execute-only for the runtime user, and
+  the code under `/app` and the entrypoint belong to root and are read-only
+  for it. (#1804, #1828)
+- The artifact print preview runs only its own script, by a per-document
+  nonce. Mermaid diagrams are rendered with `securityLevel: 'strict'`.
+  (#1796, #1801)
+
+### Security: secrets, triggers and backups
+
+- `POST /api/sessions/:id/run` masks credential-shaped values in a typed
+  message before the run starts, and a credential typed as the answer to an
+  open question is masked before it is stored or given to the model.
+  (#1728, #1747)
+- `task_update` checks a firing trigger's title and description for
+  instructions as `task_create` does. (#1708)
+- The retrieval shadow log stores an HMAC of the query under a per-process
+  salt. (#1704)
+- Backup manifests carry an HMAC keyed from the vault key (see Upgrade
+  notes). Each file is checked against its manifest checksum before it is
+  staged, and in an encrypted backup every file must be encrypted. A restore
+  and a backup verify refuse a manifest entry whose path leads outside the
+  backup. (#1843, #1850)
+- Drive backup download and delete act only on a backup folder directly under
+  the uploader's own root that the user owns and this app created; a download
+  checks the whole tree before writing and creates files exclusively. (#1775)
+- An OAuth2 API profile's client secret and the access token it mints travel
+  only over https: saving a profile with a `token_url` that is not `https:` is
+  refused, a token exchange or renewal against a non-https endpoint is refused
+  before anything is sent, and an OAuth2 request to a non-https URL is refused
+  before any vault read. Built-in sign-in presets are unaffected. (#1856)
+
+### Fixed
+
+- An evicted `artifact_save` call loses its `content` field. (#1686)
+- After a run stopped server-side mid-answer, the live chat shows the run's
+  note below the partial answer without a reload. (#1723)
+- The agent's "please continue" turn after a `max_tokens` stop is no longer
+  shown as a user message. (#1727)
+- A sub-agent's `error` event carries `subAgent` / `subAgentId` and is
+  forwarded as non-fatal. (#1711)
+- A chat stop that arrives while a turn is still being prepared ends that turn
+  before the model call. (#1750)
+- A fact marker with an unknown provenance tier is shown as the lowest tier.
+  (#1749)
+- A workflow step's recorded tool calls pair each result with its call by
+  tool-use id and name; `tool_call` and `tool_result` events carry an
+  optional `toolUseId`. (#1788)
+- The usage summary counts a run on a window's first and last day in the
+  right window, and a window ending mid-day has a bucket for its last day.
+  `GET /api/history/runs` compares `dateFrom` the same way and answers 400 to
+  a `dateFrom` or `dateTo` that does not start with a `YYYY-MM-DD` date.
+  (#1840, #1854)
+
+### Internal
+
+- Tests: the delegation row waits for its children; spawned children run
+  neither helper fallback; the bulk targets route and profile reads by a
+  person the owner lets in go together; the brokered Google reload on
+  disconnect. (#1710, #1719, #1744, #1792)
+- Comments only: the format-character fold, the history.db v43 migration,
+  how a voice is chosen. (#1724, #1739, #1786)
+- Bash pre-approval patterns were narrowed before the feature's removal; no
+  effect in this release. (#1785)
+- Online checks for Fireworks picker ids, the Mistral served-as map and
+  priced Anthropic ids; a model-tier eval for the bulk judge; the inbox eval
+  names fixtures it archived without a match; a test against Mistral
+  `-latest` aliases. (#1735, #1768, #1771, #1772, #1778, #1841)
+- CI and build: Docker Hub images through mirror.gcr.io; the Whisper model
+  through `scripts/fetch-pinned.sh` with a second source; a pre-push eslint
+  hook; per-lockfile osv scans; override floors checked in both lockfiles;
+  `nanoid@3` floor `^3.3.18`; docs dependencies; each test run gets its own
+  home; shell sidecar and image smoke probes. (#1720, #1726, #1754, #1800,
+  #1803, #1808, #1809, #1810, #1816, #1828)
+- The PR record check: security gate for the web UI's login code, legal
+  sign-off read as approver and date, PR title and body checks, and its prose
+  and link parsing. (#1799, #1814, #1820, #1827, #1832, #1833, #1837, #1838,
+  #1842, #1848)
+- Docs: Mistral location wording; the Mistral sub-processor row; README test
+  count. (#1729, #1829, #1830, #1831)
+- Contract types and a token-error classifier for a future sign-in provider.
+  (#1847, #1853)
+- `data_dir` resolution through one helper; opt-in retry, cut-off and pricing
+  options in the structured-output helper. (#1817, #1846)
+
+### Rollback to 2.15.4
+
+2.15.4 boots on the migrated databases: its migration loops do nothing at a
+higher version, and every new column is nullable or has a default. The
+schema stays at the new versions.
+
+Before rolling back:
+
+1. Do not roll back an instance whose `LYNOX_BILLING_TIER` is `managed_max`:
+   2.15.4 does not know the value. It keeps the usage hook and the
+   managed-instance refusals, but drops the control plane's config and secret
+   locks and reports the instance as self-hosted.
+2. If `config.json` has a `tier_preset`, no `tier_set` slot may name
+   `claude-opus-5-5`, `claude-sonnet-5-5` or `claude-haiku-5-5`; 2.15.4 does
+   not know them and stops loading the configuration.
+3. With an external `LYNOX_WORKSPACE_ROOT`, move the files back under
+   `<data dir>/workspace` first: 2.15.4 ignores the variable, and files under
+   the external root are neither visible, backed up nor erased.
+4. Where `bulk_runs_enabled` is on, finish or abort every list or judged bulk
+   run first; 2.15.4 does not know either kind.
+
+After rolling back:
+
+- Every owner session cookie 2.16.0 issued or refreshed carries the owner's
+  principal, which 2.15.4 refuses: the owner signs in again.
+- Every protection of this release is gone, among them the host and
+  cross-site checks, the admin-bearer scope, the access-end handling and trail
+  of a person the owner let in, session renewal, the per-write question for
+  connected accounts and the other write-gate rules, the backup signature and
+  manifest path checks, OAuth over https only, the plugin lock on provisioned
+  instances and the unattended bash rules. `GET /api/api-profiles` returns the
+  grant fingerprint fields again. A bexio profile that names a write scope
+  gets no connect link and no token renewal until the scope is removed; the
+  access token it already holds keeps its write scope until it expires, so
+  disconnect such a profile before rolling back.
+- Deleting a conversation no longer stamps what it captured, and 2.15.4 shows
+  entries that 2.16.0 stamped as ordinary entries. A deleted conversation's id
+  can be reused. 2.15.4 finds the Drive backup folder by
+  name again and may list a different root than 2.16.0 used.
+- Backups made by 2.16.0 restore on 2.15.4. What 2.16.0 removed stays
+  removed: private-mode and person erasures and expired judged runs.
+- Upgrading again runs no schema migration a second time; the grant check runs
+  at every boot. Backups made under 2.15.4 are unsigned: after the upgrade
+  their restore answers 409 `unverified_backup` until it is sent with
+  `allow_unverified: true`. Knowledge entries, created subjects, questions and
+  bulk runs written under 2.15.4 carry none of the new bookkeeping; such a
+  question from a person the owner let in counts as ended, and an entry
+  written then can be removed when a chat that later restates it goes private.
+  Connection grants are repaired at the next boot.
+
+An export from 2.15.0 or later must not be restored onto an instance running 2.14.x or older: those versions restore only the parts they know and report success, silently dropping merge ledgers, `apis/` and `workspace/`. Upgrade the target first.
+
 ## 2.15.4 — 2026-10-12
 
 ### Added: access for a person the owner lets in, not active
