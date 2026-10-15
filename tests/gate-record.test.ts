@@ -344,6 +344,37 @@ describe('gate-record — which gates a diff requires', () => {
     expect(named.ok, JSON.stringify(named.errors)).toBe(true);
   });
 
+  it('tells an author without an `approved:` line that PENDING is a valid answer', () => {
+    const missing = evaluate({
+      body: record({ gates: 'legal', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(missing.errors.join(' ')).toContain('`approved: PENDING — <why>` is a valid answer');
+  });
+
+  it('reads the sign-off of a record that names `legal` on a diff that does not owe it', () => {
+    const files = ['src/core/prompts.ts'];
+    // Positive control: the same record without `legal` passes on this diff.
+    expect(evaluate({ body: record(), head: HEAD, files }).ok).toBe(true);
+
+    const unsigned = evaluate({ body: record({ gates: 'code-review, delta, legal' }), head: HEAD, files });
+    expect(unsigned.ok).toBe(false);
+    expect(unsigned.errors.join(' ')).toContain('the record NAMES the `legal` gate');
+
+    const pending = evaluate({
+      body: record({ gates: 'code-review, delta, legal', approved: 'PENDING — not seen yet 2026-10-15' }),
+      head: HEAD, files,
+    });
+    expect(pending.ok).toBe(false);
+    expect(pending.errors.join(' ')).toContain('says the sign-off is PENDING');
+
+    const signed = evaluate({
+      body: record({ gates: 'code-review, delta, legal', approved: 'rafael 2026-10-15' }),
+      head: HEAD, files,
+    });
+    expect(signed.ok, JSON.stringify(signed.errors)).toBe(true);
+  });
+
   it('characterises what the path map CANNOT see', () => {
     // Not an endorsement — a record of the floor's shape, so the next person
     // does not mistake a green check for "no security review needed".

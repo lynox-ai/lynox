@@ -964,11 +964,15 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     }
   }
 
-  if (required.has('legal')) {
+  // A record that NAMES `legal` is read too, not only a diff that owes it: a sign-off the record
+  // claims has to be one.
+  if (claimed.has('legal') || required.has('legal')) {
     const approved = (f.approved ?? '').trim();
     if (!approved) {
       errors.push(
-        'this diff changes a binding customer text, so the record needs an `approved:` line',
+        required.has('legal')
+          ? 'this diff changes a binding customer text, so the record needs an `approved:` line'
+          : 'the record NAMES the `legal` gate, so it needs an `approved:` line — or take `legal` out of `gates:`',
         'naming who signed off on the WORDING and when (e.g. `approved: rafael 2026-08-01`).',
         '`approved: PENDING — <why>` is a valid answer and blocks the merge rather than failing',
         'the format: if the sign-off does not exist yet, saying so is the true line.',
@@ -977,8 +981,8 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     } else if (/^pending/i.test(approved)) {
       // An explicit "not yet" is the true answer while the wording is unseen, so it blocks the
       // merge. Before this branch it passed: the line only had to carry an ISO date, and
-      // `approved: PENDING — … agreed 2026-10-15` carries one. The rule and its wording are the
-      // private repo's, ported as they stand. `/^pending/i` has no `\b` on purpose: with one,
+      // `approved: PENDING — … agreed 2026-10-15` carries one. The rule, its trigger and its wording
+      // are the private repo's. `/^pending/i` has no `\b` on purpose: with one,
       // `pendingapproval rafael 2026-10-02` finds no boundary and its date reads as a sign-off.
       errors.push(
         `\`approved: ${approved}\` says the sign-off is PENDING — which is the honest answer, so this`,
