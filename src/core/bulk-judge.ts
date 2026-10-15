@@ -361,6 +361,20 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
         }
       }
     };
+    // A step after a paid call that throws — a ledger write, a mapping that meets an unexpected
+    // shape — must not leave the target claimed: a restart would skip it until the claim goes
+    // stale, then pay for it again. The claim is released, only the class is reported, and the run
+    // halts; a restart judges the target again at once.
+    const afterPaid = (step: () => void): boolean => {
+      try {
+        step();
+        return true;
+      } catch (err: unknown) {
+        try { ledger.releaseJudgeClaim(runId, seq, token); } catch { /* the claim goes stale */ }
+        deps.captureError?.(judgeErrorForTracker(err, 'bulk_judge after the call'));
+        return false;
+      }
+    };
     let verdict: Record<string, unknown>;
     try {
       const res = await call<Record<string, unknown>>({
@@ -377,7 +391,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       if (spent) book(spent.costUsd, spent.inputTokens ?? 0, spent.outputTokens ?? 0);
       const failure = classifyCallFailure(err, deps.signal?.aborted === true);
       if (failure.kind === 'invalid') {
-        record({ invalid: failure.reason });
+        if (!afterPaid(() => { record({ invalid: failure.reason }); })) return halt(BULK_HALT_REASONS.unavailable);
         continue;
       }
       ledger.releaseJudgeClaim(runId, seq, token);
@@ -389,28 +403,32 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
       return halt(failure.reason);
     }
 
-    if (external) {
-      const refused = refuseExternalAfter(target.key, verdict, deps.scanSecret);
-      record(refused === null ? { after: verdict } : { invalid: refused });
-      continue;
-    }
-    // A data-store row is written whole: the verdict goes through the plan's own mapping onto the
-    // existing row, so no column outside F is nulled (PRD bulk-loop §3.1).
-    const mapped = mapToColumns(verdict, cols!.colDefs, cols!.keyCol, target.key);
-    if ('invalid' in mapped) {
-      record({ invalid: mapped.invalid });
-      continue;
-    }
-    if (deps.scanSecret(JSON.stringify(mapped.planned)) !== null) {
-      record({ invalid: 'secret_in_after' });
-      continue;
-    }
-    const full = { ...(target.before.value as Record<string, unknown>), ...mapped.planned };
-    if (Buffer.byteLength(JSON.stringify(full), 'utf8') > BULK_MAX_TARGET_BYTES) {
-      record({ invalid: 'target_too_large' });
-      continue;
-    }
-    record({ after: full });
+    const beforeRow = target.before.value as Record<string, unknown>;
+    const settle = (): void => {
+      if (external) {
+        const refused = refuseExternalAfter(target.key, verdict, deps.scanSecret);
+        record(refused === null ? { after: verdict } : { invalid: refused });
+        return;
+      }
+      // A data-store row is written whole: the verdict goes through the plan's own mapping onto
+      // the existing row, so no column outside F is nulled (PRD bulk-loop §3.1).
+      const mapped = mapToColumns(verdict, cols!.colDefs, cols!.keyCol, target.key);
+      if ('invalid' in mapped) {
+        record({ invalid: mapped.invalid });
+        return;
+      }
+      if (deps.scanSecret(JSON.stringify(mapped.planned)) !== null) {
+        record({ invalid: 'secret_in_after' });
+        return;
+      }
+      const full = { ...beforeRow, ...mapped.planned };
+      if (Buffer.byteLength(JSON.stringify(full), 'utf8') > BULK_MAX_TARGET_BYTES) {
+        record({ invalid: 'target_too_large' });
+        return;
+      }
+      record({ after: full });
+    };
+    if (!afterPaid(settle)) return halt(BULK_HALT_REASONS.unavailable);
   }
 
   if (bookingFailed) return halt(BULK_HALT_REASONS.unavailable);

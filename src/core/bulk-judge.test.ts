@@ -430,6 +430,40 @@ describe('runBulkJudge over data-store rows', () => {
     expect([s.phase, s.haltReason, s.judge!.unjudged]).toEqual(['planned', BULK_HALT_REASONS.unavailable, 0]);
   });
 
+  it('a write after a paid call that throws frees the target: the run halts, and a restart judges it at once', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const spy = vi.spyOn(ledger, 'recordJudgement').mockImplementationOnce(() => { throw new Error(`SQLITE_BUSY ${MARK}`); });
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    spy.mockRestore();
+    const s = ledger.getStatus(id)!;
+    // Paid and booked once; the verdict is lost, the target is not.
+    expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
+    // The owner starts it again: the target is judged now, not after its claim goes stale.
+    expect(start(id).ok).toBe(true);
+    const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, again.deps)).status).toBe('done');
+    expect(again.calls).toHaveLength(1);
+    expect(ledger.getStatus(id)!.judge!.unjudged).toBe(0);
+  });
+
+  it('recording an invalid answer that throws frees the target too', async () => {
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const spy = vi.spyOn(ledger, 'recordJudgement').mockImplementationOnce(() => { throw new Error('SQLITE_BUSY'); });
+    const h = harness(() => { throw new CutOffError(); });
+    expect((await runBulkJudge(id, h.deps)).status).toBe('halted');
+    spy.mockRestore();
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.unavailable);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge after the call failed: Error']);
+    expect(start(id).ok).toBe(true);
+    const again = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, again.deps)).status).toBe('done');
+    expect(again.calls).toHaveLength(1);
+  });
+
   it('no allowed model halts judgeModel', async () => {
     const id = await plan(['A']);
     expect(start(id).ok).toBe(true);
