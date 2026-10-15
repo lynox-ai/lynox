@@ -26,6 +26,28 @@ import { copyOut, removeStaleStages, stageIn, type StageEntry, type StagedWrite 
 const WORKSPACE = 'workspace';
 const WORKSPACE_PREFIX = `${WORKSPACE}/`;
 
+/**
+ * Whether a manifest entry names a path a restore may join onto the backup and the data dir:
+ * relative, and every component a plain name. Checked per component, not on the resolved
+ * target: `memory/../workspace/x` resolves inside the data dir and still leaves its own
+ * entry, past the workspace root's anchor that only takes `workspace/…`.
+ */
+export function isRestorableEntryPath(path: unknown): path is string {
+  if (typeof path !== 'string' || path.includes('\0')) return false;
+  // The empty component also refuses '' and an absolute path, whose first component is empty.
+  return path.split('/').every(part => part.length > 0 && part !== '.' && part !== '..');
+}
+
+/** The first entry whose path a restore must not use, or null when every one is plain. */
+function unrestorableEntry(files: unknown): string | null {
+  if (!Array.isArray(files)) return '(files is not a list)';
+  for (const entry of files as Array<{ path?: unknown } | null>) {
+    const path = entry?.path;
+    if (!isRestorableEntryPath(path)) return JSON.stringify(path) ?? String(path);
+  }
+  return null;
+}
+
 /** Metadata stored alongside every backup. */
 export interface BackupManifest {
   version: string;
@@ -412,6 +434,13 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Invalid manifest.json' };
     }
 
+    // Before anything reads or writes by an entry's path: the manifest is not authenticated, and
+    // a backup downloaded from Drive carries whatever its root's writers put there.
+    const unrestorable = unrestorableEntry(manifest.files);
+    if (unrestorable !== null) {
+      return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
+    }
+
     // Refuse to restore an encrypted backup with no key: the decrypt branch
     // below would be skipped and the raw ciphertext copied OVER the live
     // plaintext DBs, silently corrupting them. Fail before touching anything.
@@ -643,6 +672,8 @@ export class BackupManager {
     }
     try {
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as BackupManifest;
+      const unrestorable = unrestorableEntry(manifest.files);
+      if (unrestorable !== null) return { valid: false, errors: [`Path outside the backup: ${unrestorable}`], files_checked: 0 };
       const verifiableFiles = manifest.files.filter(f => f.type !== 'directory');
       // The sqlite→file relabel, which this method used to omit while `createBackup` step 9 and
       // `restoreBackup` both carried it. One question asked in several places, and the one that
