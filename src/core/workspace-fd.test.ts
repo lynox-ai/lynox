@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   anchorFromFd, closeAnchor, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor, stageIn, STAGE_PREFIX,
-  readFileAt, renameAt, splitRel, statEntry, walk, writeFileAt, WorkspaceAccessError, type WorkspaceAnchor,
+  readFileAt, removeStaleStages, renameAt, splitRel, statEntry, walk, writeFileAt, WorkspaceAccessError, type WorkspaceAnchor,
 } from './workspace-fd.js';
 
 vi.setConfig({ testTimeout: 60_000 });
@@ -277,10 +277,33 @@ describe('stageIn', () => {
     expect(leftovers()).toEqual([]);
     expect(readFileSync(join(ws, 'keep'), 'utf8')).toBe('mine');
   });
-  it('removes a left-over staged file of an earlier, crashed run', () => {
-    writeFileSync(join(ws, 'sub', `${STAGE_PREFIX}stale`), 'x');
-    const s = stageIn(anchor, '', [{ rel: 'keep', data: 'x' }], MODES);
-    s.abort();
+  it('removeStaleStages removes left-over temps of that exact shape and nothing else', () => {
+    const stale = `${STAGE_PREFIX}${'a'.repeat(24)}`;
+    writeFileSync(join(ws, 'sub', stale), 'x');
+    writeFileSync(join(ws, `${STAGE_PREFIX}notmine`), 'y');
+    mkdirSync(join(ws, `${STAGE_PREFIX}${'b'.repeat(24)}`));
+    expect(removeStaleStages(anchor, '')).toBe(1);
+    expect(existsSync(join(ws, 'sub', stale))).toBe(false);
+    expect(existsSync(join(ws, `${STAGE_PREFIX}notmine`))).toBe(true);
+    expect(existsSync(join(ws, `${STAGE_PREFIX}${'b'.repeat(24)}`))).toBe(true);
+  });
+  it('is not blocked by entries another writer planted with the temp shape', () => {
+    for (let i = 0; i < 5; i++) mkdirSync(join(ws, 'sub', `${STAGE_PREFIX}${String(i).repeat(24)}`));
+    stageIn(anchor, '', [{ rel: 'sub/f', data: 'restored' }], MODES).commit();
+    expect(readFileSync(join(ws, 'sub', 'f'), 'utf8')).toBe('restored');
+  });
+  it.each([
+    [['a', 'a/b']],
+    [['a/b', 'a']],
+  ])('refuses a path that is both a file and a directory (%j)', (rels) => {
+    expect(code(() => stageIn(anchor, '', rels.map((rel) => ({ rel, data: 'x' })), MODES))).toBe('BAD_PATH');
+    expect(leftovers()).toEqual([]);
+  });
+  it('a failed commit says how far it got and leaves no temps', () => {
+    const s = stageIn(anchor, '', [{ rel: 'one', data: '1' }, { rel: 'two', data: '2' }], MODES);
+    mkdirSync(join(ws, 'two'));
+    expect(code(() => s.commit())).toBe('PARTIAL');
+    expect(readFileSync(join(ws, 'one'), 'utf8')).toBe('1');
     expect(leftovers()).toEqual([]);
   });
   it('refuses the same path twice', () => {
@@ -302,6 +325,72 @@ describe('stageIn', () => {
     const s = stageIn(anchor, '', [{ rel: 'keep', data: 'x' }], MODES);
     s.commit();
     expect(() => s.commit()).toThrow(/already/);
+  });
+});
+
+describe.runIf(LINUX)('names that are not UTF-8', () => {
+  const raw = (): Buffer => Buffer.concat([Buffer.from(`${ws}/`), Buffer.from([0x66, 0xff])]);
+  beforeEach(() => { writeFileSync(raw(), 'bytes'); writeFileSync(join(ws, 'normal'), 'n'); });
+  it('are listed as not exact, skipped by copyOut, and removed by emptyDir', () => {
+    const odd = listDir(anchor, '').find((e) => !e.exactName);
+    expect(odd?.type).toBe('file');
+    expect(walk(anchor, '').entries.filter((e) => !e.exactName).length).toBe(1);
+    const copied: string[] = [];
+    const r = copyOut(anchor, '', (rel) => { copied.push(rel); });
+    expect(copied).toEqual(['normal']);
+    expect(r.skipped.length).toBe(1);
+    emptyDir(anchor, '');
+    expect(readdirSync(ws)).toEqual([]);
+  });
+});
+
+describe('emptyDir depth', () => {
+  it('empties a tree deeper than the default walk depth of old', () => {
+    let p = ws;
+    for (let i = 0; i < 100; i++) { p = join(p, 'd'); mkdirSync(p); }
+    writeFileSync(join(p, 'f'), '1');
+    emptyDir(anchor, '');
+    expect(readdirSync(ws)).toEqual([]);
+  });
+});
+
+it('readFileAt refuses a socket as not a regular file', () => {
+  const sock = join(ws, 's');
+  spawnSync(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(sock)}, () => process.exit(0))`]);
+  expect(code(() => readFileAt(anchor, 's'))).toBe('NOT_FILE');
+});
+
+/**
+ * Ordinary activity in the tree must not break a walk, and a file that keeps
+ * growing must not get past the byte limit of a read.
+ */
+describe.runIf(LINUX)('concurrent writers', () => {
+  let churn: ChildProcess;
+  afterEach(() => { churn.kill('SIGKILL'); });
+  it('walk and copyOut survive files appearing and vanishing', async () => {
+    mkdirSync(join(ws, 'c'));
+    churn = spawn(process.execPath, ['-e', `
+      const fs = require('fs'), d = process.argv[1];
+      for (let i = 0;; i++) { const f = d + '/t' + (i % 50); try { fs.mkdirSync(f + 'd'); fs.writeFileSync(f, 'x'); fs.rmdirSync(f + 'd'); fs.unlinkSync(f); } catch {} }`, join(ws, 'c')], { stdio: 'ignore' });
+    await sleep(200);
+    const failures: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      const c = code(() => { walk(anchor, ''); copyOut(anchor, '', () => { /* sink */ }); });
+      if (c !== 'ok') failures.push(c);
+    }
+    expect(failures).toEqual([]);
+  });
+  it('readFileAt never returns more than maxBytes from a growing file', async () => {
+    writeFileSync(join(ws, 'grow'), '');
+    churn = spawn(process.execPath, ['-e', `
+      const fs = require('fs'), f = process.argv[1], b = Buffer.alloc(65536, 120);
+      for (;;) { try { fs.truncateSync(f, 0); for (let i = 0; i < 64; i++) fs.appendFileSync(f, b); } catch {} }`, join(ws, 'grow')], { stdio: 'ignore' });
+    await sleep(200);
+    let largest = 0;
+    for (let i = 0; i < 300; i++) {
+      try { largest = Math.max(largest, readFileAt(anchor, 'grow', 1000).length); } catch { /* LIMIT */ }
+    }
+    expect(largest).toBeLessThanOrEqual(1000);
   });
 });
 
