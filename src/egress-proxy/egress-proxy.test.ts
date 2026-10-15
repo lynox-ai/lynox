@@ -215,7 +215,8 @@ describe('policy: TLS hellos', () => {
     expect(parseClientHello(Buffer.from([23, 3, 3, 0x41, 0x01]), true)).toEqual({ state: 'bad', error: 'bad record length' });
     const full = Buffer.concat([Buffer.from([23, 3, 3]), u16(16_640), Buffer.alloc(16_640)]);
     expect(parseClientHello(Buffer.concat([full, full, full]), true)).toEqual({ state: 'more' });
-    expect(parseClientHello(Buffer.concat([full, full, full, full]), true)).toEqual({ state: 'bad', error: 'hello too large' });
+    // Refused as soon as a record is announced that would go past the bound, before it is read.
+    expect(parseClientHello(Buffer.concat([full, full, full, full.subarray(0, 5)]), true)).toEqual({ state: 'bad', error: 'hello too large' });
     // Without a retry, early data in front of the hello is not a hello.
     expect(parseClientHello(Buffer.concat([early, h])).state).toBe('bad');
   });
