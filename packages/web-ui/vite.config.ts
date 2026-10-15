@@ -7,6 +7,9 @@ import { defineConfig } from 'vite';
 // Standalone dev: when VITE_ENGINE_URL is set, proxy /api/* to the Engine on
 // another port so the UI can run with hot-reload while the Engine is started
 // separately (e.g. `node dist/index.js --http-api --port 3100`). Unset → same-origin.
+// The proxy passes the browser's `Origin` (this dev server's port) through, and the Engine takes a
+// write or answers CORS only for its own port or a listed origin: start it with
+// `LYNOX_ALLOWED_ORIGINS=http://localhost:5173`.
 const engineUrl = process.env['VITE_ENGINE_URL'];
 
 // Baked at build time so the client can detect stale caches — when a user's

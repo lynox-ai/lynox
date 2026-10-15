@@ -1266,7 +1266,7 @@ export class GoogleAuth {
 
   // === Private Methods ===
 
-  private _startCallbackServer(expectedState?: string): Promise<{ port: number; codePromise: Promise<string>; close: () => void }> {
+  private _startCallbackServer(expectedState: string): Promise<{ port: number; codePromise: Promise<string>; close: () => void }> {
     return new Promise((resolveSetup, rejectSetup) => {
       let resolveCode: ((code: string) => void) | null = null;
       let rejectCode: ((err: Error) => void) | null = null;
@@ -1278,6 +1278,16 @@ export class GoogleAuth {
 
       const server = createServer((req, res) => {
         const url = new URL(req.url ?? '/', `http://localhost`);
+
+        // The state first, before `error` or `code` is read. Only the redirect from Google carries
+        // it, an error redirect included. Any other request (a page that found the port, a
+        // favicon) is answered and ignored: it neither delivers a code nor ends the flow.
+        if (url.searchParams.get('state') !== expectedState) {
+          res.writeHead(400, { 'Content-Type': 'text/html' });
+          res.end(ERROR_HTML('Invalid state parameter — possible CSRF attack.'));
+          return;
+        }
+
         const code = url.searchParams.get('code');
         const error = url.searchParams.get('error');
 
@@ -1286,17 +1296,6 @@ export class GoogleAuth {
           res.end(ERROR_HTML(error));
           rejectCode?.(new Error(`OAuth error: ${error}`));
           return;
-        }
-
-        // Validate CSRF state parameter
-        if (expectedState) {
-          const returnedState = url.searchParams.get('state');
-          if (returnedState !== expectedState) {
-            res.writeHead(400, { 'Content-Type': 'text/html' });
-            res.end(ERROR_HTML('Invalid state parameter — possible CSRF attack.'));
-            rejectCode?.(new Error('OAuth CSRF: state mismatch'));
-            return;
-          }
         }
 
         if (code) {

@@ -17767,6 +17767,68 @@ describe('a server without LYNOX_HTTP_SECRET: requests from a browser', () => {
     expect((await revoke({})).status).not.toBe(403);
     expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
   });
+
+  // Another port on localhost is another program on this machine (a dev server, a notebook), and a
+  // page it serves is not this server's: it may neither write nor read the answer through CORS.
+  function withOrigin(method: string, path: string, headers: Record<string, string>): Promise<{ status: number; acao: string | undefined; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path, method, headers }, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, acao: res.headers['access-control-allow-origin'] as string | undefined, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+  const otherPort = () => String(port === 5173 ? 5174 : 5173);
+
+  it('refuses a write from another port on localhost, and Google stays connected', async () => {
+    mockGoogleRevoke.mockClear();
+    const res = await revoke({ Host: `localhost:${String(port)}`, Origin: `http://localhost:${otherPort()}`, 'Sec-Fetch-Site': 'same-site' });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain('LYNOX_ALLOWED_ORIGINS');
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+    // The same write from this server on localhost runs.
+    expect((await revoke({ Host: `localhost:${String(port)}`, Origin: `http://localhost:${String(port)}` })).status).not.toBe(403);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets no page on another localhost port read an answer: no CORS origin for it, its own for this server', async () => {
+    const host = `localhost:${String(port)}`;
+    for (const method of ['OPTIONS', 'GET']) {
+      const foreign = await withOrigin(method, '/api/vault/key?reveal=true', { Host: host, Origin: `http://localhost:${otherPort()}` });
+      expect(foreign.acao, method).toBeUndefined();
+      const loopback = await withOrigin(method, '/api/vault/key?reveal=true', { Host: `127.0.0.1:${String(port)}`, Origin: `http://127.0.0.1:${otherPort()}` });
+      expect(loopback.acao, method).toBeUndefined();
+      const ownPage = await withOrigin(method, '/api/vault/key?reveal=true', { Host: host, Origin: `http://${host}` });
+      expect(ownPage.acao, method).toBe(`http://${host}`);
+    }
+  });
+});
+
+describe('LYNOX_ALLOWED_ORIGINS at start: an entry that is not an origin is named, not dropped in silence', () => {
+  it('writes one line per dropped entry and none for a kept one', async () => {
+    const before = process.env['LYNOX_ALLOWED_ORIGINS'];
+    process.env['LYNOX_ALLOWED_ORIGINS'] = 'lynox.lan:3000, https://kept.example ,chrome-extension://abc';
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { lines.push(String(chunk)); return true; });
+    const server = new LynoxHTTPApi();
+    try {
+      await server.init();
+      await server.start(0);
+      for (let i = 0; i < 20 && !lines.some((l) => l.includes('listening on')); i++) await new Promise((r) => setTimeout(r, 25));
+    } finally {
+      spy.mockRestore();
+      await server.shutdown();
+      if (before === undefined) delete process.env['LYNOX_ALLOWED_ORIGINS']; else process.env['LYNOX_ALLOWED_ORIGINS'] = before;
+    }
+    const warned = lines.filter((l) => l.includes('LYNOX_ALLOWED_ORIGINS:'));
+    expect(warned).toHaveLength(2);
+    expect(warned[0]).toContain('"lynox.lan:3000"');
+    expect(warned[1]).toContain('"chrome-extension://abc"');
+    expect(warned.join('')).not.toContain('kept.example');
+  });
 });
 
 describe('a server WITH LYNOX_HTTP_SECRET: the bearer decides, not the browser headers', () => {

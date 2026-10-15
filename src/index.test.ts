@@ -111,6 +111,15 @@ describe('resolveDefaultOrigin (--http-api boot)', () => {
     ).toBe('https://a.example.com');
   });
 
+  it('reads the list as the server does: a first entry that is no origin does not count, a trailing slash is the origin', () => {
+    expect(
+      resolveDefaultOrigin({ origin: undefined, allowedOrigins: 'lynox.lan:3000,https://b.example.com/', tlsCert: undefined, port: 3100 }),
+    ).toBe('https://b.example.com');
+    expect(
+      resolveDefaultOrigin({ origin: undefined, allowedOrigins: 'chrome-extension://abc', tlsCert: undefined, port: 3100 }),
+    ).toBe('http://localhost:3100');
+  });
+
   it('falls back to http://localhost:<port> when no allowed-origins and no TLS', () => {
     expect(
       resolveDefaultOrigin({
