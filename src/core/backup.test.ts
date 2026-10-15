@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { BackupManager } from './backup.js';
+import { BackupManager, isRestorableEntryPath } from './backup.js';
 import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from './backup-crypto.js';
 import { computeFileChecksum, verifySqliteIntegrity } from './backup-verify.js';
 
@@ -464,5 +464,99 @@ describe('restoreBackup safety guards', () => {
     expect(cfg['default_tier']).toBe('deep');
     // The staged temp for history.db was cleaned up on the abort.
     expect(existsSync(join(lynoxDir, 'history.db.restore-staging'))).toBe(false);
+  });
+});
+
+describe('restoreBackup refuses manifest paths that leave their place', () => {
+  let lynoxDir: string;
+  let backupDir: string;
+  const escapees: string[] = [];
+
+  beforeEach(() => {
+    lynoxDir = createTmpDir();
+    backupDir = join(lynoxDir, 'backups');
+    writeFileSync(join(lynoxDir, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+  });
+
+  afterEach(() => {
+    rmSync(lynoxDir, { recursive: true, force: true });
+    for (const p of escapees.splice(0)) rmSync(p, { force: true });
+  });
+
+  /** Adds an entry with `path` to a fresh backup's manifest, its bytes placed where the restore reads them. */
+  async function backupWithEntry(path: string, bytes: string): Promise<{ manager: BackupManager; backupPath: string }> {
+    const manager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null);
+    const created = await manager.createBackup();
+    expect(created.success).toBe(true);
+    const src = join(created.path, path);
+    mkdirSync(dirname(src), { recursive: true });
+    writeFileSync(src, bytes);
+    const manifestPath = join(created.path, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { files: Array<Record<string, unknown>> };
+    manifest.files.push({ path, size_bytes: Buffer.byteLength(bytes), checksum_sha256: computeFileChecksum(src), type: 'file' });
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    return { manager, backupPath: created.path };
+  }
+
+  it('refuses a leading .. and writes nothing outside the data dir', async () => {
+    const name = `${basename(lynoxDir)}-escaped.txt`;
+    const outside = join(dirname(lynoxDir), name);
+    escapees.push(outside, join(dirname(backupDir), name));
+    const { manager, backupPath } = await backupWithEntry(`../${name}`, 'planted');
+
+    const result = await manager.restoreBackup(backupPath);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/outside the backup/);
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  it('refuses a .. inside the path, which resolves inside the data dir but leaves its entry', async () => {
+    const { manager, backupPath } = await backupWithEntry('memory/../config.json', JSON.stringify({ default_tier: 'deep' }));
+
+    const result = await manager.restoreBackup(backupPath);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/outside the backup/);
+    const cfg = JSON.parse(readFileSync(join(lynoxDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    expect(cfg['default_tier']).toBe('balanced');
+  });
+
+  it('restores the same backup when the added entry is a plain path (control)', async () => {
+    const { manager, backupPath } = await backupWithEntry('memory/planted.txt', 'plain');
+
+    const result = await manager.restoreBackup(backupPath);
+
+    expect(result.success).toBe(true);
+    expect(readFileSync(join(lynoxDir, 'memory', 'planted.txt'), 'utf-8')).toBe('plain');
+  });
+
+  it('verifyBackup reports the path instead of reading through it', async () => {
+    const { manager, backupPath } = await backupWithEntry('memory/../config.json', '{}');
+    const result = manager.verifyBackup(backupPath);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(' ')).toMatch(/outside the backup/);
+  });
+
+  it('refuses a manifest whose files is not a list, without throwing', async () => {
+    const manager = new BackupManager(lynoxDir, { backupDir, retentionDays: 30, encrypt: false }, null);
+    const created = await manager.createBackup();
+    const manifestPath = join(created.path, 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, files: { path: 'config.json' } }));
+
+    const result = await manager.restoreBackup(created.path);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not a list/);
+  });
+
+  it('isRestorableEntryPath takes plain relative names only', () => {
+    for (const ok of ['config.json', 'workspace/a/b.txt', '..env', 'a/.hidden', 'a..b/c']) {
+      expect(isRestorableEntryPath(ok), ok).toBe(true);
+    }
+    for (const bad of ['', '/etc/passwd', '../x', 'a/../b', 'a/./b', './a', 'a//b', 'a/', 'a/..', 'a\0b', 7, null, undefined]) {
+      expect(isRestorableEntryPath(bad), String(bad)).toBe(false);
+    }
   });
 });
