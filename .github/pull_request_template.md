@@ -71,8 +71,7 @@ gates the diff OWES, derived from the real file list, so leaving out a required
 - `delta` — the verdict of the delta round ON THE FIXES. `clean` or don't merge.
   `clean` does **not** mean the round found nothing — a round that found things and
   handled them is clean. It means: nothing it found is left unhandled (fixed here, or
-  filed as a register row — **not** listed in `closes:`, which names rows this PR
-  *settles*), and it ran at the head above. No exception: every fix makes a new head,
+  filed as a register row in the private repo), and it ran at the head above. No exception: every fix makes a new head,
   so it is fix, re-run, attest, and it ends when a round finds nothing.
 - `mutations` — mutations of the CHANGED LINES, killed vs survived. A survivor
   means no test covers that line and fails the check.
@@ -91,15 +90,16 @@ review: <n> <model> <round|rounds>, <result>
 security: <origin>, <result>
 delta: <clean?>
 mutations: <n> killed, <n> survived
-closes: <DEF-… ids this PR settles, or none>
+closes: <none — the only answer in this repo>
 ```
 
-**`closes:` is required, and `none` is a valid answer.** That is deliberate: an
-optional field is missing both when a PR settles no register row and when its
-author was in a hurry, so nobody can tell those apart afterwards — which is how
-two rows sat at `open` for four days after their fix merged, and how a query for
-"which merged PR closed this row" comes back empty. Writing `none` costs four
-characters and makes the silence a statement.
+**`closes:` is required, and in this public repo it is always `none`.** The
+register of open rows lives in the private repo: a row named here is no pointer
+anyone can follow, and its name can describe the gap it tracks. The same holds for
+the title and the rest of the body: the check refuses a register id (`DEF-…`) in
+either. If this PR settles a row, close it with a PR in the private repo that names
+this PR's merge commit. The field stays required so that its absence is not mistaken
+for an answer.
 
 **`security:` is only due when the diff touches the security path map**, and its
 first half says WHERE the round came from, not what it asked. Three origins,

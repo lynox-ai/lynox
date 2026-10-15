@@ -545,21 +545,70 @@ export function signOffErrors(verdict, approved, owed) {
   return out;
 }
 
+/**
+ * Lines of a PR body that name a register row (`DEF-<slug>`). The register lives in the private
+ * repo; in a public body its ids are no pointer anyone here can follow, only a disclosure, and an
+ * id often spells the gap it tracks. The whole body is read, record and prose, code and quotes:
+ * the raw body is public, rendered or not. Line numbers only: the refusal does not repeat the id.
+ */
+// Case-insensitive: a pasted row file name or a hand-typed id can arrive in lower case.
+const REGISTER_ID = /(?<![A-Za-z0-9])DEF-[A-Za-z0-9]/i;
+const REGISTER_ID_ALL = /(?<![A-Za-z0-9])DEF-[A-Za-z0-9][A-Za-z0-9-]*/gi;
+
+/** A message with every register id in it replaced, so no refusal repeats one into a public log. */
+export function withoutRegisterIds(text) {
+  return String(text).replace(REGISTER_ID_ALL, 'DEF-…');
+}
+
+export function registerIdLines(body) {
+  const out = [];
+  String(body ?? '').split('\n').forEach((line, i) => {
+    if (REGISTER_ID.test(line)) out.push(i + 1);
+  });
+  return out;
+}
+
 export function evaluate(input) {
   const verdict = evaluateRecord(input);
-  const { body, author, visibility = 'unknown' } = input;
+  const { body, title, author, visibility = 'unknown' } = input;
   // Same scope as the field rule: public or unknown, never a bot's body.
   if (visibility === 'private' || (author && /\[bot\]$/.test(author))) return verdict;
+  const extra = [];
+  if (registerIdLines(title).length > 0) {
+    extra.push('the TITLE names a register row, and the title becomes the commit subject on the public main branch. Take it out.');
+  }
+  const idLines = registerIdLines(body);
+  if (idLines.length > 0) {
+    extra.push(
+      `the body names a register row (line ${idLines.join(', ')}), and this body goes into a PUBLIC repo.`,
+      'The register is private: here an id points nowhere and can spell out the gap it tracks.',
+      'Take it out of the body. The row is closed by a PR in the private',
+      'repo that names this PR\'s merge commit; in this repo `closes:` is `none`.',
+    );
+  }
   const lines = proseOpenCountLines(body);
-  if (lines.length === 0) return verdict;
-  return {
-    ...verdict,
-    ok: false,
-    errors: [
-      ...(verdict.errors ?? []),
+  if (lines.length > 0) {
+    extra.push(
       `the body counts OPEN findings (paragraph at line ${lines.join(', ')}), and this body goes into a PUBLIC repo.`,
       'A finding that is not yet closed must not be named in public text, not even its existence, which is what',
       'a count states. Write `findings filed privately` without a number, or `<N> findings, all fixed`.',
+    );
+  }
+  // Messages of the record checks quote field values (`review:`, `delta:`, `gates:`, `head:`, a
+  // stray line); one of them may carry an id. Masked here, once, for every error. The notes that
+  // reach this point are fixed sentences (the docs-only ones); the bot note, which quotes the
+  // author's login, returned above. Nothing in them to mask.
+  const masked = {
+    ...verdict,
+    ...(verdict.errors ? { errors: verdict.errors.map(withoutRegisterIds) } : {}),
+  };
+  if (extra.length === 0) return masked;
+  return {
+    ...masked,
+    ok: false,
+    errors: [
+      ...(masked.errors ?? []),
+      ...extra,
       ...(visibility === 'unknown'
         ? ['⚠ The repo could not be determined, so it is treated as PUBLIC. For the private repo pass `--repo-visibility private`.']
         : []),
@@ -642,7 +691,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
         'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
         'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
         'register row. Findings do not make a round unclean; carrying them silently does.',
-        'A filed row does NOT belong in `closes:` — that field names rows this PR settles.',
+        'In this public repo `closes:` is `none`; a row is closed in the private repo.',
       ],
     };
   }
@@ -705,13 +754,21 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
   // Existence is not checkable HERE for a real reason: the register lives in the
   // pro repo, so a core PR cannot reach it, and a rule that passes in one repo
   // and fails in the other teaches people to leave the field out.
+  //
+  // In this PUBLIC repo the field takes only `none` (2026-10-15). A row named here
+  // is no pointer anyone can follow, and its id can spell out the gap it tracks.
+  // The `git log --grep <id>` purpose moves to the private repo, where the PR that
+  // closes the row names this PR's merge commit. The id shape below still runs for
+  // a private-visibility run (`--repo-visibility private`).
   const closes = f.closes;
   if (closes === undefined) {
     // Nested rather than `&& !docsOnlyRecord` on the `if`: that form skipped the
     // error and then fell into the `else if`, which dereferences `closes`. The
     // existing test caught the crash on the first run.
     if (!docsOnlyRecord) errors.push(
-      '`closes:` is missing — name the register rows this PR settles, or `closes: none`. ' +
+      (visibility === 'private'
+        ? '`closes:` is missing — name the register rows this PR settles, or `closes: none`. '
+        : '`closes:` is missing — write `closes: none`; in this public repo the field takes nothing else. ') +
       'It is required WITH `none` allowed on purpose: an optional field is absent both when ' +
       'nothing is closed and when someone forgot, and then nobody can tell those apart.',
     );
@@ -721,8 +778,18 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     const ids = closes.split(/[,·]/).map((s) => s.trim()).filter(Boolean);
     if (ids.length === 0) {
       errors.push('`closes:` is empty — write `closes: none` if this PR settles no register row');
+    } else if (visibility !== 'private') {
+      // In a public repo the field takes only `none`. A core PR cannot settle a row it cannot see:
+      // the register is private, and a named row is a public disclosure of it. The row is closed by
+      // a private PR that names this PR's merge commit, so `git log --grep <id>` stays exact where
+      // the register lives. The value is not echoed (see `withoutRegisterIds`).
+      errors.push(
+        '`closes:` names something other than `none`. In this PUBLIC repo it takes only `none`: the register',
+        'is private, so a row named here is a disclosure, not a pointer. Close the row in a private-repo PR',
+        'that names this PR\'s merge commit.',
+      );
     }
-    for (const id of ids) {
+    for (const id of visibility === 'private' ? ids : []) {
       // `[A-Za-z0-9-]`, not `[a-z0-9-]`. The lower-case-only class
       // refused a row that EXISTS — a false red on a correct answer, which this
       // file elsewhere calls the way a guard earns a bypass. Found in pro, where
@@ -1020,9 +1087,20 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
 return errors.length ? { ok: false, errors } : { ok: true, notes };
 }
 
+/** The PR body and title from a GitHub event payload file; empty strings where absent. */
+export function readEventPr(path) {
+  const pr = JSON.parse(readFileSync(path, 'utf-8'))?.pull_request ?? {};
+  return { body: typeof pr.body === 'string' ? pr.body : '', title: typeof pr.title === 'string' ? pr.title : '' };
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const body = args['body-file'] ? readFileSync(args['body-file'], 'utf-8') : '';
+  // In CI the body and title come from the event payload FILE (`--event-file "$GITHUB_EVENT_PATH"`),
+  // not from the step's `env`: Actions prints a step's env block, values included, into the log,
+  // and this repo's logs are public. `--body-file` stays for a local preflight run.
+  const event = args['event-file'] ? readEventPr(args['event-file']) : null;
+  const body = event ? event.body : args['body-file'] ? readFileSync(args['body-file'], 'utf-8') : '';
+  const title = event ? event.title : args['title-file'] ? readFileSync(args['title-file'], 'utf-8') : '';
   const files = args['files-file']
     ? readFileSync(args['files-file'], 'utf-8').split('\n').map((s) => s.trim()).filter(Boolean)
     : [];
@@ -1035,7 +1113,7 @@ function main() {
     repoSlug: process.env.GITHUB_REPOSITORY,
     explicit: args['repo-visibility'],
   });
-  const verdict = evaluate({ body, head: args.head ?? '', files, author: args.author ?? '', visibility });
+  const verdict = evaluate({ body, title, head: args.head ?? '', files, author: args.author ?? '', visibility });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
   if (verdict.ok) {
