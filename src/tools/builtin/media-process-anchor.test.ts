@@ -113,6 +113,14 @@ describe('media_process reaches the files area through its open directory', () =
     expect(h.spawns).toBe(0);
   });
 
+  it('refuses an input over the size limit, before ffmpeg runs', async () => {
+    // Sparse: the size is what the open file says, not bytes on disk.
+    execFileSync('truncate', ['-s', String(100 * 1024 * 1024 + 1), join(ws, 'big.mov')]);
+    await expect(run('big.mov')).rejects.toThrow(/input is too large \(max 100 MB\)/);
+    expect(h.spawns).toBe(0);
+    expect(landed()).toEqual([]);
+  });
+
   it('refuses an input outside the files area, also through /proc', async () => {
     writeFileSync(join(outside, 'o.mov'), 'o');
     await expect(run(join(outside, 'o.mov'))).rejects.toThrow(/outside your files area/);
