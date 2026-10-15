@@ -76,11 +76,11 @@ export interface Target {
 
 /**
  * `host:port` from a CONNECT request line or an absolute-form URL. The host is lower-cased;
- * an IPv6 literal is refused (the tenant hosts have no IPv6 egress). An IPv4 literal is
+ * an IPv6 literal is not a host name and is refused with every other non-name (the tenant
+ * hosts have no IPv6 egress). An IPv4 literal is
  * returned as is; it can only pass a `'*'` set, and then only if it is public.
  */
 export function parseAuthority(authority: string, defaultPort?: number): Parsed<Target> {
-  if (authority.startsWith('[')) return { ok: false, error: 'IPv6 targets are not supported' };
   const colon = authority.lastIndexOf(':');
   let host = authority;
   let port = defaultPort;

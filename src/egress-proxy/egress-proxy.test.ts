@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { connect, createServer, type AddressInfo, type Server, type Socket } from 'node:net';
+import { Socket, connect, createServer, type AddressInfo, type Server } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
-import { CredentialRegistry, DENIAL_RETENTION_MS, MAX_CREDS, MAX_TTL_S, type TunnelHandle } from './registry.js';
+import { CredentialRegistry, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
 import { credentialFromHeader, isExactHostname, parseAuthority, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
-import { ShellProxy, bearerMatches, createAdminServer } from './server.js';
+import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
 
 const CRED = 'A'.repeat(43);
@@ -137,6 +137,13 @@ describe('registry', () => {
     expect(d.closed).toBe(1);
   });
 
+  it('keeps at most MAX_DENIALS_PER_CRED denials', () => {
+    const r = new CredentialRegistry(() => 0);
+    r.put(CRED, reg([]));
+    for (let i = 0; i < MAX_DENIALS_PER_CRED + 10; i++) r.recordDenial(CRED, `h${String(i)}.example`, 443);
+    expect(r.denials(CRED)).toHaveLength(MAX_DENIALS_PER_CRED);
+  });
+
   it('refuses a new credential when full, but still replaces a known one', () => {
     const r = new CredentialRegistry(() => 0);
     for (let i = 0; i < MAX_CREDS; i++) expect(r.put(String(i).padStart(43, 'x'), reg([]))).toBe(true);
@@ -204,7 +211,18 @@ interface Rig {
   proxy: ShellProxy;
 }
 
-async function rig(opts: { addresses?: Record<string, string[]>; originPort?: number; deny?: string[] } = {}): Promise<Rig> {
+interface RigOpts {
+  addresses?: Record<string, string[]>;
+  originPort?: number;
+  deny?: string[];
+  limits?: Partial<ProxyLimits>;
+  /** Runs inside the resolver, before it answers. */
+  duringLookup?: (registry: CredentialRegistry) => void;
+  /** Replaces the stand-in connection. */
+  connect?: () => Socket;
+}
+
+async function rig(opts: RigOpts = {}): Promise<Rig> {
   const clock = { t: 5_000_000 };
   const registry = new CredentialRegistry(() => clock.t);
   const lookups: string[] = [];
@@ -214,13 +232,15 @@ async function rig(opts: { addresses?: Record<string, string[]>; originPort?: nu
     deny: new Set(opts.deny ?? []),
     lookup: async (host) => {
       lookups.push(host);
+      opts.duringLookup?.(registry);
       const a = opts.addresses?.[host];
       if (!a) throw new Error('ENOTFOUND');
       return a;
     },
     // Records the address it was asked for, then reaches the stand-in origin locally.
-    connect: (ip, port) => { connects.push({ ip, port }); return connect({ host: '127.0.0.1', port: opts.originPort ?? 1 }); },
+    connect: (ip, port) => { connects.push({ ip, port }); return opts.connect ? opts.connect() : connect({ host: '127.0.0.1', port: opts.originPort ?? 1 }); },
     log: () => { /* quiet */ },
+    ...(opts.limits ? { limits: opts.limits } : {}),
   });
   const admin = createAdminServer({ registry, secret: SECRET, log: () => { /* quiet */ } });
   return { registry, clock, shellPort: await listen(proxy.server), adminPort: await listen(admin), lookups, connects, proxy };
@@ -415,5 +435,57 @@ describe('contract: shell listener', () => {
     for (let i = 0; i < 32; i++) expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(200);
     expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(503);
     expect(r.connects).toHaveLength(32);
+  });
+
+  it('caps the tunnels of all credentials together', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, limits: { tunnelsTotal: 2 } });
+    r.registry.put(CRED, reg(['a.example']));
+    r.registry.put(CRED2, reg(['a.example']));
+    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(200);
+    expect((await shellRequest(r, connectHead('a.example:443', CRED2))).status).toBe(200);
+    expect((await shellRequest(r, connectHead('a.example:443', CRED2))).status).toBe(503);
+    expect(r.connects).toHaveLength(2);
+  });
+
+  it('answers 431 to a head that grows past the cap without ending', async () => {
+    const r = await rig();
+    expect((await shellRequest(r, `CONNECT a.example:443 HTTP/1.1\r\nX: ${'y'.repeat(20 * 1024)}`)).status).toBe(431);
+  });
+
+  it('refuses two Proxy-Authorization headers', async () => {
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] } });
+    r.registry.put(CRED, reg(['a.example']));
+    const head = `CONNECT a.example:443 HTTP/1.1\r\nProxy-Authorization: ${basic(CRED2)}\r\nProxy-Authorization: ${basic(CRED)}\r\n\r\n`;
+    expect((await shellRequest(r, head)).status).toBe(400);
+    expect(r.lookups).toEqual([]);
+  });
+
+  it('opens nothing when the credential is revoked while its name resolves', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, duringLookup: (reg2) => { reg2.delete(CRED); } });
+    r.registry.put(CRED, reg(['a.example']));
+    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(407);
+    expect(r.connects).toEqual([]);
+    expect(r.proxy.openTunnels).toBe(0);
+  });
+
+  it('closes a tunnel that stays idle', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, limits: { idleTimeoutMs: 50 } });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(r, connectHead('a.example:443'));
+    expect(res.status).toBe(200);
+    let closed = false;
+    res.socket.on('close', () => { closed = true; });
+    await until(() => closed);
+    expect(r.proxy.openTunnels).toBe(0);
+  });
+
+  it('answers 504 when the upstream does not connect in time', async () => {
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, limits: { connectTimeoutMs: 50 }, connect: () => new Socket() });
+    r.registry.put(CRED, reg(['a.example']));
+    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(504);
+    await until(() => r.proxy.openTunnels === 0);
   });
 });
