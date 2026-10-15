@@ -212,10 +212,8 @@ This release contains security fixes. Upgrading is recommended for every instanc
   and afterwards the write-ahead logs are folded in and truncated; `scrubbed`
   in the result says whether that finished. The erasure removes the person's
   subject, the knowledge entries and memories bound to them and the selected
-  name matches, and takes their text out of the profile block; every preview
-  and every result states its scope, and the instance log records the
-  erasure by ids only. On an instance
-  the control plane provisioned, both routes refuse every bearer token with
+  name matches; every preview and every result states its scope. On an
+  instance the control plane provisioned, both routes refuse every bearer token with
   403 (`session_required`, or the control plane's own refusal for its admin
   bearer). Erasing the last person keeps the result panel open.
   (#1763, #1776)
