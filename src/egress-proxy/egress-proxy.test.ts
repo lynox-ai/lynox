@@ -812,6 +812,21 @@ describe('contract: shell listener', () => {
     expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([['other.cdn.example', 'sni-mismatch']]);
   });
 
+  it('refuses a second hello that names another host from the same set', async () => {
+    // The second hello is held to the CONNECT host, not to the set: a name the
+    // credential may reach on its own CONNECT is still a different tunnel.
+    const o = await origin(serverHello(true));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example', 'b.example']));
+    const res = await open(r);
+    await until(() => res.data().length > 0);
+    const closed = closedOf(res.socket);
+    res.socket.write(Buffer.concat([CCS, hello(['b.example'])]));
+    await until(closed);
+    expect(o.received()).toBe(hello(['a.example']).toString('latin1'));
+    expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([['b.example', 'sni-mismatch']]);
+  });
+
   it('starts the tunnel when the server answers with a plain ServerHello', async () => {
     const o = await origin(serverHello(false));
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
