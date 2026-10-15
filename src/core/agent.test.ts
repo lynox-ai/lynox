@@ -64,7 +64,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -77,7 +77,8 @@ import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
+import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as builtinTools from '../tools/builtin/index.js';
@@ -6682,3 +6683,74 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
   });
 });
+
+// The diff preview a CLI user sees before a write reads the file the write would change. It
+// resolves the path as write_file and edit_file do, so it never shows a file the write could
+// not reach: outside workspace isolation that is `<data dir>/workspace/<name>`, never the
+// absolute path the model named.
+describe('diff preview before a write', () => {
+  let dataDir: string;
+  let elsewhere: string;
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'preview-data-'));
+    elsewhere = mkdtempSync(join(tmpdir(), 'preview-elsewhere-'));
+    vi.stubEnv('LYNOX_DATA_DIR', dataDir);
+    vi.stubEnv('LYNOX_WORKSPACE', '');
+    resetWorkspaceCache();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetWorkspaceCache();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  async function previewOf(path: string): Promise<string> {
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: [makeTool('write_file', async () => 'written')],
+    });
+    agent.promptUser = vi.fn().mockResolvedValue('Allow');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await (agent as unknown as { _executeOneInner(tc: unknown): Promise<unknown> })._executeOneInner({
+        type: 'tool_use', id: 'w1', name: 'write_file', input: { path, content: 'new text' },
+      });
+      return stderr.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+  }
+
+  it('does not show a file outside the workspace that the model named by absolute path', async () => {
+    const outside = join(elsewhere, 'credentials.txt');
+    writeFileSync(outside, 'outside-only-marker', 'utf-8');
+    expect(await previewOf(outside)).not.toContain('outside-only-marker');
+  });
+
+  it('shows the file the write resolves to (positive control)', async () => {
+    mkdirSync(join(dataDir, 'workspace'), { recursive: true });
+    writeFileSync(join(dataDir, 'workspace', 'credentials.txt'), 'inside-marker', 'utf-8');
+    const shown = await previewOf(join(elsewhere, 'credentials.txt'));
+    expect(shown).toContain('inside-marker');
+  });
+});
+
+describe('readForDiffPreview', () => {
+  it('reads a regular file, and does not follow a symlink at the file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'preview-read-'));
+    try {
+      writeFileSync(join(dir, 'target.txt'), 'outside-target', 'utf-8');
+      writeFileSync(join(dir, 'plain.txt'), 'plain text', 'utf-8');
+      symlinkSync(join(dir, 'target.txt'), join(dir, 'link.txt'));
+      expect(readForDiffPreview(join(dir, 'plain.txt'))).toBe('plain text');
+      expect(readForDiffPreview(join(dir, 'link.txt'))).toBe('');
+      expect(readForDiffPreview(join(dir, 'absent.txt'))).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

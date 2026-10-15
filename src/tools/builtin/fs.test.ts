@@ -669,3 +669,28 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
     });
   });
 });
+
+// The artifacts check shares the engine's predicate: an artifact whose name starts with two
+// dots is inside the artifacts directory, and the placeholder refusal applies to it too.
+describe('an artifact whose name starts with two dots', () => {
+  it('edit_file refuses the eviction placeholder in it (CLI mode)', async () => {
+    const d = await makeTempDir();
+    const prev = process.env['LYNOX_DATA_DIR'];
+    process.env['LYNOX_DATA_DIR'] = d;
+    try {
+      clearTenantWorkspace();
+      mkdirSync(join(d, 'artifacts'), { recursive: true });
+      const p = join(d, 'artifacts', '..draft.html');
+      writeFileSync(p, '# Pitch\n\nThree budget options.', 'utf-8');
+      const [[form, placeholder]] = evictionPlaceholders() as [[string, string]];
+      await expect(
+        editFileTool.handler({ path: p, old_string: 'Three budget options.', new_string: placeholder }, makeAgent()),
+        form,
+      ).rejects.toThrow(/refused[\s\S]*placeholder/);
+      expect(await readFile(p, 'utf-8')).toBe('# Pitch\n\nThree budget options.');
+    } finally {
+      if (prev === undefined) delete process.env['LYNOX_DATA_DIR'];
+      else process.env['LYNOX_DATA_DIR'] = prev;
+    }
+  });
+});

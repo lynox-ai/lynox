@@ -1,5 +1,5 @@
 import { openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
-import { dirname, resolve, basename, join, isAbsolute, relative } from 'node:path';
+import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
@@ -93,8 +93,8 @@ function artifactsRoot(): string {
 
 /** Whether an already-resolved path lies inside the artifacts directory. */
 function isInArtifactsRoot(realPath: string): boolean {
-  const rel = relative(artifactsRoot(), realPath);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  const root = artifactsRoot();
+  return realPath !== root && isPathWithin(realPath, root);
 }
 
 /** The file-tool half of the check `artifact_save` makes: text carrying the
@@ -117,8 +117,10 @@ function refuseEvictionPlaceholder(written: string, realPath: string): void {
 
 /** Resolve + boundary-validate a writable path with the same rules as
  *  write_file: validatePath when workspace isolation is active, else
- *  workspace-relative + escape-symlink rejection. */
-function resolveWritablePath(rawPath: string): string {
+ *  workspace-relative + escape-symlink rejection. Exported for the diff preview
+ *  the agent shows before a write (agent.ts): it reads the file the write would
+ *  change, so it resolves the path exactly as write_file and edit_file do. */
+export function resolveWritablePath(rawPath: string): string {
   if (isWorkspaceActive()) {
     return validatePath(resolve(rawPath), 'write');
   }

@@ -1,10 +1,10 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod } from '../core/outbound-write.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
-import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
+import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
-import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS } from '../core/workspace.js';
+import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
 import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
 import { channels } from '../core/observability.js';
 import { globToRegex } from '../core/glob.js';
@@ -398,10 +398,6 @@ function resolveRealPath(filePath: string): string {
   return resolved;
 }
 
-function isPathWithin(childPath: string, parentPath: string): boolean {
-  const rel = relative(parentPath, childPath);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
 
 /**
  * The structured danger signal. `warning` is the GO text (identical to what

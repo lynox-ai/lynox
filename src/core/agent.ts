@@ -77,7 +77,8 @@ import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, closeSync, constants } from 'node:fs';
+import { resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
   BetaMessageParam,
@@ -243,6 +244,24 @@ function stableStringify(value: unknown): string {
  * repeated in prose is a pointer at code that is free to move, and a note that
  * says "2000" after this becomes 4000 is worse than one that says nothing.
  */
+/**
+ * The text of the file a write would change, for the diff preview, or '' when there is none.
+ * `path` is the path the write tool resolved; it is opened without following a symlink at the
+ * file itself, so a file swapped for a link after that resolution shows nothing rather than
+ * the link's target.
+ */
+export function readForDiffPreview(path: string): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return readFileSync(fd, 'utf-8');
+  } catch {
+    return ''; // absent, unreadable, or a symlink — the preview shows a new file
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
@@ -4146,12 +4165,10 @@ export class Agent implements IAgent {
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
         if (input.path) {
-          let existing = '';
-          try {
-            existing = readFileSync(input.path, 'utf-8');
-          } catch {
-            // File doesn't exist — will show NEW FILE header
-          }
+          // The file the write would change, resolved as write_file and edit_file resolve it.
+          // A path they refuse throws here and skips the preview; the tool reports it.
+          const target = resolveWritablePath(input.path);
+          const existing = readForDiffPreview(target);
           let updated: string | undefined;
           if (tc.name === 'write_file' && typeof input.content === 'string') {
             updated = input.content;

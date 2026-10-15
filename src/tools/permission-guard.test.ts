@@ -3340,3 +3340,14 @@ describe('bash rule scan: the shortcuts behind the verdicts', () => {
     }
   });
 });
+
+// The containment check shares the engine's predicate (workspace.ts `isPathWithin`): a name
+// that only starts with two dots is inside the project, a `..` component is not.
+describe('write_file outside the project — a name that starts with two dots', () => {
+  it('is inside the project and not blocked', () => {
+    expect(isDangerous('write_file', { path: `${process.cwd()}/..drafts/file.txt`, content: 'ok' }, 'autonomous')).toBeNull();
+  });
+  it('a `..` component still leaves the project (control)', () => {
+    expect(isDangerous('write_file', { path: `${process.cwd()}/../elsewhere/file.txt`, content: 'ok' }, 'autonomous')).toContain('write outside project directory');
+  });
+});

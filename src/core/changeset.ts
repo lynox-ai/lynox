@@ -1,6 +1,10 @@
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, cpSync } from 'node:fs';
+import {
+  mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
+  openSync, closeSync, writeSync, constants,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, dirname, resolve } from 'node:path';
+import { join, relative, dirname, resolve, basename } from 'node:path';
+import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
@@ -18,7 +22,64 @@ export class ChangesetManager {
   /** `runId` names the session run this manager belongs to (one per user run, not the HTTP
    *  run registry's id). The review shows it and its answer carries it back, so an answer to
    *  one run's review never reaches the next run's files. */
-  constructor(private readonly cwd: string, readonly runId: string) {}
+  constructor(private readonly cwd: string, readonly runId: string, otherRoots: readonly string[] = []) {
+    const real = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+    this.realCwd = real(cwd);
+    this.roots = [this.realCwd, ...otherRoots.map(real)];
+  }
+
+  /** `cwd` with symlinks resolved: the workspace, which names in the review are relative to. */
+  private readonly realCwd: string;
+  /** Every directory a tracked file may be inside: the workspace and the other roots a write
+   *  tool may reach (`writeRootsBesidesWorkspace`), symlinks resolved. */
+  private readonly roots: readonly string[];
+
+  /**
+   * The real path of `filePath` if it lies inside one of the roots, else null. Symlinks
+   * are resolved on the file, or on its closest existing ancestor when the file does not
+   * exist yet. The manager tracks, reads, copies, restores and deletes only paths this
+   * returns, and checks again right before each of those: the path it is handed comes from
+   * the model and has not been through the write tool's own check yet, and a directory on
+   * the way can change between the backup and the rollback.
+   */
+  private _confine(filePath: string): string | null {
+    const abs = resolve(filePath);
+    let ancestor = abs;
+    let tail = '';
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      tail = tail === '' ? basename(ancestor) : join(basename(ancestor), tail);
+      ancestor = parent;
+    }
+    let real: string;
+    try {
+      real = tail === '' ? realpathSync(ancestor) : join(realpathSync(ancestor), tail);
+    } catch {
+      return null;
+    }
+    // A root itself is a directory, never a tracked file: reading it fails, and nothing is shown or restored.
+    return this.roots.some((root) => isPathWithin(real, root)) ? real : null;
+  }
+
+  /** The bytes of a tracked file, read only while it is still inside a root and
+   *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
+  private _readTracked(abs: string): Buffer | null {
+    if (this._confine(abs) !== abs) return null;
+    let fd: number;
+    try {
+      fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch {
+      return null;
+    }
+    try {
+      return readFileSync(fd);
+    } catch {
+      return null;
+    } finally {
+      closeSync(fd);
+    }
+  }
 
   /** One flat file per tracked path, named by its hash. Never a path relative to `cwd`: a
    *  file outside `cwd` would give `../…` and land outside the directory `cleanup()` removes. */
@@ -33,7 +94,10 @@ export class ChangesetManager {
    * we only need the original pre-run content.
    */
   backupBeforeWrite(filePath: string): void {
-    const abs = resolve(filePath);
+    // Outside the workspace: not tracked. The write tool refuses such a path; if it is
+    // allowed elsewhere (`/tmp`), it is not this review's to show or roll back.
+    const abs = this._confine(filePath);
+    if (abs === null) return;
     if (this.entries.has(abs)) return; // Already backed up — first write wins
 
     let originalContent: string | null = null;
@@ -44,12 +108,14 @@ export class ChangesetManager {
       // would make "Rollback all" delete a file the user had before the run.
       status = 'modified';
       try {
-        const bytes = readFileSync(abs);
+        const bytes = this._readTracked(abs);
+        if (bytes === null) throw new Error('unreadable');
         originalContent = bytes.toString('utf-8');
         // Held before the copy: a failed copy still leaves the bytes rollback restores.
         this.originalBytes.set(abs, bytes);
         this.backupDir ??= mkdtempSync(join(tmpdir(), 'lynox-changeset-'));
-        cpSync(abs, this._backupPathOf(abs)!);
+        // The held bytes, not a copy of the path: copying the path would copy a symlink as one.
+        writeFileSync(this._backupPathOf(abs)!, bytes, { mode: 0o600, flag: 'wx' });
       } catch {
         // Unreadable: rollback cannot restore it and leaves it alone (no original content).
         // Copy failed: rollback restores the held bytes; the diff is unavailable.
@@ -70,19 +136,15 @@ export class ChangesetManager {
    * bytes that are not valid UTF-8 decodes to the same string after a write that changed
    * them, and that write must still be reviewed.
    */
-  private _changed(): Array<[string, ChangesetEntry, string]> {
-    const changed: Array<[string, ChangesetEntry, string]> = [];
+  private _changed(): Array<[string, ChangesetEntry, string, Buffer]> {
+    const changed: Array<[string, ChangesetEntry, string, Buffer]> = [];
     for (const [abs, entry] of this.entries) {
-      let currentBytes: Buffer;
-      try {
-        currentBytes = readFileSync(abs);
-      } catch {
-        // Deleted during the run, or unreadable — not reported
-        continue;
-      }
+      // Deleted during the run, unreadable, or no longer inside the workspace — not reported
+      const currentBytes = this._readTracked(abs);
+      if (currentBytes === null) continue;
       if (entry.status === 'modified' && this.originalBytes.get(abs)?.equals(currentBytes)) continue;
       const currentContent = currentBytes.toString('utf-8');
-      changed.push([abs, entry, currentContent]);
+      changed.push([abs, entry, currentContent, currentBytes]);
     }
     return changed;
   }
@@ -93,8 +155,8 @@ export class ChangesetManager {
   getChanges(): ChangesetDiff[] {
     const diffs: ChangesetDiff[] = [];
 
-    for (const [abs, entry, currentContent] of this._changed()) {
-      const rel = relative(this.cwd, abs);
+    for (const [abs, entry, currentContent, currentBytes] of this._changed()) {
+      const rel = relative(this.realCwd, abs);
 
       let diffText: string;
       if (entry.status === 'added') {
@@ -103,11 +165,16 @@ export class ChangesetManager {
         const header = `--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n`;
         diffText = header + lines.map(l => `+${l}`).join('\n');
       } else {
-        // Modified file: use system diff -u
+        // Modified file: system diff -u between the backup and the bytes just read, written
+        // to a file of our own. `diff` given the tracked path would open it by name again.
         const backupPath = this._backupPathOf(abs);
+        const currentPath = backupPath === null ? null : `${backupPath}.current`;
         try {
-          if (backupPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
-          diffText = execFileSync('diff', ['-u', backupPath, abs], {
+          if (backupPath === null || currentPath === null || !existsSync(backupPath)) throw new Error('no backup copy');
+          // The bytes, as the backup holds bytes: decoded text would turn every line that is
+          // not UTF-8 into a change.
+          writeFileSync(currentPath, currentBytes, { mode: 0o600 });
+          diffText = execFileSync('diff', ['-u', '--label', `a/${rel}`, '--label', `b/${rel}`, backupPath, currentPath], {
             encoding: 'utf-8',
             timeout: 5000,
           });
@@ -119,6 +186,8 @@ export class ChangesetManager {
             // Fallback: basic header
             diffText = `--- a/${rel}\n+++ b/${rel}\n(diff unavailable)`;
           }
+        } finally {
+          if (currentPath !== null) rmSync(currentPath, { force: true });
         }
       }
 
@@ -198,7 +267,7 @@ export class ChangesetManager {
       if (changed.has(abs)) continue;
       // Kept: a tracked file that is gone or unreadable is not "unchanged".
       if (entry.status === 'modified' && !this._isUnchanged(abs)) continue;
-      if (entry.status === 'added' && existsSync(abs)) continue;
+      if (entry.status === 'added' && this._readTracked(abs) !== null) continue;
       const backupPath = this._backupPathOf(abs);
       if (backupPath !== null) rmSync(backupPath, { force: true });
       this.entries.delete(abs);
@@ -210,11 +279,7 @@ export class ChangesetManager {
   private _isUnchanged(abs: string): boolean {
     const before = this.originalBytes.get(abs);
     if (before === undefined) return false;
-    try {
-      return before.equals(readFileSync(abs));
-    } catch {
-      return false;
-    }
+    return this._readTracked(abs)?.equals(before) ?? false;
   }
 
   /**
@@ -239,13 +304,16 @@ export class ChangesetManager {
   }
 
   private _rollbackOne(abs: string, entry: ChangesetEntry): void {
+    // Checked again here: a directory on the way may have become a symlink out of the
+    // workspace since the backup. Such a file is left alone.
+    if (this._confine(abs) !== abs) return;
     if (entry.status === 'added') {
-      // New file — delete it
+      // New file — delete it (unlink removes a symlink itself, never its target)
       try {
         unlinkSync(abs);
-        // Try to remove empty parent dirs up to cwd
+        // Try to remove empty parent dirs up to the root the file is in, never the root itself
         let dir = dirname(abs);
-        while (dir !== this.cwd && dir !== dirname(dir)) {
+        while (!this.roots.includes(dir) && dir !== dirname(dir)) {
           try {
             rmdirSync(dir);
             dir = dirname(dir);
@@ -259,12 +327,29 @@ export class ChangesetManager {
     } else {
       // Modified file — restore the pre-run bytes; the decoded text loses any that are not UTF-8
       if (entry.originalContent !== null) {
+        let fd: number | undefined;
         try {
-          writeFileSync(abs, this.originalBytes.get(abs) ?? entry.originalContent);
+          // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
+          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o666);
+          const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
+          let off = 0;
+          while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
         } catch {
           // Best-effort
+        } finally {
+          if (fd !== undefined) closeSync(fd);
         }
       }
     }
   }
+}
+
+/**
+ * The changeset of one session run: the current workspace, plus the other roots a write tool
+ * may reach while isolation is active (`/tmp`, the artifacts directory). An artifact edited
+ * with `edit_file` is reviewed and can be rolled back like a workspace file; the file tools
+ * bypass the artifact store's version ring, so nothing else could undo it.
+ */
+export function workspaceChangeset(runId: string): ChangesetManager {
+  return new ChangesetManager(getWorkspaceCwd(), runId, writeRootsBesidesWorkspace());
 }
