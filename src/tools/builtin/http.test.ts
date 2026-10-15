@@ -1285,7 +1285,7 @@ describe('httpRequestTool', () => {
           // mandate proposes a task (it does not write to a connected account even with a profile).
           const SET_UP = ' To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
           const NO_STORE = ' This run has no api_profile store, so it cannot write there.';
-          const AS_TASK = ' This session does not write there; propose the change as a task instead (task_create), which runs once the owner approves it.';
+          const AS_TASK = ' This session does not write there. Tell the owner which change you would make: the owner first connects bexio through that provider, and the change can then be proposed as a task (task_create) the owner approves.';
           const bexioWrites: CapabilityContract = { ...withDelete, hostPatterns: ['api.bexio.com'], pathPatterns: ['/2.0/*'] };
           async function withEmptyStore(): Promise<void> {
             const { ApiStore } = await import('../../core/api-store.js');
@@ -1306,6 +1306,8 @@ describe('httpRequestTool', () => {
             ['an empty store, a GET with _method in the query', withEmptyStore, 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', {}, {}, SET_UP],
             ['an empty store, a contract that grants the write', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { capabilityContract: bexioWrites }, SET_UP],
             ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
+            // Who asks decides before the store: a mandate in a run with no store is told what a mandate is.
+            ['no store, a mandate', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
           ] as const)('refuses %s, with its way out, and the tool asks and sends nothing', async (_label, setUp, url, method, headers, extras, wayOut) => {
             await setUp();
             mockDnsPublic();
@@ -1318,9 +1320,11 @@ describe('httpRequestTool', () => {
             expect(fetchMock).not.toHaveBeenCalled();
           });
 
-          // An interactive write redirected onto the bexio API: the hop is refused, not asked, and
-          // the same write sent there directly is refused as above. Bodyless, so the cross-origin
-          // hop keeps its method (a body turns it into a read).
+          // An interactive write redirected onto the bexio API: the hop is refused unasked by the
+          // rule for any write hop onto another host (nothing here is particular to the provider),
+          // and its note does not promise that the direct request is asked; sent directly, it is
+          // refused as above. Bodyless, so the cross-origin hop keeps its method (a body turns it
+          // into a read).
           it('refuses an interactive DELETE redirected onto the bexio API at the hop, unasked, and the direct one too', async () => {
             await withEmptyStore();
             mockDnsPublic();
@@ -1332,6 +1336,7 @@ describe('httpRequestTool', () => {
             const agent = makeAgent({ promptUser });
             const hop = await visible({ url: 'https://api.crm.example/v1/contact/7', method: 'DELETE' }, agent);
             expect(hop).toContain('needs its own approval');
+            expect(hop).toContain('A request sent to that address directly goes through its own checks there, which ask first or refuse it.');
             expect(fetchMock).toHaveBeenCalledTimes(1);
             expect(promptUser).toHaveBeenCalledTimes(1);
             expect(await visible({ url: 'https://api.bexio.com/2.0/contact/7', method: 'DELETE' }, agent)).toContain(REFUSED);

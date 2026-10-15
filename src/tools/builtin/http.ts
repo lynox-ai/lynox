@@ -165,7 +165,7 @@ export class RedirectRefusedAfterWrite extends Error {
         ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
           `Do not repeat the request: check the target system for whether it was carried out.`
         : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out. A request sent to that address directly asks first.`),
+          `Check the target system for whether the request was carried out. A request sent to that address directly goes through its own checks there, which ask first or refuse it.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
@@ -2372,9 +2372,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const claimant = isWriteMethod(gatedMethod) ? hostClaimant(input.url) : undefined;
     if (claimant !== undefined && (!toolContext?.apiStore || profilesOnHost(input.url, toolContext.apiStore).length === 0)) {
       // The way out depends on who asks: a mandate does not write to a connected account at all
-      // (below), and a run without a profile store has nowhere to keep one.
+      // (below), and with no profile on the host a task it proposed would be refused for the
+      // owner too until the owner connects the provider; a run without a profile store has
+      // nowhere to keep a profile.
       const wayOut = !isOwnerPrincipal(agent.principal)
-        ? 'This session does not write there; propose the change as a task instead (task_create), which runs once the owner approves it.'
+        ? `This session does not write there. Tell the owner which change you would make: the owner first connects ${claimant.label} through that provider, and the change can then be proposed as a task (task_create) the owner approves.`
         : !toolContext?.apiStore
           ? 'This run has no api_profile store, so it cannot write there.'
           : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
