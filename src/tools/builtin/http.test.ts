@@ -4833,6 +4833,26 @@ describe('httpRequestTool', () => {
       expect(lastPinnedInputs).toHaveLength(0);
     });
 
+    // HTTPS only for the oauth2 attach too, like basic, bearer and header: the access
+    // token is a bearer credential until it expires.
+    it('SECURITY: refuses to attach an oauth2 token over http, before it reads the vault or renews', async () => {
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const reads: string[] = [];
+      const agent = (store: unknown): never => ({
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => { reads.push(k); return 'tok'; } },
+        sessionCounters: testCounters,
+      }) as never;
+      const oauth = await storeWith({ type: 'oauth2', oauth: { token_url: 'https://idp.bexio.com/token', token_expires_at: 1 } });
+      const result = await visible({ url: 'http://api.crm.example/3.0/users/me', method: 'GET' }, agent(oauth));
+      expect(result).toContain('refusing to attach it over a non-HTTPS URL');
+      expect(reads).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
     it('refuses a shaping slot before it reads the vault or renews a token', async () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));

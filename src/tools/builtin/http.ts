@@ -1660,6 +1660,13 @@ async function attachEngineManagedAuth(
     if (!hostVetted) {
       return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
     }
+    // HTTPS only, like basic, bearer and header. The access token is a bearer
+    // credential that holds until it expires, so "rotatable" is no reason to send it
+    // in clear. Before the revoked-grant check and the renewal below: a request that
+    // will be refused must not read the vault or run an exchange first.
+    if (!url.toLowerCase().startsWith('https://')) {
+      return { refusal: `Error: api_profile "${profile.id}" uses a stored access token — refusing to attach it over a non-HTTPS URL. Use https://.` };
+    }
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -1796,9 +1803,9 @@ async function attachEngineManagedAuth(
     if (!hostVetted) {
       return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the stored credentials to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
     }
-    // HTTPS only. Unlike the oauth2 sibling's rotatable access_token this is a
-    // long-lived password the operator typed once; `getByHostname` keys on hostname
-    // alone, so without this an `http://` URL to the same host would ship it clear.
+    // HTTPS only, as for every stored credential. This one is a long-lived password
+    // the operator typed once; `getByHostname` keys on hostname alone, so without
+    // this an `http://` URL to the same host would ship it clear.
     if (!url.toLowerCase().startsWith('https://')) {
       return { refusal: `Error: api_profile "${profile.id}" uses stored credentials — refusing to attach them over a non-HTTPS URL. Use https://.` };
     }

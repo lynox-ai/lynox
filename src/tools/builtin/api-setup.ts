@@ -276,8 +276,15 @@ function validateProfile(profile: ApiProfile): string | null {
     if (profile.auth.type === 'oauth2' && profile.auth.oauth) {
       const o = profile.auth.oauth;
       if (o.token_url !== undefined) {
-        try { new URL(o.token_url); } catch {
+        let tokenUrl: URL;
+        try { tokenUrl = new URL(o.token_url); } catch {
           return `Invalid auth.oauth.token_url: "${o.token_url}" is not a valid URL`;
+        }
+        // The client secret is posted here, and the token it mints is attached to
+        // every request: https only, like every other stored credential. No exception
+        // for a private network or loopback, because the other auth types have none.
+        if (tokenUrl.protocol !== 'https:') {
+          return 'Invalid auth.oauth.token_url: it must be an https:// URL — the client secret is posted to it and would otherwise travel in clear';
         }
       }
       if (o.grant_type !== undefined && o.grant_type !== 'client_credentials' && o.grant_type !== 'refresh_token') {
@@ -2436,6 +2443,9 @@ ${draftJson}
       const vetting = vetTokenEndpoint(tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
         const host = vetting.host;
+        if (vetting.reason === 'not-https') {
+          return `Error: profile "${input.id}" token_url is not https — fetch_token is refused because it would send the client_secret in clear. Update the profile with an https:// token_url.`;
+        }
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';

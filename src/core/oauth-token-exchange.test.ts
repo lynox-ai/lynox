@@ -67,6 +67,37 @@ describe('vetTokenEndpoint — the gate that used to live in the tool', () => {
   });
 });
 
+describe('vetTokenEndpoint — https only', () => {
+  // The client secret is posted to this endpoint. An allowlisted or accepted host does
+  // not make plain http safe, so the scheme is checked first, whatever the host.
+  it('refuses http on a baseline host and on an accepted host, and says why', () => {
+    const ack = { accepted: true as const, hosts: ['tokens.example.invalid'] };
+    for (const [url, a] of [['http://api.openai.com/oauth/token', undefined], ['http://tokens.example.invalid/x', ack]] as const) {
+      const v = vetTokenEndpoint(url, a);
+      expect(isTokenEndpointRefused(v), url).toBe(true);
+      if (isTokenEndpointRefused(v)) expect(v.reason, url).toBe('not-https');
+    }
+    // Control: the same hosts over https are admitted.
+    expect(isTokenEndpointRefused(vetTokenEndpoint('https://api.openai.com/oauth/token', undefined))).toBe(false);
+    expect(isTokenEndpointRefused(vetTokenEndpoint('https://tokens.example.invalid/x', ack))).toBe(false);
+  });
+
+  it('keeps the other refusal apart: an unvetted https host is not-vetted', () => {
+    const v = vetTokenEndpoint('https://tokens.example.invalid/x', undefined);
+    expect(isTokenEndpointRefused(v) && v.reason).toBe('not-vetted');
+  });
+
+  it('refuses an http endpoint at the exchange too, and fetches nothing', async () => {
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+    const forged = { ...vetted(), url: 'http://api.openai.com/oauth/token' };
+    const result = await exchangeToken({ endpoint: forged, params: { client_secret: 's' }, bodyFormat: 'form' }, undefined);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('not https');
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+  });
+});
+
 describe('onRequestSent — charged when the provider was REACHED, not when it answered fully', () => {
   // ── Why this test exists ──────────────────────────────────────────────
   //
