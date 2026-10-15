@@ -1,9 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { Socket, connect, createServer, type AddressInfo, type Server } from 'node:net';
+import { connect as tlsConnect } from 'node:tls';
 import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
 import { CredentialRegistry, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
-import { credentialFromHeader, isExactHostname, parseAuthority, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
+import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
 import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
 
@@ -13,11 +14,59 @@ const SECRET = 's'.repeat(40);
 const basic = (user: string): string => `Basic ${Buffer.from(user).toString('base64')}`;
 const reg = (set: string[] | '*', ttlS = 60) => ({ set: set === '*' ? '*' as const : new Set(set), ttlS, run: 'r', session: 's' });
 
+const u16 = (n: number): Buffer => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
+const u24 = (n: number): Buffer => Buffer.from([(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]);
+
+/**
+ * A minimal TLS 1.2-shaped client hello. `names` go into one server_name extension (none:
+ * no extension); `sniExtensions` repeats it; `records` splits the handshake into that many.
+ */
+function hello(names: string[] | null, opts: { records?: number; sniExtensions?: number; padding?: number } = {}): Buffer {
+  const exts: Buffer[] = [];
+  if (names !== null) {
+    const list = Buffer.concat(names.map((n) => Buffer.concat([Buffer.from([0]), u16(n.length), Buffer.from(n, 'latin1')])));
+    const data = Buffer.concat([u16(list.length), list]);
+    for (let i = 0; i < (opts.sniExtensions ?? 1); i++) exts.push(Buffer.concat([u16(0), u16(data.length), data]));
+  }
+  if (opts.padding) exts.push(Buffer.concat([u16(21), u16(opts.padding), Buffer.alloc(opts.padding)]));
+  const extBlock = Buffer.concat(exts);
+  const body = Buffer.concat([
+    Buffer.from([3, 3]), Buffer.alloc(32), Buffer.from([0]), u16(2), Buffer.from([0x13, 0x01]), Buffer.from([1, 0]),
+    ...(names === null && !opts.padding ? [] : [u16(extBlock.length), extBlock]),
+  ]);
+  const hs = Buffer.concat([Buffer.from([1]), u24(body.length), body]);
+  const n = opts.records ?? 1;
+  const size = Math.ceil(hs.length / n);
+  const recs: Buffer[] = [];
+  for (let off = 0; off < hs.length; off += size) {
+    const part = hs.subarray(off, off + size);
+    recs.push(Buffer.concat([Buffer.from([22, 3, 1]), u16(part.length), part]));
+  }
+  return Buffer.concat(recs);
+}
+
+/** The first bytes a real `node:tls` client sends for `servername`. */
+function realHello(servername: string): Promise<Buffer> {
+  return new Promise((resolve) => {
+    const server = createServer((s) => {
+      s.once('data', (d: Buffer) => { resolve(d); s.destroy(); server.close(); });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const c = tlsConnect({ host: '127.0.0.1', port: (server.address() as AddressInfo).port, servername });
+      c.on('error', () => { /* the stand-in closes it */ });
+    });
+  });
+}
+
 describe('policy', () => {
   it('takes exact lower-case host names and nothing else', () => {
     expect(isExactHostname('api.example.com')).toBe(true);
     expect(isExactHostname('a-b.example')).toBe(true);
-    for (const bad of ['API.example.com', '*.example.com', 'example.com.', '1.2.3.4', '10.0.0.010', '', 'a..b', '-a.com', 'a_b.com', `${'a'.repeat(64)}.com`]) {
+    expect(isExactHostname('a.0xample')).toBe(true);
+    for (const bad of [
+      'API.example.com', '*.example.com', 'example.com.', '1.2.3.4', '10.0.0.010', '2130706433', '0x7f000001', '0x7f.0x1', 'a.0x7f',
+      '', 'a..b', '-a.com', 'a_b.com', `${'a'.repeat(64)}.com`,
+    ]) {
       expect(isExactHostname(bad), bad).toBe(false);
     }
   });
@@ -34,7 +83,7 @@ describe('policy', () => {
     expect(parseRegistration(ok)).toMatchObject({ ok: true, value: { ttlS: 30, run: 'r', session: 's' } });
     expect(parseRegistration({ ...ok, set: '*' })).toMatchObject({ ok: true, value: { set: '*' } });
     for (const bad of [
-      null, [], 'x', { ...ok, set: ['*.example.com'] }, { ...ok, set: ['10.0.0.1'] }, { ...ok, set: 'all' },
+      null, [], 'x', { ...ok, set: ['*.example.com'] }, { ...ok, set: ['10.0.0.1'] }, { ...ok, set: ['0x5db8d70e'] }, { ...ok, set: 'all' },
       { ...ok, set: [1] }, { ...ok, ttl_s: 0 }, { ...ok, ttl_s: -1 }, { ...ok, ttl_s: 1.5 }, { ...ok, ttl_s: '30' },
       { ...ok, run: '' }, { ...ok, session: 3 }, { ...ok, extra: 1 },
     ]) {
@@ -42,11 +91,10 @@ describe('policy', () => {
     }
   });
 
-  it('reads host and port from an authority, refusing IPv6', () => {
+  it('reads host and port from a CONNECT target, refusing IPv6 and non-names', () => {
     expect(parseAuthority('API.Example.com:443')).toEqual({ ok: true, value: { host: 'api.example.com', port: 443 } });
-    expect(parseAuthority('example.com', 80)).toEqual({ ok: true, value: { host: 'example.com', port: 80 } });
     expect(parseAuthority('1.2.3.4:443')).toEqual({ ok: true, value: { host: '1.2.3.4', port: 443 } });
-    for (const bad of ['[::1]:443', 'example.com', 'example.com:x', 'example.com:123456', 'a b:443']) {
+    for (const bad of ['[::1]:443', 'example.com', 'example.com:x', 'example.com:123456', 'a b:443', 'example.com.:443', '0x7f000001:443']) {
       expect(parseAuthority(bad).ok, bad).toBe(false);
     }
   });
@@ -60,20 +108,44 @@ describe('policy', () => {
     expect(credentialFromHeader(undefined)).toBeNull();
   });
 
-  it('refuses a name when ANY of its addresses is private, denied or not IPv4', () => {
-    const deny = parseDenyIps(' 203.0.113.9 ,198.51.100.7');
+  it('refuses a name when ANY of its addresses is private, reserved, denied or not IPv4', () => {
+    const deny = parseDenyIps(' 93.184.215.99 ,198.51.100.7');
     expect(pickAddress(['93.184.215.14', '93.184.215.15'], deny)).toEqual({ ok: true, value: '93.184.215.14' });
-    expect(pickAddress(['93.184.215.14', '10.0.0.1'], deny).ok).toBe(false);
-    expect(pickAddress(['93.184.215.14', '169.254.169.254'], deny).ok).toBe(false);
-    expect(pickAddress(['93.184.215.14', '203.0.113.9'], deny).ok).toBe(false);
+    for (const inward of ['10.0.0.1', '169.254.169.254', '100.64.0.1', '192.0.2.1', '198.51.100.1', '203.0.113.1', '192.88.99.1']) {
+      expect(pickAddress(['93.184.215.14', inward], deny), inward).toEqual({ ok: false, error: 'private address' });
+    }
+    expect(pickAddress(['93.184.215.14', '93.184.215.99'], deny)).toEqual({ ok: false, error: 'denied address' });
     expect(pickAddress(['2606:2800::1'], deny).ok).toBe(false);
     expect(pickAddress([], deny).ok).toBe(false);
   });
 
-  it('stops on a deny list entry that is not an IPv4 address', () => {
-    expect(parseDenyIps(undefined).size).toBe(0);
+  it('does not start on an empty deny list, or one with anything but IPv4 addresses', () => {
+    expect([...parseDenyIps('93.184.215.99')]).toEqual(['93.184.215.99']);
+    expect(() => parseDenyIps(undefined)).toThrow(/at least/);
+    expect(() => parseDenyIps(' , ')).toThrow(/at least/);
     expect(() => parseDenyIps('1.2.3.4,example.com')).toThrow(/not an IPv4/);
     expect(() => parseDenyIps('10.0.0.0/8')).toThrow(/not an IPv4/);
+  });
+
+  it('reads the server name of a real TLS client hello', async () => {
+    const bytes = await realHello('api.example.com');
+    expect(parseClientHello(bytes)).toEqual({ state: 'hello', sni: 'api.example.com' });
+    expect(parseClientHello(bytes.subarray(0, bytes.length - 1))).toEqual({ state: 'more' });
+  });
+
+  it('reads the server name across records, and refuses what is not one plain hello', () => {
+    expect(parseClientHello(hello(['a.example']))).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(['A.Example']))).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(['a.example'], { records: 3 }))).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(hello(null))).toEqual({ state: 'hello', sni: null });
+    expect(parseClientHello(hello(['a.example', 'b.example'])).state).toBe('bad');
+    expect(parseClientHello(hello(['a.example'], { sniExtensions: 2 })).state).toBe('bad');
+    expect(parseClientHello(Buffer.from('GET / HTTP/1.1\r\n\r\n')).state).toBe('bad');
+    expect(parseClientHello(Buffer.from([22, 3, 1]))).toEqual({ state: 'more' });
+    // A handshake that announces more than the cap is refused before it is read.
+    const claim = Buffer.concat([Buffer.from([22, 3, 1]), u16(4), Buffer.from([1]), u24(MAX_HELLO_BYTES)]);
+    expect(parseClientHello(claim)).toEqual({ state: 'bad', error: 'hello too large' });
+    expect(parseClientHello(Buffer.concat([Buffer.from([22, 3, 1]), u16(4), Buffer.from([1]), u24(MAX_HELLO_BYTES - 4)]))).toEqual({ state: 'more' });
   });
 });
 
@@ -216,6 +288,8 @@ interface RigOpts {
   originPort?: number;
   deny?: string[];
   limits?: Partial<ProxyLimits>;
+  /** The resolver answers after this long. */
+  lookupDelayMs?: number;
   /** Runs inside the resolver, before it answers. */
   duringLookup?: (registry: CredentialRegistry) => void;
   /** Replaces the stand-in connection. */
@@ -232,6 +306,7 @@ async function rig(opts: RigOpts = {}): Promise<Rig> {
     deny: new Set(opts.deny ?? []),
     lookup: async (host) => {
       lookups.push(host);
+      if (opts.lookupDelayMs) await new Promise((res) => setTimeout(res, opts.lookupDelayMs));
       opts.duringLookup?.(registry);
       const a = opts.addresses?.[host];
       if (!a) throw new Error('ENOTFOUND');
@@ -325,6 +400,14 @@ describe('contract: registration listener', () => {
 });
 
 describe('contract: shell listener', () => {
+  /** CONNECT, then the client hello for `sni`; resolves once the proxy has answered the CONNECT. */
+  const open = async (r: Rig, target = 'a.example:443', sni: string[] | null = ['a.example'], cred: string = CRED) => {
+    const res = await shellRequest(r, connectHead(target, cred));
+    if (res.status === 200) res.socket.write(hello(sni));
+    return res;
+  };
+  const closedOf = (s: Socket): (() => boolean) => { let c = s.destroyed; s.on('close', () => { c = true; }); return () => c; };
+
   it('answers 407 without a credential, or with an unknown one, and opens nothing', async () => {
     const o = await origin();
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
@@ -333,6 +416,8 @@ describe('contract: shell listener', () => {
     expect(none.status).toBe(407);
     expect(none.head).toMatch(/Proxy-Authenticate: Basic/);
     expect((await shellRequest(r, connectHead('a.example:443', CRED2))).status).toBe(407);
+    // Without a credential the request is not looked at further: 407, not 403 or 405.
+    expect((await shellRequest(r, 'GET http://a.example/ HTTP/1.1\r\nHost: a.example\r\n\r\n')).status).toBe(407);
     expect(r.lookups).toEqual([]);
     expect(r.connects).toEqual([]);
   });
@@ -346,15 +431,37 @@ describe('contract: shell listener', () => {
     expect(r.registry.denials(CRED)).toEqual([{ host: 'secret-data.attacker.example', port: 443, at: 5_000_000 }]);
   });
 
-  it('refuses a port other than 443 and 80 before resolving', async () => {
+  it('refuses every port but 443 before resolving, 80 included', async () => {
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] } });
     r.registry.put(CRED, reg(['a.example']));
     expect((await shellRequest(r, connectHead('a.example:22'))).status).toBe(403);
+    expect((await shellRequest(r, connectHead('a.example:80'))).status).toBe(403);
     expect(r.lookups).toEqual([]);
-    expect(r.registry.denials(CRED)).toEqual([{ host: 'a.example', port: 22, at: 5_000_000 }]);
+    expect(r.registry.denials(CRED)?.map((d) => d.port)).toEqual([22, 80]);
   });
 
-  it('connects to exactly the checked address and tunnels bytes both ways', async () => {
+  it('refuses plain http and malformed targets, and records them as denials', async () => {
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] } });
+    r.registry.put(CRED, reg('*'));
+    const auth = `Proxy-Authorization: ${basic(CRED)}\r\n`;
+    expect((await shellRequest(r, `GET http://a.example/ HTTP/1.1\r\nHost: a.example\r\n${auth}\r\n`)).status).toBe(403);
+    expect((await shellRequest(r, connectHead('evil.example.:443'))).status).toBe(403);
+    expect((await shellRequest(r, connectHead('[::1]:443'))).status).toBe(403);
+    expect(r.registry.denials(CRED)?.map((d) => d.host)).toEqual(['http://a.example/', 'evil.example.:443', '[::1]:443']);
+    expect(r.lookups).toEqual([]);
+    expect(r.connects).toEqual([]);
+  });
+
+  it('refuses a request it cannot parse', async () => {
+    const r = await rig();
+    r.registry.put(CRED, reg('*'));
+    expect((await shellRequest(r, 'nonsense\r\n\r\n')).status).toBe(400);
+    expect((await shellRequest(r, `CONNECT a.example:443 HTTP/1.1\r\nno colon\r\n\r\n`)).status).toBe(400);
+    expect((await shellRequest(r, `CONNECT a.example:443 HTTP/1.1\r\nX: ${'y'.repeat(20 * 1024)}\r\n\r\n`)).status).toBe(431);
+    expect(r.connects).toEqual([]);
+  });
+
+  it('connects to exactly the checked address, and forwards once the hello names the same host', async () => {
     const o = await origin();
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14', '93.184.215.15'] }, originPort: o.port });
     r.registry.put(CRED, reg(['a.example']));
@@ -362,90 +469,122 @@ describe('contract: shell listener', () => {
     expect(res.status).toBe(200);
     expect(r.lookups).toEqual(['a.example']);
     expect(r.connects).toEqual([{ ip: '93.184.215.14', port: 443 }]);
-    res.socket.write('hello');
-    await until(() => res.data().includes('echo:hello'));
-    expect(o.received()).toBe('hello');
+    // Nothing reaches the upstream before the hello is read.
+    res.socket.write(hello(['a.example']).subarray(0, 10));
+    await new Promise((x) => setTimeout(x, 30));
+    expect(o.received()).toBe('');
+    res.socket.write(hello(['a.example']).subarray(10));
+    res.socket.write('after');
+    await until(() => o.received().endsWith('after'));
+    expect(o.received()).toBe(hello(['a.example']).toString('latin1') + 'after');
+    await until(() => res.data().includes('echo:'));
     expect(r.registry.denials(CRED)).toEqual([]);
   });
 
+  it('closes the tunnel when the hello names another host, or none, and forwards nothing', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example', 'b.example']));
+    for (const sni of [['other.cdn.example'], ['b.example'], null, ['a.example', 'b.example']]) {
+      const res = await shellRequest(r, connectHead('a.example:443'));
+      expect(res.status).toBe(200);
+      const closed = closedOf(res.socket);
+      res.socket.write(hello(sni));
+      await until(closed);
+    }
+    expect(o.received()).toBe('');
+    expect(r.registry.denials(CRED)?.map((d) => d.host)).toEqual(['other.cdn.example', 'b.example', 'a.example', 'a.example']);
+    expect(r.proxy.openTunnels).toBe(0);
+  });
+
+  it('closes a tunnel whose client sends no hello in time', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, limits: { headerTimeoutMs: 50 } });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(r, connectHead('a.example:443'));
+    expect(res.status).toBe(200);
+    await until(closedOf(res.socket));
+    expect(r.registry.denials(CRED)).toEqual([{ host: 'a.example', port: 443, at: 5_000_000 }]);
+  });
+
   it('refuses a name that also resolves inward, or to a denied address, and connects nowhere', async () => {
-    const r = await rig({ addresses: { 'a.example': ['93.184.215.14', '127.0.0.1'], 'b.example': ['203.0.113.9'] }, deny: ['203.0.113.9'] });
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14', '127.0.0.1'], 'b.example': ['93.184.215.99'] }, deny: ['93.184.215.99'] });
     r.registry.put(CRED, reg(['a.example', 'b.example']));
     expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(403);
     expect((await shellRequest(r, connectHead('b.example:443'))).status).toBe(403);
     expect(r.lookups).toEqual(['a.example', 'b.example']);
     expect(r.connects).toEqual([]);
     expect(r.registry.denials(CRED)?.map((d) => d.host)).toEqual(['a.example', 'b.example']);
+    expect(r.proxy.openTunnels).toBe(0);
   });
 
-  it("lets an IPv4 literal through only a '*' set, and only when it is public", async () => {
+  it("lets an IPv4 literal through only a '*' set, and only when it is public; '*' reads no hello", async () => {
     const o = await origin();
     const r = await rig({ originPort: o.port });
     r.registry.put(CRED, reg(['a.example']));
     r.registry.put(CRED2, reg('*'));
     expect((await shellRequest(r, connectHead('93.184.215.14:443'))).status).toBe(403);
-    expect((await shellRequest(r, connectHead('169.254.169.254:80', CRED2))).status).toBe(403);
-    expect((await shellRequest(r, connectHead('93.184.215.14:443', CRED2))).status).toBe(200);
+    expect((await shellRequest(r, connectHead('169.254.169.254:443', CRED2))).status).toBe(403);
+    const res = await shellRequest(r, connectHead('93.184.215.14:443', CRED2));
+    expect(res.status).toBe(200);
+    res.socket.write('raw');
+    await until(() => o.received() === 'raw');
     expect(r.lookups).toEqual([]);
     expect(r.connects).toEqual([{ ip: '93.184.215.14', port: 443 }]);
-  });
-
-  it('forwards absolute-form http in origin form, without the proxy credential', async () => {
-    const o = await origin();
-    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
-    r.registry.put(CRED, reg(['a.example']));
-    const res = await shellRequest(r,
-      `GET http://a.example/path?q=1 HTTP/1.1\r\nHost: a.example\r\nProxy-Authorization: ${basic(`${CRED}:`)}\r\nProxy-Connection: keep-alive\r\n\r\n`);
-    // The origin echoes the request it got; its first line is the response head here.
-    expect(res.head).toMatch(/^echo:GET \/path\?q=1 HTTP\/1\.1/);
-    expect(o.received()).not.toMatch(/Proxy-/i);
-    expect(o.received()).toMatch(/\r\nConnection: close\r\n/);
-    expect(r.connects).toEqual([{ ip: '93.184.215.14', port: 80 }]);
-  });
-
-  it('refuses other request forms', async () => {
-    const r = await rig();
-    r.registry.put(CRED, reg('*'));
-    expect((await shellRequest(r, `GET /local HTTP/1.1\r\nProxy-Authorization: ${basic(CRED)}\r\n\r\n`)).status).toBe(405);
-    expect((await shellRequest(r, `GET https://a.example/ HTTP/1.1\r\nProxy-Authorization: ${basic(CRED)}\r\n\r\n`)).status).toBe(405);
-    expect((await shellRequest(r, connectHead('[::1]:443'))).status).toBe(400);
-    expect((await shellRequest(r, 'nonsense\r\n\r\n')).status).toBe(400);
-    expect((await shellRequest(r, `CONNECT a.example:443 HTTP/1.1\r\nX: ${'y'.repeat(20 * 1024)}\r\n\r\n`)).status).toBe(431);
-    expect(r.connects).toEqual([]);
   });
 
   it('closes an open tunnel when its credential is revoked', async () => {
     const o = await origin();
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
     r.registry.put(CRED, reg(['a.example']));
-    const res = await shellRequest(r, connectHead('a.example:443'));
+    const res = await open(r);
     expect(res.status).toBe(200);
+    await until(() => o.received().length > 0);
     expect(r.proxy.openTunnels).toBe(1);
-    let closed = false;
-    res.socket.on('close', () => { closed = true; });
+    const closed = closedOf(res.socket);
     expect((await api(r, 'DELETE', `/cred/${CRED}`)).status).toBe(204);
-    await until(() => closed);
+    await until(closed);
     expect(r.proxy.openTunnels).toBe(0);
   });
 
-  it('caps the tunnels of one credential', async () => {
+  it('caps the tunnels of one credential, also against requests that resolve at the same time', async () => {
     const o = await origin();
-    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, lookupDelayMs: 30, limits: { tunnelsPerCred: 2 } });
     r.registry.put(CRED, reg(['a.example']));
-    for (let i = 0; i < 32; i++) expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(200);
-    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(503);
-    expect(r.connects).toHaveLength(32);
+    const all = await Promise.all(Array.from({ length: 6 }, () => shellRequest(r, connectHead('a.example:443'))));
+    expect(all.map((x) => x.status).sort()).toEqual([200, 200, 503, 503, 503, 503]);
+    expect(r.connects).toHaveLength(2);
+    expect(r.proxy.openTunnels).toBe(2);
   });
 
-  it('caps the tunnels of all credentials together', async () => {
+  it('caps the tunnels of all credentials together, also against requests that resolve at the same time', async () => {
     const o = await origin();
-    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, limits: { tunnelsTotal: 2 } });
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, lookupDelayMs: 30, limits: { tunnelsTotal: 2 } });
     r.registry.put(CRED, reg(['a.example']));
     r.registry.put(CRED2, reg(['a.example']));
-    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(200);
-    expect((await shellRequest(r, connectHead('a.example:443', CRED2))).status).toBe(200);
-    expect((await shellRequest(r, connectHead('a.example:443', CRED2))).status).toBe(503);
+    const all = await Promise.all([CRED, CRED2, CRED, CRED2].map((c) => shellRequest(r, connectHead('a.example:443', c))));
+    expect(all.map((x) => x.status).sort()).toEqual([200, 200, 503, 503]);
     expect(r.connects).toHaveLength(2);
+  });
+
+  it('gives the slot back when a request is refused after resolving', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'], 'b.example': ['10.0.0.1'] }, originPort: o.port, limits: { tunnelsPerCred: 1, tunnelsTotal: 1 } });
+    r.registry.put(CRED, reg(['a.example', 'b.example']));
+    expect((await shellRequest(r, connectHead('b.example:443'))).status).toBe(403);
+    expect((await shellRequest(r, connectHead('c.example:443'))).status).toBe(403);
+    expect(r.proxy.openTunnels).toBe(0);
+    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(200);
+  });
+
+  it('closes connections over the connection cap', async () => {
+    const r = await rig({ limits: { connectionsTotal: 2 } });
+    const held = [connect({ host: '127.0.0.1', port: r.shellPort }), connect({ host: '127.0.0.1', port: r.shellPort })];
+    for (const h of held) { h.on('error', () => { /* closed by the test */ }); closers.push(async () => { h.destroy(); }); }
+    await Promise.all(held.map((h) => new Promise((x) => h.once('connect', x))));
+    await new Promise((x) => setTimeout(x, 20));
+    const third = await shellRequest(r, connectHead('a.example:443'));
+    expect(third.status).toBe(0);
   });
 
   it('answers 431 to a head that grows past the cap without ending', async () => {
@@ -474,11 +613,10 @@ describe('contract: shell listener', () => {
     const o = await origin();
     const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, limits: { idleTimeoutMs: 50 } });
     r.registry.put(CRED, reg(['a.example']));
-    const res = await shellRequest(r, connectHead('a.example:443'));
+    const res = await open(r);
     expect(res.status).toBe(200);
-    let closed = false;
-    res.socket.on('close', () => { closed = true; });
-    await until(() => closed);
+    await until(() => o.received().length > 0);
+    await until(closedOf(res.socket));
     expect(r.proxy.openTunnels).toBe(0);
   });
 

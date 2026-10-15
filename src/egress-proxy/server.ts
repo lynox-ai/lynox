@@ -1,10 +1,11 @@
 /**
  * The two listeners of the egress proxy (PRD 152 v2 §4.2).
  *
- * The shell listener takes `CONNECT host:port` and absolute-form `http://` requests from the
- * shell sidecar, which has no other route out. The registration listener takes the engine's
- * `PUT /cred`, `DELETE /cred` and `GET /denials`. main.ts binds each to its own network, so
- * the sidecar cannot reach the second one at all; the Bearer secret is the second layer.
+ * The shell listener takes `CONNECT host:443` from the shell sidecar, which has no other
+ * route out, and then reads the TLS client hello before it forwards a byte (policy.ts says
+ * why). The registration listener takes the engine's `PUT /cred`, `DELETE /cred` and
+ * `GET /denials`. main.ts binds each to its own network, so the sidecar cannot reach the
+ * second one at all; the Bearer secret is the second layer.
  *
  * Resolution and connection come in as dependencies, so the tests can show that a name
  * outside the set reaches no resolver and that the connection goes to the checked address.
@@ -15,17 +16,21 @@ import { createServer as createHttpServer, type IncomingMessage, type Server as 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isIPv4 } from 'node:net';
 import { hostInSet, type CredentialRegistry, type TunnelHandle } from './registry.js';
-import { ALLOWED_PORTS, credentialFromHeader, isCredential, parseAuthority, parseRegistration, pickAddress, type Target } from './policy.js';
+import { ALLOWED_PORTS, credentialFromHeader, isCredential, parseAuthority, parseClientHello, parseRegistration, pickAddress } from './policy.js';
 
 export interface ProxyLimits {
   /** Request head of the shell side, request line and headers. */
   maxHeaderBytes: number;
+  /** For the request head, and again for the TLS client hello. */
   headerTimeoutMs: number;
   connectTimeoutMs: number;
   /** A tunnel with no bytes either way for this long is closed. */
   idleTimeoutMs: number;
+  /** Tunnels open or being opened (resolving, connecting, reading the hello). */
   tunnelsPerCred: number;
   tunnelsTotal: number;
+  /** Connections to the shell listener at once, authenticated or not. */
+  connectionsTotal: number;
   /** Body of a registration request. */
   maxBodyBytes: number;
 }
@@ -37,6 +42,7 @@ export const DEFAULT_LIMITS: ProxyLimits = {
   idleTimeoutMs: 120_000,
   tunnelsPerCred: 32,
   tunnelsTotal: 256,
+  connectionsTotal: 512,
   maxBodyBytes: 64 * 1024,
 };
 
@@ -61,6 +67,10 @@ const REASONS: Record<number, string> = {
   431: 'Request Header Fields Too Large', 502: 'Bad Gateway', 503: 'Service Unavailable', 504: 'Gateway Timeout',
 };
 
+const AUTHENTICATE = 'Proxy-Authenticate: Basic realm="lynox-egress"\r\n';
+/** How much of a refused target a denial keeps. */
+const MAX_DENIED_HOST_CHARS = 255;
+
 function reply(socket: Socket, code: number, extra = ''): void {
   if (socket.destroyed) return;
   socket.end(`HTTP/1.1 ${String(code)} ${REASONS[code] ?? ''}\r\n${extra}Content-Length: 0\r\nConnection: close\r\n\r\n`);
@@ -68,58 +78,38 @@ function reply(socket: Socket, code: number, extra = ''): void {
 
 interface RequestHead {
   method: string;
-  target: Target;
-  /** For absolute-form http: the path and query to send upstream. `null` for CONNECT. */
-  path: string | null;
-  /** Header lines as received, without the request line. */
-  lines: string[];
+  target: string;
   proxyAuthorization: string | undefined;
 }
 
-function parseHead(head: string): RequestHead | { error: number } {
+function parseHead(head: string): RequestHead | null {
   const lines = head.split('\r\n');
   const m = /^([A-Z]+) (\S+) HTTP\/1\.[01]$/.exec(lines[0] ?? '');
-  if (!m) return { error: 400 };
-  const method = m[1]!;
-  const rawTarget = m[2]!;
-  const headerLines = lines.slice(1);
+  if (!m) return null;
   let proxyAuthorization: string | undefined;
-  for (const line of headerLines) {
+  for (const line of lines.slice(1)) {
     const c = line.indexOf(':');
-    if (c <= 0) return { error: 400 };
+    if (c <= 0) return null;
     if (line.slice(0, c).trim().toLowerCase() === 'proxy-authorization') {
-      if (proxyAuthorization !== undefined) return { error: 400 };
+      if (proxyAuthorization !== undefined) return null;
       proxyAuthorization = line.slice(c + 1).trim();
     }
   }
-  if (method === 'CONNECT') {
-    const t = parseAuthority(rawTarget);
-    if (!t.ok) return { error: 400 };
-    return { method, target: t.value, path: null, lines: headerLines, proxyAuthorization };
-  }
-  const abs = /^http:\/\/([^/?#@]+)([/?][^#]*)?$/i.exec(rawTarget);
-  if (!abs) return { error: 405 };
-  const t = parseAuthority(abs[1]!, 80);
-  if (!t.ok) return { error: 400 };
-  return { method, target: t.value, path: abs[2] && abs[2].startsWith('/') ? abs[2] : `/${abs[2] ?? ''}`, lines: headerLines, proxyAuthorization };
-}
-
-const HOP_HEADERS = new Set(['proxy-authorization', 'proxy-connection', 'connection', 'keep-alive']);
-
-/** The request as the origin server sees it: origin-form, no proxy headers, one request per connection. */
-function upstreamHead(req: RequestHead): string {
-  const kept = req.lines.filter((l) => !HOP_HEADERS.has(l.slice(0, l.indexOf(':')).trim().toLowerCase()));
-  return `${req.method} ${req.path ?? '/'} HTTP/1.1\r\n${kept.map((l) => `${l}\r\n`).join('')}Connection: close\r\n\r\n`;
+  return { method: m[1]!, target: m[2]!, proxyAuthorization };
 }
 
 export class ShellProxy {
   readonly server: NetServer;
   private readonly limits: ProxyLimits;
+  /** Tunnels open or being opened, all credentials. */
   private open = 0;
+  /** Tunnels being opened per credential, before the registry holds them. */
+  private readonly opening = new Map<string, number>();
 
   constructor(private readonly deps: ShellDeps) {
     this.limits = { ...DEFAULT_LIMITS, ...deps.limits };
     this.server = createNetServer((socket) => { this.accept(socket); });
+    this.server.maxConnections = this.limits.connectionsTotal;
   }
 
   get openTunnels(): number {
@@ -151,56 +141,73 @@ export class ShellProxy {
 
   private async handle(socket: Socket, rawHead: string, rest: Buffer): Promise<void> {
     const req = parseHead(rawHead);
-    if ('error' in req) { reply(socket, req.error); return; }
-    const { host, port } = req.target;
+    if (req === null) { reply(socket, 400); return; }
 
-    // 1. The credential.
+    // 1. The credential, before anything about the request is looked at.
     const cred = credentialFromHeader(req.proxyAuthorization);
     const entry = cred === null ? null : this.deps.registry.lookup(cred);
-    if (cred === null || entry === null) {
-      reply(socket, 407, 'Proxy-Authenticate: Basic realm="lynox-egress"\r\n');
-      return;
-    }
+    if (cred === null || entry === null) { reply(socket, 407, AUTHENTICATE); return; }
     const tag = credTag(cred);
-    const deny = (why: string): void => {
+    const deny = (host: string, port: number, why: string): void => {
       this.deps.registry.recordDenial(cred, host, port);
-      this.deps.log(`deny cred=${tag} host=${host} port=${String(port)} why=${why}`);
+      this.deps.log(`deny cred=${tag} host=${JSON.stringify(host)} port=${String(port)} why=${why}`);
       reply(socket, 403);
     };
 
-    // 2. The port, 3. the name: both before anything is resolved.
-    if (!ALLOWED_PORTS.has(port)) { deny('port'); return; }
-    if (!hostInSet(entry.set, host)) { deny('not-in-set'); return; }
+    if (req.method !== 'CONNECT') { deny(req.target.slice(0, MAX_DENIED_HOST_CHARS), 0, 'not-connect'); return; }
+    const target = parseAuthority(req.target);
+    if (!target.ok) { deny(req.target.slice(0, MAX_DENIED_HOST_CHARS), 0, 'bad-target'); return; }
+    const { host, port } = target.value;
 
-    if (this.open >= this.limits.tunnelsTotal || this.deps.registry.tunnelCount(cred) >= this.limits.tunnelsPerCred) {
+    // 2. The port, 3. the name: both before anything is resolved.
+    if (!ALLOWED_PORTS.has(port)) { deny(host, port, 'port'); return; }
+    if (!hostInSet(entry.set, host)) { deny(host, port, 'not-in-set'); return; }
+
+    // The slot is taken now, before resolving, so parallel requests cannot all pass the cap.
+    const opening = this.opening.get(cred) ?? 0;
+    if (this.open >= this.limits.tunnelsTotal || this.deps.registry.tunnelCount(cred) + opening >= this.limits.tunnelsPerCred) {
       this.deps.log(`busy cred=${tag} host=${host}`);
       reply(socket, 503);
       return;
     }
+    this.open++;
+    this.opening.set(cred, opening + 1);
+    let reserved = true;
+    const release = (): void => {
+      if (!reserved) return;
+      reserved = false;
+      const n = (this.opening.get(cred) ?? 1) - 1;
+      if (n === 0) this.opening.delete(cred); else this.opening.set(cred, n);
+    };
 
-    // 4. Resolve and check every address.
-    let addresses: string[];
-    if (isIPv4(host)) {
-      addresses = [host];
-    } else {
-      try {
-        addresses = await this.deps.lookup(host);
-      } catch {
-        this.deps.log(`unresolved cred=${tag} host=${host}`);
-        reply(socket, 502);
-        return;
+    try {
+      // 4. Resolve and check every address.
+      let addresses: string[];
+      if (isIPv4(host)) {
+        addresses = [host];
+      } else {
+        try {
+          addresses = await this.deps.lookup(host);
+        } catch {
+          this.deps.log(`unresolved cred=${tag} host=${host}`);
+          this.open--;
+          reply(socket, 502);
+          return;
+        }
       }
-    }
-    const picked = pickAddress(addresses, this.deps.deny);
-    if (!picked.ok) { deny(picked.error.replace(/ /g, '-')); return; }
-    if (socket.destroyed) return;
+      const picked = pickAddress(addresses, this.deps.deny);
+      if (!picked.ok) { this.open--; deny(host, port, picked.error.replace(/ /g, '-')); return; }
+      if (socket.destroyed) { this.open--; return; }
 
-    // 5. Connect to exactly that address.
-    this.tunnel(socket, cred, tag, req, picked.value, rest);
+      // 5. Connect to exactly that address.
+      this.tunnel(socket, cred, tag, host, port, entry.set !== '*', picked.value, rest);
+    } finally {
+      release();
+    }
   }
 
-  private tunnel(client: Socket, cred: string, tag: string, req: RequestHead, ip: string, rest: Buffer): void {
-    const { host, port } = req.target;
+  /** Called with a slot already counted in `open`; every path out of here gives it back once. */
+  private tunnel(client: Socket, cred: string, tag: string, host: string, port: number, checkName: boolean, ip: string, rest: Buffer): void {
     let upstream: Socket | null = null;
     let closed = false;
     const handle: TunnelHandle = {
@@ -216,10 +223,10 @@ export class ShellProxy {
     };
     // The credential may have been revoked while the name was resolving.
     if (!this.deps.registry.attach(cred, handle)) {
-      reply(client, 407, 'Proxy-Authenticate: Basic realm="lynox-egress"\r\n');
+      this.open--;
+      reply(client, 407, AUTHENTICATE);
       return;
     }
-    this.open++;
     let established = false;
     const up = this.deps.connect(ip, port);
     upstream = up;
@@ -237,16 +244,55 @@ export class ShellProxy {
       clearTimeout(connectTimer);
       if (closed) { up.destroy(); return; }
       established = true;
-      this.deps.log(`open cred=${tag} host=${host} ip=${ip} port=${String(port)}`);
-      if (req.path === null) client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      else up.write(upstreamHead(req));
-      if (rest.length > 0) up.write(rest);
-      client.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
-      up.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
-      client.pipe(up);
-      up.pipe(client);
-      client.resume();
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      const start = (first: Buffer): void => {
+        this.deps.log(`open cred=${tag} host=${host} ip=${ip} port=${String(port)}`);
+        if (first.length > 0) up.write(first);
+        client.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
+        up.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
+        client.pipe(up);
+        up.pipe(client);
+        client.resume();
+      };
+      if (!checkName) { start(rest); return; }
+      this.readHello(client, host, rest, (verdict, hello) => {
+        if (closed) return;
+        if (verdict === null) { start(hello); return; }
+        this.deps.registry.recordDenial(cred, verdict.name ?? host, port);
+        this.deps.log(`deny cred=${tag} host=${host} port=${String(port)} why=${verdict.why}`);
+        handle.close();
+      });
     });
+  }
+
+  /**
+   * Read the client hello and hold it to the tunnel's name. Nothing reaches the upstream
+   * before the verdict. `done(null, bytes)` passes the bytes read so far on.
+   */
+  private readHello(client: Socket, host: string, first: Buffer, done: (refused: { why: string; name?: string } | null, bytes: Buffer) => void): void {
+    let buf = first;
+    let finished = false;
+    const finish = (refused: { why: string; name?: string } | null): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      client.off('data', onData);
+      client.pause();
+      done(refused, buf);
+    };
+    const timer = setTimeout(() => { finish({ why: 'no-hello' }); }, this.limits.headerTimeoutMs);
+    const check = (): void => {
+      const r = parseClientHello(buf);
+      if (r.state === 'more') return;
+      if (r.state === 'bad') { finish({ why: 'bad-hello' }); return; }
+      if (r.sni === null) { finish({ why: 'no-server-name' }); return; }
+      if (r.sni !== host) { finish({ why: 'server-name-differs', name: r.sni.slice(0, MAX_DENIED_HOST_CHARS) }); return; }
+      finish(null);
+    };
+    const onData = (chunk: Buffer): void => { buf = Buffer.concat([buf, chunk]); check(); };
+    client.on('data', onData);
+    client.resume();
+    check();
   }
 }
 

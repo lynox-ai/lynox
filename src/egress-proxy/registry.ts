@@ -18,7 +18,7 @@ export const CRED_RE = /^[A-Za-z0-9_-]{43}$/;
 /** A credential lives no longer than the longest shell call, plus a little for the round trip. */
 export const MAX_TTL_S = Math.ceil(MAX_EXEC_TIMEOUT_MS / 1000) + 5;
 export const DENIAL_RETENTION_MS = 60_000;
-/** Bounds the memory one credential can make the proxy hold. Later denials are dropped, the count is kept. */
+/** Bounds the memory one credential can make the proxy hold. Denials past it are not recorded. */
 export const MAX_DENIALS_PER_CRED = 256;
 /** Live credentials at once. A tenant runs a handful of shell calls at a time, not hundreds. */
 export const MAX_CREDS = 1024;
