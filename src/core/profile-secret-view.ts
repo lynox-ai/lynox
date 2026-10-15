@@ -502,10 +502,15 @@ export function withheldFrom(
  * What a read says when the view withheld a name, in place of "the vault has no value": asking
  * for the value again would not change it, and a mandate cannot store one anyway.
  */
-export function withheldText(names: readonly string[]): string {
+export function withheldText(names: readonly string[], offBase = false): string {
   const shown = names.map((n) => `"${shapedForLog(n, VAULT_NAME_SHAPE, 64)}"`).join(' and ');
   const one = names.length === 1;
-  return `${shown} ${one ? 'is' : 'are'} not available to this profile. A profile set up in a mandate's session reads a vault name of the owner's only once the owner releases it to that profile, and the owner is asked when the profile is saved. Asking for the value with ask_secret does not change this.`;
+  // A request to another port or scheme of the base's host reaches the profile, but a release
+  // covers only the base: say so, or a release that exists reads as one that does not.
+  const where = offBase
+    ? ' This request does not go to the profile\'s base_url (its scheme, host and port), and a release covers only requests to the base.'
+    : '';
+  return `${shown} ${one ? 'is' : 'are'} not available to this profile${offBase ? ' for this request' : ''}. A profile set up in a mandate's session reads a vault name of the owner's only once the owner releases it to that profile, and the owner is asked when the profile is saved.${where} Asking for the value with ask_secret does not change this.`;
 }
 
 /**
