@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { fstatSync, realpathSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { getWorkspaceDir } from './workspace.js';
@@ -85,20 +85,30 @@ function dropBase(): void {
   base = null;
 }
 
+function isLive(anchor: WorkspaceAnchor): boolean {
+  try {
+    return fstatSync(anchor.fd).nlink > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The context workspace's open directory, or null without isolation.
  *
  * Holds only its OWN fd. The root's anchor is asked for on every call and never kept: a root
  * reconfigured to another path closes the old anchor (`workspaceAccess`), and a kept copy would
  * then hold a closed fd number the kernel may hand to something else. A new `WorkspaceAccess`
- * object means the root was deliberately changed: the sub-anchor is closed and derived again. A
- * workspace directory removed while held is not reopened by name; the primitives throw `GONE`.
+ * object means the root was deliberately changed: the sub-anchor is closed and derived again.
  *
- * Below the root is decided by PATH, and the directory is then reached from the root's anchor one
- * component at a time with O_NOFOLLOW, creating nothing: a workspace entry that is a symlink, or a
- * link on the way to it, is refused, not followed to wherever it points. Only a workspace whose
- * path lies outside the root gets an anchor of its own, opened by name once, and only when it
- * neither holds nor lies inside the data directory (the check the root itself gets).
+ * Below the root is decided by PATH (the root's path or its real path), and the directory is then
+ * reached from the root's anchor one component at a time with O_NOFOLLOW, creating nothing: a
+ * symlink on the way is refused, not followed to wherever it points. A workspace below the root
+ * that is removed and made again (the Art. 17 erasure empties the root and makes the context
+ * directory again) is reached again the same way, from the root's anchor, never by name. A
+ * workspace that reaches the root only through a link is refused. Only a workspace outside the
+ * root gets an anchor of its own, opened by name once, and only when it neither holds nor lies
+ * inside the data directory (the check an external root gets); one that is removed stays an error.
  */
 export function workspaceBase(): { readonly ws: string; readonly anchor: WorkspaceAnchor } | null {
   const ws = getWorkspaceDir();
@@ -108,22 +118,44 @@ export function workspaceBase(): { readonly ws: string; readonly anchor: Workspa
   }
   const wsPath = resolve(ws);
   const rootPath = resolve(resolveWorkspaceRoot().path);
-  const below = isPathWithin(wsPath, rootPath) && wsPath !== rootPath;
+  const rootReal = realOr(rootPath);
+  let rel: string | null = null;
+  for (const r of new Set([rootPath, rootReal])) {
+    if (isPathWithin(wsPath, r)) {
+      rel = relative(r, wsPath);
+      break;
+    }
+  }
+  if (rel === null && isPathWithin(realOr(wsPath), rootReal)) {
+    throw new WorkspaceRootError(
+      `The workspace ${ws} reaches the workspace root ${rootPath} only through a link. Name it by the root's own path.`,
+    );
+  }
   // Below the root needs the root; a root that cannot be reached is the tool's error.
-  const from = below ? workspaceAccess() : null;
-  if (base !== null && base.ws === ws && base.from === from) return base;
+  const from = rel !== null ? workspaceAccess() : null;
+  if (base !== null && base.ws === ws && base.from === from && (from === null || isLive(base.anchor))) return base;
 
   dropBase();
   let anchor: WorkspaceAnchor;
-  if (from !== null) {
-    anchor = openSubAnchor(from.anchor, relative(rootPath, wsPath));
+  if (from !== null && rel !== null && rel !== '') {
+    anchor = openSubAnchor(from.anchor, rel);
+  } else if (from !== null) {
+    // The workspace is the root itself: an fd of its own on the same directory, checked against
+    // the held anchor by identity, so closing it never closes the root's.
+    anchor = openAnchor(realpathSync(rootPath));
+    const own = fstatSync(anchor.fd);
+    const held = fstatSync(from.anchor.fd);
+    if (own.dev !== held.dev || own.ino !== held.ino) {
+      closeAnchor(anchor);
+      throw new WorkspaceRootError(`The workspace root ${rootPath} is no longer the directory this engine opened.`);
+    }
   } else {
     const real = realpathSync(wsPath);
     const unsafe = unsafeRoot(real, realOr(resolve(getLynoxDir())));
     if (unsafe !== null) {
       throw new WorkspaceRootError(
         `The workspace ${ws} ${unsafe === 'holds-data-dir' ? 'is the data directory or contains it' : 'is inside the data directory'}; ` +
-        'the file tools do not write there. Use a directory of its own.',
+        'the file tools do not work there. Use a directory of its own.',
       );
     }
     anchor = openAnchor(real);

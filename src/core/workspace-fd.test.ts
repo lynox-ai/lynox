@@ -48,7 +48,7 @@ afterEach(() => {
 });
 
 describe('splitRel', () => {
-  it.each(['/abs', 'a/../b', '..', './a', 'a//b', 'a/./b', 'a\0b', 'a\\b'])('refuses %j', (rel) => {
+  it.each(['/abs', 'a/../b', '..', './a', 'a//b', 'a/./b', 'a\0b'])('refuses %j', (rel) => {
     expect(code(() => splitRel(rel))).toBe('BAD_PATH');
   });
   it('names an absolute path as such, for callers that pass one by mistake', () => {
@@ -58,6 +58,8 @@ describe('splitRel', () => {
     expect(splitRel('a/b/c')).toEqual(['a', 'b', 'c']);
     expect(splitRel('a/b/')).toEqual(['a', 'b']);
     expect(splitRel('')).toEqual([]);
+    // A backslash is an ordinary character in a Linux name; only `/` separates.
+    expect(splitRel('a\\b/c')).toEqual(['a\\b', 'c']);
   });
 });
 

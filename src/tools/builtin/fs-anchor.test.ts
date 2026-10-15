@@ -98,7 +98,7 @@ describe('file tools reach the workspace through its open directory', () => {
   it.skipIf(process.getuid?.() === 0)('leaves a read-only file unwritten, as a write by name does (skipped as root)', async () => {
     writeFileSync(join(ws, 'ro.txt'), 'fixed');
     chmodSync(join(ws, 'ro.txt'), 0o444);
-    await expect(writeFileTool.handler({ path: join(ws, 'ro.txt'), content: 'over' }, agent())).rejects.toThrow(/EACCES/);
+    await expect(writeFileTool.handler({ path: join(ws, 'ro.txt'), content: 'over' }, agent())).rejects.toThrow(`EACCES: ${join(ws, 'ro.txt')}`);
     await expect(editFileTool.handler({ path: join(ws, 'ro.txt'), old_string: 'fixed', new_string: 'over' }, agent())).rejects.toThrow(/EACCES/);
     expect(readFileSync(join(ws, 'ro.txt'), 'utf8')).toBe('fixed');
   });
@@ -108,6 +108,7 @@ describe('file tools reach the workspace through its open directory', () => {
     linkSync(join(outside, 'target.txt'), join(ws, 'hard.txt'));
     await expect(writeFileTool.handler({ path: join(ws, 'hard.txt'), content: 'over' }, agent())).rejects.toThrow(/hard link/);
     await expect(editFileTool.handler({ path: join(ws, 'hard.txt'), old_string: 'kept', new_string: 'over' }, agent())).rejects.toThrow(/hard link/);
+    await expect(readFileTool.handler({ path: join(ws, 'hard.txt') })).rejects.toThrow(/hard link/);
     expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('kept');
   });
 
@@ -119,6 +120,25 @@ describe('file tools reach the workspace through its open directory', () => {
     await expect(editFileTool.handler({ path: join(ws, 'link.txt'), old_string: 'abc', new_string: 'xyz' }, agent()))
       .rejects.toThrow(/link.txt is a symlink/);
     expect(readFileSync(join(ws, 'real.txt'), 'utf8')).toBe('abc');
+  });
+
+  it('reads and writes a name with a backslash, an ordinary character on Linux', async () => {
+    await writeFileTool.handler({ path: join(ws, 'a\\b.txt'), content: 'bs' }, agent());
+    expect(readFileSync(join(ws, 'a\\b.txt'), 'utf8')).toBe('bs');
+    expect(await readFileTool.handler({ path: join(ws, 'a\\b.txt') })).toContain('bs');
+  });
+
+  it('tells the model how to reach what a link points to', async () => {
+    mkdirSync(join(ws, 'real'));
+    writeFileSync(join(ws, 'real', 'f.txt'), 'via the real path');
+    symlinkSync(join(ws, 'real'), join(ws, 'alias'));
+    await expect(readFileTool.handler({ path: join(ws, 'alias', 'f.txt') })).rejects.toThrow(/name the file it points to by its own path/);
+    expect(await readFileTool.handler({ path: join(ws, 'real', 'f.txt') })).toContain('via the real path');
+  });
+
+  it('refuses a path with a trailing slash instead of making a file of it', async () => {
+    await expect(writeFileTool.handler({ path: `${join(ws, 'newdir')}/`, content: 'x' }, agent())).rejects.toThrow(/names a directory/);
+    expect(existsSync(join(ws, 'newdir'))).toBe(false);
   });
 
   it('answers with the workspace path of what it wrote', async () => {

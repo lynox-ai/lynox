@@ -126,13 +126,14 @@ function readNames(dir: DirHandle): Buffer[] {
 
 /**
  * Split a relative path into components. Refuses absolute paths, empty components,
- * `.`, `..`, NUL and backslashes — `..` would climb out of the magic link.
+ * `.`, `..` and NUL — `..` would climb out of the magic link. A backslash is an ordinary
+ * character on Linux (the only platform with the race-free walk); only `/` separates.
  * The empty string means the anchor itself and yields no components.
  */
 export function splitRel(rel: string): string[] {
   if (rel === '') return [];
   if (rel.startsWith('/')) throw new WorkspaceAccessError('BAD_PATH', `absolute path refused: ${JSON.stringify(rel)}`);
-  if (rel.includes('\0') || rel.includes('\\')) throw new WorkspaceAccessError('BAD_PATH', 'path contains NUL or a backslash');
+  if (rel.includes('\0')) throw new WorkspaceAccessError('BAD_PATH', 'path contains NUL');
   const parts = rel.split('/');
   // One trailing slash is tolerated ("dir/"); any other empty component is not.
   if (parts.length > 1 && parts[parts.length - 1] === '') parts.pop();
@@ -443,8 +444,9 @@ function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
  * Open a regular file for writing IN PLACE, without truncating it: the same inode, so its owner,
  * mode, ACLs and the kernel's permission check stay as they are (a read-only file is EACCES, as
  * with a plain write by name). A symlink at the file is refused (O_NOFOLLOW), and so are FIFOs,
- * sockets and devices. With `createMode`, a missing file is created with O_EXCL. The caller
- * truncates, writes and closes the fd.
+ * sockets and devices — a device is refused only after its open, which may have an effect of its
+ * own; making one in the workspace needs root. With `createMode`, a missing file is created with
+ * O_EXCL. The caller truncates, writes and closes the fd.
  */
 export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteOptions = {}): { fd: number; created: boolean } {
   const { dirParts, leaf } = splitLeaf(rel);

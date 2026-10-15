@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { toWorkspaceRel, workspaceBase, closeWorkspaceBase, WorkspacePathRefused } from './workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
-import { _resetWorkspaceAccess } from './workspace-access.js';
+import { _resetWorkspaceAccess, workspaceAccess } from './workspace-access.js';
 import { writeFileAt } from './workspace-fd.js';
 import { writeFileTool } from '../tools/builtin/fs.js';
 import type { IAgent, SessionCounters } from '../types/index.js';
@@ -175,6 +175,58 @@ describe('workspaceBase', () => {
     setTenantWorkspace(join(root, 'gone'));
     expect(() => workspaceBase()).toThrow(/ENOENT/);
     expect(existsSync(join(root, 'gone'))).toBe(false);
+  });
+
+  it('works on the root itself as the workspace, without closing the root', async () => {
+    const root = join(tmp, 'data', 'workspace');
+    mkdirSync(root, { recursive: true });
+    setTenantWorkspace(root);
+    await writeFileTool.handler({ path: join(root, 'top.txt'), content: 't' }, agent());
+    expect(readFileSync(join(root, 'top.txt'), 'utf8')).toBe('t');
+    closeWorkspaceBase();
+    // The held root still works after the workspace's own fd was closed.
+    expect(() => workspaceAccess()).not.toThrow();
+    await writeFileTool.handler({ path: join(root, 'again.txt'), content: 'a' }, agent());
+    expect(readFileSync(join(root, 'again.txt'), 'utf8')).toBe('a');
+  });
+
+  it('finds the workspace below a root spelled through a link, by the root\'s real path', async () => {
+    const realData = join(tmp, 'real-data');
+    mkdirSync(join(realData, 'workspace', 'http-api'), { recursive: true });
+    const dataLink = join(tmp, 'data-link');
+    symlinkSync(realData, dataLink);
+    process.env['LYNOX_DATA_DIR'] = dataLink;
+    _resetWorkspaceAccess();
+    const ws = join(realData, 'workspace', 'http-api');
+    setTenantWorkspace(ws);
+    await writeFileTool.handler({ path: join(ws, 'r.txt'), content: 'r' }, agent());
+    expect(readFileSync(join(ws, 'r.txt'), 'utf8')).toBe('r');
+  });
+
+  it('refuses a workspace that reaches the root only through a link', async () => {
+    const dirA = join(tmp, 'rootA');
+    mkdirSync(join(dirA, 'http-api'), { recursive: true });
+    const link = join(tmp, 'root');
+    symlinkSync(dirA, link);
+    process.env['LYNOX_WORKSPACE_ROOT'] = link;
+    _resetWorkspaceAccess();
+    setTenantWorkspace(join(link, 'http-api'));
+    expect(() => workspaceBase()).toThrow(/only through a link/);
+    await expect(writeFileTool.handler({ path: join(link, 'http-api', 'x.txt'), content: 'x' }, agent())).rejects.toThrow(/only through a link/);
+    expect(existsSync(join(dirA, 'http-api', 'x.txt'))).toBe(false);
+  });
+
+  it('reaches the context directory again after it was emptied and made again below the root', async () => {
+    const root = join(tmp, 'data', 'workspace');
+    const ws = join(root, 'http-api');
+    mkdirSync(ws, { recursive: true });
+    setTenantWorkspace(ws);
+    await writeFileTool.handler({ path: join(ws, 'before.txt'), content: 'b' }, agent());
+    // What the erasure does: the root is emptied, the context directory made again.
+    rmSync(ws, { recursive: true });
+    mkdirSync(ws);
+    await writeFileTool.handler({ path: join(ws, 'after.txt'), content: 'a' }, agent());
+    expect(readFileSync(join(ws, 'after.txt'), 'utf8')).toBe('a');
   });
 
   it('refuses a workspace outside the root that holds the data directory', async () => {

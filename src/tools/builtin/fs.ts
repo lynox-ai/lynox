@@ -1,4 +1,4 @@
-import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, writeSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
@@ -8,7 +8,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
-import { openRead, openWrite, readFileAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { openRead, openWrite, readFileAt, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -138,6 +138,7 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
   const mapped = toWorkspaceRel(raw, base.ws);
   if (mapped.kind === 'inside') {
     if (mapped.rel === '') throw new Error(`${raw} is the workspace directory itself, not a file.`);
+    if (raw.endsWith('/')) throw new Error(`${raw} names a directory, not a file.`);
     return { kind: 'anchored', anchor: base.anchor, rel: mapped.rel, shown: mapped.shown };
   }
   const real = validatePath(mapped.abs, operation);
@@ -149,22 +150,53 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
 }
 
 /**
- * Write a workspace file IN PLACE through the workspace's open directory: the same inode, so the
- * file keeps its owner, mode and permissions, and a file the engine may not write stays unwritten
- * (EACCES), as with a write by name. A symlink at the file is refused, not written through. A file
- * with more than one link is refused: the other name may be outside the workspace. With
- * `create`, a missing file (and missing directories) are made, 0644 and 0755.
+ * An errno from an fd operation names the file by its workspace path, not by the process-handle
+ * path the walk opened it through: the model would copy that path, and it is refused.
+ */
+function anchoredError(target: Extract<Target, { kind: 'anchored' }>, err: unknown): Error {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') {
+    return new Error(
+      `${err.message}. Links in the workspace are not followed; name the file it points to by its own path in the workspace.`,
+      { cause: err },
+    );
+  }
+  // Any other refusal of the walk itself already names the file by its workspace path.
+  if (!(err instanceof WorkspaceAccessError) && typeof code === 'string') {
+    return new Error(`${code}: ${target.shown}`, { cause: err });
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Write a workspace file IN PLACE through the workspace's open directory, as a write by name did:
+ * the same inode, so the file keeps its owner and permissions, and a file the engine may not write
+ * stays unwritten (EACCES). Like that write it truncates first, so a write that fails part-way
+ * (disk full) leaves the file partly written, and a new file that fails stays as far as it got;
+ * the kernel clears setuid/setgid on the write. A symlink
+ * at the file is refused, not written through. A file with more than one link is refused: the
+ * other name may be outside the workspace. With `create`, a missing file (and missing
+ * directories) are made, 0644 and 0755.
  */
 function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: string, create: boolean): void {
-  const { fd } = openWrite(target.anchor, target.rel, create ? { createMode: NEW_FILE_MODE, dirMode: NEW_DIR_MODE } : {});
+  let fd: number;
   try {
-    if (fstatSync(fd).nlink > 1) {
+    ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: NEW_FILE_MODE, dirMode: NEW_DIR_MODE } : {}));
+  } catch (err) {
+    throw anchoredError(target, err);
+  }
+  try {
+    const st = fstatSync(fd);
+    if (st.nlink > 1) {
       throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not write such a file.`);
     }
-    ftruncateSync(fd, 0);
-    const buf = Buffer.from(text, 'utf-8');
-    let off = 0;
-    while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off, off);
+    // Only a file with content is cut, as O_TRUNC does: on ext4 a cut to zero makes the next close
+    // flush the file synchronously, which a fresh file does not need.
+    if (st.size > 0) ftruncateSync(fd, 0);
+    // On the fd just opened (offset 0): the same write a write by name does.
+    writeFileSync(fd, text, 'utf-8');
+  } catch (err) {
+    throw anchoredError(target, err);
   } finally {
     closeSync(fd);
   }
@@ -232,7 +264,16 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
         const target = isolatedTarget(input.path, 'read');
         if (target.kind === 'anchored') {
           filePath = target.shown;
-          fd = openRead(target.anchor, target.rel);
+          try {
+            fd = openRead(target.anchor, target.rel);
+          } catch (err) {
+            throw anchoredError(target, err);
+          }
+          // A second name may be a file of the engine's outside the workspace, as for a write.
+          if (fstatSync(fd).nlink > 1) {
+            closeSync(fd);
+            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not read such a file.`);
+          }
         } else {
           filePath = target.path;
           fd = openSync(filePath, 'r');
@@ -407,7 +448,7 @@ export const editFileTool: ToolEntry<EditFileInput> = {
           if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
             throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
           }
-          throw err;
+          throw anchoredError(target, err);
         }
       } else {
         if (!existsSync(realPath)) {
