@@ -203,6 +203,18 @@ describe('policy: TLS hellos', () => {
     expect(parseClientHello(Buffer.concat([Buffer.from([20, 3, 3, 0, 1, 2]), hello(['a.example'])]), true).state).toBe('bad');
   });
 
+  it('passes early data before a second hello, and nothing else', () => {
+    const early = Buffer.concat([Buffer.from([23, 3, 3]), u16(5), Buffer.from('early')]);
+    const h = hello(['a.example']);
+    expect(parseClientHello(Buffer.concat([CCS, early, h]), true)).toEqual({ state: 'hello', sni: 'a.example', bytes: CCS.length + early.length + h.length });
+    expect(parseClientHello(Buffer.concat([early, CCS, early, h]), true)).toEqual({ state: 'hello', sni: 'a.example', bytes: 2 * early.length + CCS.length + h.length });
+    expect(parseClientHello(Buffer.concat([CCS, CCS, h]), true)).toEqual({ state: 'bad', error: 'bad change_cipher_spec' });
+    expect(parseClientHello(Buffer.concat([Buffer.from([23, 3, 3, 0, 0]), h]), true)).toEqual({ state: 'bad', error: 'bad record length' });
+    expect(parseClientHello(Buffer.concat([CCS, early.subarray(0, 7)]), true)).toEqual({ state: 'more' });
+    // Without a retry, early data in front of the hello is not a hello.
+    expect(parseClientHello(Buffer.concat([early, h])).state).toBe('bad');
+  });
+
   it('tells a HelloRetryRequest from a ServerHello and anything else', () => {
     expect(isHelloRetryRequest(serverHello(true))).toBe('yes');
     expect(isHelloRetryRequest(serverHello(false))).toBe('no');
@@ -958,5 +970,21 @@ describe('contract: shell listener', () => {
     // The origin echoes the second hello after its tail; the tail must not be lost before it.
     await until(() => res.data().includes('echo:'));
     expect(res.data().startsWith(`${serverHello(true).toString('latin1')}tail`)).toBe(true);
+  });
+
+  it('lets 0-RTT early data through a retry when the second hello names the host', async () => {
+    const o = await origin(serverHello(true));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(r, connectHead('a.example:443'));
+    const first = hello(['a.example']);
+    const early = Buffer.concat([Buffer.from([23, 3, 3]), u16(5), Buffer.from('early')]);
+    res.socket.write(Buffer.concat([first, CCS, early]));
+    await until(() => res.data().length > 0);
+    res.socket.write(hello(['a.example']));
+    const all = Buffer.concat([first, CCS, early, hello(['a.example'])]).toString('latin1');
+    await until(() => o.received().length === all.length);
+    expect(o.received()).toBe(all);
+    expect(r.registry.denials(CRED)).toEqual([]);
   });
 });

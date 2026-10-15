@@ -18,6 +18,11 @@
  * routes on the encrypted Host header rather than on the server name can still be asked for
  * another of its sites through an allowed name; the proxy does not intercept TLS to see it.
  *
+ * After the hello it checked (and the second one after a retry), the proxy passes the
+ * handshake on unread. Another plaintext hello sent later is the server's to refuse: a TLS 1.3
+ * server expects encrypted records by then, and a TLS 1.2 server is in the middle of its own
+ * handshake; a conforming server aborts rather than act on it.
+ *
  * Plain http is not offered: its Host header and every later request on the connection
  * would have to be parsed and held to the name. It is refused with its own reason, so a
  * tool that tries it (a package mirror reached over http, say) is told to use https.
@@ -181,10 +186,20 @@ export function parseClientHello(buf: Buffer, afterRetry = false): HelloResult {
   let hsLen = 0;
   let off = 0;
   let need = -1;
-  if (afterRetry && buf.length > 0 && buf[0] === 20) {
-    if (buf.length < 6) return { state: 'more' };
-    if (buf.readUInt16BE(3) !== 1 || buf[5] !== 1) return { state: 'bad', error: 'bad change_cipher_spec' };
-    off = 6;
+  if (afterRetry) {
+    // Before its second hello a TLS 1.3 client may have sent one change_cipher_spec record
+    // and, with 0-RTT, early data (encrypted application_data records) behind its first hello.
+    // A server skips that early data after a retry; it is passed on with the hello, unread.
+    let ccs = 0;
+    while (off < buf.length && (buf[off] === 20 || buf[off] === 23)) {
+      if (off + 5 > buf.length) return { state: 'more' };
+      const len = buf.readUInt16BE(off + 3);
+      if (len === 0 || len > 16_384 + 256) return { state: 'bad', error: 'bad record length' };
+      if (off + 5 + len > MAX_HELLO_BYTES) return { state: 'bad', error: 'hello too large' };
+      if (off + 5 + len > buf.length) return { state: 'more' };
+      if (buf[off] === 20 && (len !== 1 || buf[off + 5] !== 1 || ++ccs > 1)) return { state: 'bad', error: 'bad change_cipher_spec' };
+      off += 5 + len;
+    }
   }
   while (need === -1 || hsLen < need) {
     if (off + 5 > buf.length) return buf.length >= MAX_HELLO_BYTES ? { state: 'bad', error: 'hello too large' } : { state: 'more' };
@@ -252,8 +267,8 @@ const HELLO_RETRY_RANDOM = Buffer.from('cf21ad74e59a6111be1d8c021e65b891c2a21116
  * Whether the server's first bytes are a HelloRetryRequest, after which the client sends a
  * second hello that must be checked too. The start of the server's handshake is put together
  * across records, so a ServerHello split into small records is still read. Anything that is
- * not a plaintext ServerHello is `no`. A server that sends more than MAX_HELLO_BYTES without
- * completing the start of one is treated as `yes`: the client's next bytes are then checked.
+ * not a plaintext ServerHello is `no`. The bytes waited for stay bounded: every record adds
+ * at least one byte toward the 38 needed, and one record holds at most 64 KiB.
  */
 export function isHelloRetryRequest(buf: Buffer): 'yes' | 'no' | 'more' {
   const need = 4 + 2 + 32;
@@ -261,11 +276,11 @@ export function isHelloRetryRequest(buf: Buffer): 'yes' | 'no' | 'more' {
   let len = 0;
   let off = 0;
   while (len < need) {
-    if (off >= buf.length || off + 5 > buf.length) return buf.length > MAX_HELLO_BYTES ? 'yes' : 'more';
+    if (off + 5 > buf.length) return 'more';
     if (buf[off] !== 22) return 'no';
     const recLen = buf.readUInt16BE(off + 3);
     if (recLen === 0) return 'no';
-    if (off + 5 + recLen > buf.length) return buf.length > MAX_HELLO_BYTES ? 'yes' : 'more';
+    if (off + 5 + recLen > buf.length) return 'more';
     hs.push(buf.subarray(off + 5, off + 5 + recLen));
     len += recLen;
     off += 5 + recLen;
