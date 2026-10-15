@@ -7,7 +7,9 @@ import { BulkLedger, BULK_HALT_REASONS, type ListPageItem } from './bulk-ledger.
 import { OWNER_PRINCIPAL } from './request-principal.js';
 import { mintBulkContract } from './bulk-external.js';
 import { parseListSource, type BulkListSource } from './bulk-list.js';
-import { BULK_MAX_TARGETS } from './bulk-plan.js';
+import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
+import { judgeAfterBound, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
+import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 
 const HOST = 'shop.example.com';
@@ -255,5 +257,58 @@ describe('the approval checksum of a list run', () => {
     engineDb.getDb().prepare('UPDATE bulk_runs SET list_source = ? WHERE id = ?')
       .run(engineDb.enc(JSON.stringify({ ...source, filters: { category: '13' } })), id);
     expect(ledger.computeChecksum(id)).not.toBe(before);
+  });
+});
+
+describe('a list with a judge (PRD bulk-loop §3.1 „Start“, two starts)', () => {
+  const rule = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
+  const judgedSource: BulkListSource = parseListSource(HOST, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: judgeTemplate(rule) }, 'PUT', () => null);
+  function judgedPlan(): string {
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: judgedSource, readContract, judge: rule });
+    if (!out.ok) throw new Error(out.reason);
+    return out.status.id;
+  }
+
+  it('start 1 reads the list only: no limit, no supersedes', () => {
+    const id = judgedPlan();
+    const listChecksum = ledger.listStartChecksum(id)!;
+    expect(ledger.resumePreview(id, Date.now(), { listChecksum, costCapUsd: 1 })).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(ledger.resumePreview(id, Date.now(), { listChecksum, supersedes: 'x' })).toEqual({ ok: false, reason: 'not_at_this_start' });
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+    expect(ledger.resumePreview(id, Date.now(), { listChecksum }).ok).toBe(true);
+  });
+
+  it('the list start binds the rule: a rule changed after the owner saw it is refused', () => {
+    const id = judgedPlan();
+    const shown = ledger.listStartChecksum(id)!;
+    // Test seam: another rule written straight into the run.
+    engineDb.getDb().prepare('UPDATE bulk_runs SET judge_rule_hash = ? WHERE id = ?').run('another-rule', id);
+    expect(ledger.resumePreview(id, Date.now(), { listChecksum: shown })).toEqual({ ok: false, reason: 'checksum' });
+  });
+
+  it('a listed judged run waits for start 2, which takes the rule hash and the limit and arms the judge', () => {
+    const id = judgedPlan();
+    start(id);
+    expect(ledger.recordListPage(id, { page: 1, items: [item(1), item(2)], bytes: 10 })).toMatchObject({ ok: true, added: 2 });
+    expect(ledger.finishList(id, mint)).toBe('listed');
+    expect(ledger.getStatus(id)!.judge).toEqual({ tier: 'fast', unjudged: 2 });
+    const hash = ledger.getJudgeRuleForOwner(id)!.hash;
+    expect(ledger.resumePreview(id, Date.now(), { judgeRuleHash: hash })).toEqual({ ok: false, reason: 'cost_cap' });
+    const two = ledger.resumePreview(id, Date.now(), { judgeRuleHash: hash, costCapUsd: 2 });
+    expect(two.ok).toBe(true);
+    expect(new TriggerStore(engineDb).get(bulkPreviewTriggerId(id))?.effect).toBe('bulk_judge');
+  });
+
+  it('counts each target at the verdict\'s byte bound, not the template\'s size', () => {
+    const wide = normalizeJudgeRule({ rule: 'x', schema: { a: { type: 'string', maxLength: 2_000 }, b: { type: 'string', maxLength: 2_000 } } }, { idField: 'id' });
+    const src = parseListSource(HOST, { path: '/wp-json/wc/v3/products', filters: {}, after: judgeTemplate(wide) }, 'PUT', () => null);
+    const out = ledger.recordExternalListPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host: HOST, source: src, readContract, judge: wide });
+    if (!out.ok) throw new Error(out.reason);
+    start(out.status.id);
+    const n = Math.floor(BULK_MAX_TOTAL_BYTES / judgeAfterBound(wide.schema)) + 1;
+    // The template alone ({"a":null,"b":null}) would let every one of them in.
+    expect(n * Buffer.byteLength(JSON.stringify(judgeTemplate(wide)))).toBeLessThan(BULK_MAX_TOTAL_BYTES);
+    const items = Array.from({ length: n }, (_, i) => item(i + 1));
+    expect(ledger.recordListPage(out.status.id, { page: 1, items, bytes: 10 })).toEqual({ ok: false, reason: 'too_large' });
   });
 });
