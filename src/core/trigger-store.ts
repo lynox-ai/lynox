@@ -532,7 +532,9 @@ export class TriggerStore {
    * yields one, and {@link updateFields} cannot change `effect` or `run_id`.
    */
   armBulkEffect(params: { runId: string; effect: BulkTriggerEffect; title: string; nextRunAt: string }): string {
-    const id = params.effect === 'bulk_preview' ? bulkPreviewTriggerId(params.runId) : `bulk-${params.runId}`;
+    // The read phase — a preview or a judge, never both in one run at once — runs under its own
+    // id: `bulk-<runId>` is the id of the run's later write, which must not be overwritten.
+    const id = params.effect === 'bulk_preview' || params.effect === 'bulk_judge' ? bulkPreviewTriggerId(params.runId) : `bulk-${params.runId}`;
     this.upsert({
       id,
       title: params.title,

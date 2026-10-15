@@ -1672,12 +1672,20 @@ export class Engine {
       this.registry.register(bulkPlanTool).register(bulkStatusTool);
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
+      // The same sweep ends a started judged run nobody approved within its retention (PRD
+      // bulk-loop 3.2, M7): its before-images went to a model, and the prune keeps it from a
+      // newer plan — so it must not depend on a plan being made to end.
       const own = this.getBulkOwnership();
       const sweep = (): void => {
         try {
           ledger.expireEndedPlanners(own);
         } catch (err: unknown) {
           process.stderr.write(`[lynox] ending bulk runs of ended mandates failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+        try {
+          ledger.expireStaleJudgedRuns();
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox] ending judged bulk runs past their retention failed: ${err instanceof Error ? err.name : 'error'}\n`);
         }
       };
       sweep();

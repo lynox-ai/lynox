@@ -278,7 +278,11 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
 /** What a trigger DOES when it fires — the clean `effect` axis. `run_workflow` /
  *  `run_agent` mint a money-spending Run (→ managed gate/debit); `backup` /
  *  `notify` are deterministic side-effects that mint NO Run. This axis IS the
- *  money-vs-deterministic boundary, made legible in the schema. `backup`/`notify`
+ *  money-vs-deterministic boundary, made legible in the schema — with one stated
+ *  exception: an effect spends money only if it mints a Run, OR gates and debits every
+ *  model call it makes one by one. `bulk_judge` is that exception (PRD bulk-loop §3.1):
+ *  it calls a model once per target of a bulk run, each call behind its own
+ *  `fireBeforeRunGate` and booked by its own `reportMeteredCost`, and mints no Run. `backup`/`notify`
  *  are BUILT-IN effects (fixed capabilities, not user-formable) — distinct in kind
  *  from the user-formable `run_*`, but co-located here as the single dispatch axis.
  *  `bulk_apply` / `bulk_undo` are deterministic too: they write an APPROVED bulk run's
@@ -286,14 +290,16 @@ export type TriggerSource = 'cron' | 'watch' | 'webhook' | 'inbox_event' | 'manu
  *  approval route creates them — `deriveSourceEffect` never yields them, so no
  *  model-settable input (`task_type`, a workflow binding, `task_create`) reaches them.
  *  `bulk_preview` reads an external run's targets and mints no Run either; only the
- *  owner starting or resuming the read arms it. */
-export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo' | 'bulk_preview';
+ *  owner starting or resuming the read arms it. `bulk_judge` reads a judged run's targets
+ *  and records a model's verdict per target into its ledger; only the owner's start of a
+ *  judged run arms it, never `deriveSourceEffect`. */
+export type TriggerEffect = 'run_workflow' | 'run_agent' | 'backup' | 'notify' | 'bulk_apply' | 'bulk_undo' | 'bulk_preview' | 'bulk_judge';
 /** The bulk-run effects. `bulk_preview` reads an external run's targets into its ledger
  *  (build plan B §3) and writes nothing to them; only the owner's start or resume of the
- *  read arms it. */
-export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo' | 'bulk_preview'>;
+ *  read arms it. `bulk_judge` reads and judges, and writes nothing to a target either. */
+export type BulkTriggerEffect = Extract<TriggerEffect, 'bulk_apply' | 'bulk_undo' | 'bulk_preview' | 'bulk_judge'>;
 /** The bulk effects that write targets. */
-export type BulkWriteEffect = Exclude<BulkTriggerEffect, 'bulk_preview'>;
+export type BulkWriteEffect = Exclude<BulkTriggerEffect, 'bulk_preview' | 'bulk_judge'>;
 
 /** An AGENT-TRIGGER — a rule the WorkerLoop fires to DO work for the user (the
  *  "act" side of the agent loop). Lives in the `triggers` table. Split from

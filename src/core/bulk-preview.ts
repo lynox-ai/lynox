@@ -200,6 +200,11 @@ export async function runBulkPreview(runId: string, deps: BulkPreviewDeps): Prom
   }
 
   if (ledger.listUnread(runId).length > 0) return pending(now() + DEFAULT_RETRY_MS, 'Bulk preview has targets left to read.');
+  // A judged run is read for its judge, which goes on in the same effect (`bulk-judge.ts`): its
+  // targets have no after-state yet, so reading them does not make it previewed.
+  if (ledger.getJudgeRun(runId) !== null) {
+    return { status: 'done', summary: costed(summarize(ledger, runId, 'Bulk read done — the targets are to be judged next.')) };
+  }
   if (!ledger.finishPreview(runId)) {
     return { status: 'halted', summary: summarize(ledger, runId, 'Bulk preview stopped: the run was dropped, halted or moved on.') };
   }
