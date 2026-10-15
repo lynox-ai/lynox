@@ -66,6 +66,8 @@ describe('an fd error shown to the model', () => {
       .toBe(`read_file: ERR_FS_SOMETHING: ${join(ws, 'a.txt')}`);
     // The errno form, but what follows the code is no description.
     expect(await messageFor(errno('EIO', `EIO: ${FD}`))).toBe(`read_file: EIO: ${join(ws, 'a.txt')}`);
+    // Not the errno form, though the text after the code's length happens to be words only.
+    expect(await messageFor(errno('EIO', 'xxxx some other words'))).toBe(`read_file: EIO: ${join(ws, 'a.txt')}`);
   });
 
   it('shows only the code for an error with an empty message or none', async () => {

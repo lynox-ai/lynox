@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-  anchorFromFd, closeAnchor, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor, stageIn, STAGE_PREFIX,
+  anchorFromFd, closeAnchor, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor, openSubAnchor, stageIn, STAGE_PREFIX,
   readFileAt, removeStaleStages, renameAt, splitRel, statEntry, walk, writeFileAt, WorkspaceAccessError, type WorkspaceAnchor,
 } from './workspace-fd.js';
 
@@ -562,4 +562,26 @@ it.runIf(LINUX)('an O_PATH anchor survives a parent the process can no longer tr
     chmodSync(parent, 0o700);
     closeSync(a.fd);
   }
+});
+
+describe.skipIf(!LINUX)('openSubAnchor', () => {
+  it('opens a directory below the anchor as an fd of its own, creating nothing', () => {
+    mkdirSync(join(ws, 'a', 'b'), { recursive: true });
+    const sub = openSubAnchor(anchor, 'a/b');
+    try {
+      expect(sub.fd).not.toBe(anchor.fd);
+      writeFileAt(sub, 'x.txt', 'x', { fileMode: 0o600 });
+      expect(readFileSync(join(ws, 'a', 'b', 'x.txt'), 'utf8')).toBe('x');
+    } finally {
+      closeAnchor(sub);
+    }
+    expect(code(() => openSubAnchor(anchor, 'missing'))).toBe('ENOENT');
+    expect(existsSync(join(ws, 'missing'))).toBe(false);
+  });
+
+  it('refuses an empty path: it would hand back the anchor itself, which the caller then closes', () => {
+    expect(code(() => openSubAnchor(anchor, ''))).toBe('BAD_PATH');
+    expect(() => statSync(ws)).not.toThrow();
+    expect(code(() => readFileAt(anchor, 'nothing'))).toBe('ENOENT');
+  });
 });

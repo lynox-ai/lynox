@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -69,6 +69,22 @@ describe('file tools reach the workspace through its open directory', () => {
   it('refuses a FIFO in the workspace instead of blocking on it', async () => {
     execFileSync('mkfifo', [join(ws, 'pipe')]);
     await expect(readFileTool.handler({ path: join(ws, 'pipe') })).rejects.toThrow(/not a regular file/);
+  });
+
+  it('refuses to write a FIFO even while something reads it, when opening it does not fail', async () => {
+    execFileSync('mkfifo', [join(ws, 'pipe')]);
+    // With a reader present, opening for writing succeeds; only the type check is left.
+    const reader = openSync(join(ws, 'pipe'), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      await expect(writeFileTool.handler({ path: join(ws, 'pipe'), content: 'into the pipe' }, agent())).rejects.toThrow(/not a regular file/);
+    } finally {
+      closeSync(reader);
+    }
+  });
+
+  it('refuses the workspace directory itself as a file', async () => {
+    await expect(readFileTool.handler({ path: ws })).rejects.toThrow(`${ws} is the workspace directory itself, not a file.`);
+    await expect(writeFileTool.handler({ path: ws, content: 'x' }, agent())).rejects.toThrow(/is the workspace directory itself/);
   });
 
   it('keeps the mode of a file it rewrites or edits, and gives a new file 0644', async () => {
@@ -141,6 +157,23 @@ describe('file tools reach the workspace through its open directory', () => {
   it('refuses a path with a trailing slash instead of making a file of it', async () => {
     await expect(writeFileTool.handler({ path: `${join(ws, 'newdir')}/`, content: 'x' }, agent())).rejects.toThrow(/names a directory/);
     expect(existsSync(join(ws, 'newdir'))).toBe(false);
+  });
+
+  it('reads and edits the file in the directory it holds, not whatever the name means now', async () => {
+    writeFileSync(join(ws, 'f.txt'), 'held A');
+    await readFileTool.handler({ path: join(ws, 'f.txt') });
+    // The directory moves away and another takes its name: the tools keep to the one they opened.
+    const moved = `${ws}-moved`;
+    renameSync(ws, moved);
+    mkdirSync(ws);
+    writeFileSync(join(ws, 'f.txt'), 'named A');
+    try {
+      await editFileTool.handler({ path: join(ws, 'f.txt'), old_string: 'A', new_string: 'B' }, agent());
+      expect(readFileSync(join(moved, 'f.txt'), 'utf8')).toBe('held B');
+      expect(readFileSync(join(ws, 'f.txt'), 'utf8')).toBe('named A');
+    } finally {
+      rmSync(moved, { recursive: true, force: true });
+    }
   });
 
   it('answers with the workspace path of what it wrote', async () => {
