@@ -9,7 +9,7 @@
  * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
@@ -1852,5 +1852,22 @@ describe('a PUBLIC body does not count open findings in its prose either', () =>
   it('the shipped template passes its own rule', () => {
     const template = readFileSync(fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)), 'utf8');
     expect(proseOpenCountLines(template)).toEqual([]);
+  });
+});
+
+describe('scripts/guard-patterns/ — vendored by the private repo', () => {
+  const dir = new URL('../scripts/guard-patterns/', import.meta.url);
+  const files = readdirSync(fileURLToPath(dir)).filter((f) => f.endsWith('.mjs'));
+
+  it('holds the prose scanner gate-record runs', async () => {
+    expect(files).toContain('prose-open-count.mjs');
+    const mod = await import('../scripts/guard-patterns/prose-open-count.mjs');
+    expect(mod.proseOpenCountLines).toBe(proseOpenCountLines);
+  });
+
+  // The private repo runs these files standalone; an import would break its copy, not this one.
+  it.each(files)('%s imports nothing', (f) => {
+    const src = readFileSync(fileURLToPath(new URL(f, dir)), 'utf8');
+    expect(src).not.toMatch(/^\s*import\b|\bimport\s*\(|\brequire\s*\(/m);
   });
 });
