@@ -227,6 +227,20 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
   });
 
+  it('a target read as absent (an external read that found nothing) is invalid not_found, without a call', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    // Test seam: the state an external preview leaves for a target its host no longer has. A
+    // data-store plan refuses a missing row already at plan time, so only the read reaches this.
+    const db = engineDb.getDb();
+    db.prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ? AND seq = (SELECT MIN(seq) FROM bulk_targets WHERE run_id = ?)')
+      .run(engineDb.enc(JSON.stringify({ absent: true })), id, id);
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    await runBulkJudge(id, h.deps);
+    expect(h.calls).toHaveLength(1);
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ not_found: 1 });
+  });
+
   it('a target holding a credential is not sent: invalid secret_in_before — by the scan and by the vault', async () => {
     store.insertRecords({ collection: 'products', records: [{ sku: 'S', title: 'key sk-live-abcdef', note: 'n' }, { sku: 'V', title: 'vaulted', note: 'n' }] });
     const id = await plan(['S', 'V', 'A']);

@@ -31,6 +31,7 @@ import { BulkLedger, BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, type BulkOwn
 import { mintBulkContract } from '../core/bulk-external.js';
 import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
 import { TriggerStore } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
@@ -8918,6 +8919,94 @@ describe('LynoxHTTPApi', () => {
       expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
       expect(refused.status).toBe(409);
       expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
+    describe('a judged run (PRD bulk-loop §3.1 bulk_judge)', () => {
+      const RULE = normalizeJudgeRule({ rule: 'Write a short title.', schema: { title: { type: 'string', maxLength: 40 } } });
+      const judgedRun = (): string => bulkLedger.recordDryRun({
+        createdBy: 't', principal: OWNER_PRINCIPAL, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+        targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old' } }, after: judgeTemplate(RULE) }],
+        judge: RULE,
+      }).id;
+      const start = (id: string, body: Record<string, unknown>): Promise<Response> =>
+        jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(body) });
+      afterEach(() => { vi.unstubAllEnvs(); });
+
+      it('shows the owner the rule, its hash and the model, and starts only with both', async () => {
+        const id = judgedRun();
+        const shown = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+        expect(shown['judgeRule']).toEqual({ rule: RULE.rule, schema: RULE.schema, tier: 'fast' });
+        expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
+        expect(typeof shown['judgeModel']).toBe('string');
+        const t = await (await jsonFetch(`/api/bulk/runs/${id}/targets`)).json() as { targets: { after: unknown; changedFields: unknown }[] };
+        expect(t.targets.map((x) => [x.after, x.changedFields])).toEqual([[null, null]]);
+
+        expect((await start(id, { costCapUsd: 1 })).status).toBe(409);
+        const noCap = await start(id, { judgeRuleHash: shown['judgeRuleHash'] });
+        expect(noCap.status).toBe(400);
+        expect((await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: '1' })).status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
+        expect(ok.status).toBe(200);
+        expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      it('a second start names the run it would end, and ends it only when told', async () => {
+        const first = judgedRun();
+        const hash = (id: string): string => bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        expect((await start(first, { judgeRuleHash: hash(first), costCapUsd: 1 })).status).toBe(200);
+        const second = judgedRun();
+        const refused = await start(second, { judgeRuleHash: hash(second), costCapUsd: 1 });
+        expect(refused.status).toBe(409);
+        expect(await refused.json()).toMatchObject({ code: 'supersede_required', supersedable: { id: first, costUsd: 0 } });
+        expect(bulkLedger.getStatus(first)!.phase).toBe('planned');
+        expect((await start(second, { judgeRuleHash: hash(second), costCapUsd: 1, supersedes: first })).status).toBe(200);
+        expect(bulkLedger.getStatus(first)!.haltReason).toBe(BULK_HALT_REASONS.superseded);
+      });
+
+      it.each([
+        ['LYNOX_BILLING_TIER', 'hosted', 409],
+        ['LYNOX_MANAGED_MODE', 'hosted', 409],
+        ['LYNOX_BILLING_TIER', 'something-else', 409],
+        ['LYNOX_BILLING_TIER', 'managed', 200],
+      ])('with %s=%s a start answers %i: no judged run where the control plane does not supply the model key', async (name, value, code) => {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv(name, value);
+        const id = judgedRun();
+        const res = await start(id, { judgeRuleHash: bulkLedger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 });
+        expect(res.status).toBe(code);
+        if (code === 409) {
+          expect(await res.json()).toMatchObject({ code: 'judge_unavailable' });
+          expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.awaitingStart);
+        }
+      });
+
+      it('control: self-host (no billing tier) starts it', async () => {
+        vi.stubEnv('LYNOX_BILLING_TIER', '');
+        vi.stubEnv('LYNOX_MANAGED_MODE', '');
+        const id = judgedRun();
+        expect((await start(id, { judgeRuleHash: bulkLedger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 })).status).toBe(200);
+      });
+
+      it('shows the rule to the owner only', async () => {
+        const id = judgedRun();
+        type Resolver = (req: import('node:http').IncomingMessage) => RequestPrincipal;
+        const cookieResolver = (api as unknown as { _principalResolver: Resolver })._principalResolver;
+        try {
+          api.setPrincipalResolverForTesting(() => ({ kind: 'mandate', email: 'helper@example.invalid', mandateId: 'grant-1' }));
+          const asMandate = await jsonFetch(`/api/bulk/runs/${id}`);
+          const body = await asMandate.json() as Record<string, unknown>;
+          expect(asMandate.status).toBe(200);
+          expect([body['judgeRule'], body['judgeRuleHash']]).toEqual([null, null]);
+          expect(JSON.stringify(body)).not.toContain(RULE.rule);
+          // Twin on the same machinery: the owner reads it.
+          api.setPrincipalResolverForTesting(() => OWNER_PRINCIPAL);
+          const asOwner = await (await jsonFetch(`/api/bulk/runs/${id}`)).json() as Record<string, unknown>;
+          expect(asOwner['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
+        } finally {
+          api.setPrincipalResolverForTesting(cookieResolver);
+        }
+      });
     });
 
     it('refuses to approve an external run, and resumes a halted external preview without a checksum', async () => {
