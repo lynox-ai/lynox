@@ -91,4 +91,45 @@ describe('data-dir sweep', () => {
     // `backups/` is declared and deliberately not carried — its size costs nothing per run.
     expect(sweepDataDir(dir).oversize).toEqual([]);
   });
+
+  describe('the workspace root (P18 D8)', () => {
+    it('says the root is unknown when none is given, never assumes the default', () => {
+      const dir = tmp();
+      mkdirSync(join(dir, 'workspace'));
+      writeFileSync(join(dir, 'workspace', 'a.txt'), 'x');
+      const res = sweepDataDir(dir);
+      expect(res.workspace).toEqual({ root: null, mode: 'unknown', leftover: null });
+      expect(sweepDataDir(dir, { workspaceRoot: '' }).workspace.mode).toBe('unknown');
+    });
+
+    it('a root that is <data>/workspace is the default: nothing left over', () => {
+      const dir = tmp();
+      mkdirSync(join(dir, 'workspace'));
+      writeFileSync(join(dir, 'workspace', 'a.txt'), 'x');
+      const res = sweepDataDir(dir, { workspaceRoot: join(dir, 'workspace') });
+      expect(res.workspace.mode).toBe('default');
+      expect(res.workspace.leftover).toBeNull();
+    });
+
+    it('with an external root, reports files at the old place and does not list it as absent', () => {
+      const dir = tmp();
+      const root = tmp();
+      expect(sweepDataDir(dir, { workspaceRoot: root }).workspace).toEqual({ root, mode: 'external', leftover: null });
+      expect(sweepDataDir(dir, { workspaceRoot: root }).declaredButAbsent).not.toContain('workspace');
+      expect(sweepDataDir(dir).declaredButAbsent).toContain('workspace');
+
+      mkdirSync(join(dir, 'workspace'));
+      expect(sweepDataDir(dir, { workspaceRoot: root }).workspace.leftover).toBeNull();
+      writeFileSync(join(dir, 'workspace', 'old.txt'), 'y'.repeat(2048));
+      const res = sweepDataDir(dir, { workspaceRoot: root });
+      expect(res.workspace.leftover).toEqual({ name: 'workspace', kind: 'dir', bytes: 2048 });
+    });
+
+    it('measures an external root for oversize, not <data>/workspace', () => {
+      const dir = tmp();
+      const root = tmp();
+      sparse(join(root, 'big.bin'), OVERSIZE_BYTES + 1);
+      expect(sweepDataDir(dir, { workspaceRoot: root }).oversize.map(f => f.name)).toEqual(['workspace']);
+    });
+  });
 });

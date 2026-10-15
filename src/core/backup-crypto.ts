@@ -55,6 +55,11 @@ export function encryptFile(srcPath: string, destPath: string, key: Buffer): Enc
  * Validates header magic + version before decryption.
  */
 export function decryptFile(srcPath: string, destPath: string, key: Buffer): void {
+  writeFileSync(destPath, decryptFileToBuffer(srcPath, key), { mode: 0o600 });
+}
+
+/** Decrypt an NBAK file into memory, never onto disk. Same checks as `decryptFile`. */
+export function decryptFileToBuffer(srcPath: string, key: Buffer): Buffer {
   const data = readFileSync(srcPath);
 
   if (data.length < HEADER_LENGTH) {
@@ -79,8 +84,7 @@ export function decryptFile(srcPath: string, destPath: string, key: Buffer): voi
   const decipher = createDecipheriv(CRYPTO_ALGORITHM, key, iv, { authTagLength: CRYPTO_TAG_LENGTH });
   decipher.setAuthTag(authTag);
 
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  writeFileSync(destPath, decrypted, { mode: 0o600 });
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
 /** Check if a file has the NBAK encrypted header. */

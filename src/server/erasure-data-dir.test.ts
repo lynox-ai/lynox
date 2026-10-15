@@ -211,7 +211,11 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
       const path = join(dir, name);
       if (!existsSync(path)) continue;
       const st = statSync(path);
-      if (st.isDirectory()) expect(readdirSync(path), `${name} kept content`).toEqual([]);
+      if (name === 'workspace') {
+        // The root is emptied through its anchor and keeps the context directory, made again empty.
+        expect(readdirSync(path), 'workspace kept content').toEqual(['http-api']);
+        expect(readdirSync(join(path, 'http-api')), 'workspace/http-api kept content').toEqual([]);
+      } else if (st.isDirectory()) expect(readdirSync(path), `${name} kept content`).toEqual([]);
       else expect(readFileSync(path, 'utf8'), `${name} survived`).not.toBe(m);
     }
     for (const name of ['engine.db.corrupt-1700000000000', 'vault.db.rotate-bak', 'config.json.1.deadbeef.tmp', 'retrieval-shadow.jsonl.1']) {
