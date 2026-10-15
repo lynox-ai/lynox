@@ -267,6 +267,18 @@ describe('release_secret: the owner answers in person', () => {
     expect(releases.activeReleases()).toEqual([]);
   });
 
+  it('names every field whose change ends the release, and says whose runs send it', async () => {
+    const p = bearer({ auth: { type: 'header', header_name: 'X-Api-Key', vault_keys: ['CRM_KEY'] } });
+    const apiStore = apis([p]);
+    ask(p);
+    let question = '';
+    await release(apiStore, { promptUser: async (q) => { question = flattenPrompt(q as never); return 'Deny'; } });
+    expect(question).toContain('auth.type "header"');
+    expect(question).toContain('auth.header_name "X-Api-Key"');
+    expect(question).toContain('the user\'s own and bulk runs included, until that mandate ends');
+    expect(question).not.toContain('while that mandate is active');
+  });
+
   it('names a port other than the default in the question', async () => {
     const p = bearer({ base_url: 'https://api.crm.example:8443/v1' });
     const apiStore = apis([p]);

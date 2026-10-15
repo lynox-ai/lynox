@@ -172,6 +172,23 @@ function boundOf<T extends object>(table: Readonly<Record<string, FieldBearing>>
   return out;
 }
 
+/**
+ * The `bound` fields of `profile` that are set, by their path, as the owner is shown them when
+ * asked for a release. Read from the tables above, as {@link releaseBinding} is, so a field
+ * placed there later is shown without a second edit: the question names every field whose
+ * change ends the release.
+ */
+export function releaseBoundFields(profile: ApiProfile): Array<[string, unknown]> {
+  const out: Array<[string, unknown]> = [];
+  const add = (prefix: string, fields: Record<string, unknown>): void => {
+    for (const [key, value] of Object.entries(fields)) if (value !== null) out.push([`${prefix}${key}`, value]);
+  };
+  add('', boundOf(PROFILE_FIELDS, profile));
+  add('auth.', boundOf(AUTH_FIELDS, profile.auth));
+  add('auth.oauth.', boundOf(OAUTH_FIELDS, profile.auth?.oauth));
+  return out;
+}
+
 /** `value` as JSON with every object's keys sorted, so the same configuration always spells the same. */
 function stableJson(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) =>

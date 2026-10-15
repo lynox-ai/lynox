@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
+import { connectionTokenAllowed, mandateMayConnect, mandateMayRead, mayServeAsClientId, releaseBinding, releaseBoundFields, releaseObstacle, releaseState, secretsForProfile, withheldFrom, type ReadCtx } from './profile-secret-view.js';
 import type { ApiProfile } from './api-store.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
@@ -477,6 +477,24 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
       expect(releaseObstacle(vault, { getAll: () => [p] }, p, name)).toBeNull();
       expect(read([p], p, name, releasedFor(p, name))).toBe(true);
     }
+  });
+
+  it('shows exactly the fields that bind a release: changing any one it shows ends the release', () => {
+    const full = oauthP({ scope: 's', audience: 'https://aud.example', body_format: 'json', preset_params: { shop: 'x' } }, {});
+    const shown = releaseBoundFields(full);
+    // Control: what an OAuth profile with these set shows, by path.
+    expect(shown.map(([k]) => k)).toEqual(['auth.type', 'auth.oauth.scope', 'auth.oauth.audience', 'auth.oauth.preset_params', 'auth.oauth.body_format']);
+    const before = releaseBinding(full, 'OWNER_SECRET');
+    for (const [path] of shown) {
+      const changed = structuredClone(full) as unknown as Record<string, Record<string, unknown>>;
+      const parts = path.split('.');
+      let at: Record<string, unknown> = changed;
+      for (const part of parts.slice(0, -1)) at = at[part] as Record<string, unknown>;
+      at[parts[parts.length - 1]!] = path === 'auth.type' ? 'oauth2-changed' : 'changed';
+      expect(releaseBinding(changed as unknown as ApiProfile, 'OWNER_SECRET'), path).not.toBe(before);
+    }
+    // And header_name, query_param, basic_format of the other auth shapes.
+    expect(releaseBoundFields(mb({ auth: { type: 'header', header_name: 'X-Key', vault_keys: ['OWNER_KEY'] } })).map(([k]) => k)).toEqual(['auth.type', 'auth.header_name']);
   });
 
   it('control: a profile the owner wrote reads its name with no release at all', () => {
