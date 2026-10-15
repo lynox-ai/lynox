@@ -74,16 +74,23 @@ export function resolveFileAreaPath(filePath: string): string | null {
   return resolved;
 }
 
+/** True only when `lstat` says the name is not there; any other answer counts as present. */
+function isAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
 /**
  * The real path of `path`, or — when its leaf does not exist yet — the real path of its closest
  * existing ancestor with the missing rest re-attached. Null for a dangling symlink and for any
- * other failure (a component that is a file, an unreadable directory, a link loop): accepting the logical path there let a
- * symlink out of the area answer differently for files and directories behind it.
+ * other failure (a component that is a file, an unreadable directory, a link loop): accepting
+ * the logical path there let a symlink out of the area answer differently for files and
+ * directories behind it.
  */
-function isPresent(path: string): boolean {
-  try { lstatSync(path); return true; } catch { return false; }
-}
-
 function realpathOfClosestExisting(path: string): string | null {
   let probe = path;
   let tail = '';
@@ -95,7 +102,7 @@ function realpathOfClosestExisting(path: string): string | null {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
       // ENOENT for a name that exists is a dangling symlink: its target is missing, wherever it
       // points. Refused, or the answer would say whether that target exists outside the area.
-      if (isPresent(probe)) return null;
+      if (!isAbsent(probe)) return null;
       const parent = dirname(probe);
       if (parent === probe) return null;
       tail = tail === '' ? basename(probe) : join(basename(probe), tail);
