@@ -249,6 +249,11 @@
       "why": "a digit of another script glued to the date"
     },
     {
+      "value": "rafael 2026-10-15́",
+      "verdict": "undated",
+      "why": "a combining mark glued to the date"
+    },
+    {
       "value": "rafael 2028-02-29",
       "verdict": "ok",
       "why": "a leap day"
