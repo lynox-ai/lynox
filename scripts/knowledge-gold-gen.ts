@@ -49,8 +49,7 @@ const EXTERNAL_TOOLS = new Set([
 // ── args ─────────────────────────────────────────────────────────────────────
 
 /**
- * Label-proposal model. PINNED to a dated snapshot on purpose: the caller's own
- * default is `mistral-small-latest`, and a `-latest` tag both auto-rolls silently
+ * Label-proposal model. PINNED to a dated snapshot on purpose: a `-latest` tag both auto-rolls silently
  * (behaviour drift between two gold vintages = an uncomparable measurement) and
  * carries the deeper rate-limits we hit before. Override with `--model` only to a
  * dated tag. Keep in sync with MISTRAL_MODEL_MAP in src/types/models.ts.

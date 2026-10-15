@@ -29,7 +29,6 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { MODEL_CAPABILITIES, MISTRAL_SERVED_AS } from '../../src/types/models.js';
-import { DEFAULT_MISTRAL_MODEL } from '../../src/integrations/inbox/classifier/llm-mistral.js';
 
 const BASE = 'https://api.mistral.ai/v1';
 const KEY = process.env['MISTRAL_API_KEY'];
@@ -73,13 +72,6 @@ describe('the Mistral ids the registry prices', () => {
       }
       expect(aliases.size, 'the model list is not empty').toBeGreaterThan(0);
     }, 30_000);
-
-    // The inbox classifier SENDS an unregistered alias but is budgeted at mistral-small-2603's
-    // rates (cost-budget.ts). The coupling is only the alias list, so check it here: if Mistral
-    // moves the alias, the classifier's budget counts another model's price.
-    it(`the inbox classifier's ${DEFAULT_MISTRAL_MODEL} is still an alias of the model its budget prices`, () => {
-      expect([...(aliases.get('mistral-small-2603') ?? [])], 'aliases of mistral-small-2603').toContain(DEFAULT_MISTRAL_MODEL);
-    });
 
     it('positive control: an id that does not exist is refused', async () => {
       const r = await served('lynox-guard-no-such-model');

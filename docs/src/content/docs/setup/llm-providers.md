@@ -111,7 +111,7 @@ OPENAI_MODEL_ID=mistral-medium-2604
   - `mistral-large-latest` (floating tag — may drift between snapshots, prefer the pinned form in production)
   - `mistral-medium-2604` (the `balanced` tier pick — Ministral 14B proved too weak an orchestrator for the main slot)
   - `ministral-8b-2512` (low-cost orchestration; 100% pass on all 8 bench axes)
-  - `codestral-latest` (code-focused)
+  - `codestral-2508` (code-focused)
 - **Pricing**: $1.50 / $7.50 per MTok input/output (Medium 3.5, `deep`); $0.50 / $1.50 (Large 3, legacy); $0.15 / $0.15 (Ministral 8B)
 - **Tool calling**: bench-verified near-Sonnet quality; the pinned Medium 3.5 snapshot is what we ship for `deep`.
 
