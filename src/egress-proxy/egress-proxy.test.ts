@@ -211,6 +211,11 @@ describe('policy: TLS hellos', () => {
     expect(parseClientHello(Buffer.concat([CCS, CCS, h]), true)).toEqual({ state: 'bad', error: 'bad change_cipher_spec' });
     expect(parseClientHello(Buffer.concat([Buffer.from([23, 3, 3, 0, 0]), h]), true)).toEqual({ state: 'bad', error: 'bad record length' });
     expect(parseClientHello(Buffer.concat([CCS, early.subarray(0, 7)]), true)).toEqual({ state: 'more' });
+    // One record may not exceed the TLS limit, and all of it together not MAX_HELLO_BYTES.
+    expect(parseClientHello(Buffer.from([23, 3, 3, 0x41, 0x01]), true)).toEqual({ state: 'bad', error: 'bad record length' });
+    const full = Buffer.concat([Buffer.from([23, 3, 3]), u16(16_640), Buffer.alloc(16_640)]);
+    expect(parseClientHello(Buffer.concat([full, full, full]), true)).toEqual({ state: 'more' });
+    expect(parseClientHello(Buffer.concat([full, full, full, full]), true)).toEqual({ state: 'bad', error: 'hello too large' });
     // Without a retry, early data in front of the hello is not a hello.
     expect(parseClientHello(Buffer.concat([early, h])).state).toBe('bad');
   });

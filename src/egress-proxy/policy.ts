@@ -178,8 +178,9 @@ const ENCRYPTED_HELLO_EXTENSIONS: ReadonlySet<number> = new Set([0xfe0d, 0xffce]
  * when the hello names no server, and lower-cased otherwise. The records that carry the
  * hello must carry nothing else; `bytes` is where they end. What follows them is not part of
  * the hello and is not read here: the caller holds it back, because a client may send a
- * second hello right behind the first. `afterRetry` allows the change_cipher_spec record a
- * TLS 1.3 client may send before its second hello; `bytes` then counts it too.
+ * second hello right behind the first. `afterRetry` allows what a TLS 1.3 client may send
+ * between its two hellos: one change_cipher_spec record and 0-RTT early data records, each at
+ * most a record's size and all of it within MAX_HELLO_BYTES; `bytes` then counts them too.
  */
 export function parseClientHello(buf: Buffer, afterRetry = false): HelloResult {
   const hs: Buffer[] = [];
