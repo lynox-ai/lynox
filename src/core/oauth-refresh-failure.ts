@@ -217,19 +217,19 @@ export type MicrosoftRefreshFailureKind = RefreshFailureKind | 'needs-user' | 'n
  * never a connection lost without a word.
  */
 export const MICROSOFT_REFRESH_CODES = {
-  /** Only an admin can fix these, whatever `error` says. Checked first. */
+  /** Only an admin can fix these, whatever `error` says. Checked before any other code or `error`. */
   needsAdmin: [
     50057, // UserDisabled: the account is disabled
     50105, // the signed-in user is not assigned to a role for the app
     53003, // BlockedByConditionalAccess
-    700016, // the app was not found in the tenant (also: removed by its admin)
+    700016, // the app was not found in the tenant: not installed by its admin or consented to by any user
   ],
   /** With `invalid_grant`, these alone mean the grant is gone and the token may be deleted. */
   grantRevoked: [
     70008, // the refresh token has expired due to inactivity
     700082, // the refresh token has expired due to inactivity
     50173, // the grant was revoked (fresh auth token needed)
-    65001, // DelegationDoesNotExist: consent missing or withdrawn
+    65001, // DelegationDoesNotExist: the user or admin has not consented to the app
     50133, // session invalid due to password expiration or recent password change
   ],
 } as const satisfies Record<string, readonly number[]>;
@@ -237,15 +237,18 @@ export const MICROSOFT_REFRESH_CODES = {
 /**
  * Classify a failure of Microsoft's token endpoint. The order is the rule:
  *
- * 1. 5xx and 429 are transient, as for every provider; so is a body that is
- *    not JSON.
+ * 1. 5xx and 429 are transient, as for every provider.
  * 2. A code in `needsAdmin` → `needs-admin`, whatever the `error`.
  * 3. Otherwise `error` decides: `temporarily_unavailable` → transient;
  *    `invalid_client` / `unauthorized_client` → client-misconfigured, with any
  *    code or none (700016 never gets here, step 2 took it).
  * 4. `invalid_grant` → `grant-revoked` only with a code in `grantRevoked`;
  *    without one, `needs-user`.
- * 5. Anything else (`interaction_required` included) → `needs-user`.
+ * 5. Anything else → `needs-user`: `interaction_required`, an unknown `error`,
+ *    and a 4xx whose body is not a JSON object (a proxy page, an empty body).
+ *    The shared classifier calls the last one transient; here it would mean
+ *    retrying a permanent refusal without telling anyone, so the token is kept
+ *    and the user is asked to sign in.
  *
  * `error_description` is never read: Microsoft's reference says not to react to
  * it in code.
@@ -256,9 +259,12 @@ export function classifyMicrosoftRefreshFailure(httpStatus: number, body: string
   try {
     parsed = JSON.parse(body) as { error?: unknown; error_codes?: unknown };
   } catch {
-    return 'transient';
+    return 'needs-user';
   }
-  if (parsed === null || typeof parsed !== 'object') return 'transient';
+  // `null` is the one JSON value whose fields cannot be read; every other
+  // non-object (a number, a string, an array) has no `error` and falls through
+  // to `needs-user` below.
+  if (parsed === null) return 'needs-user';
   const codes = Array.isArray(parsed.error_codes)
     ? parsed.error_codes.filter((c): c is number => typeof c === 'number')
     : [];

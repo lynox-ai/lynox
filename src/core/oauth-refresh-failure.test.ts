@@ -171,8 +171,10 @@ describe('classifyMicrosoftRefreshFailure — one row per verdict, in the order 
     expect(ms(401, { error: 'invalid_client', error_codes: [code] })).toBe('needs-admin');
   });
 
-  it('a needs-admin code wins over a revoking code in the same answer', () => {
+  it('a needs-admin code wins over every error and over a revoking code in the same answer', () => {
     expect(ms(400, { error: 'invalid_grant', error_codes: [70008, 50105] })).toBe('needs-admin');
+    expect(ms(400, { error: 'temporarily_unavailable', error_codes: [53003] })).toBe('needs-admin');
+    expect(ms(400, { error: 'interaction_required', error_codes: [50105] })).toBe('needs-admin');
   });
 
   it('invalid_client and unauthorized_client are our misconfiguration with any code but 700016, and with none', () => {
@@ -183,12 +185,20 @@ describe('classifyMicrosoftRefreshFailure — one row per verdict, in the order 
     expect(ms(401, { error: 'invalid_client', error_codes: [700016] })).toBe('needs-admin');
   });
 
-  it('temporarily_unavailable, 5xx, 429 and a non-JSON body are transient', () => {
+  it('temporarily_unavailable, 5xx and 429 are transient; 499 is not', () => {
     expect(ms(400, { error: 'temporarily_unavailable' })).toBe('transient');
+    expect(ms(500, { error: 'invalid_grant', error_codes: [70008] })).toBe('transient');
     expect(ms(503, { error: 'invalid_grant', error_codes: [70008] })).toBe('transient');
     expect(ms(429, { error: 'invalid_grant', error_codes: [70008] })).toBe('transient');
-    expect(classifyMicrosoftRefreshFailure(400, '<html>proxy</html>')).toBe('transient');
-    expect(classifyMicrosoftRefreshFailure(400, 'null')).toBe('transient');
+    expect(ms(499, { error: 'invalid_grant', error_codes: [70008] })).toBe('grant-revoked');
+  });
+
+  it('a 4xx whose body is not a JSON object keeps the token and asks for a sign-in, never a silent retry', () => {
+    for (const body of ['<html>proxy</html>', '', 'null', '5', '"x"', '[]']) {
+      expect(classifyMicrosoftRefreshFailure(400, body), JSON.stringify(body)).toBe('needs-user');
+    }
+    // A 5xx stays transient whatever the body.
+    expect(classifyMicrosoftRefreshFailure(502, '<html>bad gateway</html>')).toBe('transient');
   });
 
   it('anything else keeps the token and asks for a sign-in: needs-user', () => {
@@ -196,7 +206,7 @@ describe('classifyMicrosoftRefreshFailure — one row per verdict, in the order 
     expect(ms(400, { message: 'no error field' })).toBe('needs-user');
   });
 
-  it('reads codes only from the error_codes array of numbers, never from error_description', () => {
+  it('reads codes only from error_codes, never from error_description; codes given as strings never match', () => {
     expect(ms(400, { error: 'invalid_grant', error_description: 'AADSTS70008: expired' })).toBe('needs-user');
     expect(ms(400, { error: 'invalid_grant', error_codes: ['70008'] })).toBe('needs-user');
     expect(ms(400, { error: 'invalid_grant', error_codes: 70008 })).toBe('needs-user');
