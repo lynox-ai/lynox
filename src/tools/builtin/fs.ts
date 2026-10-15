@@ -122,9 +122,18 @@ type Target =
   | { readonly kind: 'anchored'; readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }
   | { readonly kind: 'path'; readonly path: string };
 
-/** Mode for a new file and for directories write_file creates (the umask-022 result it had before). */
-const NEW_FILE_MODE = 0o644;
-const NEW_DIR_MODE = 0o755;
+/**
+ * The process umask, as a write by name applies it: a new file is `0o666 & ~umask`, a new
+ * directory `0o777 & ~umask`. Read from /proc, because `process.umask()` without an argument sets
+ * it to 0 for a moment. If it cannot be read, the closed answer: owner only.
+ */
+function processUmask(): number {
+  try {
+    const m = /^Umask:\s*([0-7]{1,4})$/m.exec(readFileSync('/proc/self/status', 'utf8'));
+    if (m?.[1] !== undefined) return parseInt(m[1], 8);
+  } catch { /* fall through */ }
+  return 0o077;
+}
 
 /**
  * With isolation: a path in the context workspace is reached through its open directory, every
@@ -203,13 +212,16 @@ function anchoredError(shown: string, err: unknown): Error {
  * (disk full) leaves the file partly written, and a new file that fails stays as far as it got;
  * the kernel clears setuid/setgid on the write. A symlink
  * at the file is refused, not written through. A file with more than one link is refused: the
- * other name may be outside the workspace. With `create`, a missing file (and missing
- * directories) are made, 0644 and 0755.
+ * other name may be outside the workspace. The check sees the links as they are after the open;
+ * that nobody links in a file they could not read and write themselves is the kernel's rule
+ * (`fs.protected_hardlinks`). With `create`, a missing file (and missing directories) are made
+ * with the modes a write by name gives them: 0666 and 0777 less the umask.
  */
 function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: string, create: boolean): void {
   let fd: number;
   try {
-    ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: NEW_FILE_MODE, dirMode: NEW_DIR_MODE } : {}));
+    const umask = create ? processUmask() : 0;
+    ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: 0o666 & ~umask, dirMode: 0o777 & ~umask } : {}));
   } catch (err) {
     throw anchoredError(target.shown, err);
   }

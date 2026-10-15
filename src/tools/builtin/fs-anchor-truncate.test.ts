@@ -3,11 +3,15 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 /**
+ * Two details of writing a workspace file that only a stand-in for `node:fs` shows.
  * Truncating a file that is new or already empty is not only useless: on ext4 a truncate to zero
  * makes the following close flush the data synchronously (auto_da_alloc), which made writing a
  * new file several times slower than a write by name. So only a file with content is truncated.
+ * And a new file takes its mode from the umask, read from /proc; when that read fails, the mode
+ * is the closed one.
  */
 const counts = { ftruncate: 0 };
+const blind = { status: false };
 
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:fs')>();
@@ -15,10 +19,14 @@ vi.mock('node:fs', async (importOriginal) => {
     counts.ftruncate++;
     return real.ftruncateSync(...args);
   };
-  return { ...real, default: { ...real, ftruncateSync }, ftruncateSync };
+  const readFileSync = ((...args: Parameters<typeof real.readFileSync>) => {
+    if (blind.status && args[0] === '/proc/self/status') throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    return real.readFileSync(...args);
+  }) as typeof real.readFileSync;
+  return { ...real, default: { ...real, ftruncateSync, readFileSync }, ftruncateSync, readFileSync };
 });
 
-const { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } = await import('node:fs');
+const { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } = await import('node:fs');
 const { writeFileTool, editFileTool } = await import('./fs.js');
 const { setTenantWorkspace, clearTenantWorkspace } = await import('../../core/workspace.js');
 const { closeWorkspaceBase } = await import('../../core/workspace-rel.js');
@@ -35,6 +43,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  blind.status = false;
   closeWorkspaceBase();
   clearTenantWorkspace();
   rmSync(ws, { recursive: true, force: true });
@@ -52,5 +61,12 @@ describe('writing a workspace file in place', () => {
     expect(counts.ftruncate).toBe(2);
     // The truncate is what keeps a shorter rewrite from leaving the old tail behind.
     expect(readFileSync(join(ws, 'new.txt'), 'utf8')).toBe('shorter? no: l');
+  });
+
+  it('makes a new file and directory owner-only when the umask cannot be read', async () => {
+    blind.status = true;
+    await writeFileTool.handler({ path: join(ws, 'd', 'closed.txt'), content: 'c' }, agent());
+    expect(statSync(join(ws, 'd', 'closed.txt')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(ws, 'd')).mode & 0o777).toBe(0o700);
   });
 });

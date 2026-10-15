@@ -87,7 +87,7 @@ describe('file tools reach the workspace through its open directory', () => {
     await expect(writeFileTool.handler({ path: ws, content: 'x' }, agent())).rejects.toThrow(/is the workspace directory itself/);
   });
 
-  it('keeps the mode of a file it rewrites or edits, and gives a new file 0644', async () => {
+  it('keeps the mode of a file it rewrites or edits', async () => {
     writeFileSync(join(ws, 'run.sh'), 'echo one\n');
     chmodSync(join(ws, 'run.sh'), 0o750);
     await writeFileTool.handler({ path: join(ws, 'run.sh'), content: 'echo two\n' }, agent());
@@ -96,9 +96,23 @@ describe('file tools reach the workspace through its open directory', () => {
     expect(statSync(join(ws, 'run.sh')).mode & 0o777).toBe(0o750);
     expect(readFileSync(join(ws, 'run.sh'), 'utf8')).toBe('echo three\n');
 
-    await writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent());
-    expect(statSync(join(ws, 'deep', 'new.txt')).mode & 0o777).toBe(0o644);
-    expect(statSync(join(ws, 'deep')).mode & 0o777).toBe(0o755);
+  });
+
+  it.each(['022', '077', '002'])('makes a new file and directory as a write by name does under umask %s', async (octal) => {
+    const mask = parseInt(octal, 8);
+    const before = process.umask(mask);
+    try {
+      await writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent());
+      mkdirSync(join(ws, 'byname'));
+      writeFileSync(join(ws, 'byname', 'new.txt'), 'n');
+    } finally {
+      process.umask(before);
+    }
+    expect(statSync(join(ws, 'deep', 'new.txt')).mode & 0o777).toBe(0o666 & ~mask);
+    expect(statSync(join(ws, 'deep')).mode & 0o777).toBe(0o777 & ~mask);
+    // The same as the write by name it replaces.
+    expect(statSync(join(ws, 'deep', 'new.txt')).mode & 0o777).toBe(statSync(join(ws, 'byname', 'new.txt')).mode & 0o777);
+    expect(statSync(join(ws, 'deep')).mode & 0o777).toBe(statSync(join(ws, 'byname')).mode & 0o777);
   });
 
   it('writes and edits a workspace file in place: same inode, so owner and permissions stay', async () => {
