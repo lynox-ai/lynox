@@ -694,6 +694,20 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
     });
 
+    it('a rollback that empties a root leaves the root in place', () => {
+      const cwd = makeTempDir();
+      const tmpRoot = join(makeTempDir(), 'scratch');
+      mkdirSync(tmpRoot);
+      const added = join(tmpRoot, 'out.csv');
+      const mgr = new ChangesetManager(cwd, 'test-run', [tmpRoot]);
+      mgr.backupBeforeWrite(added);
+      writeFileSync(added, 'a,b', 'utf-8');
+      mgr.rollbackAll();
+      expect(existsSync(added)).toBe(false);
+      expect(existsSync(tmpRoot)).toBe(true);
+      mgr.cleanup();
+    });
+
     it('a root given to the manager is not a licence for a sibling outside it', () => {
       const cwd = makeTempDir();
       const base = makeTempDir();

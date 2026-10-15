@@ -58,7 +58,8 @@ export class ChangesetManager {
     } catch {
       return null;
     }
-    return this.roots.some((root) => real !== root && isPathWithin(real, root)) ? real : null;
+    // A root itself is a directory, never a tracked file: reading it fails, and nothing is shown or restored.
+    return this.roots.some((root) => isPathWithin(real, root)) ? real : null;
   }
 
   /** The bytes of a tracked file, read only while it is still inside a root and
