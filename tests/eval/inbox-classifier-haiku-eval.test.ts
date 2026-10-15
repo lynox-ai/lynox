@@ -49,9 +49,9 @@ describeOrSkip('inbox-classifier eval (Anthropic Haiku)', () => {
     });
     // eslint-disable-next-line no-console
     console.log('\n=== HAIKU ===\n' + formatReport(report) + '\n');
-    expect(report.bucketMatchPct).toBeGreaterThanOrEqual(PASS_THRESHOLD_PCT);
-    // The ids first: a failing run names the mails it lost.
+    // The lost mails first, so a run that loses one names it whatever else fails.
     expect(report.missedRequiresUserIds).toEqual([]);
+    expect(report.bucketMatchPct).toBeGreaterThanOrEqual(PASS_THRESHOLD_PCT);
     expect(report.missedRequiresUser).toBe(0);
   }, 15 * 60 * 1000);
 });

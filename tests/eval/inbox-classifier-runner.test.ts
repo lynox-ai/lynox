@@ -136,6 +136,15 @@ describe('runInboxEval', () => {
     expect(formatReport(report)).toContain(`missed ids: ${lost.map((f) => f.id).join(', ')}`);
   });
 
+  it('control: a requires_user mail placed in draft_ready is not named as missed', async () => {
+    const corpus = loadCorpus();
+    const llm = bucketStub(() => 'draft_ready');
+    const report = await runInboxEval(corpus, llm);
+    expect(report.confusion.requires_user.draft_ready).toBeGreaterThan(0);
+    expect(report.missedRequiresUser).toBe(0);
+    expect(report.missedRequiresUserIds).toEqual([]);
+  });
+
   it('control: an auto_handled mail placed in requires_user is not named as missed', async () => {
     const corpus = loadCorpus();
     const llm = bucketStub(() => 'requires_user');

@@ -47,12 +47,12 @@ describeOrSkip('inbox-classifier eval (Mistral EU)', () => {
     });
     // eslint-disable-next-line no-console
     console.log('\n' + formatReport(report) + '\n');
+    // The lost mails first, so a run that loses one names it whatever else fails.
+    expect(report.missedRequiresUserIds).toEqual([]);
     expect(report.bucketMatchPct).toBeGreaterThanOrEqual(PASS_THRESHOLD_PCT);
     // PRD asymmetric criterion: a requires_user item silently bucketed
     // as auto_handled is a missed mail (unrepairable). The reverse —
     // auto_handled mail landing in requires_user — is one extra click.
-    // The ids first: a failing run names the mails it lost.
-    expect(report.missedRequiresUserIds).toEqual([]);
     expect(report.missedRequiresUser).toBe(0);
   }, 15 * 60 * 1000);
 });
