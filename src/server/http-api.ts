@@ -9781,6 +9781,26 @@ export class LynoxHTTPApi {
       this.addCpAdminRoute(to, wrap ? wrap(handler) : handler);
     }
 
+    // The workspace root as the control plane reads it after moving a tenant's workspace to a
+    // volume of its own (P18): read-only, the admin bearer only, and trailed like every request
+    // that bearer makes. Over there a missing field counts as a failed check, so all three are
+    // always present; `workspace_root_is_mount` is null where the mount id cannot be read.
+    this.addCpAdminRoute('GET /api/admin/workspace/status', async (_req, res) => {
+      const { resolveWorkspaceRoot, workspaceLegacyPending, workspaceRootIsMount } = await import('../core/workspace-root.js');
+      let root;
+      try {
+        root = resolveWorkspaceRoot();
+      } catch (err) {
+        errorResponse(res, 500, err instanceof Error ? err.message : String(err), 'workspace_root_unusable');
+        return;
+      }
+      jsonResponse(res, 200, {
+        workspace_root_mode: root.mode,
+        workspace_root_is_mount: workspaceRootIsMount(root.path),
+        workspace_legacy_pending: workspaceLegacyPending(root),
+      });
+    });
+
     // The control plane's list of the account's revoked mandates (§3.5, piece C): the whole list
     // each call, applied idempotently, so a call after a restore heals what the restore undid.
     // A revoke that is new is told to the `onRevoke` listeners, once.
@@ -12346,11 +12366,10 @@ export class LynoxHTTPApi {
       try {
         const { readdir, stat, access } = (await import('node:fs/promises'));
         const { join } = await import('node:path');
-        const { getWorkspaceDir } = await import('../core/workspace.js');
-        const { getLynoxDir } = await import('../core/config.js');
+        const { getFileAreaDir } = await import('../core/workspace.js');
         const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
 
-        const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+        const base = getFileAreaDir();
         try { await access(base); } catch { ensureDir(base); }
         // Resolve + reject traversal AND symlink-escape (realpath) — the same
         // confinement /read, /download and DELETE apply via resolveWorkspacePath.

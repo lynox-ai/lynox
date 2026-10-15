@@ -406,7 +406,6 @@ export interface LynoxUserConfig {
   plugins?: Record<string, boolean> | undefined;
   agents_dir?: string | undefined;
   manifests_dir?: string | undefined;
-  workspace_dir?: string | undefined;
   user_id?: string | undefined;
   display_name?: string | undefined;
   /** Default response language (e.g. 'de', 'en'). Overridden by user's language in conversation. */

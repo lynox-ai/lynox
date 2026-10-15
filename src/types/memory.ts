@@ -12,7 +12,7 @@ export interface LynoxContext {
   id: string;              // unique identifier (hash or explicit)
   name?: string | undefined; // human label: "acme-shop.ch", "lynox repo"
   source: ContextSource;
-  workspaceDir: string;    // ~/.lynox/workspace/<id>/
+  workspaceDir: string;    // <workspace root>/<id>/ (~/.lynox/workspace/<id>/ by default)
   localDir?: string | undefined; // original cwd (CLI only, for file access)
 }
 

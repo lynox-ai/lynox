@@ -17021,6 +17021,21 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
   });
 
+  it('answers the workspace status as a failure when the root cannot be used, never with a guessed field', async () => {
+    const other = mkdtempSync(join(tmpdir(), 'lynox-ws-root-other-'));
+    try {
+      await withEnv({ ...MANAGED, LYNOX_WORKSPACE_ROOT: other }, async () => {
+        const res = await as(ADMIN, '/api/admin/workspace/status');
+        expect(res.status).toBe(500);
+        expect(((await res.json()) as { code?: string }).code).toBe('workspace_root_unusable');
+      });
+      // The user bearer does not reach it at all.
+      await withEnv(MANAGED, async () => {
+        expect((await as(TEST_SECRET, '/api/admin/workspace/status')).status).toBe(403);
+      });
+    } finally { rmSync(other, { recursive: true, force: true }); }
+  });
+
   it('the control plane\'s revoke alias refuses to delete Drive backups, and revokes nothing then', async () => {
     await withEnv(MANAGED, async () => {
       for (const flag of [true, 'true', 1, null]) {
@@ -17108,10 +17123,10 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   describe('the positive list (PRD cp-admin-line §3.1)', () => {
     type Row = { method: string; path: string; scope: 'admin' | 'user'; stance: unknown; cpAdmin: boolean };
     const table = (): Row[] => (api as unknown as { routeStancesForTesting: () => Row[] }).routeStancesForTesting();
-    // The four calls the control plane makes with its admin bearer.
-    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke'];
+    // The five calls the control plane makes with its admin bearer.
+    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status'];
 
-    it('names exactly the four routes the control plane calls, all admin routes without a stance', () => {
+    it('names exactly the five routes the control plane calls, all admin routes without a stance', () => {
       const marked = table().filter((r) => r.cpAdmin);
       expect(marked.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...CP_ROUTES].sort());
       for (const r of marked) expect([r.path, r.scope, r.stance]).toEqual([r.path, 'admin', undefined]);
@@ -17342,6 +17357,25 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       expect(a!['request_id']).toMatch(/^[0-9a-f-]{36}$/);
       expect(d!['request_id']).toBe(a!['request_id']);
       expect(a!['recorded_at']).toBe(a!['ts']);
+    });
+
+    it('records the workspace status read like every request of the bearer, and answers all three fields', async () => {
+      let body: unknown;
+      await withEnv(MANAGED, async () => {
+        const res = await as(ADMIN, '/api/admin/workspace/status', {}, freshBase);
+        expect(res.status).toBe(200);
+        body = await res.json();
+      });
+      expect(brief()).toEqual([
+        ['cp-admin', 'GET /api/admin/workspace/status', 'attempt', 'null'],
+        ['cp-admin', 'GET /api/admin/workspace/status 200', 'done', 'null'],
+      ]);
+      // The default root: nothing pending, and is_mount a boolean where /proc is there.
+      const b = body as Record<string, unknown>;
+      expect(Object.keys(b).sort()).toEqual(['workspace_legacy_pending', 'workspace_root_is_mount', 'workspace_root_mode']);
+      expect(b['workspace_root_mode']).toBe('default');
+      expect(b['workspace_legacy_pending']).toBe(false);
+      expect(typeof b['workspace_root_is_mount']).toBe(process.platform === 'linux' ? 'boolean' : 'object');
     });
 
     it('records a refusal by the route as refused, with its status and the class of the flag', async () => {
