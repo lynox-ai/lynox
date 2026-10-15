@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, utimesSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArtifactStore } from './artifact-store.js';
@@ -178,5 +178,98 @@ describe('ArtifactStore', () => {
     expect(a.id).not.toBe('../../etc/passwd');
     expect(a.id).toMatch(/^[a-f0-9]{8}$/);
     expect(store.get(a.id)?.content).toBe('x');
+  });
+});
+
+describe('ArtifactStore — lostOnSave marks a file that holds the save placeholder', () => {
+  // The engine's placeholder as a damaged file holds it (measured on a real instance: 176 bytes).
+  const PH = '[evicted after successful save — 5251 chars. The artifact is persisted; its id and file path are in the tool result below. read_file that path if you need the content again.]';
+  let dir: string;
+  let store: ArtifactStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'lynox-artifacts-lost-'));
+    store = new ArtifactStore(dir);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const listed = (id: string) => store.list().find(a => a.id === id);
+  const LIMIT = 2048;
+
+  it('marks the damaged artifact in list() and get(), and not the fine one', () => {
+    const lost = store.save({ title: 'Pitch', content: PH, type: 'markdown' });
+    const under = store.save({ title: 'Under a heading', content: `# Pitch\n\n${PH}\n`, type: 'markdown' });
+    const fine = store.save({ title: 'Fine', content: '# A real document', type: 'markdown' });
+    expect(listed(lost.id)?.lostOnSave).toBe(true);
+    expect(listed(under.id)?.lostOnSave).toBe(true);
+    expect(listed(fine.id)?.lostOnSave).toBeUndefined();
+    expect(store.get(lost.id)?.lostOnSave).toBe(true);
+    expect(store.get(under.id)?.lostOnSave).toBe(true);
+    expect(store.get(fine.id)?.lostOnSave).toBeUndefined();
+  });
+
+  it('does not mark a file larger than a placeholder can leave, and the edge is inclusive', () => {
+    // A document that quotes the placeholder is still a document: the notice would hide it and
+    // say "only a placeholder was stored", which is false.
+    const pad = (n: number) => `${PH}\n${'x'.repeat(n - Buffer.byteLength(PH) - 1)}`;
+    const atEdge = store.save({ title: 'Edge', content: pad(LIMIT) });
+    const over = store.save({ title: 'Over', content: pad(LIMIT + 1) });
+    expect(Buffer.byteLength(store.get(atEdge.id)!.content)).toBe(LIMIT);
+    expect(listed(atEdge.id)?.lostOnSave).toBe(true);
+    expect(store.get(atEdge.id)?.lostOnSave).toBe(true);
+    expect(listed(over.id)?.lostOnSave).toBeUndefined();
+    expect(store.get(over.id)?.lostOnSave).toBeUndefined();
+  });
+
+  it('list() and get() agree on a file that is not valid UTF-8', () => {
+    // Decoding turns each invalid byte into U+FFFD (3 bytes), so the string is longer than the file.
+    const a = store.save({ title: 'Edge', content: 'x' });
+    const p = store.pathFor(a.id);
+    const head = Buffer.from(`${PH}\n`);
+    writeFileSync(p, Buffer.concat([head, Buffer.alloc(LIMIT - head.length - 2, 0x78), Buffer.from([0xff, 0xfe])]));
+    expect(statSync(p).size).toBe(LIMIT);
+    expect(listed(a.id)?.lostOnSave).toBe(true);
+    expect(store.get(a.id)?.lostOnSave).toBe(true);
+  });
+
+  it('never writes the mark into index.json', () => {
+    const lost = store.save({ title: 'Pitch', content: PH });
+    store.list();
+    store.get(lost.id);
+    store.save({ title: 'Other', content: 'x' });
+    expect(readFileSync(join(dir, 'index.json'), 'utf-8')).not.toContain('lostOnSave');
+  });
+
+  it('reads a file again when its size changes at the same mtime', () => {
+    const a = store.save({ title: 'Doc', content: '# A real document' });
+    const p = store.pathFor(a.id);
+    // Whole seconds, set before the first read and again after the write: a mtime read back
+    // through `statSync().mtime` loses its sub-millisecond part and would not be the same.
+    const t = Math.floor(Date.now() / 1000) - 100;
+    utimesSync(p, t, t);
+    expect(listed(a.id)?.lostOnSave).toBeUndefined();
+    writeFileSync(p, PH);
+    utimesSync(p, t, t);
+    expect(statSync(p).mtimeMs).toBe(t * 1000);
+    expect(listed(a.id)?.lostOnSave).toBe(true);
+  });
+
+  it('reads a file again when its mtime changes at the same size', () => {
+    const fine = 'y'.repeat(Buffer.byteLength(PH));
+    const a = store.save({ title: 'Doc', content: fine });
+    const p = store.pathFor(a.id);
+    expect(listed(a.id)?.lostOnSave).toBeUndefined();
+    writeFileSync(p, PH);
+    const later = new Date(Date.now() + 5000);
+    utimesSync(p, later, later);
+    expect(listed(a.id)?.lostOnSave).toBe(true);
+    // And back: a repaired file loses the mark.
+    writeFileSync(p, fine);
+    const later2 = new Date(Date.now() + 10000);
+    utimesSync(p, later2, later2);
+    expect(listed(a.id)?.lostOnSave).toBeUndefined();
   });
 });

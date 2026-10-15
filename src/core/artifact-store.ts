@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
+import { containsEvictionMarker } from './artifact-eviction.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
@@ -32,6 +33,13 @@ export interface ArtifactMeta {
   /** Bumped on every save AND on every external edit (file tools / bash)
    *  detected by reconcile(). Legacy entries without it normalize to 1. */
   version: number;
+  /** Set when the content file is the engine's placeholder for a saved body
+   *  rather than a document: a save that stored the placeholder lost the
+   *  document. `artifact_save` and the file tools refuse such content now;
+   *  this marks files written before they did, or by a path without that
+   *  check. Computed on read, never written to the index; absent when the file
+   *  is fine, larger than a placeholder can leave, or unreadable. */
+  lostOnSave?: true;
 }
 
 export interface Artifact extends ArtifactMeta {
@@ -54,6 +62,20 @@ export interface ArtifactOverwrite {
   /** Large replacement (content shrank to <50% of the previous size) — a
    *  likely accidental full-rewrite worth a second look. */
   significant: boolean;
+}
+
+/** The placeholder forms are a few hundred bytes at most, so a document lost
+ *  by saving one left a file of about that size, a heading at most around it.
+ *  Its own number, not EVICTION_MIN_CHARS: that is a minimum BODY length in
+ *  chars, and lowering it must not stop lost files from being marked. A larger file that contains the placeholder is a document that
+ *  quotes it, or one with a copied placeholder inside — it is still readable,
+ *  and the notice the UI shows ("only a placeholder was stored") would be false. */
+const LOST_ON_SAVE_MAX_BYTES = 2048;
+
+/** `bytes` is the file's size on disk, the number list() reads by stat — not
+ *  the decoded string's length, which grows where the file is not valid UTF-8. */
+function isLostOnSave(bytes: number, content: string): boolean {
+  return bytes <= LOST_ON_SAVE_MAX_BYTES && containsEvictionMarker(content);
 }
 
 export class ArtifactStore {
@@ -286,8 +308,9 @@ export class ArtifactStore {
     const meta = this.index.find(a => a.id === id);
     if (!meta) return null;
     try {
-      const content = readFileSync(this.contentPath(id), 'utf-8');
-      return { ...meta, content };
+      const raw = readFileSync(this.contentPath(id));
+      const content = raw.toString('utf-8');
+      return { ...meta, ...(isLostOnSave(raw.length, content) ? { lostOnSave: true as const } : {}), content };
     } catch {
       return null;
     }
@@ -295,7 +318,21 @@ export class ArtifactStore {
 
   list(): ArtifactMeta[] {
     this.reconcile();
-    return [...this.index].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return this.index
+      .map(m => (this.isLostOnSave(m.id) ? { ...m, lostOnSave: true as const } : { ...m }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /** `lostOnSave` for an indexed artifact, read from its file. A file larger
+   *  than a placeholder can leave is not read at all. */
+  private isLostOnSave(id: string): boolean {
+    try {
+      const p = this.contentPath(id);
+      if (statSync(p).size > LOST_ON_SAVE_MAX_BYTES) return false;
+      return containsEvictionMarker(readFileSync(p, 'utf-8'));
+    } catch {
+      return false;
+    }
   }
 
   delete(id: string): boolean {
