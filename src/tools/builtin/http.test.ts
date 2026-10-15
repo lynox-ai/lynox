@@ -1121,6 +1121,92 @@ describe('httpRequestTool', () => {
           expect(flattenPrompt(promptUser.mock.calls[0]![0])).toContain('is too large to show; its field names are listed.');
         });
 
+        // The question shows a query by its keys and no header, so neither may carry a value to a
+        // connected account: the customer text says each write is shown with everything sent.
+        it.each([
+          ['a percent-encoded query value', 'https://example.com/v1/report?note=pay%20900'],
+          ['a query value with a character outside letters, digits and _', 'https://example.com/v1/report?amount=9.00'],
+          ['a percent-encoded path', 'https://example.com/v1/report/pay%20900'],
+          ['a path longer than the question shows', `https://example.com/v1/${'a'.repeat(160)}`],
+        ])('refuses %s, before the question, and nothing is sent', async (_label, url) => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const out = await visible({ ...post, url }, makeAgent({ promptUser }));
+          expect(out).toContain('writes to a connected account with a path or query the approval question cannot show as sent');
+          expect(out).toContain('Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.');
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        // bexio's search reads `limit`, `offset` and `order_by` from the query only.
+        it('asks a plain query with its values shown on the instance, and sends it', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, url: 'https://example.com/v1/report?limit=10&offset=500&order_by=name_desc' }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          const asked = promptUser.mock.calls[0]![0];
+          expect(flattenPrompt(asked)).toContain('The query is sent as ?limit=10&offset=500&order_by=name_desc');
+          // The copy that leaves the box keeps the keys only.
+          expect(flattenPrompt(offBoxPrompt(asked))).not.toContain('offset=500');
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
+        it('refuses a header the question does not show, named, and nothing is sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const out = await visible({ ...post, headers: { 'Content-Type': 'application/json', 'X-Note': 'pay 900' } }, makeAgent({ promptUser }));
+          expect(out).toContain('sets headers the approval question does not show (x-note). Nothing was sent.');
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        // A media type can carry a value; a form body is shown decoded, so `%41` and `A` look alike.
+        it.each([['a made-up media type', 'application/x-pay-900'], ['a form body', 'application/x-www-form-urlencoded']])('refuses a content-type outside the list: %s', async (_label, type) => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const out = await visible({ ...post, headers: { 'content-type': type } }, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow') }));
+          expect(out).toContain('sets headers the approval question does not show (content-type).');
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('control: a clean body with content-type and accept from the list is asked and sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, headers: { 'CoNtEnT-TyPe': '  APPLICATION/json ;\t CharSet=UTF-8 ', Accept: 'application/json' } }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          // Sent as the list spells them: letter case and spacing are not a channel either.
+          const sent = fetchMock.mock.calls[0]![1] as { headers: Record<string, string> };
+          expect(sent.headers['content-type']).toBe('application/json; charset=utf-8');
+          expect(sent.headers['accept']).toBe('application/json');
+          expect(Object.keys(sent.headers).filter((k) => k !== k.toLowerCase())).toEqual([]);
+        });
+
+        it('control: without a preset, a query value and a header are asked and sent as before', async () => {
+          await withProfile(undefined);
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await handler({ ...post, url: 'https://example.com/v1/report?amount=900', headers: { 'X-Note': 'pay 900' } }, makeAgent({ promptUser }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        });
+
         it('holds: a scheduled write without a contract is refused, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();

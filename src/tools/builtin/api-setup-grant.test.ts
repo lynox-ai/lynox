@@ -3256,6 +3256,26 @@ describe('the two properties the comments claim, which nothing was checking', ()
     expect(headers['Authorization']).toBe('Bearer OLD_TOKEN');
   });
 
+  // The bulk run attaches here too, and nothing shows its requests one by one: a header name of
+  // the profile's own on an account connected through a built-in provider is not sent.
+  it.each([
+    ['refuses', { preset_id: 'bexio' }, false],
+    ['control: attaches, without a preset,', {}, true],
+  ])('%s a token in a header the profile names', async (_label, preset, sent) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register(crmProfile({
+      auth: { ...crmProfile().auth!, header_name: 'X-Pay-900', oauth: { ...crmProfile().auth!.oauth!, ...preset } },
+    }));
+    stubBoth();
+    const { attachStoredCredential } = await import('./http.js');
+    const headers: Record<string, string> = {};
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, { apiStore, secretStore: makeVault(SEED) as never });
+    expect(attached).toBe(sent);
+    expect(headers['X-Pay-900'] !== undefined).toBe(sent);
+  });
+
   /**
    * The gate at the EFFECT level, not only on the predicate: a caller without
    * `api_setup` spends no exchange, and still gets its stored token attached.

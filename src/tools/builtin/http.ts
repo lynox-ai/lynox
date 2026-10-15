@@ -173,6 +173,22 @@ export class RedirectRefusedAfterWrite extends Error {
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/** The most of a connected write's path and query the question shows as sent. */
+const MAX_SHOWN_TARGET = 160;
+/** A query pair a connected write may carry, and the question shows: `key=value`, nothing to decode. */
+const PLAIN_QUERY_PAIR = /^[A-Za-z0-9_]{1,40}(=[A-Za-z0-9_]{0,40})?$/;
+/**
+ * The headers a write to a connected account may set, and the values each may have. A fixed
+ * list and not a media-type pattern: a subtype or a charset is free text, and free text is room
+ * for a value the question does not show.
+ */
+const UNSHOWN_HEADER_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  // JSON only: a form body is shown decoded (`name=%41` and `name=A` look the same in the
+  // question and differ on the wire), and the providers connected so far speak JSON.
+  ['content-type', new Set(['application/json', 'application/json; charset=utf-8'])],
+  ['accept', new Set(['application/json', '*/*'])],
+]);
+
 /**
  * The profiles on the URL's host that were connected through a built-in provider (`preset_id`).
  * Every profile on the host counts, a host two profiles share included. Trailing root dots name
@@ -1726,6 +1742,12 @@ async function attachEngineManagedAuth(
     const ownHeader = auth.header_name !== undefined && auth.header_name.toLowerCase() !== 'authorization'
       ? auth.header_name
       : undefined;
+    // An account connected through a built-in provider takes its token as `Bearer`: the header
+    // name a profile names is the model's choice, and it would reach the provider on every
+    // request, a bulk run's included, where no question shows it.
+    if (ownHeader !== undefined && auth.oauth?.preset_id !== undefined) {
+      return { refusal: `Error: api_profile "${profile.id}" is connected through a built-in provider and names its own header for the token (auth.header_name), which nothing shows before it is sent, so the token was not attached. Remove auth.header_name with api_setup action="update".` };
+    }
     const oauthSlot = ownHeader ?? 'Authorization';
     const oauthValue = ownHeader !== undefined ? resolved : `Bearer ${resolved}`;
     // The vault value came back from a token endpoint; it enters a header here.
@@ -2325,6 +2347,43 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
+    // A write to a connected account is shown with everything the request puts on the wire, as
+    // the customer text says: the path and the query as sent (the query's values on the
+    // instance, `queryBlock` below), the body, and no header of the request's own. So refused,
+    // before the credential is attached (a refused write renews no token):
+    //  - a path or query the question could not show as sent: percent-encoded (the raw and the
+    //    decoded form differ), longer than the question shows, or a query pair outside a plain
+    //    `key=value` shape. A plain one stays possible, which bexio's search needs for its
+    //    `limit`, `offset` and `order_by`;
+    //  - a header the request sets, except `content-type` and `accept` with a value from a fixed
+    //    list (`UNSHOWN_HEADER_VALUES`). Those are sent as the list spells them, name included:
+    //    letter case and spacing are free text too.
+    // The header the token goes in is the credential's own business: a connected profile that
+    // names one of its own is refused where every request attaches it (`attachEngineManagedAuth`).
+    if (presetOnHost.length > 0) {
+      const target = new URL(input.url);
+      const host = target.hostname.replace(/\.+$/, '');
+      const sentTarget = `${target.pathname}${target.search}`;
+      if (sentTarget.includes('%') || sentTarget.length > MAX_SHOWN_TARGET
+        || !target.search.slice(1).split('&').every((pair) => pair === '' || PLAIN_QUERY_PAIR.test(pair))) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
+      }
+      const unshown: string[] = [];
+      for (const [k, v] of Object.entries(input.headers ?? {})) {
+        const name = k.trim().toLowerCase();
+        const value = v.trim().toLowerCase().replace(/\s*;\s*/g, '; ');
+        if (UNSHOWN_HEADER_VALUES.get(name)?.has(value)) {
+          delete headers[k];
+          headers[name] = value;
+        } else {
+          unshown.push(name);
+        }
+      }
+      if (unshown.length > 0) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
+      }
+    }
+
     // Engine-managed auth runs BEFORE the egress scan, and reports back the slot
     // it actually filled. The scan then skips exactly that slot.
     //
@@ -2669,6 +2728,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         const promptUser = agent.promptUser;
         const mask = (text: string) => agent.secretStore?.maskSecrets(text) ?? text;
         const path = pathForQuestion(input.url, mask);
+        // A connected account's query is shown with its values, where the question is answered on
+        // the instance, like the body; the copy that leaves the box keeps the keys in `path`. The
+        // check above let through only a query plain and short enough to show whole.
+        const sentQuery = new URL(input.url).search;
+        const queryBlock = connectedAccount && sentQuery !== '' ? onBoxBlock(`The query is sent as ${mask(sentQuery)}`) : pv``;
         const fields = bodyFieldNames(repairedBody?.body ?? input.body, mask);
         // N12-4 (rafael 2026-10-09): the question shows the body's VALUES where it is answered on
         // the instance, masked; the copy that leaves the box (notification, mail) keeps the field
@@ -2747,7 +2811,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             const sentNote = alsoNamed.length === 0 ? pv``
               : pv` It is sent as a ${sentMethod} that also names ${alsoNamed.join(', ')}; a server may run any of these.`;
             const answer = await promptUser(
-              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${bodyBlock}`,
+              pv`⚠ http_request: ${gatedMethod} to ${hostname} ${path} (${fields}) — Allow outbound data?${note}${sentNote}${contextBlock}${queryBlock}${bodyBlock}`,
               ['Allow', 'Deny', '\x00'],
             );
             const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
