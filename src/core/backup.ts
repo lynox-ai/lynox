@@ -435,8 +435,8 @@ export class BackupManager {
     // Validate the decryption key BEFORE the destructive loop. All files share
     // one derived key, so a WRONG/rotated key (present, but not matching) fails
     // AES-GCM auth on the first decrypt — but only MID-loop, after earlier files
-    // were already written over live DBs. Pre-flight one decrypt to a throwaway
-    // temp path and refuse on failure, so a wrong key can't partially corrupt
+    // were already written over live DBs. Pre-flight one decrypt in memory
+    // and refuse on failure, so a wrong key can't partially corrupt
     // live data. (checksum verify above can't detect this — the ciphertext is
     // intact; only the key is wrong.)
     if (manifest.encrypted && this.vaultKey) {
