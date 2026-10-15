@@ -3076,12 +3076,18 @@ describe('api_setup tool', () => {
       }));
       const ack = { accepted: true as const, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' };
       store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack, auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, token_url: 'http://shop.myshopify.com/admin/oauth/access_token' } } });
-      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      // Answers instead of passing through, so a regression posts to no real host, and
+      // restored, so a call here cannot show up in the next test's spy.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
 
-      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
-
+      let result: unknown;
+      try {
+        result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
       expect(result).toContain('token_url is not https');
-      expect(fetchSpy).not.toHaveBeenCalled();
       // Control: the same profile over https, with an empty vault, gets past the gate
       // and stops at the missing credentials instead.
       const control = new ApiStore();
