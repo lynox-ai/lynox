@@ -17360,6 +17360,10 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
 
     it('records the workspace status read like every request of the bearer, and answers all three fields', async () => {
+      // The default root exists on a booted engine; created here so the test does not lean on an
+      // earlier one having made it.
+      const { defaultWorkspaceRootPath } = await import('../core/workspace-root.js');
+      mkdirSync(defaultWorkspaceRootPath(), { recursive: true });
       let body: unknown;
       await withEnv(MANAGED, async () => {
         const res = await as(ADMIN, '/api/admin/workspace/status', {}, freshBase);

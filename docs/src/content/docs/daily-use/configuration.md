@@ -268,7 +268,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `LYNOX_VAULT_KEY` | Encryption key for the secret vault |
 | `LYNOX_DATA_DIR` | Override data directory (default: `~/.lynox`) |
-| `LYNOX_WORKSPACE` | Working directory for file operations in the CLI (default: the current directory); the server uses `<workspace root>/http-api` |
+| `LYNOX_WORKSPACE` | CLI only: the directory the file tools are confined to and bash starts in (unset: file writes go to the workspace root); the server ignores it and uses `<workspace root>/http-api` |
 | `LYNOX_WORKSPACE_ROOT` | Directory that holds the workspaces (default: `<data dir>/workspace`). This version accepts only the default and refuses to start on any other directory |
 | `LYNOX_BUGSINK_DSN` | Error reporting DSN (self-hosted, opt-in) |
 
