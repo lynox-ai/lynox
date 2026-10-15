@@ -120,6 +120,12 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'OAuthRefreshResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRefreshResponse') },
   { name: 'OAuthRevokeRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeRequest') },
   { name: 'OAuthRevokeResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthRevokeResponse') },
+  // Born in the contract: the handle-only claim and the Microsoft decline vocabulary.
+  { name: 'OAuthHandleProvider', contractFile: 'http.ts', twinPattern: typeTwin('OAuthHandleProvider') },
+  { name: 'OAuthHandleClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthHandleClaimResponse') },
+  { name: 'MICROSOFT_OAUTH_DECLINE_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MICROSOFT_OAUTH_DECLINE_CODES') },
+  { name: 'MicrosoftOAuthDeclineCode', contractFile: 'http.ts', twinPattern: typeTwin('MicrosoftOAuthDeclineCode') },
+  { name: 'isMicrosoftOAuthDeclineCode', contractFile: 'http.ts', twinPattern: valueTwin('isMicrosoftOAuthDeclineCode') },
   // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
   // across the repo boundary; a local re-declaration is that failure returning.
   { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },
