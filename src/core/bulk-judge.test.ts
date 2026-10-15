@@ -294,18 +294,24 @@ describe('runBulkJudge over data-store rows', () => {
       { sku: 'N', meta: { a: [{ b: 'pa"ss' }] } },
       { sku: 'K', meta: { 'pa"ss': 1 } },
       { sku: 'C', meta: { a: [{ b: 'clean' }] } },
+      // Column text that is a bare JSON string, or JSON behind a byte-order mark.
+      { sku: 'S', meta: JSON.stringify('pa"ss') },
+      { sku: 'B', meta: `\uFEFF${JSON.stringify({ a: 'pa"ss' })}` },
+      // Nested past the depth the check follows: refused unread, and the run goes on.
+      { sku: 'D', meta: '['.repeat(100) + ']'.repeat(100) },
     ] });
-    writeFileSync(join(dir, 'workspace', 'd.csv'), 'target\nN\nK\nC');
+    writeFileSync(join(dir, 'workspace', 'd.csv'), 'target\nN\nK\nC\nS\nB\nD');
     const id = runIdOf(await bulkPlanTool.handler(
       { target_system: 'data_store', target_collection: 'docs', source_file: 'd.csv', judge: { rule: 'x', schema: { meta: { type: 'string', maxLength: 20 } } } }, agent(),
     ));
     expect(start(id).ok).toBe(true);
     const h = harness(() => ({ data: { meta: 'ok' }, costUsd: 0.01 }), { maskVault: (t) => t.replace('pa"ss', '***') });
     await runBulkJudge(id, h.deps);
-    // Twin: the clean row is sent; the two holding the value are not.
+    // Twin: the clean row is sent; the five holding the value, or too deep to tell, are not.
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0]!.user).toContain('clean');
-    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_before: 2 });
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_before: 5 });
+    expect(ledger.getStatus(id)!.haltReason).toBeNull();
   });
 
   it('a verdict carrying a credential is invalid secret_in_after', async () => {

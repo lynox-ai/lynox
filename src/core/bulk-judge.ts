@@ -155,21 +155,33 @@ export function judgeUserMessage(image: Record<string, unknown>): string {
  *  the tool's name and description and the provider's own framing. Generous on purpose. */
 export const JUDGE_TOOL_OVERHEAD_TOKENS = 1_000;
 
+/** How deep `stringsIn` follows a value. A record nested deeper is not checked but refused. */
+const STRINGS_IN_MAX_DEPTH = 64;
+
 /**
  * Every string in a JSON value, keys included, at any depth — and inside a string that is
- * itself JSON, as a data-store `json` column is read: there a value is escaped once more.
+ * itself JSON, as a data-store `json` column is read: there a value is escaped once more, and a
+ * column may hold a bare JSON string or start with a byte-order mark. Null when the value nests
+ * deeper than `STRINGS_IN_MAX_DEPTH`: the caller cannot know what it holds and refuses it, rather
+ * than send it or let one record halt the run.
  */
-function stringsIn(value: unknown, out: string[] = []): string[] {
+function stringsIn(value: unknown, out: string[] = [], depth = 0): string[] | null {
+  if (depth > STRINGS_IN_MAX_DEPTH) return null;
   if (typeof value === 'string') {
     out.push(value);
-    if (/^\s*[[{]/.test(value)) {
+    const text = value.replace(/^\uFEFF/, '');
+    if (/^\s*[[{"]/.test(text)) {
       let inner: unknown;
-      try { inner = JSON.parse(value); } catch { inner = undefined; }
-      if (inner !== undefined) stringsIn(inner, out);
+      try { inner = JSON.parse(text); } catch { inner = undefined; }
+      if (inner !== undefined && stringsIn(inner, out, depth + 1) === null) return null;
     }
-  } else if (Array.isArray(value)) for (const v of value) stringsIn(v, out);
-  else if (value !== null && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) { out.push(k); stringsIn(v, out); }
+  } else if (Array.isArray(value)) {
+    for (const v of value) if (stringsIn(v, out, depth + 1) === null) return null;
+  } else if (value !== null && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      out.push(k);
+      if (stringsIn(v, out, depth + 1) === null) return null;
+    }
   }
   return out;
 }
@@ -307,7 +319,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
     // Each text value too, at any depth: a vault value holding a quote or a backslash is escaped
     // in the JSON, and escaped again inside a JSON column's text.
     const vaultHit = deps.maskVault(imageText) !== imageText
-      || stringsIn(image).some((v) => deps.maskVault(v) !== v);
+      || (stringsIn(image)?.some((v) => deps.maskVault(v) !== v) ?? true);
     if (vaultHit || deps.scanSecret(imageText) !== null) {
       record({ invalid: 'secret_in_before' });
       continue;
