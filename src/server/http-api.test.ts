@@ -8890,6 +8890,36 @@ describe('LynoxHTTPApi', () => {
       expect((await resume({ listChecksum: shown['listStartChecksum'] })).status).toBe(409);
     });
 
+    // A bulk run writes, and a profile on bexio's API that does not go through the provider gets
+    // no credential for a write: the approval says so before the run starts.
+    it('refuses to approve a run on the bexio API through a pasted-token profile', async () => {
+      const host = 'api.bexio.com';
+      const key = `https://${host}/2.0/contact/1`;
+      const planned = bulkLedger.recordExternalPlan({
+        createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: [{ key, after: { name_1: 'x' } }], contract: mintBulkContract(host, [key]),
+      });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.halt(id, BULK_HALT_REASONS.credential);
+      new TriggerStore(bulkDb).updateFields(`bulk-preview-${id}`, { status: 'completed' });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: '{}' })).status).toBe(200);
+      bulkLedger.recordRead(id, 0, { before: { name_1: 'y' } });
+      expect(bulkLedger.finishPreview(id)).toBe(true);
+      const { ApiStore } = await import('../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio-pat', name: 'bexio', base_url: `https://${host}/`, description: 'bexio',
+        auth: { type: 'bearer', vault_keys: ['BEXIO_PAT'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-10-15T00:00:00.000Z' },
+      });
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretResolve.mockImplementation((k: string) => (k === 'BEXIO_PAT' ? 'not-a-real-token-only-a-fixture' : null));
+      const refused = await jsonFetch(`/api/bulk/runs/${id}/approve`, { method: 'POST', body: JSON.stringify({ checksum: bulkLedger.computeChecksum(id), unmeasuredConfirmed: true }) });
+      expect(((await refused.json()) as { error: string }).error).toMatch(/stored credential for this run's host cannot be attached/);
+      expect(refused.status).toBe(409);
+      expect(bulkLedger.getStatus(id)!.phase).toBe('previewed');
+    });
+
     it('refuses to approve an external run, and resumes a halted external preview without a checksum', async () => {
       const host = 'shop.example.com';
       const key = `https://${host}/products/1`;

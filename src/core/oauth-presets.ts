@@ -62,6 +62,14 @@ export interface OAuthPreset {
   /** Shown to the user and the model; never parsed. */
   readonly label: string;
   readonly host: OAuthPresetHost;
+  /**
+   * The hosts of the provider's API, where its accounts are read and written. A profile on one
+   * of them that does not go through this preset is refused when it is saved, and its writes are
+   * refused (`presetNotFollowed`): the customer text and the write gate are the preset's, and a
+   * profile with a pasted token would write to the same account past both. Required, so a
+   * provider added later names its hosts or names none.
+   */
+  readonly apiHosts: readonly string[];
   /** Path on the derived host, leading slash included. */
   readonly authorizePath: string;
   readonly tokenPath: string;
@@ -124,6 +132,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     id: 'bexio',
     label: 'bexio',
     host: { kind: 'constant', host: 'auth.bexio.com' },
+    apiHosts: ['api.bexio.com'],
     authorizePath: '/realms/bexio/protocol/openid-connect/auth',
     tokenPath: '/realms/bexio/protocol/openid-connect/token',
     params: [],
@@ -365,6 +374,32 @@ export function presetScopeNeedUnmet(preset: OAuthPreset, profileScope: string |
     }
   }
   return null;
+}
+
+/**
+ * The built-in provider whose API host a profile points at, when the profile does not go
+ * through it: anything but `auth.type` oauth2 with that provider's `preset_id`. Undefined when
+ * no provider claims the host, or when the profile follows the one that does. Asked where a
+ * profile is saved (`api_setup`) and where a request attaches a profile's credentials
+ * (`http_request`, for a write), so a profile saved before the save refused it writes nothing.
+ */
+export function presetNotFollowed(
+  profile: { readonly base_url: string; readonly auth?: { readonly type: string; readonly oauth?: { readonly preset_id?: string | undefined } | undefined } | undefined },
+  register: PresetRegister = OAUTH_PRESETS,
+): OAuthPreset | undefined {
+  let host: string;
+  try {
+    host = new URL(profile.base_url).hostname.replace(/\.+$/, '');
+  } catch {
+    return undefined;
+  }
+  for (const id of register.ids()) {
+    const preset = register.get(id);
+    if (!preset?.apiHosts.includes(host)) continue;
+    const follows = profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
+    return follows ? undefined : preset;
+  }
+  return undefined;
 }
 
 /** The ids a profile may name, for a message that lists what exists. */

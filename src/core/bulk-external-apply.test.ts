@@ -111,12 +111,13 @@ function serve(s: Shop): () => void {
 
 const url = (i: number | string): string => `https://${HOST}/products/${String(i)}`;
 
-function client(opts: { attach?: boolean; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean } = {}): ExternalClient {
+function client(opts: { attach?: boolean; methods?: string[]; contract?: CapabilityContract; rateLimit?: () => string | null; scan?: (text: string) => string | null; connectedAccount?: (url: string) => boolean } = {}): ExternalClient {
   return externalClient({
     contract: opts.contract ?? mintBulkContract(HOST, [0, 1, 2, 3, 'x'].map(url)),
     hostPolicy: createToolContext({}),
     ackHosts: undefined,
-    attach: async (_u, headers) => {
+    attach: async (_u, headers, method) => {
+      opts.methods?.push(method);
       if (opts.attach === false) return false;
       headers['authorization'] = `Bearer ${TOKEN}`;
       return true;
@@ -610,6 +611,22 @@ describe('applying an external run', () => {
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(noCred) })).status).toBe('halted');
       expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.credential);
       expect(s.requests.length).toBe(before);
+    } finally {
+      restore();
+    }
+  });
+
+  // The attach refuses a write through a profile that skips its provider and lets a read go
+  // (`attachEngineManagedAuth`): it can only tell them apart by the method it is handed.
+  it('hands the credential attach the method each request is sent with', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const methods: string[] = [];
+      const c = client({ methods });
+      await c.get(url(0));
+      await c.write(url(0), 'PATCH', { price: '15' });
+      expect(methods).toEqual(['GET', 'PATCH']);
     } finally {
       restore();
     }
@@ -1398,3 +1415,39 @@ describe('a run writes to a connected account only in a measured form', () => {
   });
 });
 
+
+// The worker's own client, as a run gets it (`bulkClientFactory`): a profile on bexio's API that
+// does not go through the provider gets no credential for a write and keeps it for a read.
+describe('the worker attaches a run\'s credential by the method it sends', () => {
+  it('gives a write through a pasted-token profile on the bexio API no credential, and a read its credential', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio-pat', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio',
+        auth: { type: 'bearer', vault_keys: ['BEXIO_PAT'] },
+        custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com'], accepted_at: '2026-10-15T00:00:00.000Z' },
+      });
+      const vault = {
+        resolve: (n: string): string | null => (n === 'BEXIO_PAT' ? 'pat-value' : null),
+        resolveSecretRefs: (x: unknown): unknown => x,
+        extractSecretNames: (): string[] => [],
+        isEnvironmentSecret: (): boolean => false,
+        listNames: (): string[] => ['BEXIO_PAT'],
+      };
+      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => createToolContext({}) };
+      const factory = await (WorkerLoop.prototype as unknown as {
+        bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null) => ExternalClient | null>;
+      }).bulkClientFactory.call({ engine });
+      const target = 'https://api.bexio.com/products/0';
+      const c = factory(JSON.stringify(mintBulkContract('api.bexio.com', [target])))!;
+      expect(await c.write(target, 'PATCH', { price: '15' })).toEqual({ kind: 'no_credential' });
+      expect(s.requests).toEqual([]);
+      expect((await c.get(target)).kind).not.toBe('no_credential');
+      expect(s.requests.map((r) => [r.method, r.auth])).toEqual([['GET', 'Bearer pat-value']]);
+    } finally {
+      restore();
+    }
+  });
+});

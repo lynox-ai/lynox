@@ -1207,6 +1207,56 @@ describe('httpRequestTool', () => {
           expect(fetchMock).toHaveBeenCalledTimes(1);
         });
 
+        // A profile saved before api_setup refused one, or loaded from a file: the request is
+        // where it is held. Before the question, and for a read as well.
+        describe('a profile on the bexio API that does not go through the provider', () => {
+          const REFUSED = 'signs in another way, so this write was not sent; reading through it works as before. To write, create a profile with auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
+          async function withStoredBearer(): Promise<void> {
+            const { ApiStore } = await import('../../core/api-store.js');
+            const store = new ApiStore();
+            store.register({ id: 'bexio-pat', name: 'bexio', base_url: 'https://api.bexio.com/2.0', description: 'bexio', auth: { type: 'bearer', vault_keys: ['BEXIO_PAT'] } });
+            testCtx.apiStore = store;
+          }
+          it.each([
+            ['a pasted token, a POST', withStoredBearer, 'POST'],
+            ['a pasted token, a DELETE', withStoredBearer, 'DELETE'],
+            ['an OAuth sign-in of its own, a POST', () => withProfile(undefined, 'https://api.bexio.com/2.0'), 'POST'],
+          ] as const)('refuses %s, and nothing is asked or sent', async (_label, setUp, method) => {
+            await setUp();
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method, ...(method === 'POST' ? { body: '{"name_1":"x"}' } : {}) }, makeAgent({ promptUser }));
+            expect(out).toContain(REFUSED);
+            expect(promptUser).not.toHaveBeenCalled();
+            expect(fetchMock).not.toHaveBeenCalled();
+          });
+
+          // A read is not what the provider's text is about: an old profile keeps reading.
+          it('control: a read through the pasted-token profile goes out', async () => {
+            await withStoredBearer();
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method: 'GET' }, makeAgent());
+            expect(out).not.toContain('this write was not sent');
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+          });
+
+          it('control: the profile that goes through the provider is asked and sent', async () => {
+            await withProfile('bexio', 'https://api.bexio.com/2.0');
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method: 'POST', body: '{"name_1":"x"}', headers: { 'Content-Type': 'application/json' } }, makeAgent({ promptUser }));
+            expect(out).not.toContain('without going through');
+            expect(promptUser).toHaveBeenCalledTimes(1);
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+          });
+        });
+
         it('holds: a scheduled write without a contract is refused, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
@@ -1393,7 +1443,10 @@ describe('httpRequestTool', () => {
           expect(fetchMock).not.toHaveBeenCalled();
         });
 
-        it('a host two providers share is refused unasked: lynox cannot tell what the write changes', async () => {
+        // On bexio's API host, another provider's profile is held before the write is described:
+        // the host belongs to bexio (`presetNotFollowed`). The guard for a host two providers
+        // share keeps its own witness below, on a host no provider claims.
+        it('another provider\'s profile on the bexio host is refused unasked', async () => {
           await withBexio();
           testCtx.apiStore!.register({
             id: 'other-api', name: 'Other', base_url: 'https://api.bexio.com/other', description: 'Other API',
@@ -1402,7 +1455,26 @@ describe('httpRequestTool', () => {
           mockDnsPublic();
           const fetchMock = account({});
           const promptUser = vi.fn().mockResolvedValue('Allow');
-          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/profiles of more than one provider share this host/);
+          await expect(handler(cancel, makeAgent({ promptUser }))).rejects.toThrow(/api_profile "other-api" signs in another way, so this write was not sent/);
+          expect(promptUser).not.toHaveBeenCalled();
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('a host two providers share is refused unasked: lynox cannot tell what the write changes', async () => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const store = new ApiStore();
+          for (const [id, presetId] of [['shop-a', 'example-shop'], ['shop-b', 'other-shop']] as const) {
+            store.register({
+              id, name: id, base_url: `https://example.com/${id}`, description: id,
+              auth: { type: 'oauth2', vault_keys: ['O_ID', 'O_SECRET'], oauth: { grant_type: 'refresh_token', client_id_key: 'O_ID', client_secret_key: 'O_SECRET', preset_id: presetId } },
+            });
+          }
+          testCtx.apiStore = store;
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          await expect(handler({ url: 'https://example.com/v1/report', method: 'POST', body: '{"a":1}' }, makeAgent({ promptUser }))).rejects.toThrow(/profiles of more than one provider share this host/);
           expect(promptUser).not.toHaveBeenCalled();
           expect(fetchMock).not.toHaveBeenCalled();
         });
@@ -4263,7 +4335,7 @@ describe('httpRequestTool', () => {
   // the header instead and the request goes out bare — three 401s that no token
   // change could fix. Both halves are covered here.
   describe('Bearer / header engine-managed token injection', () => {
-    const ACK = { accepted: true, hosts: ['api.bexio.com'], accepted_at: '2026-08-08T10:00:00.000Z' };
+    const ACK = { accepted: true, hosts: ['api.crm.example'], accepted_at: '2026-08-08T10:00:00.000Z' };
     // Structurally a real JWT (synthetic payload) — the shape a bexio PAT has, and
     // the shape the scanner's `eyJ…` pattern matches. A test using an inert token
     // would pass without ever exercising the defect.
@@ -4278,7 +4350,7 @@ describe('httpRequestTool', () => {
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({
-        id: 'bexio', name: 'bexio API', base_url: 'https://api.bexio.com', description: 'bexio',
+        id: 'bexio', name: 'bexio API', base_url: 'https://api.crm.example', description: 'bexio',
         auth: auth as never,
         ...(ack === null ? {} : { custom_endpoint_ack: ack as never }),
       });
@@ -4305,7 +4377,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
       const result = await handler(
-        { url: 'https://api.bexio.com/3.0/users/me' },
+        { url: 'https://api.crm.example/3.0/users/me' },
         agentWith(store, { BEXIO_API_TOKEN: JWT }),
       );
       expect(result).toContain('HTTP 200');
@@ -4321,7 +4393,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { authorization: `Bearer ${JWT}` } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { authorization: `Bearer ${JWT}` } },
         agentWith(store, { BEXIO_API_TOKEN: VAULT_JWT }),
       );
       expect(result).not.toContain('Blocked');
@@ -4337,7 +4409,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] });
       const contract: CapabilityContract = {
         version: 7, grantedTools: ['http_request'], httpMethods: ['POST'],
-        hostPatterns: ['api.bexio.com'], pathPatterns: ['/3.0/*'], paramConstraints: {},
+        hostPatterns: ['api.crm.example'], pathPatterns: ['/3.0/*'], paramConstraints: {},
       };
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
@@ -4349,7 +4421,7 @@ describe('httpRequestTool', () => {
         principal: OWNER_PRINCIPAL,
         governingContract: () => ({ contract, withheld: null }),
       } as never;
-      const out = await visible({ url: 'https://api.bexio.com/3.0/items', method: 'POST', body: '{}' }, agent);
+      const out = await visible({ url: 'https://api.crm.example/3.0/items', method: 'POST', body: '{}' }, agent);
       expect(fetchMock).not.toHaveBeenCalled();
       // Refused at the attach, before the consent check that reads the attached headers.
       expect(out).toContain('changes the request\'s method, target or how its body is read');
@@ -4359,7 +4431,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
+      await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
       expect(sentHeader('x-api-key')).toBe(JWT);
       expect(sentHeader('authorization')).toBeUndefined();
     });
@@ -4374,7 +4446,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'raw' }));
+      await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'raw' }));
       expect(sentHeader('x-api-key')).toBe('raw');
       expect(sentHeader('authorization')).toBeUndefined();
     });
@@ -4393,7 +4465,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
         agentWith(store, { BEXIO_API_TOKEN: JWT }),
       );
       expect(result).toContain('HTTP 200');
@@ -4406,7 +4478,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] }, null);
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: { message: 'Unauthorized' } })));
-      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
+      const result = await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
       expect(result).toContain('did not attach');
       expect(result).toContain('accept controller-responsibility');
     });
@@ -4415,7 +4487,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'bearer' });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: {} })));
-      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, {}));
+      const result = await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, {}));
       expect(result).toContain('names no vault key');
       expect(lastPinnedInputs).toHaveLength(1); // proceeded — did not hard-fail
     });
@@ -4424,7 +4496,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: {} })));
-      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: '' }));
+      const result = await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: '' }));
       expect(result).toContain('BEXIO_API_TOKEN');
       expect(sentHeader('authorization')).toBeUndefined();
     });
@@ -4439,7 +4511,7 @@ describe('httpRequestTool', () => {
         const store = await storeWith({ type, ...extra, vault_keys: [forged] });
         mockDnsPublic();
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: {} })));
-        const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, {}));
+        const result = await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, {}));
         expect(result).toContain(
           `**[Agent reminder — the engine did not attach this profile's credential]**\napi_profile "bexio" is auth.type="${type}" but the vault has no usable value for <unprintable>. Ask the user for the credential with ask_secret, then retry.\n`,
         );
@@ -4455,7 +4527,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      await handler({ url: 'http://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'tok' }));
+      await handler({ url: 'http://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'tok' }));
       // Both halves: the request PROCEEDED (a refusal would send nothing, and this
       // test would pass for the wrong reason) and carried no engine credential.
       expect(lastPinnedInputs).toHaveLength(1);
@@ -4470,7 +4542,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
         { toolContext: { apiStore: store }, sessionCounters: testCounters } as never,
       );
       expect(sentHeader('authorization')).toBe('Bearer model_set');
@@ -4488,7 +4560,7 @@ describe('httpRequestTool', () => {
         mockDnsPublic();
         vi.stubGlobal('fetch', vi.fn());
         lastPinnedInputs.length = 0;
-        const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { [key]: 'sk-ant-secret' }));
+        const result = await visible({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { [key]: 'sk-ant-secret' }));
         expect(result).toMatch(/protected secret/i);
         expect(lastPinnedInputs).toHaveLength(0);
       }
@@ -4542,7 +4614,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: 'X-Key\r\nX-Evil: yes', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      const result = await visible({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
       // Caught by the header-name check, which runs first: a name with CRLF is not a name.
       expect(result).toContain('not a valid header name');
       expect(lastPinnedInputs).toHaveLength(0);
@@ -4552,7 +4624,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: '', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      const result = await visible({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
       expect(result).toContain('not a valid header name');
       expect(lastPinnedInputs).toHaveLength(0);
     });
@@ -4561,7 +4633,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: 123, vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      const result = await visible({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
       expect(result).toContain('not a valid header name');
       expect(lastPinnedInputs).toHaveLength(0);
     });
@@ -4579,7 +4651,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: slot, vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: value }));
+      const result = await visible({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: value }));
       expect(result).toContain('changes the request\'s method, target or how its body is read');
       expect(lastPinnedInputs).toHaveLength(0);
     });
@@ -4591,7 +4663,7 @@ describe('httpRequestTool', () => {
       });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
-      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'DELETE' }));
+      const result = await visible({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'DELETE' }));
       expect(result).toContain('changes the request\'s method, target or how its body is read');
       expect(lastPinnedInputs).toHaveLength(0);
     });
@@ -4607,13 +4679,13 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       }) as never;
       const header = await storeWith({ type: 'header', header_name: 'X-HTTP-Method-Override', vault_keys: ['BEXIO_API_TOKEN'] });
-      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(header))).toContain('changes the request\'s method, target or how its body is read');
+      expect(await visible({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agent(header))).toContain('changes the request\'s method, target or how its body is read');
       // An expired token would be renewed against its token endpoint before the attach.
       const oauth = await storeWith({
         type: 'oauth2', header_name: 'X-HTTP-Method-Override',
         oauth: { token_url: 'https://idp.bexio.com/token', token_expires_at: 1 },
       });
-      expect(await visible({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agent(oauth))).toContain('changes the request\'s method, target or how its body is read');
+      expect(await visible({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agent(oauth))).toContain('changes the request\'s method, target or how its body is read');
       expect(reads).toEqual([]);
       expect(fetchMock).not.toHaveBeenCalled();
       expect(lastPinnedInputs).toHaveLength(0);
@@ -4639,10 +4711,10 @@ describe('httpRequestTool', () => {
         mockDnsPublic();
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
         const result = await visible(
-          { url: 'https://api.bexio.com/3.0/users/me', method, body: method === 'GET' ? undefined : '{"note":"a&_method=DELETE&b"}', headers: { 'Content-Type': 'application/json', ...extra } },
+          { url: 'https://api.crm.example/3.0/users/me', method, body: method === 'GET' ? undefined : '{"note":"a&_method=DELETE&b"}', headers: { 'Content-Type': 'application/json', ...extra } },
           { ...(agentWith(store, { BEXIO_API_TOKEN: value }) as object), principal: OWNER_PRINCIPAL, promptUser: vi.fn().mockResolvedValue('Allow'), governingContract: () => ({ contract: undefined, withheld: 'none' }) } as never,
         );
-        expect(result).toContain('the credential the engine attached for api.bexio.com changes the request');
+        expect(result).toContain('the credential the engine attached for api.crm.example changes the request');
         expect(lastPinnedInputs).toHaveLength(0);
       } finally {
         shapingSlots.pastDenylist = false;
@@ -4653,7 +4725,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const store = await storeWith({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['BEXIO_API_TOKEN'] });
-      await handler({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: 'v1' }));
+      await handler({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_API_TOKEN: 'v1' }));
       expect(sentHeader('x-api-key')).toBe('v1');
     });
 
@@ -4661,7 +4733,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const store = await storeWith({ type: 'oauth2', header_name: 'X-Shopify-Access-Token', oauth: { token_url: 'https://idp.bexio.com/token' } });
-      await handler({ url: 'https://api.bexio.com/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'v2' }));
+      await handler({ url: 'https://api.crm.example/3.0/users/me', method: 'GET' }, agentWith(store, { BEXIO_ACCESS_TOKEN: 'v2' }));
       expect(sentHeader('x-shopify-access-token')).toBe('v2');
     });
 
@@ -4674,7 +4746,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn()
         .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://evil.example.com/collect' } }))
         .mockResolvedValueOnce(createMockResponse({ status: 200, json: {} })));
-      await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
+      await handler({ url: 'https://api.crm.example/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
       expect(lastPinnedInputs).toHaveLength(2);
       const firstHop = Object.fromEntries(Object.entries(lastPinnedInputs[0]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
       const secondHop = Object.fromEntries(Object.entries(lastPinnedInputs[1]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
@@ -4689,7 +4761,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
       const result = await visible(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { 'X-Exfil': `Bearer ${JWT}` } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { 'X-Exfil': `Bearer ${JWT}` } },
         agentWith(store, { BEXIO_API_TOKEN: 'tok' }),
       );
       expect(result).toContain("Blocked: request header 'X-Exfil'");
@@ -4714,7 +4786,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
         agentWith(store, { BEXIO_API_TOKEN: 'tok' }),
       );
       expect(sentHeader('authorization')).toBe('Bearer model_set');
@@ -4725,7 +4797,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Basic bW9kZWxzZXQ=' } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: 'Basic bW9kZWxzZXQ=' } },
         agentWith(store, { B64: 'bW9kZWxzZXQ=' }),
       );
       expect(sentHeader('authorization')).toBe('Basic bW9kZWxzZXQ=');
@@ -4751,7 +4823,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { 'x-api-key': JWT } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { 'x-api-key': JWT } },
         agentWith(store, { BEXIO_API_TOKEN: VAULT_JWT }),
       );
       expect(result).not.toContain('Blocked');
@@ -4764,7 +4836,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: `Bearer ${JWT}` } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: `Bearer ${JWT}` } },
         agentWith(store, { BEXIO_ACCESS_TOKEN: VAULT_JWT }),
       );
       expect(result).not.toContain('Blocked');
@@ -4779,7 +4851,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       const result = await handler(
-        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: `Bearer ${JWT}` } },
+        { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: `Bearer ${JWT}` } },
         agentWith(store, { BEXIO_USER: 'u', BEXIO_PASS: VAULT_JWT }),
       );
       expect(result).not.toContain('Blocked');

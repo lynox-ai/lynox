@@ -9,7 +9,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -202,6 +202,11 @@ function presetProfilesOnHost(url: string, toolContext: ToolContext | undefined)
 
 /** {@link presetProfilesOnHost} against a store: the profiles that make `url`'s host a connected account. */
 export function connectedAccountProfiles(url: string, apiStore: NonNullable<ToolContext['apiStore']>): ApiProfile[] {
+  return profilesOnHost(url, apiStore).filter((p) => p.auth?.oauth?.preset_id !== undefined);
+}
+
+/** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
+function profilesOnHost(url: string, apiStore: NonNullable<ToolContext['apiStore']>): ApiProfile[] {
   const raw = new URL(url).hostname;
   const bare = raw.replace(/\.+$/, '');
   const ids = new Set<string>();
@@ -210,9 +215,7 @@ export function connectedAccountProfiles(url: string, apiStore: NonNullable<Tool
       if (id !== undefined) ids.add(id);
     }
   }
-  return [...ids]
-    .map((id) => apiStore.get(id))
-    .filter((p): p is ApiProfile => p?.auth?.oauth?.preset_id !== undefined);
+  return [...ids].map((id) => apiStore.get(id)).filter((p): p is ApiProfile => p !== undefined);
 }
 
 /** Write approvals denied in a tool batch, keyed by the batch's identity (`IAgent.approvalBatch`):
@@ -1549,10 +1552,28 @@ async function attachEngineManagedAuth(
   headers: Record<string, string>,
   toolContext: ToolContext | undefined,
   agent: import('../../types/index.js').IAgent,
+  /** The request may change something there ({@link isWriteMethod} of the method sent). */
+  write: boolean,
 ): Promise<AttachedAuth> {
   const vault = agent.secretStore;
   const apiStore = toolContext?.apiStore;
   if (apiStore) stampResolvedConnection(url, apiStore);
+  // A profile on a provider's API host that does not go through the provider: saved before
+  // `api_setup` refused one, or loaded from a file. Its writes are refused before anything is
+  // read or sent, with or without a vault: the provider's customer text and write question are
+  // about writes and a connection with write access. Its reads go on as before.
+  let astray: { profile: ApiProfile; provider: OAuthPreset } | undefined;
+  try {
+    for (const p of apiStore ? profilesOnHost(url, apiStore) : []) {
+      const provider = presetNotFollowed(p);
+      if (provider) { astray = { profile: p, provider }; break; }
+    }
+  } catch {
+    // invalid URL — assertHostPolicy reports it downstream
+  }
+  if (astray && write) {
+    return { refusal: `Error: writes to ${astray.provider.label} go through this engine's built-in "${astray.provider.id}" provider, which shows the user what lynox may do there and asks each write with what it sends. api_profile "${astray.profile.id}" signs in another way, so this write was not sent; reading through it works as before. To write, create a profile with auth.type "oauth2" and auth.oauth.preset_id "${astray.provider.id}", then connect it with api_setup action "connect".` };
+  }
   if (!apiStore || !vault) return {};
 
   let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
@@ -2405,7 +2426,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // checked; `gateReading` (`outbound-write.ts`) is compared before and after.
     const readingNow = (): string => gateReading(method, headers, input.url, gateBodyReadings(input.body, headers));
     const readBeforeAttach = readingNow();
-    const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);
+    const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent, isWriteMethod(gatedMethod));
     // A refusal means nothing was sent — a failed call, not a quiet one. It is
     // phrased for the model (`Error: api_profile "x" is oauth2 but the vault has
     // no access_token …`), so it goes to the ledger verbatim.
@@ -3251,7 +3272,7 @@ async function describeConnectedWrite(
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
     if (limited) throw new WriteContextRefused(limited);
     const headers: Record<string, string> = { accept: 'application/json' };
-    const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent);
+    const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent, false);
     if (auth.refusal) throw new WriteContextRefused(auth.refusal);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WRITE_CONTEXT_READ_TIMEOUT_MS);
@@ -3299,6 +3320,8 @@ async function describeConnectedWrite(
 export async function attachStoredCredential(
   url: string,
   headers: Record<string, string>,
+  /** The request may change something there ({@link isWriteMethod} of its method). */
+  write: boolean,
   stores: {
     apiStore: NonNullable<ToolContext['apiStore']>;
     secretStore: NonNullable<import('../../types/index.js').IAgent['secretStore']>;
@@ -3314,6 +3337,7 @@ export async function attachStoredCredential(
     headers,
     { apiStore: stores.apiStore, mandateEnds: stores.mandateEnds, secretReleases: stores.secretReleases } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
+    write,
   );
   return auth.slot !== undefined && auth.refusal === undefined;
 }

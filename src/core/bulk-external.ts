@@ -294,7 +294,7 @@ export interface ExternalClientDeps {
   /** Hosts a human accepted, consulted only under the `guarded` policy. */
   ackHosts: ReadonlySet<string> | undefined;
   /** Attaches the host's stored credential into `headers`; true only when it did. */
-  attach: (url: string, headers: Record<string, string>) => Promise<boolean>;
+  attach: (url: string, headers: Record<string, string>, method: string) => Promise<boolean>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
   /**
@@ -377,7 +377,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // Compared before and after the attach, as `http_request` does: a slot that changed what the
     // contract was checked against is not sent with (`gateReading`), and the run halts.
     const readBeforeAttach = gateReading(method, headers, url, payload);
-    if (!(await deps.attach(url, headers))) return { kind: 'no_credential' };
+    if (!(await deps.attach(url, headers, method))) return { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);

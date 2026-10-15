@@ -129,3 +129,49 @@ describe('view tells the model which bexio scopes exist', () => {
     expect(reply).toContain('OAuth scopes this connection asks for: openid offline_access contact_show');
   });
 });
+
+describe('the bexio API is reached only through the provider', () => {
+  const PREFIX = 'Invalid profile: the API of bexio is connected only through this engine\'s built-in "bexio" provider';
+  const rest = { endpoints: [{ method: 'POST', path: '/2.0/contact', description: 'create a contact' }], guidelines: ['x'], avoid: ['x'] };
+  const save = async (action: 'create' | 'update', profile: ApiProfile, store = new ApiStore()): Promise<{ out: string; store: ApiStore }> => {
+    // A person accepts the hosts when asked, so a refusal here is this check's and not that gate's.
+    const agent = Object.assign(agentWith(store) as object, { promptUser: async (): Promise<string> => 'Allow' }) as never;
+    const out = await apiSetupTool.handler({ action, profile: { ...profile, ...rest } }, agent) as string;
+    return { out, store };
+  };
+  const bearer = (baseUrl: string): ApiProfile => ({ id: 'bexio-pat', name: 'bexio', base_url: baseUrl, description: 'd', auth: { type: 'bearer', vault_keys: ['BEXIO_PAT'] } });
+  const ownOauth: ApiProfile = {
+    id: 'bexio-own', name: 'bexio', base_url: 'https://api.bexio.com/2.0', description: 'd',
+    auth: { type: 'oauth2', vault_keys: ['BX_ID', 'BX_SECRET'], oauth: { grant_type: 'client_credentials', token_url: 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/token', client_id_key: 'BX_ID', client_secret_key: 'BX_SECRET' } },
+  };
+
+  it.each([
+    ['a pasted token', bearer('https://api.bexio.com/2.0')],
+    ['a pasted token, the host spelled with a root dot', bearer('https://api.bexio.com./2.0')],
+    ['an OAuth sign-in of its own', ownOauth],
+  ] as const)('refuses a profile with %s, and saves nothing', async (_label, profile) => {
+    const { out, store } = await save('create', profile);
+    expect(out).toContain(PREFIX);
+    expect(out).toContain('Use auth.type "oauth2" with auth.oauth.preset_id "bexio", then api_setup action "connect".');
+    expect(store.get(profile.id)).toBeUndefined();
+  });
+
+  it('refuses an update that keeps a stored profile with a pasted token', async () => {
+    const store = new ApiStore();
+    store.register({ ...bearer('https://api.bexio.com/2.0'), ...rest });
+    const { out } = await save('update', bearer('https://api.bexio.com/2.0'), store);
+    expect(out).toContain(PREFIX);
+  });
+
+  it('control: saves the profile that goes through the provider', async () => {
+    const { out, store } = await save('create', bexioProfile('contact_show'));
+    expect(out).not.toContain('Invalid profile');
+    expect(store.get('bexio-api')?.auth?.oauth?.preset_id).toBe('bexio');
+  });
+
+  it('control: saves a profile with a pasted token on a host no provider claims', async () => {
+    const { out, store } = await save('create', bearer('https://api.crm.example/v1'));
+    expect(out).not.toContain('Invalid profile');
+    expect(store.get('bexio-pat')).toBeDefined();
+  });
+});

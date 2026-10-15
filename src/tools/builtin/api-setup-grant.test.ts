@@ -3246,6 +3246,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     const attached = await attachStoredCredential(
       'https://api.crm.example/v1/contacts',
       headers,
+      false,
       { apiStore, secretStore: makeVault(SEED) as never },
     );
 
@@ -3271,9 +3272,27 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, { apiStore, secretStore: makeVault(SEED) as never });
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never });
     expect(attached).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
+  });
+
+  // A bulk run attaches here as well. A profile on bexio's API that does not go through the
+  // provider gets no credential for a write and keeps it for a read.
+  it.each([
+    ['refuses a write', true, false],
+    ['control: attaches for a read', false, true],
+  ] as const)('%s through a pasted-token profile on the bexio API', async (_label, write, sent) => {
+    const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
+    engines.push(db);
+    const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
+    apiStore.register({ id: 'bexio-pat', name: 'bexio', base_url: 'https://api.bexio.com/2.0', description: 'bexio', auth: { type: 'bearer', vault_keys: ['BEXIO_PAT'] }, custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com'], accepted_at: '2026-10-15T00:00:00.000Z' } });
+    stubBoth();
+    const { attachStoredCredential } = await import('./http.js');
+    const headers: Record<string, string> = {};
+    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never });
+    expect(attached).toBe(sent);
+    expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });
 
   /**
