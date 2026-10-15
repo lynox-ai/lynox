@@ -1,4 +1,4 @@
-import { fstatSync, realpathSync } from 'node:fs';
+import { fstatSync, readFileSync, realpathSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { getLynoxDir } from './config.js';
 import { getWorkspaceDir } from './workspace.js';
@@ -167,4 +167,18 @@ export function workspaceBase(): { readonly ws: string; readonly anchor: Workspa
 /** Close the held workspace directory (engine shutdown; tests). */
 export function closeWorkspaceBase(): void {
   dropBase();
+}
+
+/**
+ * The process umask, as a write by name applies it: a new file is `0o666 & ~umask`, a new
+ * directory `0o777 & ~umask`. Read from /proc, because `process.umask()` without an argument sets
+ * it to 0 for a moment. If it cannot be read — a kernel before 4.7, or a system without /proc,
+ * such as macOS — the closed answer: owner only, where a write by name would follow the umask.
+ */
+export function processUmask(): number {
+  try {
+    const m = /^Umask:\s*([0-7]{1,4})$/m.exec(readFileSync('/proc/self/status', 'utf8'));
+    if (m?.[1] !== undefined) return parseInt(m[1], 8);
+  } catch { /* fall through */ }
+  return 0o077;
 }

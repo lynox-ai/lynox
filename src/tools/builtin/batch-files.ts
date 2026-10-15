@@ -2,9 +2,9 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSy
 import { join, dirname, basename, resolve, posix } from 'node:path';
 import type { ToolEntry } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
-import { toWorkspaceRel } from '../../core/workspace-rel.js';
+import { processUmask, toWorkspaceRel } from '../../core/workspace-rel.js';
 import { listDir, mkdirAt, openRead, renameAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
-import { anchoredError, processUmask, reachWorkspace, writeInPlace } from './fs.js';
+import { anchoredError, reachWorkspace, writeInPlace } from './fs.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { MAX_BUFFER_BYTES } from '../../core/constants.js';
 

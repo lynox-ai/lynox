@@ -7,7 +7,7 @@ import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
-import { toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
+import { processUmask, toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
 import { openRead, openWrite, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 
 /**
@@ -121,20 +121,6 @@ function refuseEvictionPlaceholder(written: string, realPath: string): void {
 type Target =
   | { readonly kind: 'anchored'; readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }
   | { readonly kind: 'path'; readonly path: string };
-
-/**
- * The process umask, as a write by name applies it: a new file is `0o666 & ~umask`, a new
- * directory `0o777 & ~umask`. Read from /proc, because `process.umask()` without an argument sets
- * it to 0 for a moment. If it cannot be read — a kernel before 4.7, or a system without /proc,
- * such as macOS — the closed answer: owner only, where a write by name would follow the umask.
- */
-export function processUmask(): number {
-  try {
-    const m = /^Umask:\s*([0-7]{1,4})$/m.exec(readFileSync('/proc/self/status', 'utf8'));
-    if (m?.[1] !== undefined) return parseInt(m[1], 8);
-  } catch { /* fall through */ }
-  return 0o077;
-}
 
 /**
  * With isolation: a path in the context workspace is reached through its open directory, every

@@ -224,9 +224,21 @@ const KIND: Record<string, Record<string, 'fs' | 'not-fs'>> = {
   api_setup: { path: 'not-fs' },
   spawn_agent: { 'agents.profile': 'not-fs' },
 };
-const CONVERTED = new Set(['read_file', 'write_file', 'edit_file']);
+const CONVERTED = new Set(['read_file', 'write_file', 'edit_file', 'batch_files', 'media_process', 'bulk_plan']);
 /** Moved onto the workspace's open directory by the next changes; this list only shrinks. */
-const PENDING = new Set(['batch_files', 'media_process', 'bulk_plan']);
+const PENDING = new Set<string>([]);
+/** The rest of a valid input per converted tool, so the path field is what decides. */
+const REST = (dir: string): Record<string, Record<string, unknown>> => ({
+  read_file: {},
+  write_file: { content: 'B' },
+  edit_file: { old_string: 'A', new_string: 'B' },
+  batch_files: { pattern: '*.txt', directory: dir, operation: 'move', destination: dir, rename_pattern: '$1.md' },
+  media_process: { operation: 'transcode', format: 'mp4' },
+  bulk_plan: { target_system: 'workspace' },
+});
+/** A field that is a name joined to another path, never a path of its own: a handle in it names a
+ *  directory below the workspace, and the call may fail — it must not reach the handle. */
+const JOINED = new Set(['batch_files.rename_pattern']);
 
 function stringFields(schema: unknown, prefix = ''): string[] {
   if (typeof schema !== 'object' || schema === null) return [];
@@ -271,17 +283,24 @@ describe('every built-in tool that takes a filesystem path', () => {
 
   it('refuses process-handle paths in every converted field, and touches nothing', async () => {
     writeFileSync(join(ws, 'a.txt'), 'A');
+    // bulk_plan refuses without a ledger before it looks at its source; the ledger is never reached.
+    const withLedger = { ...agent(), toolContext: { bulkLedger: {} } } as unknown as IAgent;
     const handles = [`/proc/self/fd/3/a.txt`, `/dev/fd/3/a.txt`, `/proc/thread-self/fd/3/a.txt`, `/proc/1/root${ws}/a.txt`, `/proc/self/root${ws}/a.txt`];
     for (const t of TOOLS.filter(x => CONVERTED.has(x.definition.name))) {
       for (const [field, kind] of Object.entries(KIND[t.definition.name]!)) {
         if (kind !== 'fs') continue;
+        const name = `${t.definition.name}.${field}`;
         for (const p of handles) {
-          const input: Record<string, unknown> = { [field]: p, content: 'B', old_string: 'A', new_string: 'B' };
-          await expect(t.handler(input as never, agent()), `${t.definition.name}.${field} ${p}`).rejects.toThrow(/process handle/);
+          const input: Record<string, unknown> = { ...REST(ws)[t.definition.name], [field]: p };
+          if (field === 'rename_pattern') input['operation'] = 'rename';
+          // A tool says no by throwing, or (bulk_plan) by an error result.
+          const said = await t.handler(input as never, withLedger).then(String, (e: unknown) => `threw: ${(e as Error).message}`);
+          if (JOINED.has(name)) expect(said, `${name} ${p}`).not.toMatch(/^Renamed|→/m);
+          else expect(said, `${name} ${p}`).toMatch(/process handle/);
+          expect(readFileSync(join(ws, 'a.txt'), 'utf8'), `${name} ${p}`).toBe('A');
         }
       }
     }
-    expect(readFileSync(join(ws, 'a.txt'), 'utf8')).toBe('A');
   });
 });
 
