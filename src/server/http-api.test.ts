@@ -6,7 +6,7 @@ import { request as httpRequest, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
@@ -12884,6 +12884,61 @@ describe('LynoxHTTPApi', () => {
       const res = await jsonFetch('/api/files?path=../../etc');
       expect(res.status).toBe(403);
     });
+
+    it('answers every path behind an escaping symlink with 403, so files and directories out there look alike', async () => {
+      mkdirSync(join(externalDir, 'sub'), { recursive: true });
+      // Missing leaf, a file used as a directory, a directory, and a missing nested path: all
+      // outside the workspace, all the same answer. Before, the missing ones got past the realpath
+      // check, and a 400 for the file against a 404 for the rest told them apart.
+      for (const p of ['escape/nope', 'escape/secret.txt/x', 'escape/sub', 'escape/sub/x/y']) {
+        expect(`${p} → ${String((await jsonFetch(`/api/files?path=${encodeURIComponent(p)}`)).status)}`).toBe(`${p} → 403`);
+      }
+      // A dangling link inside the workspace: refused whether or not its target exists, so the
+      // answer says nothing about the outside path it names.
+      symlinkSync(join(externalDir, 'gone'), join(base, 'dangle'));
+      try {
+        for (const p of ['dangle', 'dangle/x']) {
+          expect(`${p} → ${String((await jsonFetch(`/api/files?path=${encodeURIComponent(p)}`)).status)}`).toBe(`${p} → 403`);
+        }
+      } finally { rmSync(join(base, 'dangle'), { force: true }); }
+      // Twin: the same shapes inside the workspace are not refused.
+      expect((await jsonFetch('/api/files?path=safe/nope')).status).toBe(404);
+      expect((await jsonFetch('/api/files?path=safe/ok.txt/x')).status).toBe(403);
+    });
+
+    it('answers a NUL byte in the path with 400, not as a server failure', async () => {
+      const res = await jsonFetch('/api/files?path=safe%00x');
+      expect(res.status).toBe(400);
+    });
+
+    it('answers a missing directory with 404, not an empty listing', async () => {
+      const res = await jsonFetch('/api/files?path=no-such-dir');
+      expect(res.status).toBe(404);
+    });
+
+    it('answers a file path with 400, not an empty listing', async () => {
+      const res = await jsonFetch('/api/files?path=safe/ok.txt');
+      expect(res.status).toBe(400);
+    });
+
+    // Root reads through mode bits, so the fixture cannot fail there: skipped, visibly.
+    it.skipIf(process.getuid?.() === 0)('answers an unreadable directory with 500, not an empty listing', async () => {
+      const locked = join(base, 'locked');
+      mkdirSync(locked);
+      writeFileSync(join(locked, 'kept.txt'), 'still here');
+      chmodSync(locked, 0o000);
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await jsonFetch('/api/files?path=locked');
+        expect(res.status).toBe(500);
+        // The log line carries the error code, not the path.
+        const lines = logged.mock.calls.map((c) => c.map(String).join(' ')).filter((l) => l.includes('GET /api/files failed'));
+        expect(lines).toEqual(['[lynox] GET /api/files failed: EACCES']);
+      } finally {
+        logged.mockRestore();
+        chmodSync(locked, 0o700);
+      }
+    });
   });
 });
 
@@ -17021,6 +17076,21 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
   });
 
+  it('answers the workspace status as a failure when the root cannot be used, never with a guessed field', async () => {
+    const other = mkdtempSync(join(tmpdir(), 'lynox-ws-root-other-'));
+    try {
+      await withEnv({ ...MANAGED, LYNOX_WORKSPACE_ROOT: other }, async () => {
+        const res = await as(ADMIN, '/api/admin/workspace/status');
+        expect(res.status).toBe(500);
+        expect(((await res.json()) as { code?: string }).code).toBe('workspace_root_unusable');
+      });
+      // The user bearer does not reach it at all.
+      await withEnv(MANAGED, async () => {
+        expect((await as(TEST_SECRET, '/api/admin/workspace/status')).status).toBe(403);
+      });
+    } finally { rmSync(other, { recursive: true, force: true }); }
+  });
+
   it('the control plane\'s revoke alias refuses to delete Drive backups, and revokes nothing then', async () => {
     await withEnv(MANAGED, async () => {
       for (const flag of [true, 'true', 1, null]) {
@@ -17108,10 +17178,10 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
   describe('the positive list (PRD cp-admin-line §3.1)', () => {
     type Row = { method: string; path: string; scope: 'admin' | 'user'; stance: unknown; cpAdmin: boolean };
     const table = (): Row[] => (api as unknown as { routeStancesForTesting: () => Row[] }).routeStancesForTesting();
-    // The four calls the control plane makes with its admin bearer.
-    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke'];
+    // The five calls the control plane makes with its admin bearer.
+    const CP_ROUTES = ['GET /api/export', 'POST /api/admin/mandates/revoke', 'GET /api/admin/google/status', 'POST /api/admin/google/revoke', 'GET /api/admin/workspace/status'];
 
-    it('names exactly the four routes the control plane calls, all admin routes without a stance', () => {
+    it('names exactly the five routes the control plane calls, all admin routes without a stance', () => {
       const marked = table().filter((r) => r.cpAdmin);
       expect(marked.map((r) => `${r.method} ${r.path}`).sort()).toEqual([...CP_ROUTES].sort());
       for (const r of marked) expect([r.path, r.scope, r.stance]).toEqual([r.path, 'admin', undefined]);
@@ -17342,6 +17412,29 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
       expect(a!['request_id']).toMatch(/^[0-9a-f-]{36}$/);
       expect(d!['request_id']).toBe(a!['request_id']);
       expect(a!['recorded_at']).toBe(a!['ts']);
+    });
+
+    it('records the workspace status read like every request of the bearer, and answers all three fields', async () => {
+      // The default root exists on a booted engine; created here so the test does not lean on an
+      // earlier one having made it.
+      const { defaultWorkspaceRootPath } = await import('../core/workspace-root.js');
+      mkdirSync(defaultWorkspaceRootPath(), { recursive: true });
+      let body: unknown;
+      await withEnv(MANAGED, async () => {
+        const res = await as(ADMIN, '/api/admin/workspace/status', {}, freshBase);
+        expect(res.status).toBe(200);
+        body = await res.json();
+      });
+      expect(brief()).toEqual([
+        ['cp-admin', 'GET /api/admin/workspace/status', 'attempt', 'null'],
+        ['cp-admin', 'GET /api/admin/workspace/status 200', 'done', 'null'],
+      ]);
+      // The default root: nothing pending, and is_mount a boolean where /proc is there.
+      const b = body as Record<string, unknown>;
+      expect(Object.keys(b).sort()).toEqual(['workspace_legacy_pending', 'workspace_root_is_mount', 'workspace_root_mode']);
+      expect(b['workspace_root_mode']).toBe('default');
+      expect(b['workspace_legacy_pending']).toBe(false);
+      expect(typeof b['workspace_root_is_mount']).toBe(process.platform === 'linux' ? 'boolean' : 'object');
     });
 
     it('records a refusal by the route as refused, with its status and the class of the flag', async () => {
@@ -17673,6 +17766,68 @@ describe('a server without LYNOX_HTTP_SECRET: requests from a browser', () => {
     mockGoogleRevoke.mockClear();
     expect((await revoke({})).status).not.toBe(403);
     expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+  });
+
+  // Another port on localhost is another program on this machine (a dev server, a notebook), and a
+  // page it serves is not this server's: it may neither write nor read the answer through CORS.
+  function withOrigin(method: string, path: string, headers: Record<string, string>): Promise<{ status: number; acao: string | undefined; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path, method, headers }, (res) => {
+        let body = '';
+        res.on('data', (c: Buffer) => { body += c.toString(); });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, acao: res.headers['access-control-allow-origin'] as string | undefined, body }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+  const otherPort = () => String(port === 5173 ? 5174 : 5173);
+
+  it('refuses a write from another port on localhost, and Google stays connected', async () => {
+    mockGoogleRevoke.mockClear();
+    const res = await revoke({ Host: `localhost:${String(port)}`, Origin: `http://localhost:${otherPort()}`, 'Sec-Fetch-Site': 'same-site' });
+    expect(res.status).toBe(403);
+    expect(res.body).toContain('LYNOX_ALLOWED_ORIGINS');
+    expect(mockGoogleRevoke).not.toHaveBeenCalled();
+    // The same write from this server on localhost runs.
+    expect((await revoke({ Host: `localhost:${String(port)}`, Origin: `http://localhost:${String(port)}` })).status).not.toBe(403);
+    expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets no page on another localhost port read an answer: no CORS origin for it, its own for this server', async () => {
+    const host = `localhost:${String(port)}`;
+    for (const method of ['OPTIONS', 'GET']) {
+      const foreign = await withOrigin(method, '/api/vault/key?reveal=true', { Host: host, Origin: `http://localhost:${otherPort()}` });
+      expect(foreign.acao, method).toBeUndefined();
+      const loopback = await withOrigin(method, '/api/vault/key?reveal=true', { Host: `127.0.0.1:${String(port)}`, Origin: `http://127.0.0.1:${otherPort()}` });
+      expect(loopback.acao, method).toBeUndefined();
+      const ownPage = await withOrigin(method, '/api/vault/key?reveal=true', { Host: host, Origin: `http://${host}` });
+      expect(ownPage.acao, method).toBe(`http://${host}`);
+    }
+  });
+});
+
+describe('LYNOX_ALLOWED_ORIGINS at start: an entry that is not an origin is named, not dropped in silence', () => {
+  it('writes one line per dropped entry and none for a kept one', async () => {
+    const before = process.env['LYNOX_ALLOWED_ORIGINS'];
+    process.env['LYNOX_ALLOWED_ORIGINS'] = 'lynox.lan:3000, https://kept.example ,chrome-extension://abc';
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => { lines.push(String(chunk)); return true; });
+    const server = new LynoxHTTPApi();
+    try {
+      await server.init();
+      await server.start(0);
+      for (let i = 0; i < 20 && !lines.some((l) => l.includes('listening on')); i++) await new Promise((r) => setTimeout(r, 25));
+    } finally {
+      spy.mockRestore();
+      await server.shutdown();
+      if (before === undefined) delete process.env['LYNOX_ALLOWED_ORIGINS']; else process.env['LYNOX_ALLOWED_ORIGINS'] = before;
+    }
+    const warned = lines.filter((l) => l.includes('LYNOX_ALLOWED_ORIGINS:'));
+    expect(warned).toHaveLength(2);
+    expect(warned[0]).toContain('"lynox.lan:3000"');
+    expect(warned[1]).toContain('"chrome-extension://abc"');
+    expect(warned.join('')).not.toContain('kept.example');
   });
 });
 

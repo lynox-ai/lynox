@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ambientCrossSiteRefusal, AMBIENT_CROSS_SITE_REFUSAL, crossSiteWriteRefusal, CROSS_SITE_WRITE_REFUSAL, hostRefusal, NO_SECRET_HOST_REFUSAL, normalizeAllowedOrigins } from './cross-site-write.js';
+import { ambientCrossSiteRefusal, AMBIENT_CROSS_SITE_REFUSAL, crossSiteWriteRefusal, CROSS_SITE_WRITE_REFUSAL, droppedAllowedOrigins, droppedAllowedOriginWarning, hostRefusal, isOwnOriginByAddress, NO_SECRET_HOST_REFUSAL, normalizeAllowedOrigins } from './cross-site-write.js';
 
 const base = { method: 'POST', origin: undefined, fetchSite: undefined, host: '127.0.0.1:3000', allowedOrigins: [] as string[] };
 const decide = (over: Partial<typeof base> & { origin?: string; fetchSite?: string; host?: string }) =>
@@ -20,13 +20,21 @@ describe('crossSiteWriteRefusal — writes on a server without a secret', () => 
     }
   });
 
-  it('accepts localhost, an allowed origin, and this server reached by its IP address', () => {
-    expect(decide({ origin: 'http://localhost:5173' })).toBeNull();
+  it('accepts this server on localhost or by its IP address, and an allowed origin', () => {
+    expect(decide({ origin: 'http://localhost:3000', host: 'localhost:3000' })).toBeNull();
     expect(decide({ origin: 'http://127.0.0.1:3000' })).toBeNull();
-    expect(decide({ origin: 'http://[::1]:3000' })).toBeNull();
+    expect(decide({ origin: 'http://[::1]:3000', host: '[::1]:3000' })).toBeNull();
     expect(decide({ origin: 'https://lynox.example.org', allowedOrigins: ['https://lynox.example.org'] })).toBeNull();
     expect(decide({ origin: 'http://192.168.1.20:3000', host: '192.168.1.20:3000' })).toBeNull();
     expect(decide({ origin: 'http://[fd00::20]:3000', host: '[fd00::20]:3000' })).toBeNull();
+  });
+
+  it('refuses another port on localhost: another program on this machine, not this server', () => {
+    expect(decide({ origin: 'http://localhost:5173', host: 'localhost:3000' })).toBe(CROSS_SITE_WRITE_REFUSAL);
+    expect(decide({ origin: 'http://127.0.0.1:5173' })).toBe(CROSS_SITE_WRITE_REFUSAL);
+    expect(decide({ origin: 'http://[::1]:5173', host: '[::1]:3000' })).toBe(CROSS_SITE_WRITE_REFUSAL);
+    // Listed, it counts: the Web UI's dev server is one such program.
+    expect(decide({ origin: 'http://localhost:5173', host: 'localhost:3000', allowedOrigins: ['http://localhost:5173'] })).toBeNull();
   });
 
   it('refuses this server reached by a NAME unless the name is allowed', () => {
@@ -121,10 +129,16 @@ describe('ambientCrossSiteRefusal — a credential the browser attaches on its o
     expect(judge({})).toBeNull();
   });
 
-  it('takes an allowed, a localhost and its own Origin even from a sibling host', () => {
+  it('takes an allowed and its own Origin even from a sibling host', () => {
     expect(judge({ fetchSite: 'same-site', origin: 'https://ui.example.org', allowedOrigins: ['https://ui.example.org'] })).toBeNull();
-    expect(judge({ fetchSite: 'cross-site', origin: 'http://localhost:5173' })).toBeNull();
     expect(judge({ fetchSite: 'same-site', origin: 'https://tenant.example.org:3000' })).toBeNull();
+  });
+
+  it('refuses a localhost Origin that is not this server, unless it is listed', () => {
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://localhost:5173' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://localhost:5173', host: 'localhost:3000' })).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://localhost:5173', allowedOrigins: ['http://localhost:5173'] })).toBeNull();
+    expect(judge({ fetchSite: 'cross-site', origin: 'http://localhost:3000', host: 'localhost:3000' })).toBeNull();
   });
 
   it('takes its own host by NAME only with the cookie, and on the schemes the caller gives', () => {
@@ -158,10 +172,41 @@ describe('the Origin rule both checks share', () => {
     expect(ambient('http://127.0.0.2:3000', '127.0.0.2:3000')).toBeNull();
   });
 
-  it('takes a listed origin and a localhost origin', () => {
+  it('takes a listed origin, and a localhost origin only on its own port', () => {
     expect(write('https://ui.example.org', 'x:1', ['https://ui.example.org'])).toBeNull();
     expect(ambient('https://ui.example.org', 'x:1', ['https://ui.example.org'])).toBeNull();
-    expect(write('http://localhost:5173', 'x:1')).toBeNull();
-    expect(ambient('http://localhost:5173', 'x:1')).toBeNull();
+    expect(write('http://localhost:5173', 'localhost:5173')).toBeNull();
+    expect(ambient('http://localhost:5173', 'localhost:5173')).toBeNull();
+    expect(write('http://localhost:5173', 'localhost:3000')).toBe(CROSS_SITE_WRITE_REFUSAL);
+    expect(ambient('http://localhost:5173', 'localhost:3000')).toBe(AMBIENT_CROSS_SITE_REFUSAL);
+  });
+});
+
+describe('isOwnOriginByAddress', () => {
+  it('is this server on localhost or an IP address, port and all', () => {
+    expect(isOwnOriginByAddress('http://localhost:3000', 'localhost:3000')).toBe(true);
+    expect(isOwnOriginByAddress('http://localhost:3000', 'LOCALHOST:3000')).toBe(true);
+    expect(isOwnOriginByAddress('http://10.0.0.5', '10.0.0.5')).toBe(true);
+    expect(isOwnOriginByAddress('http://localhost:3001', 'localhost:3000')).toBe(false);
+    expect(isOwnOriginByAddress('http://localhost:3000', '127.0.0.1:3000')).toBe(false);
+    // A name is never "by address", even when Host agrees: a page can point a name of its own here.
+    expect(isOwnOriginByAddress('http://lynox.lan:3000', 'lynox.lan:3000')).toBe(false);
+    expect(isOwnOriginByAddress('http://localhost:3000', undefined)).toBe(false);
+    expect(isOwnOriginByAddress('', 'localhost:3000')).toBe(false);
+    expect(isOwnOriginByAddress('null', 'localhost:3000')).toBe(false);
+  });
+});
+
+describe('droppedAllowedOrigins', () => {
+  it('names each entry the list drops, as written, and nothing it keeps', () => {
+    expect(droppedAllowedOrigins([' https://a.example/', 'lynox.lan:3000', '', 'chrome-extension://abc', ' '])).toEqual(['lynox.lan:3000', 'chrome-extension://abc']);
+    expect(droppedAllowedOrigins(['https://a.example', 'http://b.example:8080'])).toEqual([]);
+  });
+
+  it('tells the operator what was ignored and how to write it', () => {
+    const line = droppedAllowedOriginWarning('lynox.lan:3000');
+    expect(line).toContain('"lynox.lan:3000"');
+    expect(line).toContain('ignored');
+    expect(line).toContain('http://lynox.local:3000');
   });
 });

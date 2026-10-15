@@ -4,6 +4,7 @@ import { resolve, dirname, basename, join, isAbsolute, relative, sep } from 'nod
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
+import { ensureWorkspaceContextDir, getWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath } from './workspace-root.js';
 
 let _cachedDir: string | null | undefined;
 let _tenantOverride: string | null = null;
@@ -39,9 +40,9 @@ export function getWorkspaceCwd(): string {
 }
 
 /** The tenant's FILE AREA root — the exact directory `GET /api/files/download`
- *  serves from: the isolation workspace when active, else `~/.lynox/workspace`. */
+ *  serves from: the isolation workspace when active, else the workspace root. */
 export function getFileAreaDir(): string {
-  return getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+  return getWorkspaceDir() ?? getWorkspaceRoot();
 }
 
 /**
@@ -52,29 +53,65 @@ export function getFileAreaDir(): string {
  * `GET /api/files/download` (http-api.ts) and the media_process tool — so a
  * file read for either path is confined identically. Callers that require an
  * existing file must `stat` the result themselves; a not-yet-existing path
- * passes the logical containment check (the real-path check is skipped when the
- * file is absent, exactly as the download endpoint does).
+ * is checked through its closest existing ancestor, so a missing leaf under a
+ * symlink that points out of the area is refused like an existing one, and a
+ * dangling symlink is refused wherever it points.
  */
 export function resolveFileAreaPath(filePath: string): string | null {
   const base = getFileAreaDir();
-  const resolved = resolve(base, filePath);
+  // A path history names under the old `<data>/workspace` is mapped to the root first, then
+  // confined like any other (identity unless the root is external).
+  const resolved = translateLegacyWorkspacePath(resolve(base, filePath), resolveWorkspaceRoot());
   // Logical path must be within the file area.
   if (resolved !== base && !resolved.startsWith(base + '/')) return null;
   // Real path (after symlink resolution) must also be within it. Canonicalize
   // the base too: if the base itself contains a symlinked component (macOS
   // /tmp -> /private/tmp, a symlinked $HOME, or a symlinked Docker volume),
   // realpath(resolved) would otherwise mismatch the literal base and
-  // false-reject every legitimate in-area path. realpathSync(base) may throw
-  // if the base hasn't been created yet — fall back to the literal base.
-  try {
-    let realBase = base;
-    try { realBase = realpathSync(base); } catch { /* base not created yet */ }
-    const real = realpathSync(resolved);
-    if (real !== realBase && !real.startsWith(realBase + '/')) return null;
-  } catch {
-    // File doesn't exist yet — logical path check above is sufficient.
-  }
+  // false-reject every legitimate in-area path. A base that hasn't been created
+  // yet is canonicalized the same way as the path, through its closest ancestor.
+  const realBase = realpathOfClosestExisting(base) ?? base;
+  const real = realpathOfClosestExisting(resolved);
+  if (real === null) return null;
+  if (real !== realBase && !real.startsWith(realBase + '/')) return null;
   return resolved;
+}
+
+/** True only when `lstat` says the name is not there; any other answer counts as present. */
+function isAbsent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+/**
+ * The real path of `path`, or — when its leaf does not exist yet — the real path of its closest
+ * existing ancestor with the missing rest re-attached. Null for a dangling symlink and for any
+ * other failure (a component that is a file, an unreadable directory, a link loop): accepting
+ * the logical path there let a symlink out of the area answer differently for files and
+ * directories behind it.
+ */
+function realpathOfClosestExisting(path: string): string | null {
+  let probe = path;
+  let tail = '';
+  for (;;) {
+    try {
+      const real = realpathSync(probe);
+      return tail === '' ? real : join(real, tail);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      // ENOENT for a name that exists is a dangling symlink: its target is missing, wherever it
+      // points. Refused, or the answer would say whether that target exists outside the area.
+      if (!isAbsent(probe)) return null;
+      const parent = dirname(probe);
+      if (parent === probe) return null;
+      tail = tail === '' ? basename(probe) : join(basename(probe), tail);
+      probe = parent;
+    }
+  }
 }
 
 /**
@@ -119,8 +156,9 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
   const ws = getWorkspaceDir();
   if (!ws) return resolve(filePath);
 
-  // Resolve the path, following symlinks where possible
-  const resolved = resolve(filePath);
+  // Resolve the path, following symlinks where possible. A path under the old `<data>/workspace`
+  // is mapped to the root first, then confined like any other (identity unless the root is external).
+  const resolved = translateLegacyWorkspacePath(resolve(filePath), resolveWorkspaceRoot());
   let real: string;
   if (existsSync(resolved)) {
     real = realpathSync(resolved);
@@ -185,13 +223,12 @@ export function validatePath(filePath: string, operation: 'read' | 'write'): str
 
 /**
  * Ensure the workspace directory for a context exists.
- * Creates it with mode 0o700 if missing.
+ * Creates it with mode 0o700 if missing, and throws `WorkspaceRootError` naming the path
+ * when it cannot be created, read, written or entered.
  * Returns the workspace directory path.
  */
 export function ensureContextWorkspace(context: LynoxContext): string {
-  const dir = context.workspaceDir;
-  ensureDirSync(dir);
-  return dir;
+  return ensureWorkspaceContextDir(context.workspaceDir);
 }
 
 /** Reset cached workspace dir (for testing). */

@@ -27,14 +27,14 @@
  * ⚠ **What this does NOT buy, because the first draft of this comment claimed
  * it and a review refuted it:** it is not a hardening, and nothing here should
  * be cited as one. The draft argued that a data file is an editable input and
- * that a constant is not. The reason that does not follow is in the Dockerfile
- * and needs no more than reading it: the production stage copies `dist/` with
- * `--chown=lynox:lynox` and then sets `USER lynox`, so the built module sits in
- * a tree owned by the account the engine runs under. Whatever holds for a file
- * beside it holds for the module too. The move changes where the text lives,
- * not what can reach it. If you want that second property, it is a separate
- * piece of work with its own measurement — this is not it, and a later reader
- * should not restore the claim because this file sounds like it earned one.
+ * that a constant is not. The reason that does not follow is in the Dockerfile:
+ * whatever holds for a file beside the module holds for the module too. When
+ * this was written the production stage handed `dist/` to the account the
+ * engine runs under; today the image's code belongs to root and that account
+ * only reads it, and a data file under `dist/` would be protected the same way.
+ * That protection comes from the ownership, not from this move. The move changes
+ * where the text lives, not what can reach it, and a later reader should not
+ * restore the claim because this file sounds like it earned one.
  *
  * ⚠ Its neighbour {@link ./oauth-presets.ts} argues that the OAuth preset
  * register must not come from a file, and draws a ranking while doing so: an

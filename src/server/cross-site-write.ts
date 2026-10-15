@@ -15,9 +15,9 @@
  *
  * 2. `crossSiteWriteRefusal` — every method but GET, HEAD and OPTIONS. Accepted:
  *    - an `Origin` listed in `LYNOX_ALLOWED_ORIGINS`;
- *    - a localhost `Origin` (`LOCALHOST_ORIGIN`, the set the CORS block also treats as local);
- *    - an `Origin` that is this server itself, reached by IP address: its host, port included,
- *      equals the `Host` header and is an IP literal;
+ *    - an `Origin` that is this server itself, reached by IP address or as `localhost`: its host,
+ *      port included, equals the `Host` header. Another port on localhost is another program;
+ *      it counts only when it is listed (`LYNOX_ALLOWED_ORIGINS`);
  *    - a request with neither `Origin` nor `Sec-Fetch-Site` — curl, the CLI, an MCP client, a
  *      server-side fetch. A browser sends `Origin` on every write. `Sec-Fetch-Site` it sends
  *      only to a secure context, so over plain HTTP to anything but loopback, `Origin` is the
@@ -32,7 +32,6 @@
  */
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-export const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 
 function isIpLiteral(hostname: string): boolean {
   if (hostname.startsWith('[') && hostname.endsWith(']')) return true; // IPv6, as URL writes it
@@ -48,14 +47,29 @@ function isIpLiteral(hostname: string): boolean {
 export function normalizeAllowedOrigins(entries: readonly string[]): string[] {
   const out: string[] = [];
   for (const raw of entries) {
-    const entry = raw.trim();
-    if (entry === '') continue;
-    let parsed: URL;
-    try { parsed = new URL(entry); } catch { continue; }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
-    out.push(parsed.origin);
+    const origin = allowedOriginOf(raw);
+    if (origin !== null) out.push(origin);
   }
   return out;
+}
+
+/** The entries `normalizeAllowedOrigins` drops, as written, so the server can name each at start. */
+export function droppedAllowedOrigins(entries: readonly string[]): string[] {
+  return entries.map((raw) => raw.trim()).filter((entry) => entry !== '' && allowedOriginOf(entry) === null);
+}
+
+function allowedOriginOf(raw: string): string | null {
+  const entry = raw.trim();
+  if (entry === '') return null;
+  let parsed: URL;
+  try { parsed = new URL(entry); } catch { return null; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  return parsed.origin;
+}
+
+/** The start-up line for one dropped entry. */
+export function droppedAllowedOriginWarning(entry: string): string {
+  return `⚠ LYNOX_ALLOWED_ORIGINS: "${entry}" is not an http(s) origin and is ignored. Write it as scheme://host[:port], for example http://lynox.local:3000.`;
 }
 
 export const NO_SECRET_HOST_REFUSAL =
@@ -65,10 +79,11 @@ export const NO_SECRET_HOST_REFUSAL =
   + 'set LYNOX_HTTP_SECRET.';
 
 export const CROSS_SITE_WRITE_REFUSAL =
-  'Refused: this server runs without LYNOX_HTTP_SECRET and accepts changes from a browser only on '
-  + 'localhost, on its own IP address, or from an origin listed in LYNOX_ALLOWED_ORIGINS. '
-  + 'Reached by a host name or through a proxy that rewrites the host, add the origin the browser '
-  + 'shows to LYNOX_ALLOWED_ORIGINS, or set LYNOX_HTTP_SECRET.';
+  'Refused: this server runs without LYNOX_HTTP_SECRET and accepts changes from a browser only from '
+  + 'its own pages (on localhost or its IP address, on its own port) or from an origin listed in '
+  + 'LYNOX_ALLOWED_ORIGINS. Sent from another local port, reached by a host name, or through a proxy '
+  + 'that rewrites the host, add the origin the browser shows to LYNOX_ALLOWED_ORIGINS, or set '
+  + 'LYNOX_HTTP_SECRET.';
 
 export function hostRefusal(input: { host: string | undefined; allowedOrigins: readonly string[] }): string | null {
   const host = input.host;
@@ -84,6 +99,19 @@ export function hostRefusal(input: { host: string | undefined; allowedOrigins: r
 }
 
 /**
+ * Whether `origin` is this server itself, reached by IP address or as `localhost`: its host, port
+ * included, equals the `Host` header. Neither can be pointed elsewhere by a page. Another port is
+ * another program on the same machine, and a page it serves is not this server's.
+ */
+export function isOwnOriginByAddress(origin: string, host: string | undefined): boolean {
+  if (host === undefined || host === '') return false;
+  let parsed: URL;
+  try { parsed = new URL(origin); } catch { return false; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  return parsed.host === host.toLowerCase() && (parsed.hostname === 'localhost' || isIpLiteral(parsed.hostname));
+}
+
+/**
  * Whether a browser-sent `Origin` is one this server takes changes from. Shared by both checks
  * below, so the `null` case and the port comparison are one definition, not two.
  * `ownOrigins`: this server's own origin reached by NAME, scheme included — one when the server
@@ -96,14 +124,13 @@ function originAccepted(origin: string, host: string | undefined, allowedOrigins
   // `null` is what a sandboxed frame or a `file:` page sends; no entry can allow it.
   if (origin === 'null') return false;
   if (allowedOrigins.includes(origin)) return true;
-  if (LOCALHOST_ORIGIN.test(origin)) return true;
   let parsed: URL | null = null;
   try { parsed = new URL(origin); } catch { parsed = null; }
   if (parsed === null) return false;
   for (const own of ownOrigins) {
     try { if (parsed.origin === new URL(own).origin) return true; } catch { /* not an origin */ }
   }
-  return host !== undefined && parsed.host === host && isIpLiteral(parsed.hostname);
+  return isOwnOriginByAddress(origin, host);
 }
 
 export function crossSiteWriteRefusal(input: {
@@ -124,8 +151,8 @@ export function crossSiteWriteRefusal(input: {
 
 export const AMBIENT_CROSS_SITE_REFUSAL =
   'Refused: the browser says another site sent this request, and it carries a sign-in the browser '
-  + 'adds on its own. Send it from this instance\'s own pages, from localhost, or from an origin '
-  + 'listed in LYNOX_ALLOWED_ORIGINS.';
+  + 'adds on its own. Send it from this instance\'s own pages or from an origin listed in '
+  + 'LYNOX_ALLOWED_ORIGINS.';
 
 /**
  * 3. `ambientCrossSiteRefusal` — a request whose credential the browser attaches on its own, so

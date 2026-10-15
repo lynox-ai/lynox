@@ -341,4 +341,88 @@ describe('a mandate\'s reads in the actor trail (real engine)', () => {
     });
     expect(answered).toEqual([]);
   }, 60_000);
+
+  /**
+   * Every read of a mandate writes its trail, so a read another site makes the browser send would
+   * put a row there the mandate never made: the session cookie is `SameSite=Lax` and travels on a
+   * navigation from another site. Such a GET is refused before the row, for every route a mandate
+   * reads; the owner's reads and the Web UI's pages stay as they were.
+   */
+  describe('a read another site sent', () => {
+    const askWith = async (method: string, path: string, cookie: string, headers: Record<string, string>): Promise<Response> => {
+      inner().rateCounts.clear();
+      return fetch(`${base}${path}`, { method, headers: { cookie: `lynox_session=${cookie}`, ...headers } });
+    };
+
+    it('refuses a mandate\'s GET and HEAD from another site and a sibling host, and writes no row', async () => {
+      for (const method of ['GET', 'HEAD']) {
+        for (const headers of [{ 'Sec-Fetch-Site': 'cross-site' }, { 'Sec-Fetch-Site': 'same-site' }, { Origin: 'https://evil.example' }]) {
+          const res = await askWith(method, '/api/threads', mandateCookie, headers);
+          await res.arrayBuffer();
+          expect(res.status, `${method} ${JSON.stringify(headers)}`).toBe(403);
+        }
+      }
+      expect(newReadRows()).toHaveLength(0);
+    });
+
+    it('refuses it for every GET route a mandate reaches, before the trail is asked', async () => {
+      const table = api.routeStancesForTesting().filter((r) => r.method === 'GET' && r.scope === 'user' && r.path !== '/api/google/callback' && r.path !== '/api/oauth/callback');
+      expect(table.filter((r) => r.stance?.kind === 'reads').length).toBeGreaterThan(50);
+      const answered: string[] = [];
+      for (const r of table) {
+        const res = await askWith('GET', r.path.replace(/:[^/]+/g, 'x1'), mandateCookie, { 'Sec-Fetch-Site': 'cross-site' });
+        // This check's refusal, not another 403 (an `owner-only` route refuses a mandate as well).
+        const text = await res.text();
+        if (res.status !== 403 || !text.includes('another site sent this request')) answered.push(`${r.path} → ${String(res.status)}`);
+      }
+      expect(answered).toEqual([]);
+      expect(newReadRows()).toHaveLength(0);
+    }, 60_000);
+
+    it('answers the same read from its own pages and a typed URL, with one row each', async () => {
+      for (const headers of [{ 'Sec-Fetch-Site': 'same-origin' }, { 'Sec-Fetch-Site': 'none' }]) {
+        const res = await askWith('GET', '/api/threads', mandateCookie, headers);
+        await res.arrayBuffer();
+        expect(res.status, JSON.stringify(headers)).toBe(200);
+      }
+      expect(newReadRows()).toHaveLength(2);
+    });
+
+    it('ALLOWED ON PURPOSE: a mandate\'s read with neither Sec-Fetch-Site nor Origin still runs and is recorded', async () => {
+      const res = await askWith('GET', '/api/threads', mandateCookie, {});
+      await res.arrayBuffer();
+      expect(res.status).toBe(200);
+      expect(newReadRows()).toHaveLength(1);
+    });
+
+    it('leaves the owner\'s reads from another site as they were: only a mandate\'s reads write a trail', async () => {
+      const res = await askWith('GET', '/api/threads', ownerCookie, { 'Sec-Fetch-Site': 'cross-site' });
+      await res.arrayBuffer();
+      expect(res.status).toBe(200);
+      expect(newReadRows()).toHaveLength(0);
+    });
+
+    it('lets a link from another site open a Web UI page with a mandate signed in', async () => {
+      // A link in a mail opens a page, not an API route: the Web UI answers it before the check.
+      const shell = vi.fn(async (_req: unknown, res: { writeHead: (s: number) => void; end: (b: string) => void }) => { res.writeHead(200); res.end('shell'); });
+      const ui = inner() as unknown as { webUiHandler: unknown };
+      const kept = ui.webUiHandler;
+      ui.webUiHandler = shell;
+      try {
+        const res = await askWith('GET', '/app/threads/t-7', mandateCookie, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' });
+        expect(res.status).toBe(200);
+        expect(await res.text()).toBe('shell');
+      } finally { ui.webUiHandler = kept; }
+      expect(shell).toHaveBeenCalledTimes(1);
+      expect(newReadRows()).toHaveLength(0);
+    });
+
+    it('answers a refused navigation to an API route as a sentence, and writes no row', async () => {
+      const res = await askWith('GET', '/api/threads', mandateCookie, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' });
+      expect(res.status).toBe(403);
+      expect(res.headers.get('content-type')).toContain('text/plain');
+      expect(await res.text()).toContain('another site sent this request');
+      expect(newReadRows()).toHaveLength(0);
+    });
+  });
 });

@@ -3,6 +3,7 @@ import { dirname, resolve, basename, join, isAbsolute, relative } from 'node:pat
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
+import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
@@ -41,7 +42,7 @@ interface EditFileInput {
 
 /**
  * Non-isolation (CLI/headless) confinement for a writable path. The documented
- * policy is "ALL paths → ~/.lynox/workspace/": an ABSOLUTE path is reduced to
+ * policy is "ALL paths → the workspace root" (`~/.lynox/workspace/` by default): an ABSOLUTE path is reduced to
  * its basename ("strip leading /"), and a relative path is workspace-relative.
  * But a relative path was previously taken verbatim, so `../apis/x` resolved to
  * ~/.lynox/apis/x and enough `../` escaped ~/.lynox entirely — an arbitrary
@@ -57,7 +58,7 @@ interface EditFileInput {
  * escape check only ever bites a relative `..` or a symlinked component.
  */
 function confineToWorkspace(rawPath: string): string {
-  const workspaceRootRaw = resolve(join(getLynoxDir(), 'workspace'));
+  const workspaceRootRaw = resolve(getWorkspaceRoot());
   const workspaceRoot = existsSync(workspaceRootRaw) ? realpathSync(workspaceRootRaw) : workspaceRootRaw;
   const name = isAbsolute(rawPath) ? basename(rawPath) : rawPath;
   const resolved = resolve(workspaceRoot, name);

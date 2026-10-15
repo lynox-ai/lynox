@@ -101,10 +101,10 @@ npx @lynox-ai/core
 git clone https://github.com/lynox-ai/lynox.git
 cd lynox && pnpm install
 pnpm run build
-node dist/index.js --http-api          # engine HTTP API on :3100
+LYNOX_ALLOWED_ORIGINS=http://localhost:5173 node dist/index.js --http-api   # engine HTTP API on :3100; trusts the dev UI's port
 
 # In another terminal:
-cd packages/web-ui && pnpm run dev     # web UI on :5173, talks to :3100
+cd packages/web-ui && VITE_ENGINE_URL=http://localhost:3100 pnpm run dev   # web UI on :5173, proxies /api to :3100
 ```
 
 `pnpm run dev` from the repo root fires the Docker installer wizard — that's the same path as `npx @lynox-ai/core` (good for testing the installer itself). To actually run lynox from source, use the engine + web-ui combo above.

@@ -38,7 +38,7 @@ import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
-import { ambientCrossSiteRefusal, crossSiteWriteRefusal, hostRefusal, normalizeAllowedOrigins, LOCALHOST_ORIGIN } from './cross-site-write.js';
+import { ambientCrossSiteRefusal, crossSiteWriteRefusal, droppedAllowedOrigins, droppedAllowedOriginWarning, hostRefusal, isOwnOriginByAddress, normalizeAllowedOrigins } from './cross-site-write.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
@@ -1717,7 +1717,9 @@ export class LynoxHTTPApi {
    * Refuses a request another site made the browser send with a credential the browser attaches
    * on its own; true when it answered. `ambient` is that credential: no secret, or the session
    * cookie. Checked are a GET or HEAD whose route declares an effect (any stance but `reads`; an
-   * admin route declares none and is checked), and every write. Without a secret a write meets
+   * admin route declares none and is checked), every GET or HEAD of a mandate (each one writes its
+   * trail), and every write. Pages outside `/api/` are answered before this and stay reachable by a
+   * link from another site (the Web UI). Without a secret a write meets
    * `crossSiteWriteRefusal` before auth already, which refuses everything this check would; it is
    * not exempted here, because an exemption that changes nothing is one more case to get wrong.
    * The rule is `ambientCrossSiteRefusal`.
@@ -1732,7 +1734,10 @@ export class LynoxHTTPApi {
   ): boolean {
     if (ambient === 'none') return false;
     const safe = method === 'GET' || method === 'HEAD';
-    if (safe && stance?.kind === 'reads') return false;
+    // A read changes nothing, except for a mandate: its every GET leaves a row in its actor trail
+    // (`_recordedMandateRead`, which runs after this check). Another site could otherwise write
+    // reads into that trail which the mandate never made, so a mandate's reads are checked too.
+    if (safe && stance?.kind === 'reads' && !writesMandateTrail(this._principalOf(req))) return false;
     const host = singleHeader(req.headers['host']);
     const refusal = ambientCrossSiteRefusal({
       origin: singleHeader(req.headers['origin']),
@@ -3007,6 +3012,9 @@ export class LynoxHTTPApi {
       if (ALLOWED_IPS.length > 0) {
         process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
       }
+      for (const entry of droppedAllowedOrigins((process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(','))) {
+        process.stderr.write(`${droppedAllowedOriginWarning(entry)}\n`);
+      }
       if (secret && !useTls) {
         process.stderr.write(`⚠ Warning: HTTP API exposed without TLS (LYNOX_ALLOW_PLAIN_HTTP=true). Use a reverse proxy.\n`);
       }
@@ -3126,13 +3134,12 @@ export class LynoxHTTPApi {
       if (handler) { try { await handler(req, res, {}, null); } finally { this._closeTrail(req, res); } return; }
     }
 
-    // CORS — restrict to allowed origins (or allow all for localhost-only mode)
+    // CORS — restrict to allowed origins. Without a secret and without a list, only this server
+    // itself on localhost or its IP address, on its own port: another port is another program.
     const requestOrigin = req.headers['origin'] ?? '';
-    // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
-    const isLocalhostOrigin = LOCALHOST_ORIGIN.test(requestOrigin);
     const corsOrigin = ALLOWED_ORIGINS.length > 0
       ? (requestOrigin !== 'null' && ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
-      : (secret ? '' : (isLocalhostOrigin ? requestOrigin : ''));
+      : (secret ? '' : (isOwnOriginByAddress(requestOrigin, singleHeader(req.headers['host'])) ? requestOrigin : ''));
 
     if (method === 'OPTIONS') {
       res.writeHead(204, {
@@ -3150,8 +3157,8 @@ export class LynoxHTTPApi {
     }
 
     // Without a secret every request below is admin, so a write is accepted from a browser only
-    // where the browser says it came from this server, localhost, or an allowed origin. The rule
-    // and its cases are in `cross-site-write.ts`.
+    // where the browser says it came from this server (by address, on its own port) or an allowed
+    // origin. The rule and its cases are in `cross-site-write.ts`.
     if (!secret) {
       const refusal = crossSiteWriteRefusal({
         method,
@@ -9781,6 +9788,26 @@ export class LynoxHTTPApi {
       this.addCpAdminRoute(to, wrap ? wrap(handler) : handler);
     }
 
+    // The workspace root as the control plane reads it after moving a tenant's workspace to a
+    // volume of its own (P18): read-only, the admin bearer only, and trailed like every request
+    // that bearer makes. Over there a missing field counts as a failed check, so all three are
+    // always present; `workspace_root_is_mount` is null where the mount id cannot be read.
+    this.addCpAdminRoute('GET /api/admin/workspace/status', async (_req, res) => {
+      const { resolveWorkspaceRoot, workspaceLegacyPending, workspaceRootIsMount } = await import('../core/workspace-root.js');
+      let root;
+      try {
+        root = resolveWorkspaceRoot();
+      } catch (err) {
+        errorResponse(res, 500, err instanceof Error ? err.message : String(err), 'workspace_root_unusable');
+        return;
+      }
+      jsonResponse(res, 200, {
+        workspace_root_mode: root.mode,
+        workspace_root_is_mount: workspaceRootIsMount(root.path),
+        workspace_legacy_pending: workspaceLegacyPending(root),
+      });
+    });
+
     // The control plane's list of the account's revoked mandates (§3.5, piece C): the whole list
     // each call, applied idempotently, so a call after a restore heals what the restore undid.
     // A revoke that is new is told to the `onRevoke` listeners, once.
@@ -12343,14 +12370,15 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const dirPath = url.searchParams.get('path') ?? '.';
       const showHidden = url.searchParams.get('hidden') === '1';
+      // A NUL byte is the caller's mistake, not the server's: refused before the filesystem sees it.
+      if (dirPath.includes('\0')) { errorResponse(res, 400, 'Invalid path'); return; }
       try {
         const { readdir, stat, access } = (await import('node:fs/promises'));
         const { join } = await import('node:path');
-        const { getWorkspaceDir } = await import('../core/workspace.js');
-        const { getLynoxDir } = await import('../core/config.js');
+        const { getFileAreaDir } = await import('../core/workspace.js');
         const { ensureDirSync: ensureDir } = await import('../core/atomic-write.js');
 
-        const base = getWorkspaceDir() ?? join(getLynoxDir(), 'workspace');
+        const base = getFileAreaDir();
         try { await access(base); } catch { ensureDir(base); }
         // Resolve + reject traversal AND symlink-escape (realpath) — the same
         // confinement /read, /download and DELETE apply via resolveWorkspacePath.
@@ -12360,14 +12388,28 @@ export class LynoxHTTPApi {
         if (target === null) { errorResponse(res, 403, 'Outside workspace'); return; }
         const dirEntries = await readdir(target, { withFileTypes: true });
         const filtered = dirEntries.filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
-        const entries = await Promise.all(filtered.map(async e => ({
-          name: e.name,
-          isDirectory: e.isDirectory(),
-          size: e.isFile() ? (await stat(join(target, e.name))).size : 0,
-        })));
-        jsonResponse(res, 200, { path: dirPath, entries });
-      } catch {
-        jsonResponse(res, 200, { path: dirPath, entries: [] });
+        const listed = await Promise.all(filtered.map(async e => {
+          let size = 0;
+          if (e.isFile()) {
+            try {
+              size = (await stat(join(target, e.name))).size;
+            } catch (err) {
+              // Removed between readdir and stat: it is gone, so it is not listed.
+              if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+              throw err;
+            }
+          }
+          return { name: e.name, isDirectory: e.isDirectory(), size };
+        }));
+        jsonResponse(res, 200, { path: dirPath, entries: listed.filter(e => e !== null) });
+      } catch (err) {
+        // An empty 200 here read as "the folder is empty" while the files were there, so a
+        // failure is answered as one.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') { errorResponse(res, 404, 'Directory not found'); return; }
+        if (code === 'ENOTDIR') { errorResponse(res, 400, 'Not a directory'); return; }
+        console.error(`[lynox] GET /api/files failed: ${code ?? (err instanceof Error ? err.message : String(err))}`);
+        errorResponse(res, 500, 'Could not read the directory');
       }
     }, free('creates the workspace directory when it is missing, and only reads otherwise'));
 
