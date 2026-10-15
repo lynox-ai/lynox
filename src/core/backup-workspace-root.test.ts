@@ -56,7 +56,7 @@ describe('backup — the workspace root', () => {
     rmSync(ws('http-api/a.txt'));
     writeFileSync(ws('http-api/deep/er/b.bin'), 'changed');
     writeFileSync(ws('http-api/later.txt'), 'ZZ-later');
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.error).toBeUndefined();
     expect(restored.success).toBe(true);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a');
@@ -134,7 +134,7 @@ describe('backup — the workspace root', () => {
     // A directory where the backup has a file: the workspace set fails in phase 1.
     rmSync(ws('http-api/a.txt'));
     mkdirSync(ws('http-api/a.txt'));
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(JSON.parse(readFileSync(join(data, 'config.json'), 'utf8'))).toEqual({ default_tier: 'deep' });
     expect(existsSync(join(data, 'config.json.restore-staging'))).toBe(false);
@@ -148,7 +148,7 @@ describe('backup — the workspace root', () => {
     expect(created.success).toBe(true);
     writeFileSync(ws('http-api/a.txt'), 'ZZ-a-live');
     mkdirSync(join(data, 'config.json.restore-staging'));
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
@@ -164,7 +164,7 @@ describe('backup — the workspace root', () => {
     rmSync(join(data, 'config.json'));
     mkdirSync(join(data, 'config.json'));
     writeFileSync(join(data, 'config.json', 'keep'), 'x');
-    const restored = await manager().restoreBackup(created.path);
+    const restored = await manager().restoreBackup(created.path, { allowUnverified: true });
     expect(restored.success).toBe(false);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);

@@ -3,12 +3,14 @@
  * Key derived from LYNOX_VAULT_KEY via HKDF (same pattern as run-history.ts).
  */
 
-import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { hkdfSync, randomBytes, createCipheriv, createDecipheriv, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 
 const BACKUP_HKDF_INFO = 'lynox-backup-encryption';
 const BACKUP_HKDF_SALT = 'lynox-backup';
+/** A second key from the same vault key: the manifest's MAC never shares a key with the files' cipher. */
+const MANIFEST_HKDF_INFO = 'lynox-backup-manifest-auth';
 
 /** File header: 'NBAK' + version byte (for future format changes). */
 const FILE_MAGIC = Buffer.from('NBAK');
@@ -23,6 +25,36 @@ export interface EncryptedFileMetadata {
 /** Derive a backup-specific encryption key from the vault key. */
 export function deriveBackupKey(vaultKey: string): Buffer {
   return Buffer.from(hkdfSync('sha256', vaultKey, BACKUP_HKDF_SALT, BACKUP_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
+
+/** Derive the key that authenticates a backup's manifest. */
+export function deriveManifestKey(vaultKey: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', vaultKey, BACKUP_HKDF_SALT, MANIFEST_HKDF_INFO, CRYPTO_KEY_LENGTH));
+}
+
+/** JSON with object keys sorted at every level, so the MAC does not depend on key order or spacing. */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** HMAC-SHA256 over the canonical manifest, its own `auth` field left out. Hex. */
+export function manifestMac(manifest: Record<string, unknown>, key: Buffer): string {
+  const { auth: _auth, ...signed } = manifest;
+  return createHmac('sha256', key).update(canonicalJson(signed)).digest('hex');
+}
+
+/** Whether `mac` is the manifest's MAC under `key`, compared in constant time. */
+export function manifestMacMatches(manifest: Record<string, unknown>, mac: string, key: Buffer): boolean {
+  const expected = Buffer.from(manifestMac(manifest, key), 'hex');
+  const given = Buffer.from(mac, 'hex');
+  return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
 /**

@@ -11,7 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdir
 import { dirname, join, relative } from 'node:path';
 import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, encryptFile, decryptFile, decryptFileToBuffer, isEncryptedBackupFile } from './backup-crypto.js';
+import { deriveBackupKey, deriveManifestKey, encryptFile, decryptFile, decryptFileToBuffer, isEncryptedBackupFile, manifestMac, manifestMacMatches } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
@@ -56,7 +56,36 @@ export interface BackupManifest {
   encrypted: boolean;
   files: BackupFileEntry[];
   checksum: string;
+  /**
+   * Proof of origin: an HMAC over the rest of the manifest, keyed from the vault key. Written by
+   * every engine that has a vault key, encrypted backup or not. The manifest carries every file's
+   * checksum, so the MAC covers the files' bytes as well as their list and the `encrypted` flag.
+   */
+  auth?: { alg: 'hmac-sha256'; mac: string } | undefined;
 }
+
+/**
+ * Whether a backup's origin could be shown before a restore. `verified`: its MAC matches this
+ * vault key. `none`: it carries no MAC (made before backups were signed, or the MAC was removed).
+ * `mismatch`: it carries one that does not match (changed, or made under another vault key).
+ * `no-key`: this engine has no vault key to check with.
+ */
+export type BackupProvenance = 'verified' | 'none' | 'mismatch' | 'no-key';
+
+export interface RestoreOptions {
+  /**
+   * Restore although the backup's origin is not shown. Every restore path needs a way to say this
+   * (the HTTP route, the web UI, this API), or old backups and backups of a keyless engine could
+   * never be restored at all.
+   */
+  allowUnverified?: boolean | undefined;
+}
+
+const UNVERIFIED_REASON: Record<Exclude<BackupProvenance, 'verified'>, string> = {
+  none: 'This backup has no proof of origin: it was made before backups were signed, or its signature was removed.',
+  mismatch: 'This backup\'s proof of origin does not match this vault key: the backup was changed, or it was made under another vault key.',
+  'no-key': 'No vault key is available, so this backup\'s origin cannot be checked.',
+};
 
 export interface BackupResult {
   success: boolean;
@@ -78,6 +107,9 @@ export interface RestoreResult {
   files_restored: number;
   duration_ms: number;
   error?: string | undefined;
+  /** Set when the restore was refused because the backup's origin is not shown; confirm with `allowUnverified`. */
+  code?: 'unverified_backup' | undefined;
+  provenance?: BackupProvenance | undefined;
 }
 
 export interface BackupConfig {
@@ -282,6 +314,10 @@ export class BackupManager {
         files,
         checksum,
       };
+      // Truthy, not `!== null`, as in the constructor: an empty string is not key material.
+      if (this.vaultKey) {
+        manifest.auth = { alg: 'hmac-sha256', mac: manifestMac({ ...manifest }, deriveManifestKey(this.vaultKey)) };
+      }
 
       writeFileSync(join(tmpDir, 'manifest.json'), JSON.stringify(manifest, null, 2), { mode: 0o600 });
 
@@ -409,16 +445,16 @@ export class BackupManager {
 
   // ── Restore ──
 
-  async restoreBackup(backupPath: string): Promise<RestoreResult> {
+  async restoreBackup(backupPath: string, options: RestoreOptions = {}): Promise<RestoreResult> {
     this._running++;
     try {
-      return await this._restoreBackup(backupPath);
+      return await this._restoreBackup(backupPath, options);
     } finally {
       this._running--;
     }
   }
 
-  private async _restoreBackup(backupPath: string): Promise<RestoreResult> {
+  private async _restoreBackup(backupPath: string, options: RestoreOptions): Promise<RestoreResult> {
     const start = Date.now();
 
     // Load and validate manifest
@@ -441,11 +477,35 @@ export class BackupManager {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup manifest names a path outside the backup — refusing to restore: ${unrestorable}` };
     }
 
+    // The manifest decides what is written and whether it is decrypted, and anyone who can write
+    // into the backup (or the Drive folder it came from) can write the manifest. Without a MAC
+    // under this vault key, the restore needs the caller's explicit word.
+    const provenance = this.provenanceOf(manifest);
+    if (provenance !== 'verified' && options.allowUnverified !== true) {
+      return {
+        success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start,
+        code: 'unverified_backup', provenance,
+        error: `${UNVERIFIED_REASON[provenance]} Restore it only if you know where it came from, and confirm the restore without proof of origin.`,
+      };
+    }
+
     // Refuse to restore an encrypted backup with no key: the decrypt branch
     // below would be skipped and the raw ciphertext copied OVER the live
     // plaintext DBs, silently corrupting them. Fail before touching anything.
     if (manifest.encrypted && !this.vaultKey) {
       return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: 'Backup is encrypted but no vault key is available — refusing to restore (would overwrite live data with ciphertext).' };
+    }
+
+    // An encrypted backup holds ciphertext only. A plaintext file in it would be copied as it is,
+    // and putting one there needs no key, so one refuses the whole restore. (Its manifest can
+    // also say `encrypted: false`; that is what the MAC above is for.)
+    if (manifest.encrypted) {
+      const plain = manifest.files.find(
+        e => e.type !== 'directory' && existsSync(join(backupPath, e.path)) && !isEncryptedBackupFile(join(backupPath, e.path)),
+      );
+      if (plain !== undefined) {
+        return { success: false, pre_restore_backup_path: '', files_restored: 0, duration_ms: Date.now() - start, error: `Backup is encrypted but holds a file that is not — refusing to restore: ${plain.path}` };
+      }
     }
 
     // Verify the backup's own integrity (size + checksum + SQLite integrity)
@@ -584,6 +644,15 @@ export class BackupManager {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  private provenanceOf(manifest: BackupManifest): BackupProvenance {
+    if (!this.vaultKey) return 'no-key';
+    const auth: unknown = manifest.auth;
+    if (auth === undefined) return 'none';
+    const mac = (auth as { alg?: unknown; mac?: unknown } | null)?.mac;
+    if ((auth as { alg?: unknown } | null)?.alg !== 'hmac-sha256' || typeof mac !== 'string') return 'mismatch';
+    return manifestMacMatches(manifest as unknown as Record<string, unknown>, mac, deriveManifestKey(this.vaultKey)) ? 'verified' : 'mismatch';
   }
 
   // ── List ──
