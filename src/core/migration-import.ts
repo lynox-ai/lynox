@@ -27,6 +27,8 @@ import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
+import { leaseWorkspaceFor } from './workspace-access.js';
+import { removeStaleStages, stageIn, statEntry, type StageEntry } from './workspace-fd.js';
 import type { ExportedSecret } from './migration-export.js';
 import {
   generateEphemeralKeypair,
@@ -69,6 +71,11 @@ export interface ImportVerification {
   mergeLedgersImported: number;
   /** Files restored into the generic portable directories (`apis/`, `workspace/`). */
   portableDirFilesImported: number;
+  /**
+   * Workspace entries of the bundle that were not written (`workspace/...`), because a path on
+   * the way is a file, a link or a directory where the bundle has a file. Absent when none.
+   */
+  portableDirSkipped?: string[] | undefined;
   configApplied: boolean;
 }
 
@@ -430,10 +437,12 @@ export class MigrationImporter {
       const base = c.meta.name.split(':')[0]!;
       portableByDir.set(base, [...(portableByDir.get(base) ?? []), c]);
     }
+    const portableSkipped: string[] = [];
     for (const [dirName, parts] of portableByDir) {
       onProgress?.({ phase: 'restoring', currentChunk: parts[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: dirName });
-      verification.portableDirFilesImported += this.restorePortableDir(parts);
+      verification.portableDirFilesImported += this.restorePortableDir(parts, portableSkipped);
     }
+    if (portableSkipped.length > 0) verification.portableDirSkipped = portableSkipped;
 
     // 5. Secrets (most sensitive — last)
     for (const { meta, data } of chunksByType.secrets) {
@@ -804,7 +813,7 @@ export class MigrationImporter {
    * machine, `writeFileSync` follows symlinks, `resolve()` is purely lexical, and
    * `mkdirSync(recursive)` no-ops on an existing link.
    */
-  private restorePortableDir(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+  private restorePortableDir(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>, skipped: string[]): number {
     // Sum the REASSEMBLED payload, not individual chunks: `encryptChunk` already caps each
     // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit — the check
     // was unreachable. The bundle is base64, so the ceiling is expressed on the encoded
@@ -826,6 +835,8 @@ export class MigrationImporter {
     if (entries.length > MAX_PORTABLE_DIR_ENTRIES) {
       throw new Error(`Too many entries in ${bundle.dir}: ${String(entries.length)} > ${String(MAX_PORTABLE_DIR_ENTRIES)}`);
     }
+
+    if (bundle.dir === 'workspace') return this.restoreWorkspace(entries, skipped);
 
     const root = join(this.lynoxDir, bundle.dir);
     const rootPrefix = root + sep;
@@ -874,6 +885,59 @@ export class MigrationImporter {
       written++;
     }
     return written;
+  }
+
+  /**
+   * The workspace bundle, written through the root's anchor: the root may live outside the data
+   * dir. Every file is staged inside the root and then renamed over its target, so a link on the
+   * way is refused and a link at the target is replaced, never written through; files the
+   * bundle does not carry stay. An entry whose path the root cannot take as a file — a file or
+   * a link where a directory belongs, a directory where the file goes, or a path the bundle
+   * also uses as a directory — is skipped and named, as the by-name import did per entry.
+   */
+  private restoreWorkspace(entries: Array<[string, unknown]>, skipped: string[]): number {
+    const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
+    if (lease === null) throw new Error('Refusing to restore workspace: the workspace root could not be made.');
+    try {
+      const anchor = lease.access.anchor;
+      const fileKeys = new Set<string>();
+      const dirKeys = new Set<string>();
+      const accepted: Array<[string, string]> = [];
+      const takes = (rel: string): boolean => {
+        const parts = rel.split('/');
+        for (let i = 1; i < parts.length; i++) {
+          const prefix = parts.slice(0, i).join('/');
+          if (fileKeys.has(prefix)) return false;
+          if (dirKeys.has(prefix)) continue;
+          const st = statEntry(anchor, prefix);
+          if (st === null) return !dirKeys.has(rel);   // absent: everything below is made fresh
+          if (st.type !== 'dir') return false;
+        }
+        if (dirKeys.has(rel)) return false;
+        return statEntry(anchor, rel)?.type !== 'dir';
+      };
+      for (const [rel, b64] of entries) {
+        if (typeof b64 !== 'string') continue;
+        if (!isPortableDirEntryName(rel)) continue;
+        let ok: boolean;
+        try { ok = takes(rel); } catch { ok = false; }   // a link on the way: refused by the anchor
+        if (!ok) { skipped.push(`workspace/${rel}`); continue; }
+        fileKeys.add(rel);
+        const parts = rel.split('/');
+        for (let i = 1; i < parts.length; i++) dirKeys.add(parts.slice(0, i).join('/'));
+        accepted.push([rel, b64]);
+      }
+      if (accepted.length === 0) return 0;
+      removeStaleStages(anchor, '');
+      const source = function* (): Iterable<StageEntry> {
+        for (const [rel, b64] of accepted) yield { rel, data: Buffer.from(b64, 'base64') };
+      };
+      const staged = stageIn(anchor, '', source(), { fileMode: FILE_MODE_PRIVATE, dirMode: DIR_MODE_PRIVATE });
+      staged.commit();
+      return staged.files;
+    } finally {
+      lease.release();
+    }
   }
 
   /**

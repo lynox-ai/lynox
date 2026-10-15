@@ -203,6 +203,11 @@ describe('portable directories survive a migration', () => {
    * instead, which tests a list, not the importer, and left the guard uncovered.
    */
   function importCrafted(dstDir: string, dir: unknown, files: Record<string, string>): void {
+    importCraftedWith(dstDir, dir, files);
+  }
+
+  /** As `importCrafted`, returning the verification (null when the import refused). */
+  function importCraftedWith(dstDir: string, dir: unknown, files: Record<string, string>): ReturnType<MigrationImporter['restore']> | null {
     const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_KEY });
     const transferKey = handshake(importer);
     const data = Buffer.from(JSON.stringify({ dir, files }), 'utf-8');
@@ -214,7 +219,7 @@ describe('portable directories survive a migration', () => {
     const manifestHash = computeManifestHash(base);
     importer.setManifest({ ...base, manifestHash });
     importer.receiveChunk(encryptChunk(data, transferKey, 0, manifestHash));
-    try { importer.restore(); } catch { /* a refusal is a pass here; the assertions check disk */ }
+    try { return importer.restore(); } catch { return null; /* a refusal is a pass here; the assertions check disk */ }
   }
 
   it('refuses an ANCESTOR symlink, not just one at the target itself', () => {
@@ -250,6 +255,39 @@ describe('portable directories survive a migration', () => {
     expect(existsSync(join(outside, 'after.txt'))).toBe(false);
     // …and a legitimate sibling in the same bundle still lands, so the refusal is scoped.
     expect(readFileSync(join(dstDir, 'apis', 'ok.txt'), 'utf-8')).toBe('FINE');
+  });
+
+  it('workspace: refuses an ancestor symlink and a file on the way, names them, and lands the rest (P18 D6)', () => {
+    const dstDir = tmp('lynox-pdw-dst-');
+    const outside = tmp('lynox-pdw-out-');
+    mkdirSync(join(dstDir, 'workspace'), { recursive: true });
+    symlinkSync(outside, join(dstDir, 'workspace', 'sub'));
+    writeFileSync(join(dstDir, 'workspace', 'afile'), 'live');
+    mkdirSync(join(dstDir, 'workspace', 'adir'));
+    const b64 = (t: string): string => Buffer.from(t, 'utf-8').toString('base64');
+    const importer = importCraftedWith(dstDir, 'workspace', {
+      'sub/deeper/pwn.txt': b64('OWNED'),
+      'afile/x.txt': b64('X'),
+      'adir': b64('D'),
+      'ok/fine.txt': b64('FINE'),
+    });
+    expect(existsSync(join(outside, 'deeper', 'pwn.txt'))).toBe(false);
+    expect(readFileSync(join(dstDir, 'workspace', 'afile'), 'utf-8')).toBe('live');
+    expect(readFileSync(join(dstDir, 'workspace', 'ok', 'fine.txt'), 'utf-8')).toBe('FINE');
+    expect([...(importer?.portableDirSkipped ?? [])].sort()).toEqual(['workspace/adir', 'workspace/afile/x.txt', 'workspace/sub/deeper/pwn.txt']);
+  });
+
+  it('workspace: the export names a link it did not carry (P18 D6)', () => {
+    const srcDir = tmp('lynox-pdwe-src-');
+    const outside = tmp('lynox-pdwe-out-');
+    mkdirSync(join(srcDir, 'workspace'), { recursive: true });
+    writeFileSync(join(outside, 'secret.txt'), 'outside');
+    symlinkSync(join(outside, 'secret.txt'), join(srcDir, 'workspace', 'link'));
+    writeFileSync(join(srcDir, 'workspace', 'a.txt'), 'A');
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY });
+    const importer = new MigrationImporter({ lynoxDir: tmp('lynox-pdwe-dst-'), vaultKey: DST_KEY });
+    const result = exporter.export(handshake(importer));
+    expect(result.skipped).toEqual(['workspace/link']);
   });
 
   it('refuses a bundle naming a directory this build does not declare portable', () => {

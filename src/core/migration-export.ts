@@ -28,6 +28,8 @@ import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
+import { leaseWorkspaceFor } from './workspace-access.js';
+import { copyOut } from './workspace-fd.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -62,6 +64,11 @@ export type ProgressCallback = (progress: ExportProgress) => void;
 export interface ExportResult {
   manifest: MigrationManifest;
   chunks: EncryptedChunk[];
+  /**
+   * Workspace entries not in the export (`workspace/...`): links and special files (never
+   * followed) and names that are not valid UTF-8. Absent when everything was carried.
+   */
+  skipped?: string[] | undefined;
 }
 
 interface PlaintextChunk {
@@ -137,6 +144,8 @@ export class MigrationExporter {
    * exactly how a cap ends up shipping untested.
    */
   private readonly portableDirLimits: { maxEntries: number; maxBytes: number } | undefined;
+  /** Workspace entries the current export left out; reset per `export()`. */
+  private skipped: string[] = [];
 
   constructor(options?: {
     lynoxDir?: string | undefined;
@@ -162,6 +171,7 @@ export class MigrationExporter {
   export(transferKey: Buffer, onProgress?: ProgressCallback | undefined): ExportResult {
     // Phase 1: Collect plaintext chunks
     const plaintextChunks: PlaintextChunk[] = [];
+    this.skipped = [];
 
     onProgress?.({ phase: 'collecting', currentChunk: 0, totalChunks: 0, currentName: 'secrets' });
 
@@ -243,7 +253,7 @@ export class MigrationExporter {
 
     onProgress?.({ phase: 'done', currentChunk: plaintextChunks.length, totalChunks: plaintextChunks.length, currentName: '' });
 
-    return { manifest, chunks: encryptedChunks };
+    return { manifest, chunks: encryptedChunks, ...(this.skipped.length > 0 ? { skipped: [...this.skipped] } : {}) };
   }
 
   /**
@@ -488,6 +498,7 @@ export class MigrationExporter {
    * planted here would otherwise carry whatever it points at out inside the bundle.
    */
   private collectPortableDir(dirName: string): PlaintextChunk[] {
+    if (dirName === 'workspace') return this.collectWorkspace();
     const root = join(this.lynoxDir, dirName);
     if (!existsSync(root)) return [];
 
@@ -538,6 +549,43 @@ export class MigrationExporter {
       Buffer.from(JSON.stringify({ dir: dirName, files }), 'utf-8'),
       'portable_dir',
       dirName,
+    );
+  }
+
+  /**
+   * The workspace, read through its root's anchor: the root may live outside the data dir. Same
+   * bundle as every portable directory (`dir: 'workspace'`), the same name rule and caps. A
+   * link, a special file or a name that is not UTF-8 is skipped and named in `skipped`; a mount
+   * below the root or a file that cannot be read fails the export, never a silent gap.
+   */
+  private collectWorkspace(): PlaintextChunk[] {
+    const lease = leaseWorkspaceFor(this.lynoxDir);
+    if (lease === null) return [];
+    const maxEntries = this.portableDirLimits?.maxEntries ?? MAX_PORTABLE_DIR_ENTRIES;
+    const maxBytes = this.portableDirLimits?.maxBytes ?? MAX_PORTABLE_DIR_BYTES;
+    const files: Record<string, string> = {};
+    let count = 0;
+    let total = 0;
+    const tooBig = new Error(
+      `workspace/ exceeds the migration limits (${String(maxEntries)} entries / ${String(maxBytes)} bytes) — refusing to ship a partial copy of it`,
+    );
+    try {
+      const copied = copyOut(lease.access.anchor, '', (rel, fd, size) => {
+        if (!isPortableDirEntryName(rel)) return;
+        if (count >= maxEntries || total + size > maxBytes) throw tooBig;
+        files[rel] = readFileSync(fd).toString('base64');
+        count++;
+        total += size;
+      });
+      this.skipped.push(...copied.skipped.map(rel => `workspace/${rel}`));
+    } finally {
+      lease.release();
+    }
+    if (count === 0) return [];
+    return splitIntoChunks(
+      Buffer.from(JSON.stringify({ dir: 'workspace', files }), 'utf-8'),
+      'portable_dir',
+      'workspace',
     );
   }
 
