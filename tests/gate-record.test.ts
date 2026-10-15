@@ -1883,3 +1883,42 @@ describe('proseOpenCountLines — a hyphen before the number', () => {
     expect(proseOpenCountLines('See step 2 filed under docs.')).toEqual([1]);
   });
 });
+
+describe('proseOpenCountLines — the markdown link strip and long mark runs', () => {
+  // The count is assembled, so this file carries no literal count for a text check to read.
+  const W = 'findings';
+  const V = 'filed';
+  it('reads a count next to a long mark run, which is cut to 30 marks', () => {
+    expect(proseOpenCountLines(`2 ${W} ${V} a${'\u0301'.repeat(500)}`)).toEqual([1]);
+  });
+
+  it('takes out one link target, so a count around a link still reads', () => {
+    expect(proseOpenCountLines(`The round left [2](https://example.invalid/a) ${W} ${V}.`)).toEqual([1]);
+    expect(proseOpenCountLines('See [the PR](https://example.invalid/pr) and [docs](https://example.invalid/d).')).toEqual([]);
+  });
+
+  it('ends a target where the next link begins, not at a `)` further on', () => {
+    // An unclosed target stops at the next `](`, so the count after it stays.
+    expect(proseOpenCountLines(`[a](b [2](https://example.invalid/c) ${W} ${V}`)).toEqual([1]);
+  });
+
+  it('still takes out a target with a title', () => {
+    expect(proseOpenCountLines(`The round left [2](https://example.invalid/a "the round") ${W} ${V}.`)).toEqual([1]);
+    expect(proseOpenCountLines('See [docs](https://example.invalid/d "Docs") here.')).toEqual([]);
+  });
+
+  it('keeps a `]` inside a target, as CommonMark does, so the count around the link still reads', () => {
+    expect(proseOpenCountLines(`2 [${W}](https://example.invalid/a]b) ${V}`)).toEqual([1]);
+  });
+
+  // Long runs of every markup shape the reader takes apart, each read in one pass. The last two
+  // are combining marks, raw and as entities: runs of them are cut to stream-safe length.
+  it.each(['](', '[x](y', '](a]', '<a ', '&#x1', '&#1', '**2**', '<!--', '1 findings ', '\\',
+    '\u0316\u0301', '&#x316;&#x301;', '\uFF9E\u0316', '\u0301\uFF9E\u0316', '\uFF9F\u0301',
+    '&#xFF9E;&#x316;', '](a "', '](a "b" ', ']](((', '](]]('])(
+    'reads 40,000 × %j in one pass', (shape) => {
+      const start = performance.now();
+      proseOpenCountLines(shape.repeat(40_000));
+      expect(performance.now() - start).toBeLessThan(1_500);
+    });
+});

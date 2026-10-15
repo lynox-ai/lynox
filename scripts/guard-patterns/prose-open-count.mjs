@@ -37,6 +37,14 @@ export const PROSE_OPEN_COUNT = new RegExp([
 /** A line that quotes the form on purpose (a PR about this check) opts out, as in public-repo-guard. */
 export const PROSE_ALLOW = ['public-repo-guard', 'allow'].join(':');
 
+/**
+ * At most 30 combining marks in a row, as in Unicode's stream-safe text format (UAX #15): no
+ * script needs more, and a mark run is never part of a count. Applied before every NFKC fold.
+ * "Mark" includes the four characters outside \p{M} whose NFKC form begins with one
+ * (U+0E33, U+0EB3, U+FF9E, U+FF9F) — the fold turns them into marks.
+ */
+const streamSafe = (s) => s.replace(/[\p{M}\u0E33\u0EB3\uFF9E\uFF9F]{31,}/gu, (run) => Array.from(run).slice(0, 30).join(''));
+
 /** An entity's character; one outside Unicode is a space, never a thrown RangeError. */
 const codePoint = (n) => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ');
 
@@ -46,7 +54,7 @@ export function proseOpenCountLines(body) {
   // HTML comment, which `extractRecord` strips — then hid every sentence after it. The record's own
   // lines need no exemption: a valid one carries no open count, and one that does is refused by
   // the field rule anyway, so the cost of reading it twice is a second message, never a false red.
-  const lines = String(body ?? '').normalize('NFKC').split('\n');
+  const lines = streamSafe(String(body ?? '')).normalize('NFKC').split('\n');
   const hits = [];
   // Per PARAGRAPH, not per line: a soft line break renders as a space, so `2` at the end of one
   // line and `findings filed` on the next read as a count. Markdown that renders as plain text
@@ -72,9 +80,11 @@ export function proseOpenCountLines(body) {
     // Again after decoding: an entity can name a fullwidth digit, and digits of other scripts go
     // to ASCII. Optional, because the fold can also glue a decoded character onto a count
     // (`<n> filed&#xFF12;`), which unfolded still reads.
-    return (fold ? decoded.normalize('NFKC').replace(/(?![0-9])\p{Nd}/gu, asciiDigit) : decoded)
+    return (fold ? streamSafe(decoded).normalize('NFKC').replace(/(?![0-9])\p{Nd}/gu, asciiDigit) : decoded)
       .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
-      .replace(/\]\([^)]*\)/g, '')
+      // A link target ends at its `)` or where the next link begins (`](`), whichever comes
+      // first: one link, not everything up to a `)` further on. A `]` inside a target is kept.
+      .replace(/\]\((?:[^)\]]|\](?!\())*\)/g, '')
       .replace(/[*_`[\]]/g, '');
   };
   const flush = () => {
