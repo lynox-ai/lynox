@@ -45,6 +45,22 @@ export const PROSE_ALLOW = ['public-repo-guard', 'allow'].join(':');
  */
 const streamSafe = (s) => s.replace(/[\p{M}\u0E33\u0EB3\uFF9E\uFF9F]{31,}/gu, (run) => Array.from(run).slice(0, 30).join(''));
 
+/**
+ * A markdown link's `](…)` as CommonMark reads it: a target without whitespace (or in `<…>`),
+ * then optionally a title in `"…"`, `'…'` or `(…)`, then `)`. A target also ends where the next
+ * link begins (`](`), and a `]` inside it is kept. Text in parentheses that does not have this
+ * shape is not a link: GitHub shows it, so it is read. The title is in group 1, 2 or 3.
+ */
+/**
+ * The bounded link strip this scan used before reading links as CommonMark: everything from `](`
+ * to the next `)` or `](`. Kept as a second reading — where the CommonMark reading does not see a
+ * link GitHub still renders as one (a `<` inside a target, a Unicode space NFKC turned into a
+ * space), this one does, so no count the scan found before is lost.
+ */
+const LINK_BOUNDED = /\]\((?:[^)\]]|\](?!\())*\)/g;
+
+const LINK = /\]\((?:<[^<>\n]*>|(?:[^\s)\]<]|\](?!\())*)(?:\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|\(((?:\\.|[^()\\])*)\)))?\s*\)/g;
+
 /** An entity's character; one outside Unicode is a space, never a thrown RangeError. */
 const codePoint = (n) => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : ' ');
 
@@ -71,7 +87,7 @@ export function proseOpenCountLines(body) {
     while (/\p{Nd}/u.test(String.fromCodePoint(start - 1))) start -= 1;
     return String((ch.codePointAt(0) - start) % 10);
   };
-  const readable = (raw, fold) => {
+  const readable = (raw, fold, link) => {
     const decoded = raw
       .replace(/<\/?[A-Za-z!][^<>]*>/g, ' ')
       .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(Number.parseInt(h, 16)))
@@ -82,18 +98,22 @@ export function proseOpenCountLines(body) {
     // (`<n> filed&#xFF12;`), which unfolded still reads.
     return (fold ? streamSafe(decoded).normalize('NFKC').replace(/(?![0-9])\p{Nd}/gu, asciiDigit) : decoded)
       .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
-      // A link target ends at its `)` or where the next link begins (`](`), whichever comes
-      // first: one link, not everything up to a `)` further on. A `]` inside a target is kept.
-      .replace(/\]\((?:[^)\]]|\](?!\())*\)/g, '')
+      // A link as rendered: target and title go, the link text stays (see LINK).
+      .replace(link, '')
       .replace(/[*_`[\]]/g, '');
   };
   const flush = () => {
     const joined = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ');
-    // Read twice. As RENDERED, a comment is a tag and goes — `2 findings <!-- x --> filed` shows
+    // Read as rendered and as published. As RENDERED, a comment is a tag and goes — `<n> findings <!-- x --> filed` shows
     // the count. As PUBLISHED, its markers go and its text stays — the raw body (API, edit view)
-    // is public, so `<!-- <n> findings filed -->` is too. A count in either reading is a hit.
-    const views = [joined, joined.replace(/<!--|-->/g, ' ')];
-    const hit = views.some((v) => [true, false].some((fold) => PROSE_OPEN_COUNT.test(readable(v, fold))));
+    // is public, so `<!-- <n> findings filed -->` is too. A count in any view is a hit.
+    // A link's title is not shown in the text, but the raw body carries it: each title is a view
+    // of its own. Never joined — two titles must not form one count.
+    const titles = [...joined.matchAll(LINK)].map((m) => m[1] ?? m[2] ?? m[3]).filter((t) => t);
+    const views = [joined, joined.replace(/<!--|-->/g, ' '), ...titles];
+    // Every view is read with both link readings (see LINK_BOUNDED), folded and not.
+    const hit = views.some((v) => [true, false].some((fold) => [LINK, LINK_BOUNDED].some((link) =>
+      PROSE_OPEN_COUNT.test(readable(v, fold, link)))));
     if (para.length > 0 && hit) hits.push(para[0].n);
     para = [];
   };
