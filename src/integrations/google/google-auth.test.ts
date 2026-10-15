@@ -1245,6 +1245,44 @@ describe('GoogleAuth', () => {
     });
   });
 
+  // The loopback server listens on a port any page in the browser can reach. Only the redirect
+  // from Google carries the state; nothing else may deliver a code or end the flow.
+  describe('the loopback callback reads the state first', () => {
+    const handlerOf = () => (mockServerInstance as Record<string, unknown>)['_handler'] as (req: unknown, res: unknown) => void;
+
+    it('answers a request without the state, or with another, and the flow goes on', async () => {
+      const store = new Map<string, string>();
+      const vault = { get: (k: string) => store.get(k) ?? null, set: (k: string, v: string) => { store.set(k, v); }, delete: (k: string) => store.delete(k) };
+      const withVault = new GoogleAuth({ clientId: 'loopback-client', clientSecret: 's', vault: vault as unknown as import('../../core/secret-vault.js').SecretVault });
+      const { authUrl, waitForCode } = await withVault.startLocalAuth();
+      const state = new URL(authUrl).searchParams.get('state');
+      const handler = handlerOf();
+      const stray: Array<{ writeHead: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> }> = [];
+      for (const url of ['/?error=access_denied', `/?error=access_denied&state=${state}x`, '/?code=planted', '/?code=planted&state=other', '/favicon.ico']) {
+        const res = { writeHead: vi.fn(), end: vi.fn() };
+        handler({ url }, res);
+        stray.push(res);
+      }
+      for (const res of stray) expect(res.writeHead).toHaveBeenCalledWith(400, expect.anything());
+
+      handler({ url: `/?code=real-code&state=${state}` }, { writeHead: vi.fn(), end: vi.fn() });
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'tok', expires_in: 3600, scope: 'email' }) });
+      await expect(waitForCode()).resolves.toBeUndefined();
+      // The code exchanged is the one Google sent, not a planted one.
+      const body = String((mockFetch.mock.calls.at(-1)?.[1] as { body: URLSearchParams }).body);
+      expect(body).toContain('code=real-code');
+    });
+
+    it('ends the flow on an error Google sends back with the state', async () => {
+      const { authUrl, waitForCode } = await auth.startLocalAuth();
+      const state = new URL(authUrl).searchParams.get('state');
+      const res = { writeHead: vi.fn(), end: vi.fn() };
+      handlerOf()({ url: `/?error=access_denied&state=${state}` }, res);
+      expect(res.writeHead).toHaveBeenCalledWith(200, expect.anything());
+      await expect(waitForCode()).rejects.toThrow('OAuth error: access_denied');
+    });
+  });
+
   describe('requestScope validation', () => {
     it('rejects unknown scope strings', async () => {
       await expect(auth.requestScope(['invalid.scope'])).rejects.toThrow('Unknown Google OAuth scope');

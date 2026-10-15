@@ -143,6 +143,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
 import { getErrorMessage } from './core/utils.js';
+import { normalizeAllowedOrigins } from './server/cross-site-write.js';
 
 /**
  * Resolve the default ORIGIN env var for `--http-api` boot.
@@ -160,8 +161,9 @@ export function resolveDefaultOrigin(opts: {
   port: number;
 }): string | undefined {
   if (opts.origin && opts.origin.length > 0) return undefined; // operator override wins
-  const first = opts.allowedOrigins?.split(',')[0]?.trim();
-  if (first && first.length > 0) return first;
+  // The same reading the server gives the list: an entry that is no http(s) origin does not count.
+  const first = normalizeAllowedOrigins((opts.allowedOrigins ?? '').split(','))[0];
+  if (first !== undefined) return first;
   const scheme = opts.tlsCert && opts.tlsCert.length > 0 ? 'https' : 'http';
   return `${scheme}://localhost:${opts.port}`;
 }

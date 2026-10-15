@@ -38,7 +38,7 @@ import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
-import { ambientCrossSiteRefusal, crossSiteWriteRefusal, hostRefusal, normalizeAllowedOrigins, LOCALHOST_ORIGIN } from './cross-site-write.js';
+import { ambientCrossSiteRefusal, crossSiteWriteRefusal, droppedAllowedOrigins, droppedAllowedOriginWarning, hostRefusal, isOwnOriginByAddress, normalizeAllowedOrigins } from './cross-site-write.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
@@ -3007,6 +3007,9 @@ export class LynoxHTTPApi {
       if (ALLOWED_IPS.length > 0) {
         process.stderr.write(`  IP allowlist: ${ALLOWED_IPS.join(', ')}\n`);
       }
+      for (const entry of droppedAllowedOrigins((process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(','))) {
+        process.stderr.write(`${droppedAllowedOriginWarning(entry)}\n`);
+      }
       if (secret && !useTls) {
         process.stderr.write(`⚠ Warning: HTTP API exposed without TLS (LYNOX_ALLOW_PLAIN_HTTP=true). Use a reverse proxy.\n`);
       }
@@ -3126,13 +3129,12 @@ export class LynoxHTTPApi {
       if (handler) { try { await handler(req, res, {}, null); } finally { this._closeTrail(req, res); } return; }
     }
 
-    // CORS — restrict to allowed origins (or allow all for localhost-only mode)
+    // CORS — restrict to allowed origins. Without a secret and without a list, only this server
+    // itself on localhost or its IP address, on its own port: another port is another program.
     const requestOrigin = req.headers['origin'] ?? '';
-    // Localhost origins accepted in no-auth mode; with auth require explicit LYNOX_ALLOWED_ORIGINS
-    const isLocalhostOrigin = LOCALHOST_ORIGIN.test(requestOrigin);
     const corsOrigin = ALLOWED_ORIGINS.length > 0
       ? (requestOrigin !== 'null' && ALLOWED_ORIGINS.includes(requestOrigin) ? requestOrigin : '')
-      : (secret ? '' : (isLocalhostOrigin ? requestOrigin : ''));
+      : (secret ? '' : (isOwnOriginByAddress(requestOrigin, singleHeader(req.headers['host'])) ? requestOrigin : ''));
 
     if (method === 'OPTIONS') {
       res.writeHead(204, {
