@@ -12286,6 +12286,8 @@ export class LynoxHTTPApi {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const dirPath = url.searchParams.get('path') ?? '.';
       const showHidden = url.searchParams.get('hidden') === '1';
+      // A NUL byte is the caller's mistake, not the server's: refused before the filesystem sees it.
+      if (dirPath.includes('\0')) { errorResponse(res, 400, 'Invalid path'); return; }
       try {
         const { readdir, stat, access } = (await import('node:fs/promises'));
         const { join } = await import('node:path');
