@@ -64,7 +64,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
+import { Agent, readForDiffPreview, safeToolNames, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS, raceRunAbort, TOOL_ABANDONED_MESSAGE } from './agent.js';
 import { InputRequiredError } from './input-required.js';
 import { askUserTool } from '../tools/builtin/ask-user.js';
 import type { WireSnapshot } from './wire-capture.js';
@@ -77,7 +77,7 @@ import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6737,3 +6737,20 @@ describe('diff preview before a write', () => {
     expect(shown).toContain('inside-marker');
   });
 });
+
+describe('readForDiffPreview', () => {
+  it('reads a regular file, and does not follow a symlink at the file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'preview-read-'));
+    try {
+      writeFileSync(join(dir, 'target.txt'), 'outside-target', 'utf-8');
+      writeFileSync(join(dir, 'plain.txt'), 'plain text', 'utf-8');
+      symlinkSync(join(dir, 'target.txt'), join(dir, 'link.txt'));
+      expect(readForDiffPreview(join(dir, 'plain.txt'))).toBe('plain text');
+      expect(readForDiffPreview(join(dir, 'link.txt'))).toBe('');
+      expect(readForDiffPreview(join(dir, 'absent.txt'))).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

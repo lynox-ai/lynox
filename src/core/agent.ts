@@ -244,6 +244,24 @@ function stableStringify(value: unknown): string {
  * repeated in prose is a pointer at code that is free to move, and a note that
  * says "2000" after this becomes 4000 is worse than one that says nothing.
  */
+/**
+ * The text of the file a write would change, for the diff preview, or '' when there is none.
+ * `path` is the path the write tool resolved; it is opened without following a symlink at the
+ * file itself, so a file swapped for a link after that resolution shows nothing rather than
+ * the link's target.
+ */
+export function readForDiffPreview(path: string): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return readFileSync(fd, 'utf-8');
+  } catch {
+    return ''; // absent, unreadable, or a symlink — the preview shows a new file
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
 
 export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
@@ -4150,16 +4168,7 @@ export class Agent implements IAgent {
           // The file the write would change, resolved as write_file and edit_file resolve it.
           // A path they refuse throws here and skips the preview; the tool reports it.
           const target = resolveWritablePath(input.path);
-          let existing = '';
-          let fd: number | undefined;
-          try {
-            fd = openSync(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-            existing = readFileSync(fd, 'utf-8');
-          } catch {
-            // File doesn't exist — will show NEW FILE header
-          } finally {
-            if (fd !== undefined) closeSync(fd);
-          }
+          const existing = readForDiffPreview(target);
           let updated: string | undefined;
           if (tc.name === 'write_file' && typeof input.content === 'string') {
             updated = input.content;
