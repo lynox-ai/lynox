@@ -104,6 +104,7 @@ describe('what it warns about', () => {
   it('not a rule\'s scope or an owner\'s later edit, which share those words', () => {
     for (const line of [
       '- two overrides are not covered by an approval for one;',
+      '- Not covered by an approval for PATCH: a POST that carries a PATCH override.',
       '// an approval for PATCH does not cover a POST with a PATCH override',
       '// a schedule the owner took over is not held again by a later change of the owner\'s own',
       '// the next change to the file bumps its version',

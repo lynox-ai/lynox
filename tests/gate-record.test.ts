@@ -2359,9 +2359,15 @@ describe('gate-record — wording about open work in title, body and commit mess
   });
 
   it('a warning rides along with a refusal, and a clean PR carries none', () => {
+    // Both ways a check can refuse: a field the record check rejects, and a body rule of this wrapper.
     const v = evaluate({ body: `${record({ delta: '' })}\n${PUT_OFF}`, head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
     expect(v.warnings).toHaveLength(1);
+    const id = ['DEF', 'example-row'].join('-');
+    const w = evaluate({ body: `${record()}\nSee ${id}.\n${PUT_OFF}`, head: HEAD, files: CODE });
+    expect(w.ok).toBe(false);
+    expect(w.errors?.join(' ')).toContain('names a register row');
+    expect(w.warnings).toHaveLength(1);
     expect(evaluate({ body: record(), title: 'Fix the thing', commits: [{ sha: 'a1', message: 'Fix' }], head: HEAD, files: CODE }).warnings).toBeUndefined();
   });
 
