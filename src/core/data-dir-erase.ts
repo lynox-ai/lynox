@@ -240,7 +240,7 @@ export interface ScanOptions {
   readonly lstat?: ((path: string) => Stats) | undefined;
   /**
    * The workspace root. Without it the `workspace` row is treated by name, as a plain entry of
-   * the data dir; the erase route always passes it.
+   * the data dir; the erase route passes it whenever the root exists or the engine holds it.
    */
   readonly workspace?: WorkspaceErasure | undefined;
 }
