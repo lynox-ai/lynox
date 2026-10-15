@@ -799,11 +799,24 @@ describe('contract: shell listener', () => {
     expect(r.registry.denials(CRED)?.map((d) => d.reason)).toEqual(['bad-hello']);
   });
 
-  it('closes a refused connection after the linger even if the client keeps it open', async () => {
+  it('closes a refused connection after the linger even if the client keeps its side open', async () => {
     const r = await rig({ limits: { connectionsTotal: 1, replyLingerMs: 30 } });
-    const held = await shellRequest(r, connectHead('a.example:443', null));
-    expect(held.status).toBe(407);
-    await until(closedOf(held.socket));
+    // allowHalfOpen: the client does not answer the proxy's end with its own.
+    const held = connect({ host: '127.0.0.1', port: r.shellPort, allowHalfOpen: true });
+    held.on('error', () => { /* closed by the proxy */ });
+    closers.push(async () => { held.destroy(); });
+    let answer = '';
+    let ended = false;
+    held.on('data', (d: Buffer) => { answer += d.toString('latin1'); });
+    held.on('end', () => { ended = true; });
+    let open = -1;
+    const count = (): void => { r.proxy.server.getConnections((_e, n) => { open = n; }); };
+    held.write(connectHead('a.example:443', null));
+    await until(() => ended);
+    expect(answer).toMatch(/^HTTP\/1\.1 407 /);
+    // The proxy's side goes away although the client never closes its own.
+    await until(() => { count(); return open === 0; });
+    expect(held.destroyed).toBe(false);
     expect((await shellRequest(r, connectHead('a.example:443', null))).status).toBe(407);
   });
 
