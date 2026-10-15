@@ -116,8 +116,10 @@ function refuseEvictionPlaceholder(written: string, realPath: string): void {
 
 /** Resolve + boundary-validate a writable path with the same rules as
  *  write_file: validatePath when workspace isolation is active, else
- *  workspace-relative + escape-symlink rejection. */
-function resolveWritablePath(rawPath: string): string {
+ *  workspace-relative + escape-symlink rejection. Exported for the diff preview
+ *  the agent shows before a write (agent.ts): it reads the file the write would
+ *  change, so it resolves the path exactly as write_file and edit_file do. */
+export function resolveWritablePath(rawPath: string): string {
   if (isWorkspaceActive()) {
     return validatePath(resolve(rawPath), 'write');
   }

@@ -77,7 +77,8 @@ import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { _resetCache as resetWorkspaceCache } from './workspace.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as builtinTools from '../tools/builtin/index.js';
@@ -6680,5 +6681,59 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     const onStream = async (e: unknown): Promise<void> => { if ((e as { type: string }).type === 'tool_result') throw new Error('stream gone'); };
     await run(outward('mail_send', () => 'send', vi.fn().mockResolvedValue('sent')), {}, { principal: MANDATE, auditLog: log, onStream });
     expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+  });
+});
+
+// The diff preview a CLI user sees before a write reads the file the write would change. It
+// resolves the path as write_file and edit_file do, so it never shows a file the write could
+// not reach: outside workspace isolation that is `<data dir>/workspace/<name>`, never the
+// absolute path the model named.
+describe('diff preview before a write', () => {
+  let dataDir: string;
+  let elsewhere: string;
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'preview-data-'));
+    elsewhere = mkdtempSync(join(tmpdir(), 'preview-elsewhere-'));
+    vi.stubEnv('LYNOX_DATA_DIR', dataDir);
+    vi.stubEnv('LYNOX_WORKSPACE', '');
+    resetWorkspaceCache();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetWorkspaceCache();
+    rmSync(dataDir, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  async function previewOf(path: string): Promise<string> {
+    const agent = new Agent({
+      name: 'test',
+      model: 'claude-sonnet-4-6',
+      provider: 'anthropic',
+      tools: [makeTool('write_file', async () => 'written')],
+    });
+    agent.promptUser = vi.fn().mockResolvedValue('Allow');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      await (agent as unknown as { _executeOneInner(tc: unknown): Promise<unknown> })._executeOneInner({
+        type: 'tool_use', id: 'w1', name: 'write_file', input: { path, content: 'new text' },
+      });
+      return stderr.mock.calls.map((c) => String(c[0])).join('');
+    } finally {
+      stderr.mockRestore();
+    }
+  }
+
+  it('does not show a file outside the workspace that the model named by absolute path', async () => {
+    const outside = join(elsewhere, 'credentials.txt');
+    writeFileSync(outside, 'outside-only-marker', 'utf-8');
+    expect(await previewOf(outside)).not.toContain('outside-only-marker');
+  });
+
+  it('shows the file the write resolves to (positive control)', async () => {
+    mkdirSync(join(dataDir, 'workspace'), { recursive: true });
+    writeFileSync(join(dataDir, 'workspace', 'credentials.txt'), 'inside-marker', 'utf-8');
+    const shown = await previewOf(join(elsewhere, 'credentials.txt'));
+    expect(shown).toContain('inside-marker');
   });
 });

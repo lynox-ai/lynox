@@ -508,13 +508,14 @@ describe('ChangesetManager', () => {
       mgr.cleanup();
     });
 
-    it('keeps the backup of a file outside the working directory inside its own directory', () => {
+    it('keeps its backup copies inside its own directory, one flat file per tracked path', () => {
       const cwd = makeTempDir();
-      const outside = join(makeTempDir(), 'elsewhere.txt');
-      writeFileSync(outside, 'before', 'utf-8');
+      const nested = join(cwd, 'a', 'b.txt');
+      mkdirSync(join(cwd, 'a'));
+      writeFileSync(nested, 'before', 'utf-8');
       const mgr = new ChangesetManager(cwd, 'test-run');
-      mgr.backupBeforeWrite(outside);
-      writeFileSync(outside, 'after', 'utf-8');
+      mgr.backupBeforeWrite(nested);
+      writeFileSync(nested, 'after', 'utf-8');
       const dir = backupDirOf(mgr)!;
       expect(readdirSync(dir)).toHaveLength(1);
       expect(mgr.getChanges()[0]?.diff).toContain('-before');
@@ -522,4 +523,147 @@ describe('ChangesetManager', () => {
       expect(existsSync(dir)).toBe(false);
     });
   });
+
+  // The path handed to backupBeforeWrite comes from the model, before the write tool has
+  // checked it. Only files inside the workspace are tracked, and every later read, restore
+  // and delete checks again, because a directory on the way can change during the run.
+  describe('only the workspace', () => {
+    const backupDirOf = (mgr: ChangesetManager): string | null =>
+      (mgr as unknown as { backupDir: string | null }).backupDir;
+
+    it('does not track, copy or show a file outside the workspace', () => {
+      const cwd = makeTempDir();
+      const outside = join(makeTempDir(), 'engine.db');
+      writeFileSync(outside, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(outside);
+      writeFileSync(outside, 'after', 'utf-8');
+      expect(backupDirOf(mgr)).toBeNull();
+      expect(mgr.getChanges()).toEqual([]);
+      expect(mgr.hasChanges()).toBe(false);
+      // positive control: the same steps inside the workspace are tracked
+      const inside = join(cwd, 'notes.txt');
+      writeFileSync(inside, 'before', 'utf-8');
+      mgr.backupBeforeWrite(inside);
+      writeFileSync(inside, 'after', 'utf-8');
+      expect(mgr.getChanges().map(c => c.file)).toEqual(['notes.txt']);
+      mgr.cleanup();
+    });
+
+    it('a rollback neither restores nor deletes a file outside the workspace', () => {
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      const existing = join(elsewhere, 'config.json');
+      const absent = join(elsewhere, 'later.json');
+      writeFileSync(existing, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(existing);
+      mgr.backupBeforeWrite(absent);
+      writeFileSync(existing, 'changed by the engine', 'utf-8');
+      writeFileSync(absent, 'created by the engine', 'utf-8');
+      mgr.rollbackAll();
+      expect(readFileSync(existing, 'utf-8')).toBe('changed by the engine');
+      expect(readFileSync(absent, 'utf-8')).toBe('created by the engine');
+      mgr.cleanup();
+    });
+
+    it('a path through a symlinked directory that leaves the workspace is not tracked', () => {
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      writeFileSync(join(elsewhere, 'secret.txt'), 'before', 'utf-8');
+      symlinkSync(elsewhere, join(cwd, 'out'));
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'out', 'secret.txt'));
+      writeFileSync(join(elsewhere, 'secret.txt'), 'after', 'utf-8');
+      expect(mgr.getChanges()).toEqual([]);
+      mgr.rollbackAll();
+      expect(readFileSync(join(elsewhere, 'secret.txt'), 'utf-8')).toBe('after');
+      mgr.cleanup();
+    });
+
+    it('a directory swapped for a symlink out of the workspace after the backup is left alone', () => {
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      mkdirSync(join(cwd, 'sub'));
+      writeFileSync(join(cwd, 'sub', 'f.txt'), 'inside before', 'utf-8');
+      writeFileSync(join(elsewhere, 'f.txt'), 'outside', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(join(cwd, 'sub', 'f.txt'));
+      writeFileSync(join(cwd, 'sub', 'f.txt'), 'inside after', 'utf-8');
+      expect(mgr.getChanges().map(c => c.file), 'positive control: tracked before the swap').toEqual(['sub/f.txt']);
+      rmSync(join(cwd, 'sub'), { recursive: true });
+      symlinkSync(elsewhere, join(cwd, 'sub'));
+      expect(mgr.getChanges()).toEqual([]);
+      mgr.rollbackAll();
+      expect(readFileSync(join(elsewhere, 'f.txt'), 'utf-8')).toBe('outside');
+      mgr.cleanup();
+    });
+
+    it('a file swapped for a symlink after the backup is not written through on rollback', () => {
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      const target = join(elsewhere, 'vault.txt');
+      writeFileSync(target, 'outside', 'utf-8');
+      const file = join(cwd, 'f.txt');
+      writeFileSync(file, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(file);
+      rmSync(file);
+      symlinkSync(target, file);
+      expect(mgr.getChanges()).toEqual([]);
+      mgr.rollbackAll();
+      expect(readFileSync(target, 'utf-8')).toBe('outside');
+      mgr.cleanup();
+    });
+  });
+
+  // The checks above see a swap that happened before them. This one races them: a second
+  // process flips the tracked file between a regular file and a symlink to a file outside the
+  // workspace while the manager reads and restores it. The positive control writes the same
+  // name in the same loop and must reach the outside file at least once, or the race never
+  // opened and the manager's zero would prove nothing.
+  describe.runIf(process.platform === 'linux')('a race against a second process', () => {
+    it('neither shows nor overwrites the outside file while the tracked file flips to a symlink', async () => {
+      const { spawn } = await import('node:child_process');
+      const cwd = makeTempDir();
+      const elsewhere = makeTempDir();
+      const target = join(elsewhere, 'vault.txt');
+      const file = join(cwd, 'f.txt');
+      writeFileSync(file, 'before', 'utf-8');
+      const mgr = new ChangesetManager(cwd, 'test-run');
+      mgr.backupBeforeWrite(file);
+      writeFileSync(file, 'during the run', 'utf-8');
+      // The swapper keeps two prepared entries and renames them over the tracked name in turn.
+      writeFileSync(join(cwd, 'f.real'), 'during the run', 'utf-8');
+      symlinkSync(target, join(cwd, 'f.link'));
+      const SWAP = `
+        const fs = require('fs'), p = require('path'), d = process.argv[1];
+        const f = p.join(d, 'f.txt'), real = p.join(d, 'f.real'), link = p.join(d, 'f.link');
+        for (;;) {
+          try { fs.linkSync(real, f + '.n'); fs.renameSync(f + '.n', f); } catch {}
+          try { fs.symlinkSync(fs.readlinkSync(link), f + '.s'); fs.renameSync(f + '.s', f); } catch {}
+        }`;
+      const swapper = spawn(process.execPath, ['-e', SWAP, cwd], { stdio: 'ignore' });
+      try {
+        await new Promise((r) => setTimeout(r, 200));
+        let byName = 0;
+        let shown = 0;
+        for (let i = 0; i < 4000; i++) {
+          writeFileSync(target, 'outside', 'utf-8');
+          try { writeFileSync(file, 'by name'); } catch { /* mid-swap */ }
+          if (readFileSync(target, 'utf-8') === 'by name') byName++;
+          writeFileSync(target, 'outside', 'utf-8');
+          mgr.rollbackAll();
+          if (mgr.getChanges().some((c) => c.diff.includes('outside'))) shown++;
+          expect(readFileSync(target, 'utf-8')).toBe('outside');
+        }
+        expect(byName, 'positive control: writing by name reached the outside file').toBeGreaterThan(0);
+        expect(shown).toBe(0);
+      } finally {
+        swapper.kill('SIGKILL');
+        mgr.cleanup();
+      }
+    }, 60_000);
+  });
 });
+
