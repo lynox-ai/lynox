@@ -264,22 +264,23 @@ describe('Art. 17 erasure follows the data-dir inventory (real engine)', () => {
     expect(isBoundedJsonlQuiesced()).toBe(false);
   }, 60_000);
 
-  it('checks an unknown entry once it is acknowledged, and refuses one it cannot check', async () => {
+  it('refuses an entry with a directory it cannot read, before asking about unknown entries', async () => {
     // Root reads anything; the property is only observable for an ordinary user.
     if (process.getuid?.() === 0) return;
     mkdirSync(join(dir, 'zz-dir', 'locked'), { recursive: true });
     chmodSync(join(dir, 'zz-dir', 'locked'), 0o000);
     const genBefore = internals().erasureGeneration;
     try {
-      const first = await erase();
-      expect(first.status).toBe(409);
-      expect(first.body['code']).toBe('unknown_entries');
-      const second = await erase({ remove_unknown: first.body['unknown'] });
-      expect(second.status).toBe(409);
-      expect(second.body['code']).toBe('linked_entries');
-      const linked = second.body['linked'] as Array<{ name: string; remedy: string }>;
+      // The walk for the workspace root reads every directory of the data dir, known or not: one
+      // it cannot read could hold the root, so it is refused by name before the unknown entry is
+      // asked about. (Acknowledged and still unreadable: data-dir-erase-module.test.ts.)
+      const res = await erase();
+      expect(res.status).toBe(409);
+      expect(res.body['code']).toBe('linked_entries');
+      const linked = res.body['linked'] as Array<{ name: string; reason: string; remedy: string }>;
       expect(linked.map(l => l.name)).toEqual(['zz-dir']);
-      expect(linked[0]!.remedy).toMatch(/move the entry out of the data directory instead of acknowledging it/);
+      expect(linked[0]!.reason).toMatch(/zz-dir\/locked could not be read to check that the workspace root is not inside it/);
+      expect(linked[0]!.remedy).toMatch(/Make it readable to this instance, or move it out of the data directory/);
       expect(existsSync(join(dir, 'zz-dir', 'locked'))).toBe(true);
       expect(internals().erasureGeneration).toBe(genBefore);
     } finally {
