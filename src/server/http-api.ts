@@ -1717,7 +1717,9 @@ export class LynoxHTTPApi {
    * Refuses a request another site made the browser send with a credential the browser attaches
    * on its own; true when it answered. `ambient` is that credential: no secret, or the session
    * cookie. Checked are a GET or HEAD whose route declares an effect (any stance but `reads`; an
-   * admin route declares none and is checked), and every write. Without a secret a write meets
+   * admin route declares none and is checked), every GET or HEAD of a mandate (each one writes its
+   * trail), and every write. Pages outside `/api/` are answered before this and stay reachable by a
+   * link from another site (the Web UI). Without a secret a write meets
    * `crossSiteWriteRefusal` before auth already, which refuses everything this check would; it is
    * not exempted here, because an exemption that changes nothing is one more case to get wrong.
    * The rule is `ambientCrossSiteRefusal`.
@@ -1732,7 +1734,10 @@ export class LynoxHTTPApi {
   ): boolean {
     if (ambient === 'none') return false;
     const safe = method === 'GET' || method === 'HEAD';
-    if (safe && stance?.kind === 'reads') return false;
+    // A read changes nothing, except for a mandate: its every GET leaves a row in its actor trail
+    // (`_recordedMandateRead`, which runs after this check). Another site could otherwise write
+    // reads into that trail which the mandate never made, so a mandate's reads are checked too.
+    if (safe && stance?.kind === 'reads' && !writesMandateTrail(this._principalOf(req))) return false;
     const host = singleHeader(req.headers['host']);
     const refusal = ambientCrossSiteRefusal({
       origin: singleHeader(req.headers['origin']),
