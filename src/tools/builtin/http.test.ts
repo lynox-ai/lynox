@@ -1282,7 +1282,8 @@ describe('httpRequestTool', () => {
         describe('a write to the bexio API with no profile on the host', () => {
           const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent.';
           // The way out, by who asks: the owner sets up the profile, a run with no store cannot, a
-          // mandate proposes a task (it does not write to a connected account even with a profile).
+          // mandate has the owner connect the provider first (it does not write to a connected
+          // account even with a profile, and a task it proposed is refused until then).
           const SET_UP = ' To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
           const NO_STORE = ' This run has no api_profile store, so it cannot write there.';
           const AS_TASK = ' This session does not write there. Tell the owner which change you would make: the owner first connects bexio through that provider, and the change can then be proposed as a task (task_create) the owner approves.';
@@ -1322,7 +1323,8 @@ describe('httpRequestTool', () => {
 
           // An interactive write redirected onto the bexio API: the hop is refused unasked by the
           // rule for any write hop onto another host (nothing here is particular to the provider),
-          // and its note does not promise that the direct request is asked; sent directly, it is
+          // and its note does not promise that the direct request is asked (it may be sent under an
+          // approval already given, so the note asks to check before sending again); sent directly, it is
           // refused as above. Bodyless, so the cross-origin hop keeps its method (a body turns it
           // into a read).
           it('refuses an interactive DELETE redirected onto the bexio API at the hop, unasked, and the direct one too', async () => {
@@ -1336,7 +1338,7 @@ describe('httpRequestTool', () => {
             const agent = makeAgent({ promptUser });
             const hop = await visible({ url: 'https://api.crm.example/v1/contact/7', method: 'DELETE' }, agent);
             expect(hop).toContain('needs its own approval');
-            expect(hop).toContain('A request sent to that address directly goes through its own checks there, which ask first or refuse it.');
+            expect(hop).toContain('before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.');
             expect(fetchMock).toHaveBeenCalledTimes(1);
             expect(promptUser).toHaveBeenCalledTimes(1);
             expect(await visible({ url: 'https://api.bexio.com/2.0/contact/7', method: 'DELETE' }, agent)).toContain(REFUSED);

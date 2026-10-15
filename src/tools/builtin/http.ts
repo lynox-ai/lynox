@@ -165,7 +165,7 @@ export class RedirectRefusedAfterWrite extends Error {
         ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
           `Do not repeat the request: check the target system for whether it was carried out.`
         : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out. A request sent to that address directly goes through its own checks there, which ask first or refuse it.`),
+          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
