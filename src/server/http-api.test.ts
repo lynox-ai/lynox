@@ -12755,9 +12755,8 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
-    it('answers an unreadable directory with 500, not an empty listing', async () => {
-      // Root reads through mode bits, so the fixture cannot fail there.
-      if (process.getuid?.() === 0) return;
+    // Root reads through mode bits, so the fixture cannot fail there: skipped, visibly.
+    it.skipIf(process.getuid?.() === 0)('answers an unreadable directory with 500, not an empty listing', async () => {
       const locked = join(base, 'locked');
       mkdirSync(locked);
       writeFileSync(join(locked, 'kept.txt'), 'still here');

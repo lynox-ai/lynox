@@ -133,6 +133,8 @@
 
 	{#if loading}
 		<p class="text-text-subtle text-sm">{t('common.loading')}</p>
+	{:else if error}
+		<!-- The banner above says what failed; an "empty" state here would contradict it. -->
 	{:else if entries.length === 0 && currentPath === '.'}
 		<div class="text-center py-16 space-y-3">
 			<svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 mx-auto text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
