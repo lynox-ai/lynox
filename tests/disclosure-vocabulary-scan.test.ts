@@ -96,6 +96,11 @@ describe('what it warns about', () => {
       '## Not covered',
       '**Not covered:** a test that builds an absolute path',
       '// Not covered: an in-place rewrite',
+      'Not covered yet: the race',
+      '## Not covered in this PR',
+      '- Not covered — the second path',
+      '- fixed in the next PR to main',
+      '- handled in the next change of the admin route',
     ]) {
       expect(kindOf(line), line).toBe('marks work as put off');
     }
@@ -288,6 +293,15 @@ describe('proseWarnings — pull-request text and commit messages', () => {
     // Only `findings` filed privately: a named thing filed privately still names it.
     for (const named of ['The token-refresh race is filed privately.', 'a gap filed privately in the register', 'The rest is filed privately for later.']) {
       expect(proseWarnings(named), named).toEqual([{ line: 1, kind: 'marks work as put off' }]);
+    }
+    // Nothing else may sit inside the exception: another form between `findings` and
+    // `filed privately` is read.
+    for (const inside of ['findings left open in a later PR, filed privately', 'findings not fixed here, filed privately', 'findings are pre-existing gaps, filed privately']) {
+      expect(proseWarnings(inside), inside).toEqual([{ line: 1, kind: 'marks work as put off' }]);
+    }
+    // The spellings in use pass.
+    for (const ok of ['Findings outside the change are filed privately.', 'Findings were fixed here or filed privately.', 'Further findings filed privately.']) {
+      expect(proseWarnings(ok), ok).toEqual([]);
     }
     // Control: `filed` without `privately` still warns.
     expect(proseWarnings('The rest is filed.')).toEqual([{ line: 1, kind: 'marks work as put off' }]);

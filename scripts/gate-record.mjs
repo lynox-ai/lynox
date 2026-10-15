@@ -602,6 +602,8 @@ export function openWorkWarnings({ title = '', body = '', commits = [] } = {}) {
  * Commit messages from `git log --format='%h%x1f%B%x1e'`: one record per commit. A message
  * may itself contain the separator bytes, so a record counts only when what stands before
  * its `\x1f` is a hex SHA: the SHA is printed in the warning, and author text must not be.
+ * A message that forges a record this way can split itself, and the forged tail is then
+ * either dropped or attributed to the hex word it names — never printed.
  */
 export function parseCommits(text) {
   return String(text ?? '')

@@ -78,12 +78,13 @@ export const PUTS_WORK_OFF = [
   // Work handed to a named later piece: `comes with the admin route of the next change`,
   // `is a separate change`. Not `by a later change`, which describes an owner's later edit.
   // `change to the store` is the product's own state change, not a later piece of work.
-  /\b(of|in|with|into) (a|the) (next|separate|later|future|subsequent) (change|PR|pull request)\b(?!\s+(to|in|of)\b)|\b(is|are) a separate (change|PR|pull request)\b/i,
+  /\b(of|in|with|into) (a|the) (next|separate|later|future|subsequent) (change\b(?!\s+to\b)|PR\b|pull request\b)|\b(is|are) a separate (change|PR|pull request)\b/i,
   // A list of what is left open, under its own heading: `What this does not cover`,
   // `## Not covered`, `**Not covered:**`. Not `not covered by an approval`, a rule's scope.
   /\bwhat (this|it) (PR |change |fix )?does(n't| not) cover\b/i,
-  // Only as a label (`Not covered:`, `## Not covered`), not `not covered → coverage falls`.
-  /^[\s#*/>-]*(\*\*)?not covered(\*\*)?\s*([:.]|\*\*|$)/i,
+  // At the start of a line, as a label (`Not covered:`, `## Not covered`, `Not covered in this
+  // PR:`). Not `not covered by an approval` (a rule's scope) or `not covered → …` (a state).
+  /^[\s#*/>-]*(\*\*)?not covered\b(?!\s+by\b)(?!\s*(→|->))/i,
   // About a defect, not a pre-existing record: followed by a defect noun, or standing as
   // the statement itself (`pre-existing.`, `is pre-existing`, `PRE-EXISTING and filed`).
   /\bpre-?existing\b(?=[^.]{0,40}\b(gaps?|holes?|defects?|bugs?|problems?|issues?|findings?|violations?)\b)/i,
@@ -93,11 +94,12 @@ export const PUTS_WORK_OFF = [
 /**
  * The form this repo's PR text is told to use for findings handled elsewhere
  * (`findings filed privately`, the `gate-record` template). It names no gap and no record,
- * so prose reading leaves it out — only with `findings` as what is filed, in the same
- * clause: `a gap filed privately` or `the rest is filed privately` names something and warns.
- * Every other word on the line is still read.
+ * so prose reading leaves it out. Only the spellings in use, word for word: `findings` as
+ * what is filed (`a gap filed privately`, `the rest is filed privately` name something and
+ * warn), and nothing else between, so no other form can sit inside the exception. Every
+ * other word on the line is still read.
  */
-const PRESCRIBED_FORM = /\bfindings?\b[^.;:]{0,40}?\bfiled privately\b/gi;
+const PRESCRIBED_FORM = /\b(further\s+)?findings?\s+((outside|beyond)\s+(this|the)\s+(change|PR)\s+)?((were|are|is|have been)\s+)?(fixed here or\s+)?filed privately\b/gi;
 
 /**
  * The lines of a pull request's title, body or commit messages that say one of the
