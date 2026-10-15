@@ -35,6 +35,7 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { proseOpenCountLines } from './guard-patterns/prose-open-count.mjs';
+import { LEGAL_APPROVERS, approvedVerdict } from './guard-patterns/legal-sign-off.mjs';
 
 /**
  * The token that opens the record block, assembled rather than written.
@@ -498,6 +499,51 @@ function openCountRefusal(field, visibility) {
 
 // The prose scan lives in guard-patterns/ so the private repo can vendor the same file.
 export { proseOpenCountLines };
+export { LEGAL_APPROVERS, approvedVerdict };
+
+/**
+ * The refusal for a legal sign-off, by the verdict `approvedVerdict` gave. Fails closed: a verdict
+ * this function does not know (a later version of the vendored reader may add one) refuses too.
+ *
+ * @param {string} verdict  what `approvedVerdict` returned
+ * @param {string} approved the trimmed value of the `approved:` field
+ * @param {boolean} owed    whether the diff owes the `legal` gate (else the record only names it)
+ * @returns {string[]}
+ */
+export function signOffErrors(verdict, approved, owed) {
+  const out = [];
+  if (verdict === 'missing') {
+    out.push(
+      owed
+        ? 'this diff changes a binding customer text, so the record needs an `approved:` line'
+        : 'the record NAMES the `legal` gate, so it needs an `approved:` line — or take `legal` out of `gates:`',
+      'naming who signed off on the WORDING and when (e.g. `approved: rafael 2026-08-01`).',
+      '`approved: PENDING — <why>` is a valid answer and blocks the merge rather than failing',
+      'the format: if the sign-off does not exist yet, saying so is the true line.',
+      'Run `/legal-review` first — its findings are what the sign-off is given on.',
+    );
+  } else if (verdict === 'pending') {
+    // An explicit "not yet" is the true answer while the wording is unseen, so it blocks the
+    // merge, with a message that does not read as a format complaint.
+    out.push(
+      `\`approved: ${approved}\` says the sign-off is PENDING — which is the honest answer, so this`,
+      'is NOT a format complaint. The merge waits for the sign-off, not for a better line.',
+    );
+  } else if (verdict === 'not-an-approver') {
+    out.push(
+      `\`approved: ${approved}\` does not start with who signed off. A sign-off reads`,
+      `\`approved: <who> <YYYY-MM-DD> [anything]\`, where <who> is one of: ${LEGAL_APPROVERS.join(', ')}.`,
+      'If the sign-off does not exist yet, write `approved: PENDING — <why>`.',
+    );
+  } else if (verdict === 'undated') {
+    // A name without a date cannot be told apart from a sign-off carried over from an
+    // earlier revision of the same text.
+    out.push(`\`approved: ${approved}\` has no valid ISO date right after the name — a sign-off without one cannot be tied to this revision`);
+  } else if (verdict !== 'ok') {
+    out.push(`\`approved: ${approved}\` was read as \`${verdict}\`, which this check does not know — refused until it does`);
+  }
+  return out;
+}
 
 export function evaluate(input) {
   const verdict = evaluateRecord(input);
@@ -968,29 +1014,7 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
   // claims has to be one.
   if (claimed.has('legal') || required.has('legal')) {
     const approved = (f.approved ?? '').trim();
-    if (!approved) {
-      errors.push(
-        required.has('legal')
-          ? 'this diff changes a binding customer text, so the record needs an `approved:` line'
-          : 'the record NAMES the `legal` gate, so it needs an `approved:` line — or take `legal` out of `gates:`',
-        'naming who signed off on the WORDING and when (e.g. `approved: rafael 2026-08-01`).',
-        '`approved: PENDING — <why>` is a valid answer and blocks the merge rather than failing',
-        'the format: if the sign-off does not exist yet, saying so is the true line.',
-        'Run `/legal-review` first — its findings are what the sign-off is given on.',
-      );
-    } else if (/^pending/i.test(approved)) {
-      // An explicit "not yet" is the true answer while the wording is unseen, so it blocks the
-      // merge. Before this branch it passed: the line only had to carry an ISO date, and
-      // `approved: PENDING — … agreed 2026-10-15` carries one. Rule and trigger are ported from the
-      // private repo's gate record. `/^pending/i` has no `\b` on purpose: with one,
-      // `pendingapproval rafael 2026-10-02` finds no boundary and its date reads as a sign-off.
-      errors.push(
-        `\`approved: ${approved}\` says the sign-off is PENDING — which is the honest answer, so this`,
-        'is NOT a format complaint. The merge waits for the sign-off, not for a better line.',
-      );
-    } else if (!/\d{4}-\d{2}-\d{2}/.test(approved)) {
-      errors.push(`\`approved: ${approved}\` has no ISO date — a sign-off without one cannot be tied to this revision`);
-    }
+    errors.push(...signOffErrors(approvedVerdict(approved), approved, required.has('legal')));
   }
 
 return errors.length ? { ok: false, errors } : { ok: true, notes };

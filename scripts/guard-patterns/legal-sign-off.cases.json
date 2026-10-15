@@ -1,0 +1,267 @@
+{
+  "approvers": [
+    "rafael"
+  ],
+  "cases": [
+    {
+      "value": "rafael 2026-08-01",
+      "verdict": "ok",
+      "why": "the plain form"
+    },
+    {
+      "value": "rafael 2026-10-13 10:57 (orchestrator window, shown the wording)",
+      "verdict": "ok",
+      "why": "a time after the date"
+    },
+    {
+      "value": "rafael 2026-09-29/30 (two sessions)",
+      "verdict": "ok",
+      "why": "a second day after the date"
+    },
+    {
+      "value": "rafael 2026-10-08 — the wording of one line",
+      "verdict": "ok",
+      "why": "free text after a dash"
+    },
+    {
+      "value": "rafael 2026-10-14 (Checkin, „Freigeben“; head 729ce43a)",
+      "verdict": "ok",
+      "why": "free text in brackets"
+    },
+    {
+      "value": "Rafael 2026-10-15",
+      "verdict": "ok",
+      "why": "the name in any case"
+    },
+    {
+      "value": "rafael 2026-10-15, no longer pending",
+      "verdict": "ok",
+      "why": "the word pending later in the line"
+    },
+    {
+      "value": "rafael 2026-10-15 (pending)",
+      "verdict": "ok",
+      "why": "name and date make the sign-off; text after the date is free"
+    },
+    {
+      "value": "PENDING — wording not seen yet",
+      "verdict": "pending",
+      "why": "the honest answer"
+    },
+    {
+      "value": "PENDING — not seen yet, agreed 2026-10-15",
+      "verdict": "pending",
+      "why": "a date does not turn it into a sign-off"
+    },
+    {
+      "value": "pending rafael 2026-10-15",
+      "verdict": "pending",
+      "why": "lower case"
+    },
+    {
+      "value": "pendingapproval rafael 2026-10-02",
+      "verdict": "pending",
+      "why": "no word boundary after pending"
+    },
+    {
+      "value": "**PENDING** 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "`PENDING` 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "\"pending\" 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "'pending' 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "_pending_ 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "[pending] 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "(pending) 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "- pending 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "⏳ pending 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "TBD 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "todo 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "wartet auf rafael 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "ausstehend 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "offen 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "noch nicht 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "n/a 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "- 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "none 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "nobody 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "not yet 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "awaiting rafael 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "requested 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "asked rafael 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "ＰＥＮＤＩＮＧ 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "pénding 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "pend1ng 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "p​ending 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a not-yet in other words, with a date"
+    },
+    {
+      "value": "Orchestrator 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a session, not a person"
+    },
+    {
+      "value": "rafael​ 2026-10-15",
+      "verdict": "not-an-approver",
+      "why": "a zero-width space glued to the name"
+    },
+    {
+      "value": "rafael pending 2026-10-15",
+      "verdict": "undated",
+      "why": "the date does not follow the name"
+    },
+    {
+      "value": "rafael",
+      "verdict": "undated",
+      "why": "no date"
+    },
+    {
+      "value": "rafael 2026-1-15",
+      "verdict": "undated",
+      "why": "not an ISO date"
+    },
+    {
+      "value": "rafael 2026-10-155",
+      "verdict": "undated",
+      "why": "a longer number is not a date"
+    },
+    {
+      "value": "rafael 2026-13-45",
+      "verdict": "undated",
+      "why": "no such month"
+    },
+    {
+      "value": "rafael 2026-02-30",
+      "verdict": "undated",
+      "why": "no such day"
+    },
+    {
+      "value": "rafael 2026-10-15abc",
+      "verdict": "undated",
+      "why": "a letter glued to the date"
+    },
+    {
+      "value": "rafael 2026-10-15١",
+      "verdict": "undated",
+      "why": "a digit of another script glued to the date"
+    },
+    {
+      "value": "rafael 2026-10-15́",
+      "verdict": "undated",
+      "why": "a combining mark glued to the date"
+    },
+    {
+      "value": "rafael 2028-02-29",
+      "verdict": "ok",
+      "why": "a leap day"
+    },
+    {
+      "value": "",
+      "verdict": "missing",
+      "why": "no line"
+    }
+  ]
+}

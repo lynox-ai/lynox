@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -345,6 +345,58 @@ describe('gate-record — which gates a diff requires', () => {
       head: HEAD, files: ['SUBPROCESSORS.md'],
     });
     expect(named.ok, JSON.stringify(named.errors)).toBe(true);
+  });
+
+  describe('the legal sign-off, against the fixture both repos share', () => {
+    // Both files live in scripts/guard-patterns/, which the private repo vendors byte-identically,
+    // so its gate record runs the same predicate against the same cases.
+    const fixture = JSON.parse(readFileSync(new URL('../scripts/guard-patterns/legal-sign-off.cases.json', import.meta.url), 'utf8')) as {
+      approvers: string[];
+      cases: { value: string; verdict: string; why: string }[];
+    };
+
+    it('lists the same approvers as the fixture', () => {
+      // A name added here alone, or in the fixture alone, fails this.
+      expect([...LEGAL_APPROVERS]).toEqual(fixture.approvers);
+    });
+
+    it('keeps every approver in lower case, as the name it is compared with', () => {
+      // The name is lower-cased before the lookup; an entry with a capital could never match.
+      for (const a of LEGAL_APPROVERS) expect(a).toBe(a.toLowerCase());
+    });
+
+    it('refuses a verdict it does not know, and nothing for `ok`', () => {
+      // Fails closed: a later version of the shared reader may return a verdict this script
+      // has no branch for.
+      expect(signOffErrors('expired', 'rafael 2026-10-15', true).join(' ')).toContain('which this check does not know');
+      expect(signOffErrors('ok', 'rafael 2026-10-15', true)).toEqual([]);
+    });
+
+    it.each(fixture.cases.map((c) => [c.value, c.verdict, c.why] as const))(
+      '%j → %s (%s)', (value, verdict) => {
+        expect(approvedVerdict(value)).toBe(verdict);
+      },
+    );
+
+    it('blocks the merge on every verdict but `ok`, through the record', () => {
+      for (const c of fixture.cases) {
+        if (c.verdict === 'missing') continue;
+        const r = evaluate({
+          body: record({ gates: 'legal', approved: c.value, delta: '', mutations: '' }),
+          head: HEAD, files: ['SUBPROCESSORS.md'],
+        });
+        expect(r.ok, `${JSON.stringify(c.value)}: ${JSON.stringify(r.errors)}`).toBe(c.verdict === 'ok');
+      }
+    });
+
+    it('names the approvers when the line does not start with one', () => {
+      const r = evaluate({
+        body: record({ gates: 'legal', approved: 'ausstehend 2026-10-15', delta: '', mutations: '' }),
+        head: HEAD, files: ['SUBPROCESSORS.md'],
+      });
+      expect(r.errors.join(' ')).toContain('does not start with who signed off');
+      expect(r.errors.join(' ')).toContain(`one of: ${LEGAL_APPROVERS.join(', ')}`);
+    });
   });
 
   it('tells an author without an `approved:` line that PENDING is a valid answer', () => {
@@ -1930,6 +1982,13 @@ describe('scripts/guard-patterns/ — vendored by the private repo', () => {
     expect(files).toContain('prose-open-count.mjs');
     const mod = await import('../scripts/guard-patterns/prose-open-count.mjs');
     expect(mod.proseOpenCountLines).toBe(proseOpenCountLines);
+  });
+
+  it('holds the legal sign-off reader gate-record runs, and its cases', async () => {
+    expect(files).toEqual(expect.arrayContaining(['legal-sign-off.mjs', 'legal-sign-off.cases.json']));
+    const mod = await import('../scripts/guard-patterns/legal-sign-off.mjs');
+    expect(mod.approvedVerdict).toBe(approvedVerdict);
+    expect(mod.LEGAL_APPROVERS).toBe(LEGAL_APPROVERS);
   });
 
   // The private repo runs these files standalone; an import would break its copy, not this one.
