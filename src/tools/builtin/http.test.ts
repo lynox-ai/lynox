@@ -1457,6 +1457,8 @@ describe('httpRequestTool', () => {
           ['a request host that ends in a dot', 'https://example.com/v1', 'https://example.com./v1/report'],
           // Two dots: the raw form is the only one of the three that names the stored host.
           ['a base_url and a request host that end in two dots', 'https://example.com../v1', 'https://example.com../v1/report'],
+          // Every trailing dot comes off for the bare form, not only the last one.
+          ['a request host that ends in two dots', 'https://example.com/v1', 'https://example.com../v1/report'],
         ])('counts the account as connected with %s', async (_label, baseUrl, url) => {
           await withProfile('example-shop', baseUrl);
           mockDnsPublic();
