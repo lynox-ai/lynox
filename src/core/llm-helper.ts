@@ -19,7 +19,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
 import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
-import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff } from './llm-wire-rules.js';
+import { settleForcedTool, reportForcedToolMiss, reportForcedToolCutOff, isCutOffReply } from './llm-wire-rules.js';
+import { getPricing } from './pricing.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -80,6 +81,26 @@ export interface CallForStructuredJsonOptions {
   agent?: IAgent;
   /** Max output tokens. Default 4000. */
   maxOutputTokens?: number;
+  /**
+   * Retries the SDK may make on its own (a 429, a 5xx, a dropped connection). Unset: the
+   * client's own setting — the Anthropic SDK retries twice. A caller that gates and books
+   * every request passes 0: a retry inside the SDK is a second paid request no gate saw.
+   */
+  maxRetries?: number;
+  /**
+   * Throw {@link CutOffError}, with the reply's spend attached, when the reply stopped at
+   * `max_tokens` — its tool input is incomplete, even when what arrived parses. Off by default:
+   * `api_setup` accepts a cut-off but schema-valid extraction and keeps doing so.
+   */
+  refuseCutOff?: boolean;
+  /**
+   * How the call is priced, for the pre-flight estimate and the returned cost. `helper`
+   * (default): the model registry, an unregistered model at the Sonnet list price. `run`: the
+   * way a run is priced (`getPricing`) — the operator's pricing.json, then the registry, then
+   * the conservative fallback. Opt-in: switching the default would move `api_setup`'s budget
+   * cap on unregistered models.
+   */
+  pricing?: 'helper' | 'run';
 }
 
 export interface StructuredJsonResult<T> {
@@ -137,7 +158,8 @@ export interface StructuredJsonResult<T> {
 interface ModelPricing { input: number; output: number; }
 const FALLBACK_MODEL_ID = 'claude-sonnet-4-6';
 
-function pricingFor(model: string): ModelPricing {
+function pricingFor(model: string, pricing: 'helper' | 'run' = 'helper'): ModelPricing {
+  if (pricing === 'run') return getPricing(model);
   const cap = modelCapability(model) ?? modelCapability(FALLBACK_MODEL_ID);
   return { input: cap?.pricing.input ?? 3, output: cap?.pricing.output ?? 15 };
 }
@@ -228,15 +250,16 @@ export function estimateCostUsd(
   inputTokens: number,
   maxOutputTokens: number = DEFAULT_MAX_OUTPUT_TOKENS,
   model: string = DEFAULT_ANTHROPIC_MODEL,
+  pricing: 'helper' | 'run' = 'helper',
 ): number {
   const estimatedOutput = Math.min(Math.ceil(inputTokens * 0.25), maxOutputTokens);
-  const p = pricingFor(model);
+  const p = pricingFor(model, pricing);
   return (inputTokens * p.input + estimatedOutput * p.output) / 1_000_000;
 }
 
 /** Compute exact USD cost from Anthropic-reported usage. */
-function computeCostUsd(inputTokens: number, outputTokens: number, model: string): number {
-  const p = pricingFor(model);
+function computeCostUsd(inputTokens: number, outputTokens: number, model: string, pricing: 'helper' | 'run'): number {
+  const p = pricingFor(model, pricing);
   return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
 }
 
@@ -404,6 +427,7 @@ export async function callForStructuredJson<T = unknown>(
     budgetUsd = DEFAULT_BUDGET_USD,
     model = resolveModel(providerSnapshot, opts.blockedModelIds),
     maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
+    pricing = 'helper',
   } = opts;
 
   // Pre-flight: cost + token check on combined system + user content.
@@ -411,10 +435,10 @@ export async function callForStructuredJson<T = unknown>(
   if (inputEstimate > maxInputTokens) {
     throw new BudgetError(
       `Input estimate ${String(inputEstimate)} tokens exceeds maxInputTokens=${String(maxInputTokens)}`,
-      { estimatedInputTokens: inputEstimate, estimatedCostUsd: estimateCostUsd(inputEstimate, maxOutputTokens, model) },
+      { estimatedInputTokens: inputEstimate, estimatedCostUsd: estimateCostUsd(inputEstimate, maxOutputTokens, model, pricing) },
     );
   }
-  const costEstimate = estimateCostUsd(inputEstimate, maxOutputTokens, model);
+  const costEstimate = estimateCostUsd(inputEstimate, maxOutputTokens, model, pricing);
   if (costEstimate > budgetUsd) {
     throw new BudgetError(
       `Estimated cost $${costEstimate.toFixed(4)} exceeds budgetUsd=$${budgetUsd.toFixed(4)}`,
@@ -457,17 +481,18 @@ export async function callForStructuredJson<T = unknown>(
       input_schema: schema as unknown as Anthropic.Tool.InputSchema,
     }],
     tool_choice: { type: 'tool', name: 'extract' },
-  }));
+  }, opts.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : undefined));
   reportForcedToolMiss('llm-helper', missed);
   reportForcedToolCutOff('llm-helper', model, response);
 
   const inputTokens = response.usage.input_tokens;
   const outputTokens = response.usage.output_tokens;
   const spend: ExtractionSpend = {
-    costUsd: computeCostUsd(inputTokens, outputTokens, model),
+    costUsd: computeCostUsd(inputTokens, outputTokens, model, pricing),
     tier: modelCapability(model)?.tier ?? 'balanced',
   };
   try {
+    if (opts.refuseCutOff === true && isCutOffReply(response)) throw new CutOffError();
     return { ...readExtraction<T>(response, schema), inputTokens, outputTokens, ...spend, model };
   } catch (err) {
     // The reply is paid for whether or not it parses. Hand the spend to the caller with the
@@ -514,6 +539,18 @@ function readExtraction<T>(response: Anthropic.Message, schema: ExtractSchema): 
 
   validateAgainstSchema(toolUseBlock.input, schema);
   return { data: toolUseBlock.input as T };
+}
+
+/**
+ * The reply stopped at `max_tokens` and the caller asked for it to be refused
+ * ({@link CallForStructuredJsonOptions.refuseCutOff}). A fixed message: nothing of the reply.
+ * The reply is paid for — {@link extractionSpendOf} reads what it cost.
+ */
+export class CutOffError extends Error {
+  constructor() {
+    super('The reply stopped at max_tokens; its tool input is incomplete.');
+    this.name = 'CutOffError';
+  }
 }
 
 /**
