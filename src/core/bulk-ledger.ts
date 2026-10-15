@@ -1841,7 +1841,7 @@ export class BulkLedger {
    * Delete every started, unapproved judged run whose start is more than `maxAgeMs` ago, with
    * its read phase's trigger and its encrypted before-images (PRD 3.2, M7 and Opus-Delta #6). A
    * started judged run is kept from the prune; this is what bounds how long it is kept. Run at
-   * boot and on every worker tick, not only when a plan is recorded. Returns how many went.
+   * boot and every 5 minutes by the engine's bulk sweep, not only when a plan is recorded. Returns how many went.
    */
   expireStaleJudgedRuns(now: number = Date.now(), maxAgeMs: number = BULK_JUDGED_RETENTION_MS): number {
     const db = this.engineDb.getDb();

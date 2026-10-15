@@ -8,7 +8,7 @@ import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
 import { BulkLedger, BULK_HALT_REASONS, BULK_JUDGED_RETENTION_MS, BULK_MAX_PREVIEWED_RUNS } from './bulk-ledger.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
-import { bulkPlanTool } from '../tools/builtin/bulk.js';
+import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
 import {
@@ -201,6 +201,11 @@ describe('runBulkJudge over data-store rows', () => {
     // Counts only: nothing of a target in what the session reads.
     expect(out.summary).not.toContain(MARK);
     expect(out.summary).not.toContain('old a');
+    // What the session's model reads about the run: counts, never a verdict or a value.
+    const status = await bulkStatusTool.handler({ run_id: id }, agent());
+    expect(status).toContain('without a verdict yet');
+    expect(status).toContain('Model spend: $0.02 of a $1.00 limit.');
+    for (const v of [MARK, 'new old a', 'old a']) expect(status).not.toContain(v);
     const p = ledger.getPreview(id);
     expect(p.map((t) => t.after)).toEqual([
       { sku: 'A', title: 'new old a', note: `${MARK}-a` },
