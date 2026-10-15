@@ -1,14 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execFileSync, type ChildProcess } from 'node:child_process';
 import {
-  chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readSync,
+  chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync,
   readdirSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-  closeAnchor, copyIn, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor,
+  anchorFromFd, closeAnchor, copyOut, emptyDir, ensureSubAnchor, listDir, mkdirAt, mountIdOf, openAnchor, stageIn, STAGE_PREFIX,
   readFileAt, renameAt, splitRel, statEntry, walk, writeFileAt, WorkspaceAccessError, type WorkspaceAnchor,
 } from './workspace-fd.js';
 
@@ -50,6 +50,9 @@ afterEach(() => {
 describe('splitRel', () => {
   it.each(['/abs', 'a/../b', '..', './a', 'a//b', 'a/./b', 'a\0b', 'a\\b'])('refuses %j', (rel) => {
     expect(code(() => splitRel(rel))).toBe('BAD_PATH');
+  });
+  it('names an absolute path as such, for callers that pass one by mistake', () => {
+    expect(() => splitRel('/proc/self/fd/3/x')).toThrow(/absolute path refused/);
   });
   it('splits a plain path and tolerates one trailing slash', () => {
     expect(splitRel('a/b/c')).toEqual(['a', 'b', 'c']);
@@ -123,6 +126,19 @@ describe('ensureSubAnchor', () => {
       expect(statSync(join(ws, 'http-api')).mode & 0o7777).toBe(0o750);
     } finally {
       closeAnchor(ctx);
+    }
+  });
+  it('takes exactly one component', () => {
+    expect(code(() => ensureSubAnchor(anchor, 'a/b', 0o700))).toBe('BAD_PATH');
+    expect(existsSync(join(ws, 'a'))).toBe(false);
+  });
+  it('anchorFromFd refuses a file descriptor that is not a directory', () => {
+    writeFileSync(join(ws, 'f'), '1');
+    const fd = openSync(join(ws, 'f'), 'r');
+    try {
+      expect(code(() => anchorFromFd(fd, 'f'))).toBe('NOT_DIR');
+    } finally {
+      closeSync(fd);
     }
   });
   it('refuses a symlink planted at the context name', () => {
@@ -213,36 +229,96 @@ describe('copyOut', () => {
     expect(r.skipped.sort()).toEqual(['d/l', 'd/p']);
     expect([r.files, r.dirs, r.bytes]).toEqual([1, 1, 4]);
   });
+  it('skips a unix socket without trying to open it', () => {
+    const sock = join(ws, 's');
+    spawnSync(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(sock)}, () => process.exit(0))`]);
+    expect(lstatSync(sock).isSocket()).toBe(true);
+    const r = copyOut(anchor, '', () => { /* nothing to copy */ });
+    expect(r.skipped).toEqual(['s']);
+  });
+  it.runIf(process.getuid?.() !== 0)('fails on an unreadable file instead of leaving it out', () => {
+    writeFileSync(join(ws, 'hidden'), 'x');
+    chmodSync(join(ws, 'hidden'), 0o000);
+    expect(code(() => copyOut(anchor, '', () => { /* sink */ }))).toBe('EACCES');
+  });
 });
 
-describe('copyIn', () => {
-  let src: string;
+describe('stageIn', () => {
+  const MODES = { fileMode: 0o640, dirMode: 0o750 };
+  const leftovers = (): string[] => walk(anchor, '').entries.map((e) => e.rel).filter((r) => r.includes(STAGE_PREFIX));
   beforeEach(() => {
-    src = join(root, 'src');
-    mkdirSync(join(src, 'sub'), { recursive: true });
-    writeFileSync(join(src, 'sub', 'f'), 'restored');
-  });
-  it('overlays: replaces existing files, keeps others, applies the modes', () => {
     mkdirSync(join(ws, 'sub'));
     writeFileSync(join(ws, 'sub', 'f'), 'old');
     writeFileSync(join(ws, 'keep'), 'mine');
-    writeFileSync(join(src, 'new'), 'n');
-    const r = copyIn(anchor, '', src, { fileMode: 0o640, dirMode: 0o750 });
+  });
+  it('leaves the targets alone until commit, then overlays with the modes', () => {
+    const s = stageIn(anchor, '', [{ rel: 'sub/f', data: 'restored' }, { rel: 'new/n', data: 'n' }], MODES);
+    expect(readFileSync(join(ws, 'sub', 'f'), 'utf8')).toBe('old');
+    expect(existsSync(join(ws, 'new', 'n'))).toBe(false);
+    expect([s.files, s.bytes]).toEqual([2, 9]);
+    s.commit();
     expect(readFileSync(join(ws, 'sub', 'f'), 'utf8')).toBe('restored');
     expect(readFileSync(join(ws, 'keep'), 'utf8')).toBe('mine');
-    expect(statSync(join(ws, 'new')).mode & 0o7777).toBe(0o640);
-    expect([r.files, r.dirs]).toEqual([2, 1]);
+    expect(statSync(join(ws, 'new', 'n')).mode & 0o7777).toBe(0o640);
+    expect(statSync(join(ws, 'new')).mode & 0o7777).toBe(0o750);
+    expect(leftovers()).toEqual([]);
   });
-  it('refuses symlinks in the source and counts them', () => {
-    symlinkSync(join(outside, 'secret'), join(src, 'l'));
-    const r = copyIn(anchor, '', src, { fileMode: 0o600, dirMode: 0o700 });
-    expect(r.skipped).toEqual(['l']);
-    expect(existsSync(join(ws, 'l'))).toBe(false);
+  it('abort removes every staged file and changes no target', () => {
+    const s = stageIn(anchor, '', [{ rel: 'sub/f', data: 'restored' }, { rel: 'keep', data: 'x' }], MODES);
+    expect(leftovers().length).toBe(2);
+    s.abort();
+    expect(leftovers()).toEqual([]);
+    expect(readFileSync(join(ws, 'sub', 'f'), 'utf8')).toBe('old');
+    expect(readFileSync(join(ws, 'keep'), 'utf8')).toBe('mine');
   });
-  it('does not write through a symlink the workspace already holds', () => {
-    symlinkSync(outside, join(ws, 'sub'));
-    expect(code(() => copyIn(anchor, '', src, { fileMode: 0o600, dirMode: 0o700 }))).toBe('SYMLINK');
-    expect(existsSync(join(outside, 'f'))).toBe(false);
+  it('fails in the staging phase on a directory at a target, and leaves nothing staged', () => {
+    mkdirSync(join(ws, 'isdir'));
+    expect(code(() => stageIn(anchor, '', [{ rel: 'keep', data: 'x' }, { rel: 'isdir', data: 'y' }], MODES))).toBe('NOT_FILE');
+    expect(leftovers()).toEqual([]);
+    expect(readFileSync(join(ws, 'keep'), 'utf8')).toBe('mine');
+  });
+  it('removes a left-over staged file of an earlier, crashed run', () => {
+    writeFileSync(join(ws, 'sub', `${STAGE_PREFIX}stale`), 'x');
+    const s = stageIn(anchor, '', [{ rel: 'keep', data: 'x' }], MODES);
+    s.abort();
+    expect(leftovers()).toEqual([]);
+  });
+  it('refuses the same path twice', () => {
+    expect(code(() => stageIn(anchor, '', [{ rel: 'keep', data: 'a' }, { rel: 'keep', data: 'b' }], MODES))).toBe('BAD_PATH');
+    expect(leftovers()).toEqual([]);
+  });
+  it('refuses a symlinked directory on the way and writes nothing outside', () => {
+    symlinkSync(outside, join(ws, 'out'));
+    expect(code(() => stageIn(anchor, '', [{ rel: 'out/f', data: 'x' }], MODES))).toBe('SYMLINK');
+    expect(readdirSync(outside).sort()).toEqual(['private', 'secret']);
+  });
+  it('commit replaces a symlink at the target instead of writing through it', () => {
+    symlinkSync(join(outside, 'secret'), join(ws, 'link'));
+    stageIn(anchor, '', [{ rel: 'link', data: 'mine now' }], MODES).commit();
+    expect(readFileSync(join(outside, 'secret'), 'utf8')).toBe('OUTSIDE');
+    expect(lstatSync(join(ws, 'link')).isFile()).toBe(true);
+  });
+  it('commits only once', () => {
+    const s = stageIn(anchor, '', [{ rel: 'keep', data: 'x' }], MODES);
+    s.commit();
+    expect(() => s.commit()).toThrow(/already/);
+  });
+});
+
+describe.runIf(LINUX)('a removed anchor', () => {
+  it('refuses every operation instead of seeing an empty tree', () => {
+    const gone = join(root, 'gone');
+    mkdirSync(gone);
+    const a = openAnchor(gone);
+    try {
+      rmSync(gone, { recursive: true });
+      expect(code(() => walk(a, ''))).toBe('GONE');
+      expect(code(() => listDir(a, ''))).toBe('GONE');
+      expect(code(() => statEntry(a, ''))).toBe('GONE');
+      expect(code(() => emptyDir(a, ''))).toBe('GONE');
+    } finally {
+      closeAnchor(a);
+    }
   });
 });
 

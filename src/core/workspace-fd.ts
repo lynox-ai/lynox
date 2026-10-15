@@ -37,14 +37,13 @@ import {
   openSync,
   readdirSync,
   readFileSync,
-  readSync,
   renameSync,
   rmdirSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 const IS_LINUX = process.platform === 'linux';
@@ -80,7 +79,7 @@ export interface EntryInfo {
 /** Thrown for every refusal of this module, with a stable code for callers. */
 export class WorkspaceAccessError extends Error {
   constructor(
-    readonly code: 'BAD_PATH' | 'SYMLINK' | 'NOT_DIR' | 'NOT_FILE' | 'LIMIT' | 'MOUNT' | 'REMAINDER',
+    readonly code: 'BAD_PATH' | 'SYMLINK' | 'NOT_DIR' | 'NOT_FILE' | 'LIMIT' | 'MOUNT' | 'REMAINDER' | 'GONE',
     message: string,
   ) {
     super(message);
@@ -162,6 +161,7 @@ function closeDir(dir: DirHandle, anchor: DirHandle): void {
  * The caller closes the returned handle with `closeDir` — it may be the anchor.
  */
 function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode: number }): DirHandle {
+  assertLive(anchor);
   let cur: DirHandle = anchor;
   for (const name of parts) {
     let next: DirHandle;
@@ -192,6 +192,17 @@ function walkDir(anchor: DirHandle, parts: readonly string[], create?: { dirMode
     cur = next;
   }
   return cur;
+}
+
+/**
+ * A held fd keeps a deleted directory alive: every operation would then see an
+ * empty tree, and a backup or an erase count would report nothing where the real
+ * workspace is gone. Refuse instead.
+ */
+function assertLive(anchor: DirHandle): void {
+  if (fstatSync(anchor.fd).nlink === 0) {
+    throw new WorkspaceAccessError('GONE', `${anchor.path} was removed while held open`);
+  }
 }
 
 /** fchmod needs a real fd; an O_PATH fd gives EBADF, so reopen the directory read-only. */
@@ -253,7 +264,10 @@ export function mountIdOf(fd: number): number | null {
 export function statEntry(anchor: WorkspaceAnchor, rel: string): EntryInfo | null {
   const parts = splitRel(rel);
   const leaf = parts.pop();
-  if (leaf === undefined) return info('', fstatSync(anchor.fd));
+  if (leaf === undefined) {
+    assertLive(anchor);
+    return info('', fstatSync(anchor.fd));
+  }
   const dir = walkDir(anchor, parts);
   try {
     return info(leaf, lstatSync(at(dir, leaf)));
@@ -522,57 +536,126 @@ export function copyOut(anchor: WorkspaceAnchor, rel: string, sink: CopyOutSink,
   return { files, dirs, bytes, skipped };
 }
 
-export interface CopyInOptions {
+export interface StageOptions {
   readonly fileMode: number;
   readonly dirMode: number;
 }
 
+/** One file to write in: a path relative to the staged directory, and its content. */
+export interface StageEntry {
+  readonly rel: string;
+  readonly data: string | Uint8Array;
+}
+
+/** Files written beside their targets, not yet in place. */
+export interface StagedWrite {
+  readonly files: number;
+  readonly bytes: number;
+  /** Rename every staged file over its target. Not atomic across files. */
+  commit(): void;
+  /** Remove every staged file; the targets stay as they were. */
+  abort(): void;
+}
+
+/** Prefix of a staged file. Fixed, so a temp left by a crashed run is found again. */
+export const STAGE_PREFIX = '.lynox-stage-';
+
+function stageName(leaf: string): string {
+  return STAGE_PREFIX + createHash('sha256').update(leaf).digest('hex').slice(0, 24);
+}
+
+interface Staged {
+  readonly dirParts: string[];
+  readonly leaf: string;
+  readonly tmp: string;
+}
+
 /**
- * Copy a directory tree from OUTSIDE the workspace (`srcDir`, a path the engine
- * owns, e.g. a decrypted backup) into the workspace below `rel`. Overlays: each
- * file is written beside its target and renamed over it; nothing is deleted.
- * Symlinks and special files in the source are refused and counted.
+ * Write files into the workspace below `rel` in two phases, so a restore can
+ * stage everything (databases, config, workspace) and only then swap.
+ *
+ * Phase 1 (this call): left-over files of the stage pattern below `rel` are
+ * removed; each entry is written to a temp beside its target (O_EXCL|O_NOFOLLOW,
+ * fchmod, fsync). A target of the wrong kind (a directory where a file goes) or a
+ * symlink on the way fails here, and everything staged so far is removed.
+ * `commit()` renames the temps over the targets; nothing is ever deleted, so this
+ * overlays. A symlink at a target is replaced by the rename, never written through.
  */
-export function copyIn(anchor: WorkspaceAnchor, rel: string, srcDir: string, opts: CopyInOptions): CopyCount {
-  const skipped: string[] = [];
-  let files = 0, dirs = 0, bytes = 0;
-  const visit = (srcPath: string, relParts: readonly string[]): void => {
-    for (const name of readdirSync(srcPath)) {
-      const from = join(srcPath, name);
-      const st = lstatSync(from);
-      const parts = [...relParts, name];
-      if (st.isDirectory()) {
-        closeDir(walkDir(anchor, parts, { dirMode: opts.dirMode }), anchor);
-        dirs++;
-        visit(from, parts);
-      } else if (st.isFile()) {
-        const target = walkDir(anchor, relParts, { dirMode: opts.dirMode });
-        try {
-          const src = openSync(from, constants.O_RDONLY | O_NOFOLLOW);
-          try {
-            writeIntoDir(target, name, opts.fileMode, (fd) => {
-              const buf = Buffer.allocUnsafe(1 << 16);
-              let n: number;
-              while ((n = readSync(src, buf, 0, buf.length, null)) > 0) {
-                let off = 0;
-                while (off < n) off += writeSync(fd, buf, off, n - off);
-                bytes += n;
-              }
-            });
-          } finally {
-            closeSync(src);
-          }
-        } finally {
-          closeDir(target, anchor);
-        }
-        files++;
-      } else {
-        skipped.push(parts.join('/'));
-      }
+export function stageIn(anchor: WorkspaceAnchor, rel: string, source: Iterable<StageEntry>, opts: StageOptions): StagedWrite {
+  const base = splitRel(rel);
+  const staged: Staged[] = [];
+  const seen = new Set<string>();
+  let bytes = 0;
+  const removeStaged = (): void => {
+    for (const s of staged) {
+      try {
+        const dir = walkDir(anchor, s.dirParts);
+        try { unlinkSync(at(dir, s.tmp)); } finally { closeDir(dir, anchor); }
+      } catch { /* already gone */ }
     }
   };
-  visit(srcDir, splitRel(rel));
-  return { files, dirs, bytes, skipped };
+  try {
+    if (statEntry(anchor, rel)?.type === 'dir') {
+      for (const e of walk(anchor, rel).entries) {
+        const name = e.rel.slice(e.rel.lastIndexOf('/') + 1);
+        if (e.type !== 'dir' && name.startsWith(STAGE_PREFIX)) unlinkAt(anchor, [...base, e.rel].join('/'));
+      }
+    }
+    for (const entry of source) {
+      const parts = [...base, ...splitRel(entry.rel)];
+      const leaf = parts.pop();
+      if (leaf === undefined) throw new WorkspaceAccessError('BAD_PATH', 'a staged file needs a path');
+      const key = [...parts, leaf].join('/');
+      if (seen.has(key)) throw new WorkspaceAccessError('BAD_PATH', `${key} staged twice`);
+      seen.add(key);
+      const dir = walkDir(anchor, parts, { dirMode: opts.dirMode });
+      try {
+        try {
+          if (lstatSync(at(dir, leaf)).isDirectory()) {
+            throw new WorkspaceAccessError('NOT_FILE', `${join(dir.path, leaf)} is a directory`);
+          }
+        } catch (err) {
+          if (errno(err) !== 'ENOENT') throw err;
+        }
+        const tmp = stageName(leaf);
+        const fd = openSync(at(dir, tmp), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600);
+        staged.push({ dirParts: parts, leaf, tmp });
+        try {
+          const buf = typeof entry.data === 'string' ? Buffer.from(entry.data, 'utf8') : entry.data;
+          let off = 0;
+          while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
+          bytes += buf.length;
+          fchmodSync(fd, opts.fileMode);
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+      } finally {
+        closeDir(dir, anchor);
+      }
+    }
+  } catch (err) {
+    removeStaged();
+    throw err;
+  }
+  let settled = false;
+  return {
+    files: staged.length,
+    bytes,
+    commit(): void {
+      if (settled) throw new Error('staged write already committed or aborted');
+      settled = true;
+      for (const s of staged) {
+        const dir = walkDir(anchor, s.dirParts);
+        try { renameSync(at(dir, s.tmp), at(dir, s.leaf)); } finally { closeDir(dir, anchor); }
+      }
+    },
+    abort(): void {
+      if (settled) return;
+      settled = true;
+      removeStaged();
+    },
+  };
 }
 
 export interface EmptyResult {
