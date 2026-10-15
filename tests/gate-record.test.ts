@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -345,6 +345,45 @@ describe('gate-record — which gates a diff requires', () => {
       head: HEAD, files: ['SUBPROCESSORS.md'],
     });
     expect(named.ok, JSON.stringify(named.errors)).toBe(true);
+  });
+
+  describe('the legal sign-off, against the fixture both repos share', () => {
+    // The private repo's gate record reads the same file and must come to the same verdicts.
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/legal-approved.json', import.meta.url), 'utf8')) as {
+      approvers: string[];
+      cases: { value: string; verdict: string; why: string }[];
+    };
+
+    it('lists the same approvers as the fixture', () => {
+      // A name added here alone, or in the fixture alone, fails this.
+      expect([...LEGAL_APPROVERS]).toEqual(fixture.approvers);
+    });
+
+    it.each(fixture.cases.map((c) => [c.value, c.verdict, c.why] as const))(
+      '%j → %s (%s)', (value, verdict) => {
+        expect(approvedVerdict(value)).toBe(verdict);
+      },
+    );
+
+    it('blocks the merge on every verdict but `ok`, through the record', () => {
+      for (const c of fixture.cases) {
+        if (c.verdict === 'missing') continue;
+        const r = evaluate({
+          body: record({ gates: 'legal', approved: c.value, delta: '', mutations: '' }),
+          head: HEAD, files: ['SUBPROCESSORS.md'],
+        });
+        expect(r.ok, `${JSON.stringify(c.value)}: ${JSON.stringify(r.errors)}`).toBe(c.verdict === 'ok');
+      }
+    });
+
+    it('names the approvers when the line does not start with one', () => {
+      const r = evaluate({
+        body: record({ gates: 'legal', approved: 'ausstehend 2026-10-15', delta: '', mutations: '' }),
+        head: HEAD, files: ['SUBPROCESSORS.md'],
+      });
+      expect(r.errors.join(' ')).toContain('does not start with who signed off');
+      expect(r.errors.join(' ')).toContain(`one of: ${LEGAL_APPROVERS.join(', ')}`);
+    });
   });
 
   it('tells an author without an `approved:` line that PENDING is a valid answer', () => {

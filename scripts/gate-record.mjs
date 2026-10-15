@@ -167,6 +167,38 @@ const LEGAL_PATHS = [
   /^SUBPROCESSORS\.md$/,
 ];
 
+/**
+ * Who may sign off on the wording of a binding customer text. A legal sign-off is a person's,
+ * never a session's: a new name comes in through a change to this list, not through a line in
+ * a PR body. The same list stands in the private repo's gate record, and both repos test it
+ * against the same fixture (`tests/fixtures/legal-approved.json`).
+ */
+export const LEGAL_APPROVERS = ['rafael'];
+
+/**
+ * What an `approved:` value says, read from its START: an approver and an ISO date, in that
+ * order, is a sign-off. Everything after the date is free text (a time, `2026-09-29/30`, where
+ * it was given). Anything else is not a sign-off, however it is worded: a positive form, because
+ * the ways to write "not yet" (`TBD`, `**PENDING**`, `ausstehend`, a lookalike letter) cannot be
+ * listed, and each one with a date used to pass.
+ *
+ * ⚠ It reads the SYNTAX. A line that says `rafael 2026-10-15` without rafael having signed off
+ * passes, and no format check can tell.
+ *
+ * @returns {'missing' | 'pending' | 'undated' | 'not-an-approver' | 'ok'}
+ */
+export function approvedVerdict(raw) {
+  const approved = String(raw ?? '').trim();
+  if (!approved) return 'missing';
+  // `/^pending/i` has no `\b` on purpose: with one, `pendingapproval rafael 2026-10-02` finds no
+  // boundary and gets the wrong message.
+  if (/^pending/i.test(approved)) return 'pending';
+  const name = approved.split(/\s/, 1)[0].toLowerCase();
+  if (!LEGAL_APPROVERS.includes(name)) return 'not-an-approver';
+  // The date follows the name directly; a date later in the line ties nothing to the name.
+  return /^\S+\s+\d{4}-\d{2}-\d{2}(?!\d)/.test(approved) ? 'ok' : 'undated';
+}
+
 const DOC_ONLY = [/^docs\//, /\.md$/, /^\.github\/ISSUE_TEMPLATE\//, /^LICENSE$/];
 
 function parseArgs(argv) {
@@ -968,7 +1000,8 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
   // claims has to be one.
   if (claimed.has('legal') || required.has('legal')) {
     const approved = (f.approved ?? '').trim();
-    if (!approved) {
+    const verdict = approvedVerdict(approved);
+    if (verdict === 'missing') {
       errors.push(
         required.has('legal')
           ? 'this diff changes a binding customer text, so the record needs an `approved:` line'
@@ -978,18 +1011,23 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
         'the format: if the sign-off does not exist yet, saying so is the true line.',
         'Run `/legal-review` first — its findings are what the sign-off is given on.',
       );
-    } else if (/^pending/i.test(approved)) {
+    } else if (verdict === 'pending') {
       // An explicit "not yet" is the true answer while the wording is unseen, so it blocks the
-      // merge. Before this branch it passed: the line only had to carry an ISO date, and
-      // `approved: PENDING — … agreed 2026-10-15` carries one. Rule and trigger are ported from the
-      // private repo's gate record. `/^pending/i` has no `\b` on purpose: with one,
-      // `pendingapproval rafael 2026-10-02` finds no boundary and its date reads as a sign-off.
+      // merge, with a message that does not read as a format complaint.
       errors.push(
         `\`approved: ${approved}\` says the sign-off is PENDING — which is the honest answer, so this`,
         'is NOT a format complaint. The merge waits for the sign-off, not for a better line.',
       );
-    } else if (!/\d{4}-\d{2}-\d{2}/.test(approved)) {
-      errors.push(`\`approved: ${approved}\` has no ISO date — a sign-off without one cannot be tied to this revision`);
+    } else if (verdict === 'not-an-approver') {
+      errors.push(
+        `\`approved: ${approved}\` does not start with who signed off. A sign-off reads`,
+        `\`approved: <who> <YYYY-MM-DD> [anything]\`, where <who> is one of: ${LEGAL_APPROVERS.join(', ')}.`,
+        'If the sign-off does not exist yet, write `approved: PENDING — <why>`.',
+      );
+    } else if (verdict === 'undated') {
+      // A name without a date cannot be told apart from a sign-off carried over from an
+      // earlier revision of the same text.
+      errors.push(`\`approved: ${approved}\` has no ISO date right after the name — a sign-off without one cannot be tied to this revision`);
     }
   }
 
