@@ -1673,7 +1673,7 @@ export class Engine {
       // A run a mandate planned and nobody approved ends with its grant (§3.13 B7): at boot,
       // every 5 minutes, and when a revoke is recorded. Fails on its own, like the prompt sweep.
       // The same sweep ends a started judged run nobody approved within its retention (PRD
-      // bulk-loop 3.2, M7): its before-images went to a model, and the prune keeps it from a
+      // bulk-loop §3.1): its before-images went to a model, and the prune keeps it from a
       // newer plan — so it must not depend on a plan being made to end.
       const own = this.getBulkOwnership();
       const sweep = (): void => {

@@ -493,11 +493,11 @@ export async function callForStructuredJson<T = unknown>(
   };
   try {
     if (opts.refuseCutOff === true && isCutOffReply(response)) throw new CutOffError();
-    return { ...readExtraction<T>(response, schema), inputTokens, outputTokens, ...spend, model };
+    return { ...readExtraction<T>(response, schema), ...spend, inputTokens, outputTokens, model };
   } catch (err) {
     // The reply is paid for whether or not it parses. Hand the spend to the caller with the
     // error, so a refused extraction is booked like an accepted one.
-    attachExtractionSpend(err, spend);
+    attachExtractionSpend(err, { ...spend, inputTokens, outputTokens });
     throw err;
   }
 }
@@ -506,6 +506,9 @@ export async function callForStructuredJson<T = unknown>(
 export interface ExtractionSpend {
   costUsd: number;
   tier: ModelTier;
+  /** The reply's usage, when the reply came: a caller that books tokens books them too. */
+  inputTokens?: number | undefined;
+  outputTokens?: number | undefined;
 }
 
 const spendByFailedExtraction = new WeakMap<Error, ExtractionSpend>();

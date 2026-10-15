@@ -5,7 +5,7 @@
  * start and the approval.
  *
  * The schema is the only thing that bounds what a verdict can hold, and only as far as the plan
- * enforces it (PRD 3.2, M4): `validateAgainstSchema` refuses unknown fields only under
+ * enforces it (PRD bulk-loop §3.1): `validateAgainstSchema` refuses unknown fields only under
  * `additionalProperties: false`, `required` is optional, and a `pattern` runs as a regex over
  * model output — before the length check, so `maxLength` does not bound it. So the plan does not
  * take a schema as given; it builds one from what it was given and refuses what it cannot bound:
@@ -26,8 +26,11 @@ export const JUDGE_MAX_STRING = 2_000;
 export const JUDGE_MAX_RULE_CHARS = 4_000;
 /** The most a verdict may take in bytes, as {@link judgeAfterBound} counts it. */
 export const JUDGE_MAX_AFTER_BYTES = 32 * 1024;
-/** Bytes a number in a verdict may take as JSON: the longest a double prints. */
-const NUMBER_BYTES = 24;
+/** Bytes a number in a verdict may take as JSON: the longest a double prints is 25
+ *  (`-0.0000012345678901234567`); rounded up. */
+const NUMBER_BYTES = 32;
+/** Names an object literal does not hold as its own field. */
+const RESERVED_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 export interface JudgeRule {
   /** What the model is told to decide, per target. The owner's words, never a target's. */
@@ -121,7 +124,9 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
   }
   const properties: Record<string, ExtractSchemaProperty> = {};
   for (const name of names) {
-    if (!FIELD_RE.test(name)) throw new BulkSourceError('judge.schema: a field name must be one top-level name (letters, digits, _).');
+    if (!FIELD_RE.test(name) || RESERVED_NAMES.has(name)) {
+      throw new BulkSourceError('judge.schema: a field name must be one top-level name (letters, digits, _), not __proto__, constructor or prototype.');
+    }
     if (opts.idField !== undefined && name === opts.idField) {
       throw new BulkSourceError('judge.schema must not decide the id field: the run could not check it reads back the target it listed.');
     }
@@ -139,7 +144,7 @@ export function normalizeJudgeRule(input: unknown, opts: { idField?: string | un
 
 /**
  * The most bytes a verdict under `schema` can take as JSON — an upper bound, not a count of
- * characters (PRD 3.2, Opus-Delta #6): a character takes up to 4 bytes in UTF-8 and up to 6 as a
+ * characters (PRD bulk-loop §3.1): a character takes up to 4 bytes in UTF-8 and up to 6 as a
  * JSON escape, and the keys, quotes, colons and commas count. A run's byte cap is checked against
  * this before any call is paid, so it cannot fail on a verdict afterwards.
  */

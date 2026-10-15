@@ -151,6 +151,15 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   ].join('\n');
 }
 
+/** The column types a verdict field of each schema type is written into without loss
+ *  (`coercePlainColumnValue`): text into a number or true/false column could not be read back. */
+const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
+  string: ['string', 'date', 'json'],
+  number: ['number', 'string', 'json'],
+  integer: ['number', 'string', 'json'],
+  boolean: ['boolean', 'string', 'json'],
+};
+
 /** What a planner is told about a judged run. Counts and rules only — never a verdict. */
 const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
   'Then a model decides each target\'s new values with your rule, one target at a time, without tools. ' +
@@ -265,6 +274,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             const col = colDefs.get(f);
             if (!col) throw new BulkSourceError(`judge.schema names ${f}, which is not a column of the target collection.`);
             if (col.type === 'subject') throw new BulkSourceError(`judge.schema names ${f}, a subject column, which a run cannot set.`);
+            // Refused here, before any call is paid: a verdict the column cannot take would make
+            // every target invalid after its call.
+            const fieldType = judge.schema.properties[f]!.type;
+            if (!(JUDGE_COLUMN_TYPES[fieldType] ?? []).includes(col.type)) {
+              throw new BulkSourceError(`judge.schema gives ${f} the type ${fieldType}, which its ${col.type} column does not take.`);
+            }
           }
           const template = judgeTemplate(judge);
           // A verdict replaces F on an existing row; a row that is not there has nothing to judge.

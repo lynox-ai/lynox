@@ -158,7 +158,7 @@ const INTERRUPTED_RESULT =
  * (`BulkLedger.claimTarget`), and its preview skips the targets it has already read.
  * `bulk_judge` skips targets with a verdict and claims each one before its call is paid
  * (`BulkLedger.claimJudge`): a run started again after a loss pays at most one more call per
- * target whose claim expired (PRD bulk-loop §3.1 „Verlust“).
+ * target whose claim expired (PRD bulk-loop §3.1).
  */
 const RESUMES_AFTER_LOSS = {
   run_workflow: false,
@@ -1649,7 +1649,7 @@ export class WorkerLoop {
       // What leaves here reaches the run result, the notification, the follow-up prompt and the
       // error tracker (the dispatch catch above). Today only fixed texts are thrown inside, but
       // a write handles target content, so nothing of a thrown message leaves: the tracker gets
-      // the class and status, the rest a fixed text (PRD bulk-loop 3.2, H1). Rethrown, so the
+      // the class and status, the rest a fixed text (PRD bulk-loop §3.1, error classes). Rethrown, so the
       // dispatch keeps deciding retry, timeout and stop as before.
       const { judgeErrorForTracker } = await import('./bulk-judge.js');
       void import('./error-reporting.js').then(({ captureError }) => captureError(judgeErrorForTracker(err, effect))).catch(() => {});
@@ -1805,7 +1805,7 @@ export class WorkerLoop {
     } catch (err: unknown) {
       // A judge that threw (the ledger, SQLite) would leave its run planned and unhalted with no
       // trigger left. Halted, the owner can start it again. Reported by class only: the original
-      // error may carry a target's text (PRD 3.2, H1).
+      // error may carry a target's text (PRD bulk-loop §3.1, error classes).
       capture(judgeErrorForTracker(err));
       ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
       const reason = ledger.getStatus(runId)?.haltReason;

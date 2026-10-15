@@ -8344,7 +8344,7 @@ export class LynoxHTTPApi {
       if (!status) { errorResponse(res, 404, 'Bulk run not found.'); return; }
       // A judged run: the rule the owner starts it with — its text and schema are the planner's
       // words and its hash is what the start presents, so they go to the owner only (PRD
-      // bulk-loop §3.1 „Start“, R3 M12) — and the model it would be judged on now (3.2, #18).
+      // bulk-loop §3.1) — and the model it would be judged on now (§4).
       const judgeRule = status.judge !== null && isOwnerPrincipal(this._principalOf(req)) ? ledger.getJudgeRuleForOwner(params['id']!) : null;
       let judgeModel: string | null = null;
       if (status.judge !== null) {
@@ -8446,7 +8446,7 @@ export class LynoxHTTPApi {
           supersedes: typeof rawSupersedes === 'string' && rawSupersedes.length > 0 ? rawSupersedes : undefined,
         });
         if (!read.ok && read.reason === 'supersede_required') {
-          // Never replaced silently: the start names the run it replaces (R3 M7).
+          // Never replaced silently: the start names the run it replaces.
           errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
             supersedable: { id: read.supersedable.id, costUsd: read.supersedable.costUsd },
           });

@@ -2549,6 +2549,42 @@ export class RunHistory {
     `).all(startIso, endIso) as Array<{ day: string; cost_usd: number }>;
 
     const dailyMap = new Map(dailyRaw.map(r => [r.day, r.cost_usd]));
+
+    // The bulk judge's spend (v62): model calls without a run of their own. It counts in the
+    // same window as a run, so the dashboard sees what the daily and monthly limits see
+    // (`getCostByDay`) — as cost and tokens, never as a run.
+    const judgeRows = this.db.prepare(`
+      SELECT model_id, date(created_at) as day,
+             COALESCE(SUM(cost_usd), 0) as cost_usd,
+             COALESCE(SUM(tokens_in), 0) as tokens_in,
+             COALESCE(SUM(tokens_out), 0) as tokens_out
+      FROM bulk_cost_days
+      WHERE created_at >= ? AND created_at < ?
+      GROUP BY model_id, date(created_at)
+    `).all(startIso, endIso) as Array<{ model_id: string; day: string; cost_usd: number; tokens_in: number; tokens_out: number }>;
+    for (const j of judgeRows) {
+      dailyMap.set(j.day, (dailyMap.get(j.day) ?? 0) + j.cost_usd);
+      const m = byModelRows.find((r) => r.model_id === j.model_id);
+      if (m) {
+        m.cost_usd += j.cost_usd;
+        m.tokens_in += j.tokens_in;
+        m.tokens_out += j.tokens_out;
+      } else {
+        byModelRows.push({ model_id: j.model_id, cost_usd: j.cost_usd, run_count: 0, tokens_in: j.tokens_in, tokens_out: j.tokens_out, tokens_cache_read: 0 });
+      }
+      const k = byKindRows.find((r) => r.kind === 'llm');
+      if (k) {
+        k.cost_usd += j.cost_usd;
+        k.unit_count += j.tokens_in + j.tokens_out;
+      } else {
+        byKindRows.push({ kind: 'llm', cost_usd: j.cost_usd, unit_count: j.tokens_in + j.tokens_out, run_count: 0 });
+      }
+    }
+    if (judgeRows.length > 0) {
+      byModelRows.sort((a, b) => b.cost_usd - a.cost_usd);
+      byKindRows.sort((a, b) => b.cost_usd - a.cost_usd);
+    }
+
     const daily: Array<{ date: string; cost_cents: number }> = [];
     // One bucket per UTC day the window touches, its last day included: a window that ends
     // mid-day (rolling, or a billing period) ends on that day, not before it. Stepping from the

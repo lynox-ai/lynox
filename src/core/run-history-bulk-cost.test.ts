@@ -79,6 +79,32 @@ describe('RunHistory — the bulk judge\'s spend (bulk_cost_days)', () => {
     expect(stats.cost_by_model.map((e) => e.model_id)).toEqual(['acme-local-7b']);
   });
 
+  it('shows in the usage dashboard as the limits see it: day, model and kind, never a run', () => {
+    const h = history();
+    const id = h.insertRun({ taskText: 'chat', modelTier: 'fast', modelId: 'claude-haiku-4-5' });
+    h.updateRun(id, { costUsd: 0.5, tokensIn: 10, tokensOut: 1, status: 'completed' });
+    h.recordBulkJudgeCost({ runId: 'b1', modelId: 'claude-haiku-4-5', tokensIn: 100, tokensOut: 5, costUsd: 0.25 });
+    h.recordBulkJudgeCost({ runId: 'b1', modelId: 'acme-local-7b', tokensIn: 200, tokensOut: 30, costUsd: 1 });
+    // Yesterday to tomorrow: the window compares ISO bounds against `datetime('now')` text, as for
+    // runs, so a row on the window's first day is not in it — the same for both.
+    const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+    const start = new Date(today.getTime() - 24 * 3600_000);
+    const end = new Date(today.getTime() + 24 * 3600_000);
+    const u = h.getUsageSummary({ startIso: start.toISOString(), endIso: end.toISOString(), source: 'rolling', label: 'today' });
+    expect(u.used_cents).toBe(175);
+    expect(u.daily).toEqual([
+      { date: start.toISOString().slice(0, 10), cost_cents: 0 },
+      { date: today.toISOString().slice(0, 10), cost_cents: 175 },
+    ]);
+    expect(u.by_model.map((m) => [m.model_id, m.cost_cents, m.run_count, m.tokens_in, m.tokens_out])).toEqual([
+      ['acme-local-7b', 100, 0, 200, 30],
+      ['claude-haiku-4-5', 75, 1, 110, 6],
+    ]);
+    expect(u.by_kind).toEqual([{ kind: 'llm', cost_cents: 175, unit_count: 346, unit_label: 'tokens', run_count: 1 }]);
+    // The headline matches what the daily limit counts.
+    expect(h.getCostByDay(1)[0]!.cost_usd).toBeCloseTo(1.75, 12);
+  });
+
   it('reaches the daily limit', () => {
     const h = history();
     configurePersistentBudget({ costProvider: h, dailyCapUSD: 1, monthlyCapUSD: 100 });

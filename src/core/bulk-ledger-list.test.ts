@@ -260,7 +260,7 @@ describe('the approval checksum of a list run', () => {
   });
 });
 
-describe('a list with a judge (PRD bulk-loop §3.1 „Start“, two starts)', () => {
+describe('a list with a judge (PRD bulk-loop §3.1, two starts)', () => {
   const rule = normalizeJudgeRule({ rule: 'Mark the draft.', schema: { status: { type: 'string', enum: ['draft', 'publish'] } } }, { idField: 'id' });
   const judgedSource: BulkListSource = parseListSource(HOST, { path: '/wp-json/wc/v3/products', filters: { category: '12' }, after: judgeTemplate(rule) }, 'PUT', () => null);
   function judgedPlan(): string {

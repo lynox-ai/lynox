@@ -15,7 +15,7 @@ import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, MemoryScopeRef } from '../types/index.js';
 
 /**
- * PRD bulk-loop §6(a), error channel (3.2, Deep-Dive H1): a provider that refuses with a target's
+ * PRD bulk-loop §6(a), error channel: a provider that refuses with a target's
  * text in its error — a schema refusal carrying the value, a 400 echoing the body — reaches
  * neither the run result, nor the notification, nor the error tracker. Through the real worker
  * dispatch and `executeBulkJudge`; only the model's client and the tracker are stand-ins.

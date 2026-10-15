@@ -256,12 +256,17 @@ export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
  *  approve. */
 export const BULK_MAX_PREVIEWED_RUNS = 10;
 
-/** How long a started, unapproved judged run is kept (PRD 3.2, M7): its before-images were sent to
- *  a model and are held encrypted until the owner approves the run or this runs out. */
+/** How long a started, unapproved judged run is kept (PRD bulk-loop §3.1): its
+ *  before-images were sent to a model and are held encrypted until the owner approves the run or
+ *  this runs out. */
 export const BULK_JUDGED_RETENTION_MS = 30 * 24 * 60 * 60_000;
+/** A run never approved: still before its approval, or ended there — replaced by another
+ *  judged start, or planned under an access that ended. */
+const UNAPPROVED_JUDGED = `(phase IN ('planned','previewed')
+  OR (phase = 'aborted' AND halt_reason IN ('${BULK_HALT_REASONS.superseded}', '${BULK_HALT_REASONS.mandateEnded}')))`;
 
-/** A spend limit as the start takes it: finite, above zero, in whole cents (L1: spend shown
- *  rounded down beside a limit with a fraction of a cent reads an overrun limit as „below“). */
+/** A spend limit as the start takes it: finite, above zero, in whole cents: spend shown
+ *  rounded down beside a limit with a fraction of a cent would read an overrun limit as below it. */
 export function isWholeCents(usd: number): boolean {
   if (!Number.isFinite(usd) || usd <= 0) return false;
   const cents = usd * 100;
@@ -304,7 +309,7 @@ export interface PreviewTarget {
   after: unknown;
   diff: TargetDiff;
   /** How many fields the write changes — the number the owner checks a judged run by (PRD
-   *  bulk-loop 3.2, Opus-Delta #18). A text value counts as one. Null for a judged run's target
+   *  bulk-loop §4). A text value counts as one. Null for a judged run's target
    *  that has no verdict yet: its after-state is not decided. */
   changedFields: number | null;
   error: string | null;
@@ -680,8 +685,8 @@ export class BulkLedger {
   private pruneUnapproved(): void {
     const db = this.engineDb.getDb();
     // A run whose judge was started holds paid verdicts: not dropped for a newer plan (PRD
-    // bulk-loop §3.1 „Verdrängen“) — its end is the owner's start of another one (superseded,
-    // which then joins this set) or the retention sweep. „Started“ is the limit being set, not
+    // bulk-loop §3.1) — its end is the owner's start of another one (superseded,
+    // which then joins this set) or the retention sweep. is the limit being set, not
     // spend above zero: a run whose first call is in flight has spent nothing yet.
     const prunable = `kind = 'apply' AND (
          (phase IN ('previewed','planned') AND NOT (judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL))
@@ -824,7 +829,7 @@ export class BulkLedger {
     const run = this.runRow(runId);
     if (!run || run.list_state !== 'pending' || run.list_source === null) return null;
     // A judged list's start also binds its rule: the owner who starts the list read starts the
-    // run whose rule they were shown (PRD 3.2, Opus-Delta #7).
+    // run whose rule they were shown (PRD bulk-loop §3.1).
     return this.engineDb.keyedHash([
       'bulk-list-start-v1', run.target_system, this.engineDb.dec(run.list_source), run.contract_json ?? '',
       ...(run.judge_rule_hash !== null ? ['judge', run.judge_rule_hash] : []),
@@ -1629,7 +1634,7 @@ export class BulkLedger {
    * route clears the halt — the start gate included — and the preview trigger is due at
    * once. Targets already read stay read.
    *
-   * A judged run (PRD bulk-loop §3.1 „Start“) is started with the hash of the rule the owner was
+   * A judged run (PRD bulk-loop §3.1) is started with the hash of the rule the owner was
    * shown and a spend limit in whole cents, and arms `bulk_judge`. A list's first start reads
    * only the list and takes neither: a list can end empty, and an empty run must not have
    * replaced anything. Starting a judged run ends the instance's other started, unapproved judged
@@ -1673,7 +1678,7 @@ export class BulkLedger {
       ).get(runId) as { n: number };
       if (run.target_system.startsWith('http:') && reading.n > 0) return 'busy';
       if (judging) {
-        // At most one started, unapproved judged run per instance (R2 S1, R3 M7).
+        // At most one started, unapproved judged run per instance (PRD bulk-loop §3.1).
         const other = db.prepare(
           `SELECT id, cost_usd FROM bulk_runs WHERE judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL
              AND phase IN ('planned','previewed') AND id != ? ORDER BY created_at LIMIT 1`,
@@ -1687,7 +1692,7 @@ export class BulkLedger {
             `UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ? AND phase IN ('planned','previewed')`,
           ).run(BULK_HALT_REASONS.superseded, other.id);
           // Its read phase's trigger goes with it: it would fire into an aborted run, maybe with a
-          // paid call in flight (R3 M6).
+          // paid call in flight.
           if (ended.changes === 1) new TriggerStore(this.engineDb).remove(bulkPreviewTriggerId(other.id));
         }
       }
@@ -1700,7 +1705,7 @@ export class BulkLedger {
       triggerId = this.armPreviewTrigger(runId, now, judging ? 'bulk_judge' : 'bulk_preview');
       return 'moved';
     // IMMEDIATE: the write lock before the check, so two starts at once cannot both see no other
-    // judged run and both start (R3 M9).
+    // judged run and both start.
     }).immediate();
     if (moved === 'busy') return { ok: false, reason: 'external_in_progress' };
     if (moved === 'supersede') return { ok: false, reason: 'supersede_required', supersedable: supersedable! };
@@ -1740,7 +1745,7 @@ export class BulkLedger {
    * Take the claim on one target before its call is paid for: atomically, only when the target
    * has no verdict and no live claim, and only while the run is planned and not halted. A claim
    * older than `staleMs` belongs to a loop that died. Two loops after a lost lease thus pay for
-   * a target at most once per expired claim (PRD 3.2, M1).
+   * a target at most once per expired claim (PRD bulk-loop §3.1).
    */
   claimJudge(runId: string, seq: number, token: string, now: number, staleMs: number): boolean {
     return this.engineDb.getDb().prepare(
@@ -1752,7 +1757,7 @@ export class BulkLedger {
   }
 
   /** Give a claim back, when the call ends without a verdict (a halt, a wait): the next tick
-   *  tries the target again at once instead of after the claim expires (PRD 3.2, Opus-Delta #8). */
+   *  tries the target again at once instead of after the claim expires. */
   releaseJudgeClaim(runId: string, seq: number, token: string): void {
     this.engineDb.getDb().prepare(
       `UPDATE bulk_targets SET judge_claimed_at = NULL, judge_claim_token = NULL
@@ -1781,7 +1786,7 @@ export class BulkLedger {
    * none. Only under the claim's own token (compare-and-set), only while the target has no
    * verdict, and only while the run is `planned`: a loop whose claim expired cannot overwrite
    * the verdict of the loop that took it over, and a verdict in flight does not write into a run
-   * that was superseded (PRD 3.2, M1, M7).
+   * that was superseded (PRD bulk-loop §3.1).
    */
   recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason }, now: number = Date.now()): boolean {
     const db = this.engineDb.getDb();
@@ -1839,19 +1844,22 @@ export class BulkLedger {
 
   /**
    * Delete every started, unapproved judged run whose start is more than `maxAgeMs` ago, with
-   * its read phase's trigger and its encrypted before-images (PRD 3.2, M7 and Opus-Delta #6). A
-   * started judged run is kept from the prune; this is what bounds how long it is kept. Run at
-   * boot and every 5 minutes by the engine's bulk sweep, not only when a plan is recorded. Returns how many went.
+   * its read phase's trigger and its encrypted before-images (PRD bulk-loop §3.1).
+   * A started judged run is kept from the prune; this is what bounds how long it is kept. That
+   * includes a run ended before approval — replaced by another start, or planned under an access
+   * that has ended — whose before-images went to a model all the same; never a run that was
+   * approved (an atomic run aborted while writing keeps its own reason). Run at boot and every 5
+   * minutes by the engine's bulk sweep, not only when a plan is recorded. Returns how many went.
    */
   expireStaleJudgedRuns(now: number = Date.now(), maxAgeMs: number = BULK_JUDGED_RETENTION_MS): number {
     const db = this.engineDb.getDb();
     const doomed = db.prepare(
-      `SELECT id FROM bulk_runs WHERE judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL AND phase IN ('planned','previewed')
+      `SELECT id FROM bulk_runs WHERE judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL AND ${UNAPPROVED_JUDGED}
          AND judge_started_at IS NOT NULL AND judge_started_at < ?`,
     ).all(new Date(now - maxAgeMs).toISOString()) as { id: string }[];
     if (doomed.length === 0) return 0;
     const triggers = new TriggerStore(this.engineDb);
-    const drop = db.prepare(`DELETE FROM bulk_runs WHERE id = ? AND phase IN ('planned','previewed')`);
+    const drop = db.prepare(`DELETE FROM bulk_runs WHERE id = ? AND ${UNAPPROVED_JUDGED}`);
     let n = 0;
     db.transaction(() => {
       for (const { id } of doomed) {

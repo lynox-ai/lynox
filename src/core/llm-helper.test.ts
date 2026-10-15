@@ -749,7 +749,7 @@ describe('callForStructuredJson — a reply that lost the forced call', () => {
     expect(err).toBeInstanceOf(ExtractShapeError);
     expect(forcedToolMissCounts()['llm-helper']).toBe(before + 1);
     // The paid reply travels with the error, priced at the model's rate: 100 in at $4/M, 50 out at $20/M.
-    expect(extractionSpendOf(err)).toEqual({ costUsd: expect.closeTo(0.0014, 9) as number, tier: 'deep' });
+    expect(extractionSpendOf(err)).toEqual({ costUsd: expect.closeTo(0.0014, 9) as number, tier: 'deep', inputTokens: 100, outputTokens: 50 });
   });
 });
 
@@ -845,6 +845,9 @@ describe('callForStructuredJson — options for a caller that gates and books ev
     expect(err).toBeInstanceOf(CutOffError);
     expect((err as Error).message).not.toContain('low');
     expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
+    // The usage comes with it, for a caller that books tokens.
+    expect(extractionSpendOf(err)?.inputTokens).toBeGreaterThan(0);
+    expect(extractionSpendOf(err)?.outputTokens).toBeGreaterThan(0);
     // The default stays as api_setup relies on it: a schema-valid cut-off is accepted.
     const ok = await callForStructuredJson({ ...base, client: recordingClient('max_tokens').client });
     expect(ok.data).toEqual(VALID);

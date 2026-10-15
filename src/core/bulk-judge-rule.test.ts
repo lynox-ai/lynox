@@ -55,6 +55,9 @@ describe('normalizeJudgeRule — the plan builds the verdict schema, it does not
     expect(normalizeJudgeRule({ rule: 'x', schema: { title: TITLE }, tier: 'balanced' }).tier).toBe('balanced');
     expect(() => normalizeJudgeRule({ rule: 'x', schema: { 'a.b': TITLE } })).toThrow(/field name/);
     expect(() => normalizeJudgeRule({ rule: 'x', schema: {} })).toThrow(/fields/);
+    for (const name of ['__proto__', 'constructor', 'prototype']) {
+      expect(() => normalizeJudgeRule({ rule: 'x', schema: JSON.parse(`{"${name}":{"type":"boolean"}}`) as Record<string, unknown> })).toThrow(/field name/);
+    }
   });
 
   it('refuses a schema whose verdict could pass the byte cap', () => {
@@ -66,8 +69,13 @@ describe('normalizeJudgeRule — the plan builds the verdict schema, it does not
 describe('judgeAfterBound — an upper bound in bytes, not a count of characters', () => {
   it('holds for the worst verdict: every character a 6-byte JSON escape', () => {
     const r = normalizeJudgeRule({ rule: 'x', schema: { t: { type: 'string', maxLength: 10 }, n: { type: 'number' }, b: { type: 'boolean' } } });
-    const worst = { t: '\u0001'.repeat(10), n: -1.7976931348623157e308, b: false };
+    const worst = { t: '\u0001'.repeat(10), n: -0.0000012345678901234567, b: false };
     expect(Buffer.byteLength(JSON.stringify(worst), 'utf8')).toBeLessThanOrEqual(judgeAfterBound(r.schema));
+    // Several numbers, each the longest a double prints: the last field's spare comma does not
+    // cover them all.
+    const nums = normalizeJudgeRule({ rule: 'x', schema: { a: { type: 'number' }, b: { type: 'number' }, c: { type: 'number' } } });
+    const longest = -0.0000012345678901234567;
+    expect(Buffer.byteLength(JSON.stringify({ a: longest, b: longest, c: longest }), 'utf8')).toBeLessThanOrEqual(judgeAfterBound(nums.schema));
     // A 4-byte character holds too (one code point, two UTF-16 units).
     const emoji = { t: '🙂'.repeat(10), n: 0, b: true };
     expect(Buffer.byteLength(JSON.stringify(emoji), 'utf8')).toBeLessThanOrEqual(judgeAfterBound(r.schema));

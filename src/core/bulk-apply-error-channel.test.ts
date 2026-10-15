@@ -6,7 +6,7 @@ import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord } from '../types/index.js';
 
 /**
- * `executeBulk`'s inner catch (PRD bulk-loop 3.2, H1, „L2 zieht den Fang dort mit“): an error
+ * `executeBulk`'s inner catch (PRD bulk-loop §3.1, error classes): an error
  * thrown inside a bulk write leaves the worker as a fixed text, and reaches the tracker as its
  * class only. Today nothing inside throws a target's text; this holds the channel shut for when
  * something does.

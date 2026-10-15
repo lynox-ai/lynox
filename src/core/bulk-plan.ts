@@ -285,8 +285,8 @@ export function dataStoreColumns(store: DataStore, collection: string): {
 /**
  * The named fields of an after-state as the collection stores them, or why they cannot be:
  * `unknown_column`, `subject_column`, `bad_value`, or `bad_key` for a key that would be nulled
- * or changed. The one mapping both a plan and a judge's verdict go through (PRD 3.2,
- * Opus-Delta 2 #1) — a verdict merged any other way would skip these checks.
+ * or changed. The one mapping both a plan and a judge's verdict go through (PRD
+ * bulk-loop §3.1) — a verdict merged any other way would skip these checks.
  */
 export function mapToColumns(
   after: unknown,

@@ -11,10 +11,12 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
+import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, type callForStructuredJson,
 } from './llm-helper.js';
-import { runBulkJudge, judgeErrorForTracker, classifyCallFailure, JUDGE_CLAIM_STALE_MS, type BulkJudgeDeps } from './bulk-judge.js';
+import { runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
+import { getPricing } from './pricing.js';
 import type { IAgent, MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -92,7 +94,7 @@ interface Harness {
   deps: BulkJudgeDeps;
   calls: { user: string; system: string; maxRetries: number | undefined }[];
   reports: { runId: string; costUsd: number }[];
-  booked: { runId: string; costUsd: number }[];
+  booked: { runId: string; costUsd: number; tokensIn: number; tokensOut: number }[];
   captured: Error[];
 }
 
@@ -110,7 +112,7 @@ function harness(answer: (user: string, n: number) => Promise<{ data: Record<str
     resolveModel: (tier) => ({ tier, modelId: 'claude-haiku-4-5', client: {} as Anthropic }),
     gate: async () => ({ runId: `gate-${String(++gates)}`, blockedReason: null }),
     report: (runId, costUsd) => { h.reports.push({ runId, costUsd }); },
-    bookSpend: (e) => { h.booked.push({ runId: e.runId, costUsd: e.costUsd }); },
+    bookSpend: (e) => { h.booked.push({ runId: e.runId, costUsd: e.costUsd, tokensIn: e.tokensIn, tokensOut: e.tokensOut }); },
     budgetAllows: () => true,
     scanSecret: (t) => (t.includes('sk-live-') ? 'api_key' : null),
     maskVault: (t) => t,
@@ -147,6 +149,23 @@ describe('bulk_plan with judge — planned, waiting for the owner\'s start', () 
       { target_system: 'data_store', target_collection: 'products', source_file: 'f.csv', judge: RULE, atomic: true }, agent(),
     )).toMatch(/cannot be atomic/);
     expect(ledger.listRuns()).toEqual([]);
+  });
+
+  it('refuses a field type its column cannot take, before any call is paid', async () => {
+    store.createCollection({
+      name: 'stock', scope, uniqueKey: ['sku'],
+      columns: [{ name: 'sku', type: 'string' }, { name: 'qty', type: 'number' }, { name: 'live', type: 'boolean' }],
+    });
+    store.insertRecords({ collection: 'stock', records: [{ sku: 'A', qty: 1, live: true }] });
+    writeFileSync(join(dir, 'workspace', 's.csv'), 'target\nA');
+    const planStock = (schema: Record<string, unknown>): Promise<string> => bulkPlanTool.handler(
+      { target_system: 'data_store', target_collection: 'stock', source_file: 's.csv', judge: { rule: 'x', schema } }, agent(),
+    );
+    expect(await planStock({ qty: { type: 'string', maxLength: 5 } })).toMatch(/qty the type string, which its number column does not take/);
+    expect(await planStock({ live: { type: 'number' } })).toMatch(/which its boolean column does not take/);
+    expect(ledger.listRuns()).toEqual([]);
+    // Twin: the types the columns take are planned.
+    expect(await planStock({ qty: { type: 'integer' }, live: { type: 'boolean' } })).toMatch(/Bulk run [0-9a-f-]{36}/);
   });
 
   it('refuses a field that is not a column, and the key column', async () => {
@@ -250,16 +269,21 @@ describe('runBulkJudge over data-store rows', () => {
   });
 
   it('a target holding a credential is not sent: invalid secret_in_before — by the scan and by the vault', async () => {
-    store.insertRecords({ collection: 'products', records: [{ sku: 'S', title: 'key sk-live-abcdef', note: 'n' }, { sku: 'V', title: 'vaulted', note: 'n' }] });
-    const id = await plan(['S', 'V', 'A']);
+    store.insertRecords({ collection: 'products', records: [
+      { sku: 'S', title: 'key sk-live-abcdef', note: 'n' },
+      { sku: 'V', title: 'vaulted', note: 'n' },
+      // A vault value with a quote: escaped in the JSON, so only the value itself matches.
+      { sku: 'Q', title: 'pa"ss', note: 'n' },
+    ] });
+    const id = await plan(['S', 'V', 'Q', 'A']);
     expect(start(id).ok).toBe(true);
     const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
-      maskVault: (t) => t.replace('vaulted', '***'),
+      maskVault: (t) => t.replace('vaulted', '***').replace('pa"ss', '***'),
     });
     await runBulkJudge(id, h.deps);
     expect(h.calls).toHaveLength(1);
     expect(h.calls[0]!.user).toContain('old a');
-    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_before: 2 });
+    expect(ledger.getStatus(id)!.invalidReasons).toMatchObject({ secret_in_before: 3 });
   });
 
   it('a verdict carrying a credential is invalid secret_in_after', async () => {
@@ -277,7 +301,7 @@ describe('runBulkJudge over data-store rows', () => {
     const errs = [new CutOffError(), new SchemaValueError(`value ${MARK} too long`, 'title', 'maxLength'), new ExtractShapeError('no tool call')];
     const h = harness((_u, n) => {
       const e = errs[n - 1]!;
-      attachExtractionSpend(e, { costUsd: 0.03, tier: 'fast' });
+      attachExtractionSpend(e, { costUsd: 0.03, tier: 'fast', inputTokens: 700, outputTokens: 30 });
       throw e;
     });
     const out = await runBulkJudge(id, h.deps);
@@ -285,7 +309,8 @@ describe('runBulkJudge over data-store rows', () => {
     expect(ledger.getStatus(id)!.invalidReasons).toEqual({ cut_off: 1, verdict_invalid: 2 });
     expect(ledger.getStatus(id)!.costUsd).toBeCloseTo(0.09, 12);
     expect(h.reports).toHaveLength(3);
-    expect(h.booked).toHaveLength(3);
+    // Booked with the reply's tokens, not as a call that read and wrote nothing.
+    expect(h.booked.map((b) => [b.tokensIn, b.tokensOut])).toEqual([[700, 30], [700, 30], [700, 30]]);
     // A run with nothing valid left closes with nothing to write.
     expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
@@ -346,6 +371,21 @@ describe('runBulkJudge over data-store rows', () => {
     });
     await runBulkJudge(b, credit.deps);
     expect([ledger.getStatus(b)!.haltReason, credit.calls.length]).toEqual([BULK_HALT_REASONS.creditRefused, 0]);
+  });
+
+  it('a booking that fails keeps the others and the verdict, and stops the run before its next paid call', async () => {
+    const id = await plan(['A', 'B']);
+    expect(start(id).ok).toBe(true);
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+      bookSpend: () => { throw new Error(`SQLITE_BUSY ${MARK}`); },
+    });
+    const out = await runBulkJudge(id, h.deps);
+    expect(out.status).toBe('halted');
+    expect(h.calls).toHaveLength(1);
+    expect(h.reports).toHaveLength(1);
+    const s = ledger.getStatus(id)!;
+    expect([s.haltReason, s.costUsd, s.judge!.unjudged]).toEqual([BULK_HALT_REASONS.unavailable, 0.01, 1]);
+    expect(h.captured.map((e) => e.message)).toEqual(['bulk_judge booking failed: Error']);
   });
 
   it('no allowed model halts judgeModel', async () => {
@@ -420,14 +460,52 @@ describe('keeping and ending judged runs', () => {
     const hash = ledger.getJudgeRuleForOwner(id)!.hash;
     expect(ledger.resumePreview(id, started, { judgeRuleHash: hash, costCapUsd: 1 }).ok).toBe(true);
     const fresh = await plan(['B']);
-    expect(start(fresh, 1, id).ok).toBe(true);
-    // The superseded one is aborted, not swept; the fresh one is inside its 30 days.
+    expect(ledger.expireStaleJudgedRuns()).toBe(1);
+    expect(ledger.getStatus(id)).toBeNull();
+    expect(new TriggerStore(engineDb).get(bulkPreviewTriggerId(id))).toBeUndefined();
+    // The one inside its 30 days stays.
+    expect(start(fresh).ok).toBe(true);
     expect(ledger.expireStaleJudgedRuns()).toBe(0);
-    const old = await plan(['C']);
-    expect(ledger.resumePreview(old, started, { judgeRuleHash: ledger.getJudgeRuleForOwner(old)!.hash, costCapUsd: 1, supersedes: fresh }).ok).toBe(true);
+    expect(ledger.getStatus(fresh)).not.toBeNull();
+  });
+
+  it('a run replaced by another start is still deleted 30 days after its own start: its images went to a model', async () => {
+    const old = await plan(['A']);
+    const started = Date.now() - BULK_JUDGED_RETENTION_MS - 60_000;
+    expect(ledger.resumePreview(old, started, { judgeRuleHash: ledger.getJudgeRuleForOwner(old)!.hash, costCapUsd: 1 }).ok).toBe(true);
+    const next = await plan(['B']);
+    expect(start(next, 1, old).ok).toBe(true);
+    expect(ledger.getStatus(old)!.haltReason).toBe(BULK_HALT_REASONS.superseded);
     expect(ledger.expireStaleJudgedRuns()).toBe(1);
     expect(ledger.getStatus(old)).toBeNull();
-    expect(new TriggerStore(engineDb).get(bulkPreviewTriggerId(old))).toBeUndefined();
+    expect(ledger.getStatus(next)).not.toBeNull();
+  });
+
+  it('a run whose planner\'s access ended is deleted 30 days after its start too', async () => {
+    const GRANT = { kind: 'mandate' as const, email: 'helper@example.invalid', mandateId: 'grant-1' };
+    const rule = normalizeJudgeRule(RULE);
+    const id = ledger.recordDryRun({
+      createdBy: 't', principal: GRANT, targetSystem: 'data_store', scope: 'products', targetCollection: 'products',
+      targets: [{ key: 'A', before: { absent: false, value: { sku: 'A', title: 'old a', note: 'n' } }, after: judgeTemplate(rule) }],
+      judge: rule,
+    }).id;
+    const started = Date.now() - BULK_JUDGED_RETENTION_MS - 60_000;
+    expect(ledger.resumePreview(id, started, { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 }).ok).toBe(true);
+    expect(ledger.endIfPlannerEnded(id, { isLive: () => false, threadCreator: () => undefined, threadsKnown: true })).toBe(true);
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.mandateEnded);
+    expect(ledger.expireStaleJudgedRuns()).toBe(1);
+    expect(ledger.getStatus(id)).toBeNull();
+  });
+
+  it('control: an approved judged run is never swept, however old its start', async () => {
+    const id = await plan(['A']);
+    const started = Date.now() - BULK_JUDGED_RETENTION_MS - 60_000;
+    expect(ledger.resumePreview(id, started, { judgeRuleHash: ledger.getJudgeRuleForOwner(id)!.hash, costCapUsd: 1 }).ok).toBe(true);
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }));
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    expect(ledger.approve(id, { checksum: ledger.computeChecksum(id)!, approvedBy: 'test' }).ok).toBe(true);
+    expect(ledger.expireStaleJudgedRuns()).toBe(0);
+    expect(ledger.getStatus(id)!.phase).toBe('approved');
   });
 });
 
@@ -504,5 +582,18 @@ describe('against the real managed hook (PRD §6(e)): what reaches the control p
     await hook.onShutdown?.();
     expect(h.calls).toHaveLength(0);
     expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.creditRefused);
+  });
+});
+
+describe('judgeWorstCaseUsd — an upper bound on what one call can cost', () => {
+  it('holds for text of one token per character, and counts the tool schema and its framing', () => {
+    const p = getPricing('claude-haiku-4-5');
+    const user = '数'.repeat(1_000);
+    const schema = { type: 'object', properties: { t: { type: 'string', maxLength: 10 } } };
+    // A thousand characters may be a thousand tokens; the helper's estimate would say ~286.
+    const realistic = ((1_000 + JUDGE_TOOL_OVERHEAD_TOKENS) * p.input + 256 * p.output) / 1_000_000;
+    expect(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', user, schema, 256)).toBeGreaterThanOrEqual(realistic);
+    expect(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', { big: 'y'.repeat(5_000) }, 256))
+      .toBeGreaterThan(judgeWorstCaseUsd('claude-haiku-4-5', 'sys', 'x', {}, 256));
   });
 });
