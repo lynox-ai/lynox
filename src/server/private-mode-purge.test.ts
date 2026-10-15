@@ -186,8 +186,9 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
 
   it('takes the profile line its entry seeded, and leaves the user\'s own profile line and the playbook', async () => {
     // What the switch's text (`threads.private_on` / `private_off`) promises about the two
-    // always-loaded blocks: "the profile lines made from it" go, the playbook stays. Before
-    // core#1718 the text said the whole profile stays.
+    // always-loaded blocks: profile and playbook stay, except the profile lines setup seeded
+    // in this chat (the seed is recorded as the onboarding promotion records it). Any other
+    // profile line stays, however it got there.
     const { ts, ks } = stores();
     const seededLine = 'Ruedi Kalt prefers mail to calls';
     const ownLine = 'Ruedi Kalt works four days a week';
