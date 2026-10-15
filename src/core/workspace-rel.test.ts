@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, fstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, fstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { toWorkspaceRel, workspaceBase, closeWorkspaceBase, WorkspacePathRefused } from './workspace-rel.js';
@@ -201,6 +201,10 @@ describe('workspaceBase', () => {
     setTenantWorkspace(ws);
     await writeFileTool.handler({ path: join(ws, 'r.txt'), content: 'r' }, agent());
     expect(readFileSync(join(ws, 'r.txt'), 'utf8')).toBe('r');
+    // The anchor is the context directory itself, not merely a directory the write happened to land in.
+    const held = fstatSync(workspaceBase()!.anchor.fd);
+    const real = statSync(ws);
+    expect([held.dev, held.ino]).toEqual([real.dev, real.ino]);
   });
 
   it('refuses a workspace that reaches the root only through a link', async () => {
@@ -227,6 +231,27 @@ describe('workspaceBase', () => {
     mkdirSync(ws);
     await writeFileTool.handler({ path: join(ws, 'after.txt'), content: 'a' }, agent());
     expect(readFileSync(join(ws, 'after.txt'), 'utf8')).toBe('a');
+  });
+
+  it('names the workspace, not the fd path, while the context directory is gone, and makes nothing', async () => {
+    const root = join(tmp, 'data', 'workspace');
+    const ws = join(root, 'http-api');
+    mkdirSync(ws, { recursive: true });
+    setTenantWorkspace(ws);
+    await writeFileTool.handler({ path: join(ws, 'before.txt'), content: 'b' }, agent());
+    // The erasure's window: emptied, not yet made again.
+    rmSync(ws, { recursive: true });
+    const err = await writeFileTool.handler({ path: join(ws, 'x.txt'), content: 'x' }, agent()).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe(`write_file: ENOENT: no such file or directory: ${ws}`);
+    expect(existsSync(ws)).toBe(false);
+
+    // A link put where the directory was is refused, with the advice the other link refusals give.
+    const foreign = join(tmp, 'foreign');
+    mkdirSync(foreign);
+    symlinkSync(foreign, ws);
+    await expect(writeFileTool.handler({ path: join(ws, 'x.txt'), content: 'x' }, agent()))
+      .rejects.toThrow(/http-api is a symlink.*name the file it points to by its own path/);
+    expect(readdirSync(foreign)).toEqual([]);
   });
 
   it('refuses a workspace outside the root that holds the data directory', async () => {

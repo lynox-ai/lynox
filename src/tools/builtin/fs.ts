@@ -1,14 +1,14 @@
 import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
+import { getWorkspaceDir, isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
 import { getLynoxDir } from '../../core/config.js';
 import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
-import { openRead, openWrite, readFileAt, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { openRead, openWrite, WorkspaceAccessError, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -133,7 +133,14 @@ const NEW_DIR_MODE = 0o755;
  * lands in the workspace through a link is refused: it would reach workspace files by name.
  */
 function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
-  const base = workspaceBase();
+  let base: ReturnType<typeof workspaceBase>;
+  try {
+    base = workspaceBase();
+  } catch (err) {
+    // Reaching the workspace itself failed (e.g. while the erasure makes it again): named by the
+    // workspace's path, like any other fd error.
+    throw anchoredError(getWorkspaceDir() ?? raw, err);
+  }
   if (base === null) return { kind: 'path', path: validatePath(raw, operation) };
   const mapped = toWorkspaceRel(raw, base.ws);
   if (mapped.kind === 'inside') {
@@ -153,7 +160,7 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
  * An errno from an fd operation names the file by its workspace path, not by the process-handle
  * path the walk opened it through: the model would copy that path, and it is refused.
  */
-function anchoredError(target: Extract<Target, { kind: 'anchored' }>, err: unknown): Error {
+function anchoredError(shown: string, err: unknown): Error {
   const code = (err as NodeJS.ErrnoException).code;
   if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') {
     return new Error(
@@ -162,8 +169,10 @@ function anchoredError(target: Extract<Target, { kind: 'anchored' }>, err: unkno
     );
   }
   // Any other refusal of the walk itself already names the file by its workspace path.
-  if (!(err instanceof WorkspaceAccessError) && typeof code === 'string') {
-    return new Error(`${code}: ${target.shown}`, { cause: err });
+  // An errno message reads `CODE: description, syscall 'path'`: keep the description, swap the path.
+  if (!(err instanceof WorkspaceAccessError) && typeof code === 'string' && err instanceof Error && err.message.startsWith(`${code}: `)) {
+    const description = err.message.slice(code.length + 2).split(', ')[0];
+    return new Error(`${code}: ${description}: ${shown}`, { cause: err });
   }
   return err instanceof Error ? err : new Error(String(err));
 }
@@ -183,7 +192,7 @@ function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: strin
   try {
     ({ fd } = openWrite(target.anchor, target.rel, create ? { createMode: NEW_FILE_MODE, dirMode: NEW_DIR_MODE } : {}));
   } catch (err) {
-    throw anchoredError(target, err);
+    throw anchoredError(target.shown, err);
   }
   try {
     const st = fstatSync(fd);
@@ -196,7 +205,7 @@ function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: strin
     // On the fd just opened (offset 0): the same write a write by name does.
     writeFileSync(fd, text, 'utf-8');
   } catch (err) {
-    throw anchoredError(target, err);
+    throw anchoredError(target.shown, err);
   } finally {
     closeSync(fd);
   }
@@ -267,7 +276,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
           try {
             fd = openRead(target.anchor, target.rel);
           } catch (err) {
-            throw anchoredError(target, err);
+            throw anchoredError(target.shown, err);
           }
           // A second name may be a file of the engine's outside the workspace, as for a write.
           if (fstatSync(fd).nlink > 1) {
@@ -442,13 +451,24 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       // In the workspace the read and the write both go through its open directory.
       let original: string;
       if (target.kind === 'anchored') {
+        let fd: number;
         try {
-          original = readFileAt(target.anchor, target.rel).toString('utf-8');
+          fd = openRead(target.anchor, target.rel);
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
             throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
           }
-          throw anchoredError(target, err);
+          throw anchoredError(target.shown, err);
+        }
+        try {
+          // Before anything is compared: whether old_string matches would tell the content of a
+          // file read_file refuses.
+          if (fstatSync(fd).nlink > 1) {
+            throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not edit such a file.`);
+          }
+          original = readFileSync(fd, 'utf-8');
+        } finally {
+          closeSync(fd);
         }
       } else {
         if (!existsSync(realPath)) {

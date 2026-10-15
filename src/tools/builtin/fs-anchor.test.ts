@@ -98,7 +98,7 @@ describe('file tools reach the workspace through its open directory', () => {
   it.skipIf(process.getuid?.() === 0)('leaves a read-only file unwritten, as a write by name does (skipped as root)', async () => {
     writeFileSync(join(ws, 'ro.txt'), 'fixed');
     chmodSync(join(ws, 'ro.txt'), 0o444);
-    await expect(writeFileTool.handler({ path: join(ws, 'ro.txt'), content: 'over' }, agent())).rejects.toThrow(`EACCES: ${join(ws, 'ro.txt')}`);
+    await expect(writeFileTool.handler({ path: join(ws, 'ro.txt'), content: 'over' }, agent())).rejects.toThrow(`EACCES: permission denied: ${join(ws, 'ro.txt')}`);
     await expect(editFileTool.handler({ path: join(ws, 'ro.txt'), old_string: 'fixed', new_string: 'over' }, agent())).rejects.toThrow(/EACCES/);
     expect(readFileSync(join(ws, 'ro.txt'), 'utf8')).toBe('fixed');
   });
@@ -108,6 +108,8 @@ describe('file tools reach the workspace through its open directory', () => {
     linkSync(join(outside, 'target.txt'), join(ws, 'hard.txt'));
     await expect(writeFileTool.handler({ path: join(ws, 'hard.txt'), content: 'over' }, agent())).rejects.toThrow(/hard link/);
     await expect(editFileTool.handler({ path: join(ws, 'hard.txt'), old_string: 'kept', new_string: 'over' }, agent())).rejects.toThrow(/hard link/);
+    // The same answer whether old_string occurs or not: otherwise edit_file tells what read_file refuses.
+    await expect(editFileTool.handler({ path: join(ws, 'hard.txt'), old_string: 'absent', new_string: 'over' }, agent())).rejects.toThrow(/hard link/);
     await expect(readFileTool.handler({ path: join(ws, 'hard.txt') })).rejects.toThrow(/hard link/);
     expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('kept');
   });
