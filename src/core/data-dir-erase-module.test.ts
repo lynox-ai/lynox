@@ -491,6 +491,18 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     }
   });
 
+  it.skipIf(process.getuid?.() === 0)('does not enter another mount in the identity walk', () => {
+    mkdirSync(join(dir, 'vol', 'locked'), { recursive: true });
+    chmodSync(join(dir, 'vol', 'locked'), 0o000);
+    try {
+      const mountId = (p: string): number => (p.endsWith('/vol') ? 2 : 1);
+      const scan = scanDataDir(dir, { mountId, workspace: external([], { rootIdentity: { dev: -1, ino: -1 } }) });
+      expect(scan.linked.filter(l => l.reason.includes('could not be read'))).toEqual([]);
+    } finally {
+      chmodSync(join(dir, 'vol', 'locked'), 0o700);
+    }
+  });
+
   it.skipIf(process.getuid?.() === 0)('does not walk OS litter such as an unreadable lost+found', () => {
     mkdirSync(join(dir, 'lost+found'));
     chmodSync(join(dir, 'lost+found'), 0o000);
