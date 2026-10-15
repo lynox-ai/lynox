@@ -7,6 +7,8 @@ import { getWorkspaceRoot } from '../../core/workspace-root.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
+import { toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
+import { openRead, readFileAt, statEntry, writeFileAt, type EntryInfo, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -115,6 +117,54 @@ function refuseEvictionPlaceholder(written: string, realPath: string): void {
   );
 }
 
+/** A file the tool reaches: through the context workspace's open directory, or by a checked path. */
+type Target =
+  | { readonly kind: 'anchored'; readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }
+  | { readonly kind: 'path'; readonly path: string };
+
+/** Mode for a new file and for directories write_file creates (the umask-022 result it had before). */
+const NEW_FILE_MODE = 0o644;
+const NEW_DIR_MODE = 0o755;
+
+/**
+ * With isolation: a path in the context workspace is reached through its open directory, every
+ * component opened with O_NOFOLLOW, so a symlink on the way is refused instead of followed. Any
+ * other path keeps `validatePath` (`/tmp`, the artifacts directory, `/app` for reads) — but one that
+ * lands in the workspace through a link is refused: it would reach workspace files by name.
+ */
+function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
+  const base = workspaceBase();
+  if (base === null) return { kind: 'path', path: validatePath(raw, operation) };
+  const mapped = toWorkspaceRel(raw, base.ws);
+  if (mapped.kind === 'inside') {
+    if (mapped.rel === '') throw new Error(`${raw} is the workspace directory itself, not a file.`);
+    return { kind: 'anchored', anchor: base.anchor, rel: mapped.rel, shown: mapped.shown };
+  }
+  const real = validatePath(mapped.abs, operation);
+  const wsReal = existsSync(base.ws) ? realpathSync(base.ws) : base.ws;
+  if (isPathWithin(real, base.ws) || isPathWithin(real, wsReal)) {
+    throw new Error(`${raw} reaches the workspace through a link. Name the file by its path in the workspace (${base.ws}).`);
+  }
+  return { kind: 'path', path: real };
+}
+
+/** The entry at a workspace path, or null when it or a directory on the way does not exist yet. */
+function priorEntry(target: Extract<Target, { kind: 'anchored' }>): EntryInfo | null {
+  try {
+    return statEntry(target.anchor, target.rel);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** A symlink at a workspace file is not written through: replacing it would drop the user's link. */
+function refuseLinkLeaf(target: Extract<Target, { kind: 'anchored' }>, kind: string | undefined): void {
+  if (kind === 'symlink') {
+    throw new Error(`${target.shown} is a symlink. Links in the workspace are not followed; write to the file it points to by its own path.`);
+  }
+}
+
 /** Resolve + boundary-validate a writable path with the same rules as
  *  write_file: validatePath when workspace isolation is active, else
  *  workspace-relative + escape-symlink rejection. Exported for the diff preview
@@ -172,8 +222,16 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
   handler: async (input: ReadFileInput): Promise<string> => {
     try {
       let filePath: string;
+      let fd: number;
       if (isWorkspaceActive()) {
-        filePath = validatePath(input.path, 'read');
+        const target = isolatedTarget(input.path, 'read');
+        if (target.kind === 'anchored') {
+          filePath = target.shown;
+          fd = openRead(target.anchor, target.rel);
+        } else {
+          filePath = target.path;
+          fd = openSync(filePath, 'r');
+        }
       } else {
         const resolved = resolve(input.path);
         // Reject symlinks that escape their parent directory (path traversal via symlink)
@@ -185,6 +243,7 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
           }
         }
         filePath = resolved;
+        fd = openSync(filePath, 'r');
       }
       // Wrap file content in untrusted-data envelope. The content originates
       // outside the agent's trust boundary (user-provided file, attacker-
@@ -196,7 +255,6 @@ export const readFileTool: ToolEntry<ReadFileInput> = {
       // Open-once + fstat: same fd for stat and read closes the TOCTOU
       // window where an attacker could swap the file between two separate
       // path-based calls.
-      const fd = openSync(filePath, 'r');
       let content: string;
       try {
         const stats = fstatSync(fd);
@@ -264,30 +322,39 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
       // basename; relative → workspace-relative but confined — a `..` must NOT
       // escape, see confineToWorkspace).
       // With active workspace: resolve normally (validatePath enforces boundaries)
-      let resolved: string;
       if (isWorkspaceActive()) {
-        resolved = resolve(input.path);
-      } else {
-        resolved = confineToWorkspace(input.path);
-      }
-      let realPath: string;
-      if (isWorkspaceActive()) {
-        realPath = validatePath(resolved, 'write');
-      } else {
-        // Reject symlinks that escape their parent directory (path traversal via symlink)
-        if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
-          const realTarget = realpathSync(resolved);
-          const parentDir = realpathSync(dirname(resolved));
-          if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
-            throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
-          }
+        const target = isolatedTarget(input.path, 'write');
+        if (target.kind === 'anchored') {
+          refuseEvictionPlaceholder(input.content, target.shown);
+          const prior = priorEntry(target);
+          refuseLinkLeaf(target, prior?.type);
+          writeFileAt(target.anchor, target.rel, input.content, {
+            fileMode: prior?.type === 'file' ? prior.mode : NEW_FILE_MODE,
+            dirMode: NEW_DIR_MODE,
+          });
+          agent.sessionCounters.writeBytes += contentBytes;
+          return `Written to ${target.shown}`;
         }
-        realPath = existsSync(resolved)
-          ? realpathSync(resolved)
-          : existsSync(dirname(resolved))
-            ? join(realpathSync(dirname(resolved)), basename(resolved))
-            : resolved;
+        refuseEvictionPlaceholder(input.content, target.path);
+        mkdirSync(dirname(target.path), { recursive: true });
+        writeFileSync(target.path, input.content, 'utf-8');
+        agent.sessionCounters.writeBytes += contentBytes;
+        return `Written to ${target.path}`;
       }
+      const resolved = confineToWorkspace(input.path);
+      // Reject symlinks that escape their parent directory (path traversal via symlink)
+      if (existsSync(resolved) && lstatSync(resolved).isSymbolicLink()) {
+        const realTarget = realpathSync(resolved);
+        const parentDir = realpathSync(dirname(resolved));
+        if (!realTarget.startsWith(parentDir + '/') && realTarget !== parentDir) {
+          throw new Error(`Blocked: that file link points outside the allowed directory. This is a security restriction.`);
+        }
+      }
+      const realPath = existsSync(resolved)
+        ? realpathSync(resolved)
+        : existsSync(dirname(resolved))
+          ? join(realpathSync(dirname(resolved)), basename(resolved))
+          : resolved;
       refuseEvictionPlaceholder(input.content, realPath);
       mkdirSync(dirname(realPath), { recursive: true });
       writeFileSync(realPath, input.content, 'utf-8');
@@ -321,14 +388,32 @@ export const editFileTool: ToolEntry<EditFileInput> = {
   },
   handler: async (input: EditFileInput, agent: IAgent): Promise<string> => {
     try {
-      const realPath = resolveWritablePath(input.path);
-      if (!existsSync(realPath)) {
-        throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
-      }
       if (input.old_string === input.new_string) {
         throw new Error('old_string and new_string are identical — nothing to change.');
       }
-      const original = readFileSync(realPath, 'utf-8');
+      let target: Target;
+      if (isWorkspaceActive()) {
+        target = isolatedTarget(input.path, 'write');
+      } else {
+        target = { kind: 'path', path: resolveWritablePath(input.path) };
+      }
+      const realPath = target.kind === 'anchored' ? target.shown : target.path;
+      // One read, then one write of the same file: in the workspace both go through its open
+      // directory, and the file keeps its mode.
+      let fileMode: number | undefined;
+      let original: string;
+      if (target.kind === 'anchored') {
+        const prior = priorEntry(target);
+        if (prior === null) throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+        // A link at the file is refused by the read itself (O_NOFOLLOW).
+        fileMode = prior.mode;
+        original = readFileAt(target.anchor, target.rel).toString('utf-8');
+      } else {
+        if (!existsSync(realPath)) {
+          throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+        }
+        original = readFileSync(realPath, 'utf-8');
+      }
       const segments = original.split(input.old_string);
       const matches = segments.length - 1;
       if (matches === 0) {
@@ -354,7 +439,11 @@ export const editFileTool: ToolEntry<EditFileInput> = {
       if (agent.sessionCounters.writeBytes + delta > MAX_WRITE_BYTES_PER_SESSION) {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
-      writeFileSync(realPath, updated, 'utf-8');
+      if (target.kind === 'anchored') {
+        writeFileAt(target.anchor, target.rel, updated, { fileMode: fileMode ?? NEW_FILE_MODE });
+      } else {
+        writeFileSync(realPath, updated, 'utf-8');
+      }
       agent.sessionCounters.writeBytes += delta;
       const n = replaceAll ? matches : 1;
       return `Edited ${realPath} (${n} replacement${n === 1 ? '' : 's'})`;

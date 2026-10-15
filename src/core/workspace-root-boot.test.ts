@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { chmodSync, fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, fstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
@@ -8,6 +8,9 @@ import { reloadConfig } from './config.js';
 import { getWorkspaceDir, _resetCache } from './workspace.js';
 import { WorkspaceRootError } from './workspace-root.js';
 import { workspaceAccess, _resetWorkspaceAccess } from './workspace-access.js';
+import { workspaceBase } from './workspace-rel.js';
+import { writeFileTool } from '../tools/builtin/fs.js';
+import type { IAgent } from '../types/index.js';
 
 /**
  * The workspace root as a real Engine boots on it. The unit tests call the root's functions
@@ -73,6 +76,22 @@ describe('Engine boot — workspace root', () => {
     rmSync(join(data, 'workspace'), { recursive: true });
     mkdirSync(join(data, 'workspace'));
     expect(() => workspaceAccess()).toThrow('no longer the directory this engine opened');
+  });
+
+  it('gives the file tools the context directory below the held root, and closes it on shutdown', async () => {
+    const data = dataDir();
+    const engine = await boot();
+    const ws = join(data, 'workspace', 'http-api');
+    const base = workspaceBase();
+    expect(base?.ws).toBe(ws);
+    expect(fstatSync(base!.anchor.fd).ino).toBe(statSync(ws).ino);
+    const agent = { sessionCounters: { writeBytes: 0 } } as unknown as IAgent;
+    await writeFileTool.handler({ path: join(ws, 'boot.txt'), content: 'b' }, agent);
+    expect(readFileSync(join(ws, 'boot.txt'), 'utf8')).toBe('b');
+    const fd = base!.anchor.fd;
+    await engine.shutdown();
+    engines.length = 0;
+    expect(() => fstatSync(fd)).toThrow(/EBADF/);
   });
 
   it('boots on a symlinked <data>/workspace and keeps the by-name path', async () => {
