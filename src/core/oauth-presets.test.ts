@@ -3,6 +3,7 @@ import {
   OAUTH_PRESETS,
   derivePresetEndpoints,
   presetIds,
+  presetNotFollowed,
   presetRegisterOf,
   presetScopeRequest,
   type OAuthPreset,
@@ -16,7 +17,7 @@ const CONSTANT: OAuthPreset = {
   id: 'example-constant',
   label: 'Example',
   host: { kind: 'constant', host: 'auth.example.com' },
-  authorizePath: '/oauth/authorize',
+  apiHosts: [], authorizePath: '/oauth/authorize',
   tokenPath: '/oauth/token',
   params: [],
   requiredScopes: [],
@@ -27,7 +28,7 @@ const TEMPLATED: OAuthPreset = {
   id: 'example-shop',
   label: 'Example Shop',
   host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
-  authorizePath: '/admin/oauth/authorize',
+  apiHosts: [], authorizePath: '/admin/oauth/authorize',
   tokenPath: '/admin/oauth/access_token',
   params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
   requiredScopes: [],
@@ -79,8 +80,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // copy in a test claiming to bind them.
     const module = await import('./oauth-presets.js');
     expect(Object.keys(module).sort()).toEqual(
-      // `presetScopeRequest` and `presetScopeNeedUnmet` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeRequest'].sort(),
+      // `presetScopeRequest`, `presetScopeNeedUnmet` and `presetNotFollowed` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetNotFollowed', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeRequest'].sort(),
     );
   });
 
@@ -328,7 +329,7 @@ describe('derivation happens at use, from the register alone', () => {
     // host, because the origin is written first and the parser commits the
     // authority there. So an odd-looking path is not refused — it is simply a
     // path — and `host` is read off the assembled URL either way.
-    const odd = presetRegisterOf([{ ...CONSTANT, authorizePath: '//evil.example/authorize' }]);
+    const odd = presetRegisterOf([{ ...CONSTANT, apiHosts: [], authorizePath: '//evil.example/authorize' }]);
     const out = derivePresetEndpoints('example-constant', undefined, odd);
 
     expect(out).toMatchObject({ host: 'auth.example.com' });
@@ -392,4 +393,42 @@ describe('the bexio customer text covers every write scope the preset allows', (
       expect(presetScopeRequest(OAUTH_PRESETS.get('bexio')!, `contact_show ${scope}`)).toEqual({ refused: [scope] });
     },
   );
+});
+
+describe('presetNotFollowed: a profile on a provider\'s API host goes through the provider', () => {
+  const viaBexio = { type: 'oauth2', oauth: { preset_id: 'bexio' } };
+  it('names the bexio API host', () => {
+    expect(OAUTH_PRESETS.get('bexio')?.apiHosts).toEqual(['api.bexio.com']);
+  });
+  it.each([
+    ['a pasted token', 'https://api.bexio.com/2.0', { type: 'bearer' }],
+    ['no auth', 'https://api.bexio.com/2.0', undefined],
+    ['an OAuth sign-in of its own', 'https://api.bexio.com/2.0', { type: 'oauth2', oauth: {} }],
+    ['another provider\'s id', 'https://api.bexio.com/2.0', { type: 'oauth2', oauth: { preset_id: 'shopify' } }],
+    ['the preset id under another auth type', 'https://api.bexio.com/2.0', { type: 'bearer', oauth: { preset_id: 'bexio' } }],
+    ['the host with a root dot', 'https://api.bexio.com./2.0', { type: 'bearer' }],
+    ['the host in capitals', 'https://API.BEXIO.COM/2.0', { type: 'bearer' }],
+  ] as const)('holds %s to bexio', (_label, base_url, auth) => {
+    expect(presetNotFollowed({ base_url, auth })?.id).toBe('bexio');
+  });
+  // Two providers on one host: following either is in order, following neither is not.
+  it('holds a profile to the providers that claim its host, any of them', () => {
+    const base = OAUTH_PRESETS.get('bexio')!;
+    const register = presetRegisterOf([
+      { ...base, id: 'first', apiHosts: ['api.shared.example'] },
+      { ...base, id: 'second', apiHosts: ['api.shared.example'] },
+    ]);
+    const at = (preset_id: string | undefined) => presetNotFollowed({ base_url: 'https://api.shared.example/v1', auth: { type: 'oauth2', oauth: preset_id === undefined ? {} : { preset_id } } }, register);
+    expect(at('second')).toBeUndefined();
+    expect(at('first')).toBeUndefined();
+    expect(at(undefined)?.id).toBe('first');
+  });
+  it.each([
+    ['the profile that goes through bexio', 'https://api.bexio.com/2.0', viaBexio],
+    ['a host no provider claims', 'https://api.crm.example/v1', { type: 'bearer' }],
+    ['bexio\'s sign-in host, which is not its API', 'https://auth.bexio.com', { type: 'bearer' }],
+    ['a base_url that is not a URL', 'not a url', { type: 'bearer' }],
+  ] as const)('control: holds nothing for %s', (_label, base_url, auth) => {
+    expect(presetNotFollowed({ base_url, auth })).toBeUndefined();
+  });
 });

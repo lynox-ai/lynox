@@ -1725,7 +1725,7 @@ export class WorkerLoop {
   private async bulkClientFactory(): Promise<(contractJson: string | null, listQuery?: import('../tools/permission-guard.js').ListQueryConstraints) => import('./bulk-external.js').ExternalClient | null> {
     const { externalClient, parseBulkContract } = await import('./bulk-external.js');
     const { withListQuery } = await import('../tools/permission-guard.js');
-    const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent } = await import('../tools/builtin/http.js');
+    const { attachStoredCredential, connectedAccountProfiles, detectSecretInContent, isWriteMethod } = await import('../tools/builtin/http.js');
     const { resolveGuardedAckHosts } = await import('./tool-context.js');
     const apiStore = this.engine.getApiStore();
     const secretStore = this.engine.getSecretStore();
@@ -1748,7 +1748,7 @@ export class WorkerLoop {
         hostPolicy: toolContext,
         ackHosts: resolveGuardedAckHosts(toolContext),
         // A bulk run runs once the owner approved it (`approve` is the owner's), as the owner's.
-        attach: (url, headers) => attachStoredCredential(url, headers, { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases }),
+        attach: (url, headers, method) => attachStoredCredential(url, headers, isWriteMethod(method), { apiStore, secretStore, principal: OWNER_PRINCIPAL, mandateEnds: toolContext.mandateEnds, secretReleases: toolContext.secretReleases }),
         rateLimit: (hostname) => apiStore.checkRateLimit(hostname),
         scan: detectSecretInContent,
         connectedAccount: (url) => connectedAccountProfiles(url, apiStore).length > 0,

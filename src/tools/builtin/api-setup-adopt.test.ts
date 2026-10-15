@@ -19,7 +19,7 @@ vi.mock('../../core/oauth-presets.js', async (importOriginal) => {
     id: 'example-shop',
     label: 'Example Shop',
     host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
-    authorizePath: '/admin/oauth/authorize',
+    apiHosts: [], authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
     requiredScopes: [],

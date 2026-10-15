@@ -11,7 +11,7 @@ const REGISTER = presetRegisterOf([{
   id: 'example-shop',
   label: 'Example Shop',
   host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
-  authorizePath: '/admin/oauth/authorize',
+  apiHosts: [], authorizePath: '/admin/oauth/authorize',
   tokenPath: '/admin/oauth/access_token',
   params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
   requiredScopes: ['openid'],
@@ -98,14 +98,14 @@ describe('the start route decides everything before it mints anything', () => {
   const REGISTER_FOR: Partial<Record<ConnectRefusalKind, typeof REGISTER>> = {
     'inside-network': presetRegisterOf([{
       id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: '169.254.169.254' },
-      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
+      apiHosts: [], authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]),
     'broken-preset': presetRegisterOf([{
       id: 'example-shop', label: 'Broken', host: { kind: 'constant', host: 'shops.example.com' },
       // No leading slash: the path would merge into the authority. Nobody
       // standing in front of the page can fix that, which is the whole reason
       // this is its own refusal.
-      authorizePath: 'admin/oauth/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
+      apiHosts: [], authorizePath: 'admin/oauth/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]),
   };
 
@@ -153,7 +153,7 @@ describe('the start route decides everything before it mints anything', () => {
   describe('the customer text of a preset that has one', () => {
     const WITH_TEXT = presetRegisterOf([{
       id: 'example-shop', label: 'Example Shop', host: { kind: 'template', param: 'shop', template: '{shop}.shops.example.com' },
-      authorizePath: '/admin/oauth/authorize', tokenPath: '/admin/oauth/access_token',
+      apiHosts: [], authorizePath: '/admin/oauth/authorize', tokenPath: '/admin/oauth/access_token',
       params: [{ name: 'shop', pattern: /[a-z0-9][a-z0-9-]{0,59}/, describe: 'the shop name' }],
       requiredScopes: ['openid'], allowedScopes: ['read_orders', 'write_orders', 'write_notes'],
       consentNotice: { lang: 'de', writeScopes: ['write_orders', 'write_notes'], paragraphs: ['Erster Absatz.', 'Zweiter Absatz.'] },
@@ -235,7 +235,7 @@ describe('the start route decides everything before it mints anything', () => {
     // authorizing. Nothing pinned that difference until this.
     const lan = presetRegisterOf([{
       id: 'example-shop', label: 'LAN', host: { kind: 'constant', host: 'localhost' },
-      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
+      apiHosts: [], authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, lan);
 
@@ -274,7 +274,7 @@ describe('the start route decides everything before it mints anything', () => {
     // quad and three suffixes — not these four.
     const inside = presetRegisterOf([{
       id: 'example-shop', label: 'inside', host: { kind: 'constant', host },
-      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
+      apiHosts: [], authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
 
@@ -295,7 +295,7 @@ describe('the start route decides everything before it mints anything', () => {
     // case goes red instead of quietly moving to another branch.
     const inside = presetRegisterOf([{
       id: 'example-shop', label: 'inside', host: { kind: 'constant', host },
-      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
+      apiHosts: [], authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, inside);
 
@@ -315,7 +315,7 @@ describe('the start route decides everything before it mints anything', () => {
     // that names the act does.
     const vetted = presetRegisterOf([{
       id: 'example-shop', label: 'vetted', host: { kind: 'constant', host: 'api.openai.com' },
-      authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
+      apiHosts: [], authorizePath: '/authorize', tokenPath: '/token', params: [], requiredScopes: [], allowedScopes: [],
     }]);
     const decision = decide({ ...good, profile: profile({ custom_endpoint_ack: undefined }) }, vetted);
 
