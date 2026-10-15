@@ -128,7 +128,7 @@ type Target =
  * it to 0 for a moment. If it cannot be read — a kernel before 4.7, or a system without /proc,
  * such as macOS — the closed answer: owner only, where a write by name would follow the umask.
  */
-function processUmask(): number {
+export function processUmask(): number {
   try {
     const m = /^Umask:\s*([0-7]{1,4})$/m.exec(readFileSync('/proc/self/status', 'utf8'));
     if (m?.[1] !== undefined) return parseInt(m[1], 8);
@@ -143,22 +143,7 @@ function processUmask(): number {
  * lands in the workspace through a link is refused: it would reach workspace files by name.
  */
 function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
-  let base: ReturnType<typeof workspaceBase>;
-  try {
-    base = workspaceBase();
-  } catch (err) {
-    // Reaching the workspace directory itself failed (e.g. while the erasure makes it again, or the
-    // directory is a link): said so, by the workspace's path, and without the advice for a link at
-    // a file. A WorkspaceRootError (no code) is written for the model already and passes as it is.
-    const code = (err as NodeJS.ErrnoException).code;
-    if (typeof code !== 'string') throw err;
-    const why = err instanceof WorkspaceAccessError ? err.message : errnoText(code, err);
-    throw new Error(
-      `The workspace directory ${getWorkspaceDir() ?? raw} cannot be reached (${why}). ` +
-      'The file tools cannot work until it can.',
-      { cause: err },
-    );
-  }
+  const base = reachWorkspace(raw);
   if (base === null) return { kind: 'path', path: validatePath(raw, operation) };
   const mapped = toWorkspaceRel(raw, base.ws);
   if (mapped.kind === 'inside') {
@@ -172,6 +157,28 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
     throw new Error(`${raw} reaches the workspace through a link. Name the file by its path in the workspace (${base.ws}).`);
   }
   return { kind: 'path', path: real };
+}
+
+/**
+ * The context workspace's open directory, or null without isolation. A failure to reach the
+ * directory itself is said by the workspace's path (`raw` only when no workspace is set).
+ */
+export function reachWorkspace(raw: string): ReturnType<typeof workspaceBase> {
+  try {
+    return workspaceBase();
+  } catch (err) {
+    // Reaching the workspace directory itself failed (e.g. while the erasure makes it again, or the
+    // directory is a link): said so, by the workspace's path, and without the advice for a link at
+    // a file. A WorkspaceRootError (no code) is written for the model already and passes as it is.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (typeof code !== 'string') throw err;
+    const why = err instanceof WorkspaceAccessError ? err.message : errnoText(code, err);
+    throw new Error(
+      `The workspace directory ${getWorkspaceDir() ?? raw} cannot be reached (${why}). ` +
+      'The file tools cannot work until it can.',
+      { cause: err },
+    );
+  }
 }
 
 /** The description libuv puts after the code: words only, so no path can come along with it. */
@@ -191,7 +198,7 @@ function errnoText(code: string, err: unknown): string {
  * An errno from an fd operation names the file by its workspace path, not by the process-handle
  * path the walk opened it through: the model would copy that path, and it is refused.
  */
-function anchoredError(shown: string, err: unknown): Error {
+export function anchoredError(shown: string, err: unknown): Error {
   const code = (err as NodeJS.ErrnoException).code;
   if (err instanceof WorkspaceAccessError && err.code === 'SYMLINK') {
     return new Error(
@@ -218,7 +225,7 @@ function anchoredError(shown: string, err: unknown): Error {
  * (`fs.protected_hardlinks`). With `create`, a missing file (and missing directories) are made
  * with the modes a write by name gives them: 0666 and 0777 less the umask.
  */
-function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: string, create: boolean): void {
+export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }, text: string, create: boolean): void {
   let fd: number;
   try {
     const umask = create ? processUmask() : 0;

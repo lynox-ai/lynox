@@ -73,14 +73,13 @@ describe('batchFilesTool', () => {
             pattern: '*.txt',
             directory: d,
             operation: 'rename',
-            // `join()` collapses the `../` — this resolves to /etc (never an
-            // allowed root). validatePath must reject it BEFORE renameSync; the
-            // block reason (not an OS error) is what proves the guard ran.
+            // The `../` climbs out of the workspace (to /etc). The new name is refused
+            // BEFORE any rename; the block reason (not an OS error) proves the guard ran.
             rename_pattern: '../../../../../../../../../../etc/lynox-batch-traversal-test',
           },
           {} as never,
         );
-        expect(result).toMatch(/outside allowed directories/);
+        expect(result).toMatch(/leaves the workspace/);
         // The file was not moved out of the workspace.
         expect(existsSync(join(d, 'report.txt'))).toBe(true);
         expect(existsSync('/etc/lynox-batch-traversal-test')).toBe(false);
