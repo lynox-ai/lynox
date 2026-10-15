@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, realpathSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,6 +16,9 @@ import {
 } from './llm-helper.js';
 import { runBulkJudge, judgeErrorForTracker, classifyCallFailure, JUDGE_CLAIM_STALE_MS, type BulkJudgeDeps } from './bulk-judge.js';
 import type { IAgent, MemoryScopeRef } from '../types/index.js';
+import { createManagedHook } from './managed-hook.js';
+import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
+import type { LynoxHooks } from './engine.js';
 
 /**
  * The bulk judge (PRD bulk-loop §3.1 `bulk_judge`, 3.2): a model decides each target's new values
@@ -437,5 +440,64 @@ describe('what leaves as an error', () => {
     expect(classifyCallFailure(new Error('timeout'), true)).toEqual({ kind: 'wait' });
     expect(classifyCallFailure(Object.assign(new Error('x'), { status: 500 }), false)).toEqual({ kind: 'wait' });
     expect(classifyCallFailure(new Error('ECONNRESET'), false)).toMatchObject({ kind: 'halt' });
+  });
+});
+
+describe('against the real managed hook (PRD §6(e)): what reaches the control plane', () => {
+  const bodies: { runs: { run_id: string; cost_cents: number }[] }[] = [];
+  let allowed = true;
+  beforeEach(() => {
+    bodies.length = 0;
+    allowed = true;
+    vi.stubEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'https://cp.test');
+    vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-1');
+    vi.stubEnv('LYNOX_HTTP_SECRET', 'secret');
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { body?: string }) => {
+      if (!String(url).endsWith('/status') && init?.body) bodies.push(JSON.parse(init.body) as typeof bodies[number]);
+      return { ok: true, json: async () => ({ allowed, spend_gate: 'balance' }) };
+    }));
+  });
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+
+  async function hookHost(): Promise<{ host: { getHooks: () => LynoxHooks[]; getContext: () => null }; hook: LynoxHooks }> {
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    return { hook, host: { getHooks: () => [hook], getContext: () => null } };
+  }
+
+  it('debits every call: the cents of all flushes equal the sum of the calls, carried in micro-cents', async () => {
+    const skus = Array.from({ length: 13 }, (_, i) => `K${String(i)}`);
+    store.insertRecords({ collection: 'products', records: skus.map((sku) => ({ sku, title: `t ${sku}`, note: 'n' })) });
+    const id = await plan(skus);
+    expect(start(id, 5).ok).toBe(true);
+    const { host, hook } = await hookHost();
+    // Exact in micro-cents, so rounding does not carry the test: 1.234 + 0.567 cents, alternating.
+    const costs = skus.map((_, i) => (i % 2 === 0 ? 0.01234 : 0.00567));
+    const h = harness((user, n) => ({ data: { title: title(user) }, costUsd: costs[n - 1]! }), {
+      gate: (tier) => fireBeforeRunGate(host as never, tier),
+      report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
+    });
+    expect((await runBulkJudge(id, h.deps)).status).toBe('done');
+    await hook.onShutdown?.();
+    const sent = bodies.flatMap((b) => b.runs);
+    const micro = costs.reduce((n, c) => n + Math.round(c * 100_000), 0);
+    expect(sent.reduce((n, r) => n + r.cost_cents, 0)).toBe(Math.floor(micro / 1000));
+    // One gate per call: the reports carry distinct run ids.
+    expect(new Set(sent.map((r) => r.run_id)).size).toBe(sent.length);
+  });
+
+  it('a refused credit blocks the next call before the model is called', async () => {
+    allowed = false;
+    const id = await plan(['A']);
+    expect(start(id).ok).toBe(true);
+    const { host, hook } = await hookHost();
+    const h = harness((user) => ({ data: { title: title(user) }, costUsd: 0.01 }), {
+      gate: (tier) => fireBeforeRunGate(host as never, tier),
+      report: (gateRunId, usd, tier) => reportMeteredCost(host as never, gateRunId, usd, tier),
+    });
+    await runBulkJudge(id, h.deps);
+    await hook.onShutdown?.();
+    expect(h.calls).toHaveLength(0);
+    expect(ledger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.creditRefused);
   });
 });
