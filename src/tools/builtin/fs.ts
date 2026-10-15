@@ -225,7 +225,7 @@ export function anchoredError(shown: string, err: unknown): Error {
  * (`fs.protected_hardlinks`). With `create`, a missing file (and missing directories) are made
  * with the modes a write by name gives them: 0666 and 0777 less the umask.
  */
-export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }, text: string, create: boolean): void {
+export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonly rel: string; readonly shown: string }, data: string | Uint8Array, create: boolean): void {
   let fd: number;
   try {
     const umask = create ? processUmask() : 0;
@@ -242,7 +242,8 @@ export function writeInPlace(target: { readonly anchor: WorkspaceAnchor; readonl
     // flush the file synchronously, which a fresh file does not need.
     if (st.size > 0) ftruncateSync(fd, 0);
     // On the fd just opened (offset 0): the same write a write by name does.
-    writeFileSync(fd, text, 'utf-8');
+    if (typeof data === 'string') writeFileSync(fd, data, 'utf-8');
+    else writeFileSync(fd, data);
   } catch (err) {
     throw anchoredError(target.shown, err);
   } finally {
