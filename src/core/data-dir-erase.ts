@@ -163,15 +163,15 @@ function otherMountThan(dir: string, dev: number, mountId: (path: string) => num
 }
 
 /**
- * The mount id is asked of directories only: a removal descends into a directory, and that is what
- * reaches another filesystem; a file that is a mount point cannot be unlinked (EBUSY). An entry
- * that cannot be asked counts as on another mount (refused, never removed), except one that is
- * gone, which there is nothing left to remove.
+ * Asked of files too: a file bind-mounted into the data dir cannot be unlinked (EBUSY), and finding
+ * that in the scan keeps the erasure all-or-nothing instead of failing after the stores are emptied.
+ * An entry that cannot be asked counts as on another mount (refused, never removed), except one
+ * that is gone, which there is nothing left to remove.
  */
 function otherMount(dev: number, own: number | null, mountId: (path: string) => number | null): OnOtherMount {
   return (path, st) => {
     if (st.dev !== dev) return true;
-    if (own === null || !st.isDirectory()) return false;
+    if (own === null) return false;
     try {
       return mountId(path) !== own;
     } catch (err) {
@@ -295,25 +295,50 @@ export interface ScanOptions {
 
 /**
  * The directories in `dir` (relative), at any depth, that are the directory `id`; symlinks are not
- * followed. `skipTop` is a top-level name not to report or enter: the default root, which IS the
- * root by design. Fails loudly on an unreadable directory: it could hold the root.
+ * followed, and another mount is not entered (the scan refuses it where the erasure would reach
+ * it). `skipTop` is a top-level name not to report or enter: the default root, which IS the root by
+ * design. An entry gone since the listing is skipped; a directory that cannot be read is returned
+ * as unreadable, for the caller to refuse with its name: it could hold the root.
  */
-function directoriesWithIdentity(dir: string, id: { readonly dev: number; readonly ino: number }, skipTop: string | null): string[] {
+function directoriesWithIdentity(
+  dir: string,
+  id: { readonly dev: number; readonly ino: number },
+  skipTop: string | null,
+  onOther: OnOtherMount,
+): { found: string[]; unreadable: Array<{ path: string; cause: string }> } {
   const found: string[] = [];
+  const unreadable: Array<{ path: string; cause: string }> = [];
   const stack = [''];
   while (stack.length > 0) {
     const rel = stack.pop()!;
-    for (const d of readdirSync(join(dir, rel), { withFileTypes: true })) {
+    let dirents;
+    try {
+      dirents = readdirSync(join(dir, rel), { withFileTypes: true });
+    } catch (err) {
+      if (!isGone(err)) unreadable.push({ path: rel, cause: errorText(err) });
+      continue;
+    }
+    for (const d of dirents) {
       if (!d.isDirectory()) continue;
       const childRel = rel === '' ? d.name : join(rel, d.name);
       if (rel === '' && (d.name === skipTop || OS_LITTER.has(d.name))) continue;
-      const st = lstatSync(join(dir, childRel));
+      const path = join(dir, childRel);
+      let st: Stats;
+      try {
+        st = lstatSync(path);
+      } catch (err) {
+        if (!isGone(err)) unreadable.push({ path: childRel, cause: errorText(err) });
+        continue;
+      }
       if (st.dev === id.dev && st.ino === id.ino) { found.push(childRel); continue; }
+      if (onOther(path, st)) continue;
       stack.push(childRel);
     }
   }
-  return found;
+  return { found, unreadable };
 }
+
+const errorText = (err: unknown): string => (err as NodeJS.ErrnoException | null)?.code ?? (err instanceof Error ? err.message : String(err));
 
 /** Why a `<data>/workspace` link must not be emptied as the root (`unsafeRoot`), or null. */
 function linkedRootReason(path: string, dataDir: string): string | null {
@@ -368,12 +393,19 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
       });
     }
     if (ws.rootIdentity !== undefined && walk) {
-      const at = directoriesWithIdentity(dir, ws.rootIdentity, ws.external ? null : WORKSPACE);
-      if (at.length > 0) {
+      const { found, unreadable } = directoriesWithIdentity(dir, ws.rootIdentity, ws.external ? null : WORKSPACE, onOther);
+      if (found.length > 0) {
         linked.push({
           name: WORKSPACE,
-          reason: `the workspace root is also inside the data directory (${at.join(', ')}); erasing the data directory would empty it by that path`,
+          reason: `the workspace root is also inside the data directory (${found.join(', ')}); erasing the data directory would empty it by that path`,
           remedy: 'Point the workspace at a directory of its own, outside the data directory, then erase.',
+        });
+      }
+      for (const u of unreadable) {
+        linked.push({
+          name: u.path.split('/')[0]!,
+          reason: `${u.path} could not be read to check that the workspace root is not inside it (${u.cause})`,
+          remedy: 'Make it readable to this instance, or move it out of the data directory, then erase.',
         });
       }
     }

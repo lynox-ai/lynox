@@ -97,6 +97,18 @@ describe('portable directories survive a migration', () => {
     expect(readFileSync(join(dstDir, 'workspace', 'big.bin')).equals(big)).toBe(true);
   });
 
+  it('refuses to export when the data directory is inside the workspace root, never copies it into itself', () => {
+    // `<data>/workspace` linked to the directory that holds the data directory stands in for a bind
+    // mount, which takes privileges: the root then contains the data directory.
+    const nest = tmp('lynox-pd-nest-');
+    const srcDir = join(nest, 'src');
+    mkdirSync(join(srcDir, 'apis'), { recursive: true });
+    writeFileSync(join(srcDir, 'apis', 'a.json'), '{}', 'utf-8');
+    symlinkSync(nest, join(srcDir, 'workspace'));
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY });
+    expect(() => exporter.export(Buffer.alloc(32, 1))).toThrow(/data directory is inside/);
+  });
+
   it('refuses to ship a partial directory rather than truncating it silently', () => {
     // Both caps, reached through the test-only override — the real ceilings are 20 000
     // entries and 64 MiB, and a test that has to materialise either is slow enough that it

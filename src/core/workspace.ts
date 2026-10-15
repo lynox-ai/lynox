@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, lstatSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { resolve, dirname, basename, join, isAbsolute, relative, sep } from 'node:path';
+import { resolve, dirname, basename, join, relative } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';

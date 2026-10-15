@@ -83,7 +83,7 @@ export interface EntryInfo {
 }
 
 export type WorkspaceErrorCode =
-  | 'BAD_PATH' | 'SYMLINK' | 'NOT_DIR' | 'NOT_FILE' | 'LIMIT' | 'MOUNT' | 'REMAINDER' | 'GONE' | 'PARTIAL' | 'UNSUPPORTED';
+  | 'BAD_PATH' | 'SYMLINK' | 'NOT_DIR' | 'NOT_FILE' | 'LIMIT' | 'MOUNT' | 'OVERLAP' | 'REMAINDER' | 'GONE' | 'PARTIAL' | 'UNSUPPORTED';
 
 /** Thrown for the refusals of this module, with a stable code for callers. */
 export class WorkspaceAccessError extends Error {
@@ -642,10 +642,20 @@ export type CopyOutSink = (rel: string, fd: number, size: number) => void;
  * Mount boundaries are refused before anything is copied. A file that cannot be
  * read (EACCES) fails the copy: a backup must not be silently incomplete.
  */
-export function copyOut(anchor: WorkspaceAnchor, rel: string, sink: CopyOutSink, limits: WalkLimits = DEFAULT_LIMITS): CopyCount {
-  const listing = walk(anchor, rel, limits);
+export function copyOut(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  sink: CopyOutSink,
+  limits: WalkLimits = DEFAULT_LIMITS,
+  /** A directory that must not be inside (the data directory): copying it would copy it into itself. */
+  refuse?: { readonly dev: number; readonly ino: number },
+): CopyCount {
+  const listing = walk(anchor, rel, limits, refuse);
   if (listing.mountBoundaries.length > 0) {
     throw new WorkspaceAccessError('MOUNT', `mount boundary below ${JSON.stringify(rel)}: ${listing.mountBoundaries.join(', ')}`);
+  }
+  if (listing.watchedAt.length > 0) {
+    throw new WorkspaceAccessError('OVERLAP', `the data directory is inside ${JSON.stringify(rel)} (at ${listing.watchedAt.map(p => p === '' ? '.' : p).join(', ')}), e.g. through a bind mount`);
   }
   const base = splitRel(rel);
   const skipped: string[] = [];

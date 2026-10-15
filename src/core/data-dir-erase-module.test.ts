@@ -460,6 +460,55 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     expect(scan.emptiedInPlace).toContain('workspace');
   });
 
+  it('refuses a FILE bind-mounted into the data dir in the scan, before anything is erased', () => {
+    writeFileSync(join(dir, 'config.json'), '{}');
+    const mountId = (p: string): number => (p.endsWith('/config.json') ? 2 : 1);
+    const scan = scanDataDir(dir, { mountId });
+    expect(scan.linked.find(l => l.name === 'config.json')?.reason).toMatch(/mount point/);
+  });
+
+  it('removeOwedEntries refuses an entry whose mount id cannot be asked, and never throws', () => {
+    leftover();
+    const acked = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external() });
+    expect(acked.linked).toEqual([]);
+    const failing = (p: string): number => {
+      if (p.endsWith('/workspace')) throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' });
+      return acked.mnt ?? 1;
+    };
+    const out = removeOwedEntries({ ...acked, mnt: acked.mnt ?? 1 }, ['workspace'], undefined, external(), failing);
+    expect(out.failures.map(f => f.name)).toEqual(['workspace']);
+    expect(readFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'utf8')).toBe('ZZ-old');
+  });
+
+  it.skipIf(process.getuid?.() === 0)('names an unreadable directory of the data dir instead of failing the request (it could hold the root)', () => {
+    mkdirSync(join(dir, 'private', 'inner'), { recursive: true });
+    chmodSync(join(dir, 'private'), 0o000);
+    try {
+      const scan = scanDataDir(dir, { workspace: external([], { rootIdentity: { dev: -1, ino: -1 } }) });
+      expect(scan.linked.find(l => l.name === 'private')?.reason).toMatch(/could not be read/);
+    } finally {
+      chmodSync(join(dir, 'private'), 0o700);
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)('does not walk OS litter such as an unreadable lost+found', () => {
+    mkdirSync(join(dir, 'lost+found'));
+    chmodSync(join(dir, 'lost+found'), 0o000);
+    try {
+      const scan = scanDataDir(dir, { workspace: external([], { rootIdentity: { dev: -1, ino: -1 } }) });
+      expect(scan.linked).toEqual([]);
+    } finally {
+      chmodSync(join(dir, 'lost+found'), 0o700);
+    }
+  });
+
+  it('skips the default root by its top-level name only, not a nested directory called workspace', () => {
+    mkdirSync(join(dir, 'workspace'));
+    mkdirSync(join(dir, 'memory', 'workspace'), { recursive: true });
+    const scan = scanDataDir(dir, { workspace: defaultRoot(join(dir, 'workspace'), [], { rootIdentity: identity(join(dir, 'memory', 'workspace')) }) });
+    expect(scan.linked.find(l => l.reason.includes('also inside'))?.reason).toMatch(/memory\/workspace/);
+  });
+
   it('a mount id that cannot be asked refuses the entry; one gone since is not refused', () => {
     leftover();
     const failing = (code: string) => (p: string): number => {

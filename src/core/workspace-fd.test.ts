@@ -457,6 +457,15 @@ describe('walk — watching for a directory by identity', () => {
     expect(walk(anchor, '', undefined, id(outside)).watchedAt).toEqual([]);
     expect(walk(anchor, '').watchedAt).toEqual([]);
   });
+  it('copyOut refuses before copying anything when the refused directory is inside', () => {
+    mkdirSync(join(ws, 'a', 'b'), { recursive: true });
+    writeFileSync(join(ws, 'a', 'f.txt'), 'x');
+    const st = statSync(join(ws, 'a', 'b'));
+    let copied = 0;
+    expect(code(() => copyOut(anchor, '', () => { copied++; }, undefined, { dev: st.dev, ino: st.ino }))).toBe('OVERLAP');
+    expect(copied).toBe(0);
+    expect(copyOut(anchor, '', () => { copied++; }).files).toBe(1);
+  });
   it('does not follow a link to the watched directory', () => {
     symlinkSync(outside, join(ws, 'to-outside'));
     const st = statSync(outside);

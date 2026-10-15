@@ -570,13 +570,14 @@ export class MigrationExporter {
       `workspace/ exceeds the migration limits (${String(maxEntries)} entries / ${String(maxBytes)} bytes) — refusing to ship a partial copy of it`,
     );
     try {
+      const data = statSync(this.lynoxDir);
       const copied = copyOut(lease.access.anchor, '', (rel, fd, size) => {
         if (!isPortableDirEntryName(rel)) { this.skipped.push(`workspace/${rel}`); return; }
         if (count >= maxEntries || total + size > maxBytes) throw tooBig;
         files[rel] = readFileSync(fd).toString('base64');
         count++;
         total += size;
-      });
+      }, undefined, { dev: data.dev, ino: data.ino });
       this.skipped.push(...copied.skipped.map(rel => `workspace/${rel}`));
     } finally {
       lease.release();
