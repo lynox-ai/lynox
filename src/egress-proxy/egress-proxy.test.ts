@@ -3,7 +3,7 @@ import { Socket, connect, createServer, type AddressInfo, type Server } from 'no
 import { connect as tlsConnect } from 'node:tls';
 import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
-import { CredentialRegistry, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
+import { CredentialRegistry, DENIAL_REASONS, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIED_HOST_CHARS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
 import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
 import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
@@ -157,12 +157,12 @@ describe('registry', () => {
     const c = clock();
     const r = new CredentialRegistry(c.now);
     r.put(CRED, reg(['a.example'], 10));
-    r.recordDenial(CRED, 'b.example', 443);
+    r.recordDenial(CRED, 'b.example', 443, 'not-in-set');
     c.t += 9_999;
     expect(r.lookup(CRED)).not.toBeNull();
     c.t += 1;
     expect(r.lookup(CRED)).toBeNull();
-    expect(r.denials(CRED)).toEqual([{ host: 'b.example', port: 443, at: 1_000_000 }]);
+    expect(r.denials(CRED)).toEqual([{ host: 'b.example', port: 443, at: 1_000_000, reason: 'not-in-set' }]);
     c.t += DENIAL_RETENTION_MS - 1;
     expect(r.denials(CRED)).not.toBeNull();
     c.t += 1;
@@ -173,7 +173,7 @@ describe('registry', () => {
     const c = clock();
     const r = new CredentialRegistry(c.now);
     r.put(CRED, reg(['a.example']));
-    r.recordDenial(CRED, 'b.example', 443);
+    r.recordDenial(CRED, 'b.example', 443, 'not-in-set');
     r.put(CRED, reg(['b.example']));
     expect(r.lookup(CRED)?.set).toEqual(new Set(['b.example']));
     expect(r.denials(CRED)).toHaveLength(1);
@@ -209,10 +209,26 @@ describe('registry', () => {
     expect(d.closed).toBe(1);
   });
 
+  it('names every denial reason in a closed set; each one is produced by a shell-listener test below', () => {
+    expect([...DENIAL_REASONS].sort()).toEqual(
+      ['bad-hello', 'bad-target', 'hello-timeout', 'no-sni', 'not-in-set', 'plain-http', 'port', 'sni-mismatch', 'ssrf'],
+    );
+  });
+
+  it('keeps only printable ASCII without spaces in a denied host, cut to MAX_DENIED_HOST_CHARS', () => {
+    const r = new CredentialRegistry(() => 0);
+    r.put(CRED, reg([]));
+    r.recordDenial(CRED, 'a b\u0000\u001b[31m\u00e9\u202e.example', 443, 'bad-target');
+    r.recordDenial(CRED, 'x'.repeat(MAX_DENIED_HOST_CHARS + 50), 443, 'bad-target');
+    const [first, second] = r.denials(CRED) ?? [];
+    expect(first?.host).toBe('a?b??[31m??.example');
+    expect(second?.host).toHaveLength(MAX_DENIED_HOST_CHARS);
+  });
+
   it('keeps at most MAX_DENIALS_PER_CRED denials', () => {
     const r = new CredentialRegistry(() => 0);
     r.put(CRED, reg([]));
-    for (let i = 0; i < MAX_DENIALS_PER_CRED + 10; i++) r.recordDenial(CRED, `h${String(i)}.example`, 443);
+    for (let i = 0; i < MAX_DENIALS_PER_CRED + 10; i++) r.recordDenial(CRED, `h${String(i)}.example`, 443, 'not-in-set');
     expect(r.denials(CRED)).toHaveLength(MAX_DENIALS_PER_CRED);
   });
 
@@ -366,8 +382,8 @@ describe('contract: registration listener', () => {
     expect((await api(r, 'PUT', `/cred/${CRED}`, { set: ['a.example'], ttl_s: 30, run: 'r', session: 's' })).status).toBe(204);
     expect((await api(r, 'PUT', `/cred/${CRED}`, { set: ['b.example'], ttl_s: 30, run: 'r', session: 's' })).status).toBe(204);
     expect(r.registry.lookup(CRED)?.set).toEqual(new Set(['b.example']));
-    r.registry.recordDenial(CRED, 'c.example', 443);
-    expect(await api(r, 'GET', `/denials/${CRED}`)).toEqual({ status: 200, json: [{ host: 'c.example', port: 443, at: 5_000_000 }] });
+    r.registry.recordDenial(CRED, 'c.example', 443, 'not-in-set');
+    expect(await api(r, 'GET', `/denials/${CRED}`)).toEqual({ status: 200, json: [{ host: 'c.example', port: 443, at: 5_000_000, reason: 'not-in-set' }] });
     expect((await api(r, 'DELETE', `/cred/${CRED}`)).status).toBe(204);
     expect((await api(r, 'DELETE', `/cred/${CRED}`)).status).toBe(204);
     expect((await api(r, 'DELETE', `/cred/${CRED2}`)).status).toBe(204);
@@ -428,7 +444,7 @@ describe('contract: shell listener', () => {
     expect((await shellRequest(r, connectHead('secret-data.attacker.example:443'))).status).toBe(403);
     expect(r.lookups).toEqual([]);
     expect(r.connects).toEqual([]);
-    expect(r.registry.denials(CRED)).toEqual([{ host: 'secret-data.attacker.example', port: 443, at: 5_000_000 }]);
+    expect(r.registry.denials(CRED)).toEqual([{ host: 'secret-data.attacker.example', port: 443, at: 5_000_000, reason: 'not-in-set' }]);
   });
 
   it('refuses every port but 443 before resolving, 80 included', async () => {
@@ -437,7 +453,7 @@ describe('contract: shell listener', () => {
     expect((await shellRequest(r, connectHead('a.example:22'))).status).toBe(403);
     expect((await shellRequest(r, connectHead('a.example:80'))).status).toBe(403);
     expect(r.lookups).toEqual([]);
-    expect(r.registry.denials(CRED)?.map((d) => d.port)).toEqual([22, 80]);
+    expect(r.registry.denials(CRED)?.map((d) => [d.port, d.reason])).toEqual([[22, 'port'], [80, 'port']]);
   });
 
   it('refuses plain http and malformed targets, and records them as denials', async () => {
@@ -447,7 +463,9 @@ describe('contract: shell listener', () => {
     expect((await shellRequest(r, `GET http://a.example/ HTTP/1.1\r\nHost: a.example\r\n${auth}\r\n`)).status).toBe(403);
     expect((await shellRequest(r, connectHead('evil.example.:443'))).status).toBe(403);
     expect((await shellRequest(r, connectHead('[::1]:443'))).status).toBe(403);
-    expect(r.registry.denials(CRED)?.map((d) => d.host)).toEqual(['http://a.example/', 'evil.example.:443', '[::1]:443']);
+    expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([
+      ['http://a.example/', 'plain-http'], ['evil.example.:443', 'bad-target'], ['[::1]:443', 'bad-target'],
+    ]);
     expect(r.lookups).toEqual([]);
     expect(r.connects).toEqual([]);
   });
@@ -493,7 +511,9 @@ describe('contract: shell listener', () => {
       await until(closed);
     }
     expect(o.received()).toBe('');
-    expect(r.registry.denials(CRED)?.map((d) => d.host)).toEqual(['other.cdn.example', 'b.example', 'a.example', 'a.example']);
+    expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([
+      ['other.cdn.example', 'sni-mismatch'], ['b.example', 'sni-mismatch'], ['a.example', 'no-sni'], ['a.example', 'bad-hello'],
+    ]);
     expect(r.proxy.openTunnels).toBe(0);
   });
 
@@ -504,7 +524,7 @@ describe('contract: shell listener', () => {
     const res = await shellRequest(r, connectHead('a.example:443'));
     expect(res.status).toBe(200);
     await until(closedOf(res.socket));
-    expect(r.registry.denials(CRED)).toEqual([{ host: 'a.example', port: 443, at: 5_000_000 }]);
+    expect(r.registry.denials(CRED)).toEqual([{ host: 'a.example', port: 443, at: 5_000_000, reason: 'hello-timeout' }]);
   });
 
   it('refuses a name that also resolves inward, or to a denied address, and connects nowhere', async () => {
@@ -514,7 +534,7 @@ describe('contract: shell listener', () => {
     expect((await shellRequest(r, connectHead('b.example:443'))).status).toBe(403);
     expect(r.lookups).toEqual(['a.example', 'b.example']);
     expect(r.connects).toEqual([]);
-    expect(r.registry.denials(CRED)?.map((d) => d.host)).toEqual(['a.example', 'b.example']);
+    expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([['a.example', 'ssrf'], ['b.example', 'ssrf']]);
     expect(r.proxy.openTunnels).toBe(0);
   });
 

@@ -25,11 +25,29 @@ export const MAX_CREDS = 1024;
 
 export type HostSet = ReadonlySet<string> | '*';
 
+/**
+ * Why a connection was refused. A closed set: the engine picks what to tell the model from
+ * it (ask for the host, use https, nothing to do).
+ */
+export const DENIAL_REASONS = [
+  'not-in-set', 'plain-http', 'port', 'bad-target', 'ssrf', 'sni-mismatch', 'no-sni', 'bad-hello', 'hello-timeout',
+] as const;
+export type DenialReason = (typeof DENIAL_REASONS)[number];
+
+/** How much of a refused target a denial keeps. */
+export const MAX_DENIED_HOST_CHARS = 255;
+
 export interface Denial {
+  /**
+   * The refused host, or the raw target or server name when there was no valid host. It can
+   * come from the sidecar and ends up in what the model reads, so it holds printable ASCII
+   * without spaces only (`?` for anything else) and at most MAX_DENIED_HOST_CHARS.
+   */
   host: string;
   port: number;
   /** Epoch milliseconds. */
   at: number;
+  reason: DenialReason;
 }
 
 export interface Registration {
@@ -111,10 +129,11 @@ export class CredentialRegistry {
     return [...r.denials];
   }
 
-  recordDenial(cred: string, host: string, port: number): void {
+  recordDenial(cred: string, host: string, port: number, reason: DenialReason): void {
     const entry = this.liveEntry(cred);
     if (!entry || entry.denials.length >= MAX_DENIALS_PER_CRED) return;
-    entry.denials.push({ host, port, at: this.now() });
+    const shown = host.slice(0, MAX_DENIED_HOST_CHARS).replace(/[^\x21-\x7e]/g, '?');
+    entry.denials.push({ host: shown, port, at: this.now(), reason });
   }
 
   /** Attach a tunnel to a live credential. `false` when it is no longer live. */

@@ -15,7 +15,7 @@ import { createServer as createNetServer, type Server as NetServer, type Socket 
 import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isIPv4 } from 'node:net';
-import { hostInSet, type CredentialRegistry, type TunnelHandle } from './registry.js';
+import { hostInSet, type CredentialRegistry, type DenialReason, type TunnelHandle } from './registry.js';
 import { ALLOWED_PORTS, credentialFromHeader, isCredential, parseAuthority, parseClientHello, parseRegistration, pickAddress } from './policy.js';
 
 export interface ProxyLimits {
@@ -68,8 +68,6 @@ const REASONS: Record<number, string> = {
 };
 
 const AUTHENTICATE = 'Proxy-Authenticate: Basic realm="lynox-egress"\r\n';
-/** How much of a refused target a denial keeps. */
-const MAX_DENIED_HOST_CHARS = 255;
 
 function reply(socket: Socket, code: number, extra = ''): void {
   if (socket.destroyed) return;
@@ -148,15 +146,17 @@ export class ShellProxy {
     const entry = cred === null ? null : this.deps.registry.lookup(cred);
     if (cred === null || entry === null) { reply(socket, 407, AUTHENTICATE); return; }
     const tag = credTag(cred);
-    const deny = (host: string, port: number, why: string): void => {
-      this.deps.registry.recordDenial(cred, host, port);
-      this.deps.log(`deny cred=${tag} host=${JSON.stringify(host)} port=${String(port)} why=${why}`);
+    const deny = (host: string, port: number, reason: DenialReason, detail = ''): void => {
+      this.deps.registry.recordDenial(cred, host, port, reason);
+      this.deps.log(`deny cred=${tag} host=${JSON.stringify(host.slice(0, 255))} port=${String(port)} why=${reason}${detail}`);
       reply(socket, 403);
     };
 
-    if (req.method !== 'CONNECT') { deny(req.target.slice(0, MAX_DENIED_HOST_CHARS), 0, 'not-connect'); return; }
+    // Plain http is answered here rather than left to fail on the network, so the engine can
+    // tell the model to use https.
+    if (req.method !== 'CONNECT') { deny(req.target, 0, /^http:\/\//i.test(req.target) ? 'plain-http' : 'bad-target'); return; }
     const target = parseAuthority(req.target);
-    if (!target.ok) { deny(req.target.slice(0, MAX_DENIED_HOST_CHARS), 0, 'bad-target'); return; }
+    if (!target.ok) { deny(req.target, 0, 'bad-target'); return; }
     const { host, port } = target.value;
 
     // 2. The port, 3. the name: both before anything is resolved.
@@ -196,7 +196,7 @@ export class ShellProxy {
         }
       }
       const picked = pickAddress(addresses, this.deps.deny);
-      if (!picked.ok) { this.open--; deny(host, port, picked.error.replace(/ /g, '-')); return; }
+      if (!picked.ok) { this.open--; deny(host, port, 'ssrf', ` (${picked.error})`); return; }
       if (socket.destroyed) { this.open--; return; }
 
       // 5. Connect to exactly that address.
@@ -258,7 +258,7 @@ export class ShellProxy {
       this.readHello(client, host, rest, (verdict, hello) => {
         if (closed) return;
         if (verdict === null) { start(hello); return; }
-        this.deps.registry.recordDenial(cred, verdict.name ?? host, port);
+        this.deps.registry.recordDenial(cred, verdict.name ?? host, port, verdict.why);
         this.deps.log(`deny cred=${tag} host=${host} port=${String(port)} why=${verdict.why}`);
         handle.close();
       });
@@ -269,10 +269,10 @@ export class ShellProxy {
    * Read the client hello and hold it to the tunnel's name. Nothing reaches the upstream
    * before the verdict. `done(null, bytes)` passes the bytes read so far on.
    */
-  private readHello(client: Socket, host: string, first: Buffer, done: (refused: { why: string; name?: string } | null, bytes: Buffer) => void): void {
+  private readHello(client: Socket, host: string, first: Buffer, done: (refused: { why: DenialReason; name?: string } | null, bytes: Buffer) => void): void {
     let buf = first;
     let finished = false;
-    const finish = (refused: { why: string; name?: string } | null): void => {
+    const finish = (refused: { why: DenialReason; name?: string } | null): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
@@ -280,13 +280,13 @@ export class ShellProxy {
       client.pause();
       done(refused, buf);
     };
-    const timer = setTimeout(() => { finish({ why: 'no-hello' }); }, this.limits.headerTimeoutMs);
+    const timer = setTimeout(() => { finish({ why: 'hello-timeout' }); }, this.limits.headerTimeoutMs);
     const check = (): void => {
       const r = parseClientHello(buf);
       if (r.state === 'more') return;
       if (r.state === 'bad') { finish({ why: 'bad-hello' }); return; }
-      if (r.sni === null) { finish({ why: 'no-server-name' }); return; }
-      if (r.sni !== host) { finish({ why: 'server-name-differs', name: r.sni.slice(0, MAX_DENIED_HOST_CHARS) }); return; }
+      if (r.sni === null) { finish({ why: 'no-sni' }); return; }
+      if (r.sni !== host) { finish({ why: 'sni-mismatch', name: r.sni }); return; }
       finish(null);
     };
     const onData = (chunk: Buffer): void => { buf = Buffer.concat([buf, chunk]); check(); };

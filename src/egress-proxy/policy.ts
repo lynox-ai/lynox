@@ -195,15 +195,12 @@ export function parseClientHello(buf: Buffer): HelloResult {
     if (extEnd > h.length) return { state: 'bad', error: 'truncated extensions' };
     p += 2;
     let sni: string | null = null;
-    let seen = false;
     while (p < extEnd) {
       const type = h.readUInt16BE(p);
       const len = h.readUInt16BE(p + 2);
       const end = p + 4 + len;
       if (end > extEnd) return { state: 'bad', error: 'truncated extension' };
       if (type === 0) {
-        if (seen) return { state: 'bad', error: 'two server_name extensions' };
-        seen = true;
         let q = p + 4 + 2;
         const listEnd = q + h.readUInt16BE(p + 4);
         if (listEnd > end) return { state: 'bad', error: 'bad server_name list' };
@@ -212,6 +209,7 @@ export function parseClientHello(buf: Buffer): HelloResult {
           const nameLen = h.readUInt16BE(q + 1);
           if (q + 3 + nameLen > listEnd) return { state: 'bad', error: 'bad server_name entry' };
           if (nameType === 0) {
+            // Also catches a second server_name extension.
             if (sni !== null) return { state: 'bad', error: 'two host names' };
             sni = h.subarray(q + 3, q + 3 + nameLen).toString('latin1').toLowerCase();
           }
