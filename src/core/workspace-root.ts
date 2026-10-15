@@ -1,6 +1,6 @@
 import { accessSync, closeSync, constants, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ensureDirSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
 
@@ -38,6 +38,60 @@ export class WorkspaceRootError extends Error {
   }
 }
 
+/**
+ * True iff `child` resolves to `parent` itself or a path nested under it.
+ * Relative-path based so a `..` that climbs out of `parent` fails. Exported so
+ * the non-isolation write path in the fs tools can reuse the exact same
+ * containment predicate the isolation path (`validatePath`) enforces.
+ */
+export function isPathWithin(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  // `..` as a whole first component climbs out; a name that merely starts with two dots
+  // (`..env`) is a file inside.
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * Why the directory `real` must not be a workspace root of the data directory `dataDir` (both
+ * resolved), or `null`: it is the data directory or contains it (`/` among them), or it lies
+ * inside it. Emptying the root would then empty the data directory or part of it. Asked by path
+ * and by identity (device and inode along both ancestor chains): a case-insensitive file system or
+ * a second spelling of the same directory passes the path check alone. One guard for an external
+ * root (`resolveWorkspaceRoot`) and for a `<data>/workspace` link (the erasure's scan); the default
+ * root itself is inside the data directory by name and is never asked. A bind mount that shows the
+ * data directory under an unrelated path is not visible here; the erasure looks for it in its walks.
+ */
+export function unsafeRoot(real: string, dataDir: string): 'holds-data-dir' | 'inside-data-dir' | null {
+  if (isPathWithin(dataDir, real)) return 'holds-data-dir';
+  if (isPathWithin(real, dataDir)) return 'inside-data-dir';
+  const rootId = identityOf(real);
+  const dataId = identityOf(dataDir);
+  if (rootId !== null && ancestorsOf(dataDir).some(p => sameIdentity(identityOf(p), rootId))) return 'holds-data-dir';
+  if (dataId !== null && ancestorsOf(real).some(p => sameIdentity(identityOf(p), dataId))) return 'inside-data-dir';
+  return null;
+}
+
+interface Identity { readonly dev: number; readonly ino: number }
+
+/** A directory's identity, or null when it cannot be read (the path check above still holds). */
+function identityOf(path: string): Identity | null {
+  try {
+    const st = statSync(path);
+    return { dev: st.dev, ino: st.ino };
+  } catch {
+    return null;
+  }
+}
+
+const sameIdentity = (a: Identity | null, b: Identity): boolean => a !== null && a.dev === b.dev && a.ino === b.ino;
+
+/** `path` and every directory above it, up to `/`. */
+function ancestorsOf(path: string): string[] {
+  const out = [path];
+  for (let p = path, up = dirname(p); up !== p; p = up, up = dirname(p)) out.push(up);
+  return out;
+}
+
 /** Whether this engine accepts an external root. Backup, export and erase reach it through its anchor. */
 const EXTERNAL_ROOT_SUPPORTED = true;
 
@@ -69,8 +123,10 @@ function classify(named: Stats, byName: string): WorkspaceRootMode {
 
 /**
  * The root, classified. Creates nothing. Throws `WorkspaceRootError` when the variable names a
- * path that does not resolve or is not a directory, and when it names an external root, which
- * this engine does not accept (`allowExternal` is the test seam for the code that will).
+ * path that does not resolve or is not a directory, and when it names an external root that
+ * `unsafeRoot` rejects. Every reader goes through here (the server's anchor, the CLI, the tools'
+ * confinement), so none of them can work in a root the erasure would refuse to empty.
+ * (`allowExternal: false` refuses any external root; a test seam.)
  */
 export function resolveWorkspaceRoot(opts: { allowExternal?: boolean } = {}): WorkspaceRoot {
   const byName = defaultWorkspaceRootPath();
@@ -94,7 +150,30 @@ export function resolveWorkspaceRoot(opts: { allowExternal?: boolean } = {}): Wo
       'its backup, export and erasure would not reach the files there. Unset LYNOX_WORKSPACE_ROOT, or run an engine version that supports it.',
     );
   }
+  refuseUnsafeRoot(real);
   return { path: real, mode: 'external' };
+}
+
+function refuseUnsafeRoot(real: string): void {
+  let dataDir: string;
+  try {
+    dataDir = realpathSync(getLynoxDir());
+  } catch (err) {
+    throw new WorkspaceRootError(`Cannot check the workspace root ${real} against the data directory ${getLynoxDir()} (${errnoOf(err)}).`);
+  }
+  const unsafe = unsafeRoot(real, dataDir);
+  if (unsafe === 'holds-data-dir') {
+    throw new WorkspaceRootError(
+      `LYNOX_WORKSPACE_ROOT names ${real}, which is the data directory ${dataDir} or contains it. ` +
+      'The erasure empties the workspace root, so it must be a directory of its own.',
+    );
+  }
+  if (unsafe === 'inside-data-dir') {
+    throw new WorkspaceRootError(
+      `LYNOX_WORKSPACE_ROOT names ${real}, which is inside the data directory ${dataDir}. ` +
+      'Use the default (unset it) or a directory outside the data directory.',
+    );
+  }
 }
 
 /** The root's path (see `resolveWorkspaceRoot`). */

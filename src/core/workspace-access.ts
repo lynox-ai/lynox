@@ -1,7 +1,6 @@
 import { closeSync, existsSync, fstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { getLynoxDir } from './config.js';
-import { isPathWithin } from './workspace.js';
 import { closeAnchor, openAnchor, type WorkspaceAnchor } from './workspace-fd.js';
 import { ensureWorkspaceRoot, resolveWorkspaceRoot, WorkspaceRootError, type WorkspaceRoot } from './workspace-root.js';
 
@@ -39,7 +38,6 @@ export function workspaceAccess(): WorkspaceAccess {
     }
     return held;
   }
-  if (root.mode === 'external') refuseUnsafeRoot(root.path);
   let anchor: WorkspaceAnchor;
   try {
     // The resolved path, not the name: the anchor refuses a link at its last component, and a
@@ -64,48 +62,6 @@ export function workspaceAccessIfPresent(): WorkspaceAccess | null {
   const heldHere = held !== null && held.root.path === root.path && held.root.mode === root.mode;
   if (!heldHere && root.mode === 'default' && !existsSync(root.path)) return null;
   return workspaceAccess();
-}
-
-/**
- * An external root the erasure must never empty, because it empties the root: the data
- * directory itself or a directory that contains it (`/` among them), and any other directory
- * inside the data directory (a `secrets` there would become the workspace). The default
- * `<data>/workspace` is not external and never gets here.
- */
-function refuseUnsafeRoot(real: string): void {
-  let dataDir: string;
-  try {
-    dataDir = realpathSync(getLynoxDir());
-  } catch (err) {
-    const cause = err instanceof Error ? err.message : String(err);
-    throw new WorkspaceRootError(`Cannot check the workspace root ${real} against the data directory ${getLynoxDir()} (${cause}).`);
-  }
-  const unsafe = unsafeRoot(real, dataDir);
-  if (unsafe === 'holds-data-dir') {
-    throw new WorkspaceRootError(
-      `LYNOX_WORKSPACE_ROOT names ${real}, which is the data directory ${dataDir} or contains it. ` +
-      'The erasure empties the workspace root, so it must be a directory of its own.',
-    );
-  }
-  if (unsafe === 'inside-data-dir') {
-    throw new WorkspaceRootError(
-      `LYNOX_WORKSPACE_ROOT names ${real}, which is inside the data directory ${dataDir}. ` +
-      'Use the default (unset it) or a directory outside the data directory.',
-    );
-  }
-}
-
-/**
- * Why the directory `real` must not be emptied as a workspace root of the data directory
- * `dataDir` (both resolved), or `null`: it is the data directory or contains it (`/` among
- * them), or it lies inside it. One guard for an external root (refused at boot) and for a
- * `<data>/workspace` that is a link (refused by the erasure, PRD I12d): the default root itself
- * is inside the data directory by name and is never asked.
- */
-export function unsafeRoot(real: string, dataDir: string): 'holds-data-dir' | 'inside-data-dir' | null {
-  if (isPathWithin(dataDir, real)) return 'holds-data-dir';
-  if (isPathWithin(real, dataDir)) return 'inside-data-dir';
-  return null;
 }
 
 /**

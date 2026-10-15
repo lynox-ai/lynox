@@ -296,10 +296,11 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     rmSync(outside, { recursive: true, force: true });
   });
 
-  const external = (boundaries: readonly string[] = []): WorkspaceErasure =>
-    ({ external: true, isRoot: () => false, mountBoundaries: () => boundaries });
-  const defaultRoot = (rootPath: string, boundaries: readonly string[] = []): WorkspaceErasure =>
-    ({ external: false, isRoot: (p) => statSync(p).ino === statSync(rootPath).ino, mountBoundaries: () => boundaries });
+  const external = (boundaries: readonly string[] = [], extra: Partial<WorkspaceErasure> = {}): WorkspaceErasure =>
+    ({ external: true, isRoot: () => false, mountBoundaries: () => boundaries, dataDirAt: () => [], ...extra });
+  const defaultRoot = (rootPath: string, boundaries: readonly string[] = [], extra: Partial<WorkspaceErasure> = {}): WorkspaceErasure =>
+    ({ external: false, isRoot: (p) => statSync(p).ino === statSync(rootPath).ino, mountBoundaries: () => boundaries, dataDirAt: () => [], ...extra });
+  const identity = (p: string): { dev: number; ino: number } => { const st = statSync(p); return { dev: st.dev, ino: st.ino }; };
   const leftover = (): void => {
     mkdirSync(join(dir, 'workspace', 'http-api'), { recursive: true });
     writeFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'ZZ-old');
@@ -431,6 +432,38 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     const out = removeOwedEntries(scan, ['workspace'], undefined, external(), mountId);
     expect(out.failures.map(f => f.name)).toEqual(['workspace']);
     expect(readFileSync(join(dir, 'workspace', 'http-api', 'old.txt'), 'utf8')).toBe('ZZ-old');
+  });
+
+  it('refuses when the anchor walk finds the data directory inside the root (a bind mount)', () => {
+    const scan = scanDataDir(dir, { workspace: external([], { dataDirAt: () => ['srv/lynox'] }) });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/contains the data directory \(srv\/lynox\)/);
+  });
+
+  it('refuses when the root is also a directory inside the data directory (a bind mount)', () => {
+    mkdirSync(join(dir, 'memory', 'deep'), { recursive: true });
+    const scan = scanDataDir(dir, { workspace: external([], { rootIdentity: identity(join(dir, 'memory', 'deep')) }) });
+    expect(scan.linked.map(l => l.name)).toEqual(['workspace']);
+    expect(scan.linked[0]!.reason).toMatch(/also inside the data directory \(memory\/deep\)/);
+  });
+
+  it('does not count the default root, which is <data>/workspace by design, as the root inside the data directory', () => {
+    mkdirSync(join(dir, 'workspace'));
+    const scan = scanDataDir(dir, { workspace: defaultRoot(join(dir, 'workspace'), [], { rootIdentity: identity(join(dir, 'workspace')) }) });
+    expect(scan.linked).toEqual([]);
+    expect(scan.emptiedInPlace).toContain('workspace');
+  });
+
+  it('a mount id that cannot be asked refuses the entry; one gone since is not refused', () => {
+    leftover();
+    const failing = (code: string) => (p: string): number => {
+      if (p.endsWith('/workspace/http-api')) throw Object.assign(new Error(code), { code });
+      return 1;
+    };
+    const refused = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external(), mountId: failing('EMFILE') });
+    expect(refused.linked.map(l => l.name)).toEqual(['workspace']);
+    const gone = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external(), mountId: failing('ENOENT') });
+    expect(gone.linked).toEqual([]);
   });
 
   it('refuses the whole erasure when the anchor walk finds a mount below the root (I1e)', () => {

@@ -4,7 +4,7 @@ import { resolve, dirname, basename, join, isAbsolute, relative, sep } from 'nod
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
-import { ensureWorkspaceContextDir, getWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath } from './workspace-root.js';
+import { ensureWorkspaceContextDir, getWorkspaceRoot, resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin } from './workspace-root.js';
 
 let _cachedDir: string | null | undefined;
 let _tenantOverride: string | null = null;
@@ -114,18 +114,9 @@ function realpathOfClosestExisting(path: string): string | null {
   }
 }
 
-/**
- * True iff `child` resolves to `parent` itself or a path nested under it.
- * Relative-path based so a `..` that climbs out of `parent` fails. Exported so
- * the non-isolation write path in the fs tools can reuse the exact same
- * containment predicate the isolation path (`validatePath`) enforces.
- */
-export function isPathWithin(child: string, parent: string): boolean {
-  const rel = relative(parent, child);
-  // `..` as a whole first component climbs out; a name that merely starts with two dots
-  // (`..env`) is a file inside.
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
+// `isPathWithin` lives beside the workspace root's guard, which needs it and which this module
+// imports; re-exported so every caller keeps its import.
+export { isPathWithin };
 
 /**
  * The roots a write may reach besides the workspace when isolation is active: `/tmp` and the

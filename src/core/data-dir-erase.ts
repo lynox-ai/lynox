@@ -27,7 +27,7 @@
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR_INVENTORY, type DataDirEntry } from './data-dir-inventory.js';
-import { unsafeRoot } from './workspace-access.js';
+import { unsafeRoot } from './workspace-root.js';
 import { mountIdAt } from './workspace-fd.js';
 
 /**
@@ -82,6 +82,10 @@ export interface WorkspaceErasure {
   readonly isRoot: (path: string) => boolean;
   /** Directories below the root on another mount, from the anchor walk. */
   readonly mountBoundaries: () => readonly string[];
+  /** Directories in the root (`''` for the root itself) that ARE the data dir, from the same walk. */
+  readonly dataDirAt: () => readonly string[];
+  /** The anchored root's device and inode, to find it inside the data dir (a bind mount). */
+  readonly rootIdentity?: { readonly dev: number; readonly ino: number } | undefined;
 }
 
 /** The inventory name of the workspace row. */
@@ -148,8 +152,25 @@ type OnOtherMount = (path: string, st: Stats) => boolean;
  * alone misses a bind mount or a second volume on the same filesystem.
  */
 function otherMountThan(dir: string, dev: number, mountId: (path: string) => number | null): OnOtherMount {
-  const own = mountId(dir);
-  return (path, st) => st.dev !== dev || (own !== null && mountId(path) !== own);
+  return otherMount(dev, mountId(dir), mountId);
+}
+
+/**
+ * The mount id is asked of directories only: a removal descends into a directory, and that is what
+ * reaches another filesystem; a file that is a mount point cannot be unlinked (EBUSY). An entry
+ * that cannot be asked counts as on another mount (refused, never removed), except one that is
+ * gone, which there is nothing left to remove.
+ */
+function otherMount(dev: number, own: number | null, mountId: (path: string) => number | null): OnOtherMount {
+  return (path, st) => {
+    if (st.dev !== dev) return true;
+    if (own === null || !st.isDirectory()) return false;
+    try {
+      return mountId(path) !== own;
+    } catch (err) {
+      return !isGone(err);
+    }
+  };
 }
 
 /**
@@ -265,6 +286,28 @@ export interface ScanOptions {
   readonly workspace?: WorkspaceErasure | undefined;
 }
 
+/**
+ * The directories in `dir` (relative), at any depth, that are the directory `id`; symlinks are not
+ * followed. `skipTop` is a top-level name not to report or enter: the default root, which IS the
+ * root by design. Fails loudly on an unreadable directory: it could hold the root.
+ */
+function directoriesWithIdentity(dir: string, id: { readonly dev: number; readonly ino: number }, skipTop: string | null): string[] {
+  const found: string[] = [];
+  const stack = [''];
+  while (stack.length > 0) {
+    const rel = stack.pop()!;
+    for (const d of readdirSync(join(dir, rel), { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const childRel = rel === '' ? d.name : join(rel, d.name);
+      if (rel === '' && (d.name === skipTop || OS_LITTER.has(d.name))) continue;
+      const st = lstatSync(join(dir, childRel));
+      if (st.dev === id.dev && st.ino === id.ino) { found.push(childRel); continue; }
+      stack.push(childRel);
+    }
+  }
+  return found;
+}
+
 /** Why a `<data>/workspace` link must not be emptied as the root (`unsafeRoot`), or null. */
 function linkedRootReason(path: string, dataDir: string): string | null {
   let real: string;
@@ -305,6 +348,27 @@ export function scanDataDir(dataDir: string, opts: ScanOptions = {}): DataDirSca
         reason: `the workspace root contains a mount point (${boundaries.join(', ')}); its content is on another filesystem`,
         remedy: 'This instance\'s data is there: erase it where it lives and remove the mount, or move the content into the workspace root.',
       });
+    }
+    // Emptying the root must not empty the data dir, and erasing the data dir must not empty the
+    // root through another path. Paths alone cannot show either when a bind mount is involved: the
+    // same directory appears under a second, unrelated name. So by identity, both ways.
+    const dataDirAt = ws.dataDirAt();
+    if (dataDirAt.length > 0) {
+      linked.push({
+        name: WORKSPACE,
+        reason: `the workspace root contains the data directory (${dataDirAt.map(p => p === '' ? '.' : p).join(', ')}); emptying it would empty the data directory`,
+        remedy: 'Point the workspace at a directory of its own, outside the data directory, then erase.',
+      });
+    }
+    if (ws.rootIdentity !== undefined && walk) {
+      const at = directoriesWithIdentity(dir, ws.rootIdentity, ws.external ? null : WORKSPACE);
+      if (at.length > 0) {
+        linked.push({
+          name: WORKSPACE,
+          reason: `the workspace root is also inside the data directory (${at.join(', ')}); erasing the data directory would empty it by that path`,
+          remedy: 'Point the workspace at a directory of its own, outside the data directory, then erase.',
+        });
+      }
     }
   }
   for (const name of readdirSync(dir)) {
@@ -416,7 +480,7 @@ export function removeOwedEntries(
   const failures: Array<{ name: string; reason: string }> = [];
   const ack = new Set(acknowledgedUnknown);
   const owed: Array<{ name: string; cls: EntryClass }> = [];
-  const onOther: OnOtherMount = (path, st) => st.dev !== scan.dev || (scan.mnt !== null && mountId(path) !== scan.mnt);
+  const onOther = otherMount(scan.dev, scan.mnt, mountId);
   let names: string[];
   try {
     names = readdirSync(scan.dir);

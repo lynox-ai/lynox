@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +85,21 @@ function seed(b: Booted): string {
   return markerPath;
 }
 
+/** Every file under `dir` with its size and mtime: "nothing erased" as one comparison. */
+function snapshot(dir: string): string[] {
+  const out: string[] = [];
+  const visit = (rel: string): void => {
+    for (const name of readdirSync(join(dir, rel))) {
+      const r = rel === '' ? name : join(rel, name);
+      const st = lstatSync(join(dir, r));
+      if (st.isDirectory()) visit(r);
+      else out.push(`${r} ${String(st.size)} ${String(st.mtimeMs)}`);
+    }
+  };
+  visit('');
+  return out.sort();
+}
+
 async function erase(b: Booted): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${b.baseUrl}/api/data`, {
     method: 'DELETE',
@@ -106,8 +121,37 @@ describe('Art. 17 erasure — a default workspace linked to a directory of its o
     if (outside !== undefined) rmSync(outside, { recursive: true, force: true });
   });
 
+  // The held root is checked by identity before anything else: a link re-pointed since boot is
+  // "no longer the directory this engine opened", answered as unreachable (500, nothing erased).
+  it('refuses, and erases nothing, once the link names another directory than the one held since boot', async () => {
+    const markerPath = seed(b);
+    const other = join(outside, 'other');
+    mkdirSync(other);
+    writeFileSync(join(other, 'o.txt'), 'ZZ-o');
+    const link = join(b.dir, 'workspace');
+    unlinkSync(link);
+    symlinkSync(other, link);
+    const before = snapshot(b.dir);
+    try {
+      const { status, body } = await erase(b);
+      expect(status).toBe(500);
+      expect(body['deleted']).toBe(false);
+      expect(body['failed']).toEqual(['workspace']);
+      expect(snapshot(b.dir)).toEqual(before);
+      expect(readFileSync(markerPath, 'utf8')).toBe('ZZMARK');
+      expect(readFileSync(join(b.target, 'other', 'b.txt'), 'utf8')).toBe('ZZ-b');
+      expect(readFileSync(join(other, 'o.txt'), 'utf8')).toBe('ZZ-o');
+    } finally {
+      unlinkSync(link);
+      symlinkSync(b.target, link);
+      rmSync(join(b.target, 'other'), { recursive: true, force: true });
+      rmSync(join(b.target, 'http-api', 'kept.txt'), { force: true });
+    }
+  }, 60_000);
+
   it('empties the target through the anchor; the link and the target stay', async () => {
     const markerPath = seed(b);
+    const targetIno = statSync(b.target).ino;
     const { status, body } = await erase(b);
     expect(status).toBe(200);
     expect(body['deleted']).toBe(true);
@@ -116,6 +160,7 @@ describe('Art. 17 erasure — a default workspace linked to a directory of its o
     expect(existsSync(join(b.target, 'http-api', 'kept.txt'))).toBe(false);
     expect(lstatSync(join(b.dir, 'workspace')).isSymbolicLink()).toBe(true);
     expect(readlinkSync(join(b.dir, 'workspace'))).toBe(b.target);
+    expect(statSync(b.target).ino).toBe(targetIno);
     // Only what the engine recreates for its own context may be there.
     expect(readdirSync(b.target).filter(n => n !== 'http-api')).toEqual([]);
   }, 60_000);
@@ -130,11 +175,14 @@ describe('Art. 17 erasure — a default workspace linked into the data directory
 
   it('refuses with 409 linked_entries, erases nothing, and leaves the target as it was', async () => {
     const markerPath = seed(b);
+    const before = snapshot(b.dir);
     const { status, body } = await erase(b);
     expect(status).toBe(409);
     expect(body['code']).toBe('linked_entries');
     const linked = body['linked'] as Array<{ name: string; reason: string }>;
     expect(linked.find(l => l.name === 'workspace')?.reason).toMatch(/inside the data directory/);
+    // The stores, the config and the secrets included: not one file of the data directory changed.
+    expect(snapshot(b.dir)).toEqual(before);
     expect(readFileSync(markerPath, 'utf8')).toBe('ZZMARK');
     expect(readFileSync(join(b.target, 'http-api', 'kept.txt'), 'utf8')).toBe('ZZ-kept');
     expect(readFileSync(join(b.target, 'other', 'b.txt'), 'utf8')).toBe('ZZ-b');

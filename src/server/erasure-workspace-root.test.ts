@@ -9,7 +9,7 @@ import { reloadConfig } from '../core/config.js';
 import { scopeToDir } from '../core/scope-resolver.js';
 import type { Memory } from '../core/memory.js';
 import type { WorkspaceAccess } from '../core/workspace-access.js';
-import { _resetWorkspaceAccess } from '../core/workspace-access.js';
+import { _resetWorkspaceAccess, workspaceAccess } from '../core/workspace-access.js';
 
 /**
  * `DELETE /api/data` reaches the workspace through the anchored root (PRD P18 D5): the root is
@@ -27,8 +27,8 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
   const IS_ROOT = process.getuid?.() === 0;
 
   const root = (): string => join(dir, 'workspace');
-  const seams = (): { _workspaceMountBoundaries: (a: WorkspaceAccess) => Promise<readonly string[]> } =>
-    api as unknown as { _workspaceMountBoundaries: (a: WorkspaceAccess) => Promise<readonly string[]> };
+  const seams = (): { _workspaceWalk: (a: WorkspaceAccess, d: string) => Promise<{ readonly mountBoundaries: readonly string[]; readonly dataDirAt: readonly string[] }> } =>
+    api as unknown as { _workspaceWalk: (a: WorkspaceAccess, d: string) => Promise<{ readonly mountBoundaries: readonly string[]; readonly dataDirAt: readonly string[] }> };
 
   async function erase(): Promise<{ status: number; body: Record<string, unknown> }> {
     const res = await fetch(`${baseUrl}/api/data`, {
@@ -108,8 +108,8 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
     const intact = memoryMarker();
     writeFileSync(join(root(), 'http-api', 'kept.txt'), 'ZZ-kept');
     const s = seams();
-    const real = s._workspaceMountBoundaries;
-    s._workspaceMountBoundaries = async () => ['proj/mnt'];
+    const real = s._workspaceWalk;
+    s._workspaceWalk = async () => ({ mountBoundaries: ['proj/mnt'], dataDirAt: [] });
     try {
       const res = await erase();
       expect(res.status).toBe(409);
@@ -118,8 +118,46 @@ describe('Art. 17 erasure — the workspace root (real engine)', () => {
       expect(linked.map(l => l.name)).toEqual(['workspace']);
       expect(linked[0]!.reason).toMatch(/proj\/mnt/);
     } finally {
-      s._workspaceMountBoundaries = real;
+      s._workspaceWalk = real;
     }
+    expect(intact()).not.toBeNull();
+    expect(readFileSync(join(root(), 'http-api', 'kept.txt'), 'utf8')).toBe('ZZ-kept');
+    rmSync(join(root(), 'http-api', 'kept.txt'));
+  }, 60_000);
+
+  it('the erasure walk names a directory of the root that IS the directory it is asked about', async () => {
+    mkdirSync(join(root(), 'sub', 'deeper'), { recursive: true });
+    const access = workspaceAccess();
+    const s = seams();
+    expect((await s._workspaceWalk(access, join(root(), 'sub', 'deeper'))).dataDirAt).toEqual(['sub/deeper']);
+    expect((await s._workspaceWalk(access, root())).dataDirAt).toEqual(['']);
+    expect((await s._workspaceWalk(access, dir)).dataDirAt).toEqual([]);
+    rmSync(join(root(), 'sub'), { recursive: true });
+  }, 60_000);
+
+  it('refuses with 409 when the anchor walk finds the data directory inside the root, and erases nothing', async () => {
+    const intact = memoryMarker();
+    writeFileSync(join(root(), 'http-api', 'kept.txt'), 'ZZ-kept');
+    const s = seams();
+    const real = s._workspaceWalk;
+    let askedFor: string | null = null;
+    // A bind mount of the data directory into the root takes privileges; the walk is stood in for,
+    // and the real one is still asked with the data directory, so the seam cannot drift from it.
+    s._workspaceWalk = async (a, d) => {
+      askedFor = d;
+      const found = await real.call(api, a, d);
+      return { mountBoundaries: found.mountBoundaries, dataDirAt: ['srv/lynox'] };
+    };
+    try {
+      const res = await erase();
+      expect(res.status).toBe(409);
+      expect(res.body['code']).toBe('linked_entries');
+      const linked = res.body['linked'] as Array<{ name: string; reason: string }>;
+      expect(linked.find(l => l.name === 'workspace')?.reason).toMatch(/contains the data directory/);
+    } finally {
+      s._workspaceWalk = real;
+    }
+    expect(askedFor).not.toBeNull();
     expect(intact()).not.toBeNull();
     expect(readFileSync(join(root(), 'http-api', 'kept.txt'), 'utf8')).toBe('ZZ-kept');
     rmSync(join(root(), 'http-api', 'kept.txt'));

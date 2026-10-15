@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isAnchoredRoot, workspaceAccess, workspaceAccessIfPresent, _resetWorkspaceAccess } from './workspace-access.js';
 import { emptyDir, WorkspaceAccessError } from './workspace-fd.js';
-import { WorkspaceRootError } from './workspace-root.js';
+import { getWorkspaceRoot, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
 
 describe('workspace access — the anchored root', () => {
   let tmp: string;
@@ -117,6 +117,8 @@ describe('workspace access — the anchored root', () => {
       process.env['LYNOX_WORKSPACE_ROOT'] = root;
       expect(() => workspaceAccess()).toThrow(WorkspaceRootError);
       expect(() => workspaceAccess()).toThrow(text);
+      // The CLI and the tools' confinement read the root by name, without the anchor: the same refusal.
+      expect(() => getWorkspaceRoot()).toThrow(text);
     };
 
     it('the data directory itself', () => { refuses(data, 'is the data directory'); });
@@ -148,6 +150,26 @@ describe('workspace access — the anchored root', () => {
     it('a directory named `..something` inside the data directory', () => {
       mkdirSync(join(data, '..x'));
       refuses(join(data, '..x'), 'inside the data directory');
+    });
+
+    // A second spelling of the same directory (a case-insensitive file system; here a link that is
+    // not resolved) passes a path comparison; the identity along the ancestors does not.
+    it('by identity: a root that holds the data directory under another name', () => {
+      const alias = join(tmp, 'alias-of-tmp');
+      symlinkSync(tmp, alias);
+      expect(unsafeRoot(alias, data)).toBe('holds-data-dir');
+    });
+    it('by identity: a root inside a data directory named another way', () => {
+      const alias = join(tmp, 'alias-of-data');
+      symlinkSync(data, alias);
+      mkdirSync(join(data, 'secrets'));
+      expect(unsafeRoot(join(data, 'secrets'), alias)).toBe('inside-data-dir');
+    });
+    it('by identity: a directory beside the data directory stays allowed', () => {
+      const alias = join(tmp, 'alias-of-data');
+      symlinkSync(data, alias);
+      mkdirSync(join(tmp, 'volume'));
+      expect(unsafeRoot(join(tmp, 'volume'), alias)).toBeNull();
     });
   });
 });

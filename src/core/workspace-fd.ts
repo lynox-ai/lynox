@@ -541,6 +541,12 @@ export interface WalkResult {
   readonly bytes: number;
   /** Directories that sit on a different mount than the walked root. Not descended into. */
   readonly mountBoundaries: string[];
+  /**
+   * Directories (`''` for the walked one itself) that ARE the directory `watch` names, by device
+   * and inode: a bind mount shows a directory under a second path on the same mount, which no
+   * mount boundary reveals.
+   */
+  readonly watchedAt: string[];
 }
 
 const DEFAULT_LIMITS: WalkLimits = { maxDepth: 1024, maxEntries: Number.MAX_SAFE_INTEGER, maxBytes: Number.MAX_SAFE_INTEGER };
@@ -551,12 +557,24 @@ const DEFAULT_LIMITS: WalkLimits = { maxDepth: 1024, maxEntries: Number.MAX_SAFE
  * a limit throws (LIMIT) rather than truncating, so a caller can never mistake a
  * cut-off listing for the whole tree.
  */
-export function walk(anchor: WorkspaceAnchor, rel: string, limits: WalkLimits = DEFAULT_LIMITS): WalkResult {
+export function walk(
+  anchor: WorkspaceAnchor,
+  rel: string,
+  limits: WalkLimits = DEFAULT_LIMITS,
+  watch?: { readonly dev: number; readonly ino: number },
+): WalkResult {
   const entries: WalkEntry[] = [];
   const mountBoundaries: string[] = [];
+  const watchedAt: string[] = [];
   let files = 0, dirs = 0, symlinks = 0, others = 0, bytes = 0;
   const root = walkDir(anchor, splitRel(rel));
   const rootMount = mountKey(root.fd);
+  const isWatched = (fd: number): boolean => {
+    if (watch === undefined) return false;
+    const st = fstatSync(fd);
+    return st.dev === watch.dev && st.ino === watch.ino;
+  };
+  if (isWatched(root.fd)) watchedAt.push('');
   const visit = (dir: DirHandle, prefix: string, prefixExact: boolean, depth: number): void => {
     for (const name of readNames(dir)) {
       const st = lstatOrNull(dir, name);
@@ -591,6 +609,7 @@ export function walk(anchor: WorkspaceAnchor, rel: string, limits: WalkLimits = 
             mountBoundaries.push(childRel);
             continue;
           }
+          if (isWatched(child.fd)) watchedAt.push(childRel);
           visit(child, childRel, childExact, depth + 1);
         } finally {
           closeSync(child.fd);
@@ -603,7 +622,7 @@ export function walk(anchor: WorkspaceAnchor, rel: string, limits: WalkLimits = 
   } finally {
     closeDir(root, anchor);
   }
-  return { entries, files, dirs, symlinks, others, bytes, mountBoundaries };
+  return { entries, files, dirs, symlinks, others, bytes, mountBoundaries, watchedAt };
 }
 
 export interface CopyCount {
