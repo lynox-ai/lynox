@@ -1126,6 +1126,106 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBe('rt-1');
   });
 
+  describe('names another profile uses', () => {
+    // A second profile of the owner's, with a name of every kind a profile uses.
+    const shopProfile = (): ApiProfile => ({
+      id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'Shop API',
+      auth: {
+        type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+        oauth: { token_url: 'https://api.shop.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', refresh_token_key: 'SHOP_RT' },
+      },
+      custom_endpoint_ack: { ...ACK, hosts: ['api.shop.example'] },
+      oauth_grant: { written: wrote({ SHOP_EARLIER_TOKEN: 'shop-at-0' }) },
+    });
+    const feedProfile = (): ApiProfile => ({
+      id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['FEED_KEY'] },
+    });
+    const shopVault = (): MockVault => makeVault({
+      CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1',
+      SHOP_CLIENT_ID: 'shop-client', SHOP_CLIENT_SECRET: 'shop-secret', SHOP_RT: 'shop-rt',
+      SHOP_API_ACCESS_TOKEN: 'shop-at', SHOP_API_REFRESH_TOKEN: 'shop-rt-derived', SHOP_EARLIER_TOKEN: 'shop-at-0', FEED_KEY: 'feed-key',
+    });
+
+    it.each([
+      ['its client secret', 'SHOP_CLIENT_SECRET', 'shop-api'],
+      ['its client id', 'SHOP_CLIENT_ID', 'shop-api'],
+      ['the refresh slot it names', 'SHOP_RT', 'shop-api'],
+      ['its derived access slot', 'SHOP_API_ACCESS_TOKEN', 'shop-api'],
+      ['its derived refresh slot', 'SHOP_API_REFRESH_TOKEN', 'shop-api'],
+      ['a name one of its exchanges wrote', 'SHOP_EARLIER_TOKEN', 'shop-api'],
+      ['the key a bearer profile sends', 'FEED_KEY', 'feed'],
+    ])('refuses %s as output name before posting anything', async (_label, outputName, holder) => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      store.register(shopProfile());
+      store.register(feedProfile());
+      const vault = shopVault();
+      const before = vault.peek(outputName);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: outputName }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain(`output_secret_name "${outputName}" is a name API profile "${holder}" uses`);
+      expect(result).toContain(`Leave output_secret_name out, so the token goes to "${ACCESS}"`);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vault.peek(outputName)).toBe(before);
+    });
+
+    it('control: a name no other profile uses takes the token while those profiles are there', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      store.register(shopProfile());
+      store.register(feedProfile());
+      const vault = shopVault();
+      tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+      expect(result).not.toContain('Error');
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+    });
+
+    it('control: a name its own earlier exchange wrote takes the token again', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_OWN_TOKEN: 'at-0' }) } }));
+      store.register(shopProfile());
+      const vault = shopVault();
+      vault.set('CRM_OWN_TOKEN', 'at-0');
+      tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+      expect(result).not.toContain('Error');
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+    });
+
+    it('control: naming its own access slot, which another profile reads on purpose, takes the token', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+      const vault = vaultWithRefresh();
+      tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: ACCESS }, makeAgent(store, vault)) as string;
+
+      expect(result).not.toContain('Error');
+      expect(vault.peek(ACCESS)).toBe('at-1');
+    });
+
+    it('control: a renewal names no output and is not asked, whoever else reads its slot', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+      const vault = vaultWithRefresh();
+      tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+      const result = await fetchToken(makeAgent(store, vault));
+
+      expect(result).not.toContain('Error');
+      expect(vault.peek(ACCESS)).toBe('at-1');
+    });
+  });
+
   describe('the slots the profile signs in with', () => {
     it.each([
       ['client secret', 'CRM_CLIENT_SECRET'],

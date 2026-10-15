@@ -361,7 +361,7 @@ describe('the owner\'s exchange does not write into a mandate\'s token slot', ()
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const v = vault({ ERP_CLIENT_ID: 'i', ERP_CLIENT_SECRET: 's' });
     const out = await apiSetupTool.handler({ action: 'fetch_token', id: 'erp-api', output_secret_name: 'CRM_API_ACCESS_TOKEN' } as never, agentOf(apis([owners, mandates]), v));
-    expect(out).toContain('set up in a mandate\'s session');
+    expect(out).toContain('is a name API profile "crm-api" uses');
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(v.peek('CRM_API_ACCESS_TOKEN')).toBeUndefined();
   });
