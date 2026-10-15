@@ -8951,6 +8951,17 @@ describe('LynoxHTTPApi', () => {
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
       });
 
+      it('a restart after a halt refuses a limit that is not a number, instead of keeping the old one', async () => {
+        const id = judgedRun();
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: 1 })).status).toBe(200);
+        bulkLedger.haltPreview(id, BULK_HALT_REASONS.costCap);
+        expect((await start(id, { judgeRuleHash: hash, costCapUsd: '5' })).status).toBe(400);
+        expect(bulkLedger.getStatus(id)!.haltReason).toBe(BULK_HALT_REASONS.costCap);
+        // Twin: without a new limit the old one holds, and the run starts again.
+        expect((await start(id, { judgeRuleHash: hash })).status).toBe(200);
+      });
+
       it('a second start names the run it would end, and ends it only when told', async () => {
         const first = judgedRun();
         const hash = (id: string): string => bulkLedger.getJudgeRuleForOwner(id)!.hash;
