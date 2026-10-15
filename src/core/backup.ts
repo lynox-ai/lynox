@@ -7,13 +7,24 @@
  * All operations are designed to be safe during concurrent lynox operation.
  */
 
-import { existsSync, mkdirSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdirSync, copyFileSync, rmSync, readFileSync, writeFileSync, writeSync, renameSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
+import { leaseWorkspaceFor } from './workspace-access.js';
+import { copyOut, removeStaleStages, stageIn, type StageEntry, type StagedWrite } from './workspace-fd.js';
+
+/**
+ * The inventory row the workspace root serves. The root may live outside the data dir, so it is
+ * copied out of and staged into its anchor (`workspace-access.ts`), never joined onto the data
+ * dir; in the archive its files keep the `workspace/` prefix, so a backup taken before the root
+ * moved restores the same way.
+ */
+const WORKSPACE = 'workspace';
+const WORKSPACE_PREFIX = `${WORKSPACE}/`;
 
 /** Metadata stored alongside every backup. */
 export interface BackupManifest {
@@ -31,6 +42,12 @@ export interface BackupResult {
   manifest: BackupManifest;
   duration_ms: number;
   error?: string | undefined;
+  /**
+   * Workspace entries not in the backup: symlinks, FIFOs, sockets and devices (never followed or
+   * copied), and names that are not valid UTF-8 (they cannot be addressed by path). Archive paths,
+   * `workspace/...`. Empty when everything was copied.
+   */
+  skipped?: string[] | undefined;
 }
 
 export interface RestoreResult {
@@ -157,6 +174,7 @@ export class BackupManager {
     }
     const tmpDir = join(this.backupDir, `${timestamp}.tmp`);
     const files: BackupFileEntry[] = [];
+    const skipped: string[] = [];
 
     try {
       mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
@@ -173,6 +191,10 @@ export class BackupManager {
 
       // 2. Memory + Sessions — recursive copy
       for (const dirName of COPY_DIRS) {
+        if (dirName === WORKSPACE) {
+          skipped.push(...this.copyWorkspaceOut(tmpDir, files));
+          continue;
+        }
         const srcDir = join(this.lynoxDir, dirName);
         if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) continue;
 
@@ -345,7 +367,10 @@ export class BackupManager {
         }
       }
 
-      return { success: true, path: finalDir, manifest, duration_ms: Date.now() - start };
+      if (skipped.length > 0) {
+        process.stderr.write(`[lynox:backup] ${String(skipped.length)} workspace entries are not in this backup (links, special files or names that are not UTF-8): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}\n`);
+      }
+      return { success: true, path: finalDir, manifest, duration_ms: Date.now() - start, ...(skipped.length > 0 ? { skipped } : {}) };
     } catch (err: unknown) {
       // Cleanup temp dir on failure
       try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ok */ }
@@ -457,9 +482,14 @@ export class BackupManager {
       // every file stays individually consistent and the safety backup covers a
       // full recovery.
       const staged: Array<{ tmp: string; dest: string }> = [];
+      let workspaceStaged: { staged: StagedWrite; release: () => void } | null = null;
       try {
+        const workspaceEntries: BackupFileEntry[] = [];
         for (const entry of manifest.files) {
           if (entry.type === 'directory') continue;
+          // The workspace set is staged through the root's anchor below, never by name: the
+          // root may live outside the data dir.
+          if (entry.path.startsWith(WORKSPACE_PREFIX)) { workspaceEntries.push(entry); continue; }
 
           const srcFile = join(backupPath, entry.path);
           const destFile = join(this.lynoxDir, entry.path);
@@ -478,9 +508,12 @@ export class BackupManager {
           }
           staged.push({ tmp: tmpFile, dest: destFile });
         }
+        // Staged only once the data-dir set is, and committed only after it is swapped: a
+        // failure in staging EITHER set leaves every live file as it was.
+        if (workspaceEntries.length > 0) workspaceStaged = this.stageWorkspaceIn(backupPath, workspaceEntries, key);
       } catch (stageErr) {
         // Staging failed before any live file was touched — drop the partial
-        // temps and rethrow so the whole restore aborts cleanly.
+        // temps and rethrow so the whole restore aborts cleanly. (`stageIn` removes its own.)
         for (const { tmp } of staged) {
           try { rmSync(tmp, { force: true }); } catch { /* best-effort */ }
         }
@@ -490,9 +523,24 @@ export class BackupManager {
       // Swap phase: atomic per-file rename over the live files. All bytes are
       // already staged on the same filesystem, so each rename is atomic and does
       // no decrypt/copy work — the window for a partial apply is minimal.
-      for (const { tmp, dest } of staged) {
-        renameSync(tmp, dest);
-        filesRestored++;
+      try {
+        for (const { tmp, dest } of staged) {
+          renameSync(tmp, dest);
+          filesRestored++;
+        }
+      } catch (swapErr) {
+        // The workspace set was never committed: its temps go, its live files stay.
+        workspaceStaged?.staged.abort();
+        workspaceStaged?.release();
+        throw swapErr;
+      }
+      if (workspaceStaged !== null) {
+        try {
+          workspaceStaged.staged.commit();
+          filesRestored += workspaceStaged.staged.files;
+        } finally {
+          workspaceStaged.release();
+        }
       }
 
       return {
@@ -676,6 +724,66 @@ export class BackupManager {
     return result;
   }
 
+  /**
+   * Copy the workspace root into `<tmpDir>/workspace` through its anchor, appending the manifest
+   * entries. Returns what was not copied (archive paths). A mount below the root or a file that
+   * cannot be read fails the backup: it must not be silently incomplete.
+   */
+  private copyWorkspaceOut(tmpDir: string, files: BackupFileEntry[]): string[] {
+    const lease = leaseWorkspaceFor(this.lynoxDir);
+    if (lease === null) return [];
+    try {
+      const destDir = join(tmpDir, WORKSPACE);
+      mkdirSync(destDir, { recursive: true, mode: 0o700 });
+      files.push({ path: WORKSPACE, size_bytes: 0, checksum_sha256: '', type: 'directory' });
+      const count = copyOut(lease.access.anchor, '', (rel, fd) => {
+        const dest = join(destDir, rel);
+        mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+        copyFdToFile(fd, dest);
+        files.push(this.fileEntry(tmpDir, `${WORKSPACE_PREFIX}${rel}`, 'file'));
+      });
+      return count.skipped.map(rel => `${WORKSPACE_PREFIX}${rel}`);
+    } finally {
+      lease.release();
+    }
+  }
+
+  /**
+   * Phase 1 of restoring the workspace set: every file is written as a temp beside its target
+   * inside the root, nothing replaced yet. Stale temps of a crashed restore are removed first.
+   */
+  private stageWorkspaceIn(backupPath: string, entries: readonly BackupFileEntry[], key: Buffer | null): { staged: StagedWrite; release: () => void } {
+    const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
+    if (lease === null) throw new Error('the workspace root could not be made');
+    const anchor = lease.access.anchor;
+    const scratch = join(backupPath, '.workspace-restore.tmp');
+    const source = function* (): Iterable<StageEntry> {
+      for (const entry of entries) {
+        const srcFile = join(backupPath, entry.path);
+        if (!existsSync(srcFile)) continue;
+        let data: Buffer;
+        if (key !== null && isEncryptedBackupFile(srcFile)) {
+          try {
+            decryptFile(srcFile, scratch, key);
+            data = readFileSync(scratch);
+          } finally {
+            rmSync(scratch, { force: true });
+          }
+        } else {
+          data = readFileSync(srcFile);
+        }
+        yield { rel: entry.path.slice(WORKSPACE_PREFIX.length), data };
+      }
+    };
+    try {
+      removeStaleStages(anchor, '');
+      return { staged: stageIn(anchor, '', source(), { fileMode: 0o600, dirMode: 0o700 }), release: () => lease.release() };
+    } catch (err) {
+      lease.release();
+      throw err;
+    }
+  }
+
   /** Create a file entry with checksum and size. */
   private fileEntry(backupDir: string, relPath: string, type: 'sqlite' | 'file'): BackupFileEntry {
     const fullPath = join(backupDir, relPath);
@@ -685,5 +793,23 @@ export class BackupManager {
       checksum_sha256: computeFileChecksum(fullPath),
       type,
     };
+  }
+}
+
+/** Copy an open file to a new file at `dest`, in chunks. */
+function copyFdToFile(fd: number, dest: string): void {
+  const out = openSync(dest, 'wx', 0o600);
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    let pos = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, pos);
+      if (n === 0) break;
+      let off = 0;
+      while (off < n) off += writeSync(out, buf, off, n - off);
+      pos += n;
+    }
+  } finally {
+    closeSync(out);
   }
 }
