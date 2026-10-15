@@ -53,6 +53,18 @@ export function workspaceAccess(): WorkspaceAccess {
 }
 
 /**
+ * As `workspaceAccess()`, but `null` for a default root that does not exist and that this engine
+ * never opened: there is nothing in it to reach (a CLI or a server that never made one). A root
+ * the engine holds and that is gone since stays an error.
+ */
+export function workspaceAccessIfPresent(): WorkspaceAccess | null {
+  const root = resolveWorkspaceRoot();
+  const heldHere = held !== null && held.root.path === root.path && held.root.mode === root.mode;
+  if (!heldHere && root.mode === 'default' && !existsSync(root.path)) return null;
+  return workspaceAccess();
+}
+
+/**
  * Whether `path` (followed if it is a link) is the anchored root itself. In the default mode the
  * data directory's `workspace` entry IS the root; the erasure empties it through the anchor and
  * must not remove it by name. (A `workspace` entry that is a link or a mount point is refused by

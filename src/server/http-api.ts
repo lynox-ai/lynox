@@ -11767,7 +11767,7 @@ export class LynoxHTTPApi {
         // Before the synchronous stretch: the stores' files are looked up by name below.
         const { getLynoxDir } = await import('../core/config.js');
         const dataDir = getLynoxDir();
-        const { isAnchoredRoot, workspaceAccess } = await import('../core/workspace-access.js');
+        const { isAnchoredRoot, workspaceAccessIfPresent } = await import('../core/workspace-access.js');
         const { closeAnchor, emptyDir, ensureSubAnchor } = await import('../core/workspace-fd.js');
         const { getWorkspaceDir } = await import('../core/workspace.js');
         const { AgentMemoryDb } = await import('../core/agent-memory-db.js');
@@ -11809,24 +11809,26 @@ export class LynoxHTTPApi {
         // The workspace root may live outside the data dir and is reached only through its
         // anchor. Without it the erasure could not reach the workspace, so it does not start:
         // answering with the stores emptied and the files left would be the false success.
-        let wsAccess: WorkspaceAccess;
+        // A default root that never existed holds nothing: `null`, and the workspace is skipped.
+        let wsAccess: WorkspaceAccess | null;
         let wsBoundaries: readonly string[];
         try {
-          wsAccess = workspaceAccess();
-          wsBoundaries = await this._workspaceMountBoundaries(wsAccess);
+          wsAccess = workspaceAccessIfPresent();
+          wsBoundaries = wsAccess === null ? [] : await this._workspaceMountBoundaries(wsAccess);
         } catch (err) {
           process.stderr.write(`⚠ /api/data: workspace root unavailable: ${err instanceof Error ? err.message : String(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['workspace'], error: 'Erasure incomplete — the workspace could not be reached, so nothing was erased' });
           return;
         }
-        const wsErasure: WorkspaceErasure = {
-          external: wsAccess.root.mode === 'external',
-          isRoot: (path) => isAnchoredRoot(wsAccess, path),
+        const access = wsAccess;
+        const wsErasure: WorkspaceErasure | undefined = access === null ? undefined : {
+          external: access.root.mode === 'external',
+          isRoot: (path) => isAnchoredRoot(access, path),
           mountBoundaries: () => wsBoundaries,
         };
         let scan: ReturnType<typeof scanDataDir>;
         try {
-          scan = scanDataDir(dataDir, { acknowledged: new Set(acknowledged.map(a => a.name)), workspace: wsErasure });
+          scan = scanDataDir(dataDir, { acknowledged: new Set(acknowledged.map(a => a.name)), ...(wsErasure === undefined ? {} : { workspace: wsErasure }) });
         } catch (err) {
           process.stderr.write(`⚠ /api/data: data dir scan failed: ${err instanceof Error ? err.message : String(err)}\n`);
           jsonResponse(res, 500, { deleted: false, failed: ['data_dir#scan'], error: 'Erasure incomplete — the data directory could not be read, so nothing was erased' });
@@ -12215,17 +12217,19 @@ export class LynoxHTTPApi {
         // The files the erasure owes, after every store is emptied and scrubbed; `backups`
         // last inside. The acknowledged unknown entries are re-checked against what the
         // caller was shown, here, in the synchronous stretch.
-        const rescan = (() => { try { return scanDataDir(dataDir, { walk: false, workspace: { ...wsErasure, mountBoundaries: () => [] } }); } catch { return null; } })();
+        const rescan = (() => { try { return scanDataDir(dataDir, { walk: false, ...(wsErasure === undefined ? {} : { workspace: { ...wsErasure, mountBoundaries: () => [] } }) }); } catch { return null; } })();
         const ackStillValid = rescan !== null && sameUnknownSet(rescan.unknown, acknowledged);
         if (!ackStillValid && acknowledged.length > 0) note('data_dir#unknown_changed', new Error('the unknown entries changed after they were reported; none was removed'));
         // The workspace root is emptied through its anchor: bottom-up, never following a link,
         // refusing a mount, and failing on anything left. The root itself stays, so the anchor
         // the engine holds stays valid; the context directory is made again inside it.
-        attempt('workspace', () => { emptyDir(wsAccess.anchor, ''); });
-        attemptRepair('workspace#context', () => {
-          const ctxDir = getWorkspaceDir();
-          if (ctxDir !== null && dirname(ctxDir) === wsAccess.root.path) closeAnchor(ensureSubAnchor(wsAccess.anchor, basename(ctxDir), 0o700));
-        });
+        if (access !== null) {
+          attempt('workspace', () => { emptyDir(access.anchor, ''); });
+          attemptRepair('workspace#context', () => {
+            const ctxDir = getWorkspaceDir();
+            if (ctxDir !== null && dirname(ctxDir) === access.root.path) closeAnchor(ensureSubAnchor(access.anchor, basename(ctxDir), 0o700));
+          });
+        }
         const files = removeOwedEntries(scan, ackStillValid ? acknowledged.map(a => a.name) : [], undefined, wsErasure);
         for (const f of files.failures) note(`data_dir:${f.name}`, new Error(f.reason));
         // What the engine still holds in memory of the files just removed: the artifact

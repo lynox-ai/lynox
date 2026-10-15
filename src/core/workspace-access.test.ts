@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { fstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isAnchoredRoot, workspaceAccess, _resetWorkspaceAccess } from './workspace-access.js';
+import { isAnchoredRoot, workspaceAccess, workspaceAccessIfPresent, _resetWorkspaceAccess } from './workspace-access.js';
 import { emptyDir, WorkspaceAccessError } from './workspace-fd.js';
 import { WorkspaceRootError } from './workspace-root.js';
 
@@ -92,6 +92,19 @@ describe('workspace access — the anchored root', () => {
     rmSync(join(data, 'workspace'));
     symlinkSync(second, join(data, 'workspace'));
     expect(() => workspaceAccess()).toThrow('no longer the directory this engine opened');
+  });
+
+  it('if present: nothing for a default root that never existed, the anchor when it exists', () => {
+    expect(workspaceAccessIfPresent()).toBeNull();
+    mkdirSync(join(data, 'workspace'));
+    expect(workspaceAccessIfPresent()?.root.mode).toBe('default');
+  });
+
+  it('if present: a root this engine holds and that is gone since stays an error', () => {
+    mkdirSync(join(data, 'workspace'));
+    workspaceAccess();
+    rmSync(join(data, 'workspace'), { recursive: true });
+    expect(() => workspaceAccessIfPresent()).toThrow(WorkspaceRootError);
   });
 
   it('throws WorkspaceRootError when the root cannot be opened', () => {
