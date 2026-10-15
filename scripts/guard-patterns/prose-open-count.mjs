@@ -7,7 +7,7 @@
  * An open-findings COUNT in the body's PROSE. The record's fields are held to
  * `openFiledCount` in gate-record.mjs; this is the same rule for the sentences around them, which until now
  * only a manual run of the private repo's text check read. Measured before it existed: a valid
- * record plus the sentence "the security round left 2 findings filed in the register" was green.
+ * record plus the sentence "the security round left <n> findings filed in the register", with a digit for <n>, was green.
  *
  * The pattern starts from the private repo's PROSE pattern, not `OPEN_COUNT`: prose needs the
  * narrower one. Widened here by three shapes a review measured passing — "2 findings were filed",
@@ -71,7 +71,7 @@ export function proseOpenCountLines(body) {
       .replace(/&(?:nbsp|ensp|emsp|thinsp);/gi, ' ');
     // Again after decoding: an entity can name a fullwidth digit, and digits of other scripts go
     // to ASCII. Optional, because the fold can also glue a decoded character onto a count
-    // (`2 filed&#xFF12;`), which unfolded still reads.
+    // (`<n> filed&#xFF12;`), which unfolded still reads.
     return (fold ? decoded.normalize('NFKC').replace(/(?![0-9])\p{Nd}/gu, asciiDigit) : decoded)
       .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
       .replace(/\]\([^)]*\)/g, '')
@@ -81,7 +81,7 @@ export function proseOpenCountLines(body) {
     const joined = para.map((p) => p.text.replace(/\\\r?$/, '')).join(' ');
     // Read twice. As RENDERED, a comment is a tag and goes — `2 findings <!-- x --> filed` shows
     // the count. As PUBLISHED, its markers go and its text stays — the raw body (API, edit view)
-    // is public, so `<!-- 2 findings filed -->` is too. A count in either reading is a hit.
+    // is public, so `<!-- <n> findings filed -->` is too. A count in either reading is a hit.
     const views = [joined, joined.replace(/<!--|-->/g, ' ')];
     const hit = views.some((v) => [true, false].some((fold) => PROSE_OPEN_COUNT.test(readable(v, fold))));
     if (para.length > 0 && hit) hits.push(para[0].n);
