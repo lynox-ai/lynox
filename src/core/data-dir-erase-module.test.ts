@@ -447,6 +447,12 @@ describe('data-dir erasure — the workspace root (P18-2)', () => {
     expect(scan.linked[0]!.reason).toMatch(/also inside the data directory \(memory\/deep\)/);
   });
 
+  it('refuses an external root that is the leftover <data>/workspace under another path (a bind mount)', () => {
+    leftover();
+    const scan = scanDataDir(dir, { acknowledged: new Set(['workspace']), workspace: external([], { rootIdentity: identity(join(dir, 'workspace')) }) });
+    expect(scan.linked.find(l => l.reason.includes('also inside the data directory'))?.reason).toMatch(/\(workspace\)/);
+  });
+
   it('does not count the default root, which is <data>/workspace by design, as the root inside the data directory', () => {
     mkdirSync(join(dir, 'workspace'));
     const scan = scanDataDir(dir, { workspace: defaultRoot(join(dir, 'workspace'), [], { rootIdentity: identity(join(dir, 'workspace')) }) });

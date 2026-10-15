@@ -165,6 +165,13 @@ describe('workspace access — the anchored root', () => {
       mkdirSync(join(data, 'secrets'));
       expect(unsafeRoot(join(data, 'secrets'), alias)).toBe('inside-data-dir');
     });
+    // When the identity cannot be read (a path that does not resolve), the path decides alone.
+    it('by path alone, when no identity can be read', () => {
+      const gone = join(tmp, 'gone');
+      expect(unsafeRoot(join(gone, 'data', 'secrets'), join(gone, 'data'))).toBe('inside-data-dir');
+      expect(unsafeRoot(gone, join(gone, 'data'))).toBe('holds-data-dir');
+      expect(unsafeRoot(join(gone, 'volume'), join(gone, 'data'))).toBeNull();
+    });
     it('by identity: a directory beside the data directory stays allowed', () => {
       const alias = join(tmp, 'alias-of-data');
       symlinkSync(data, alias);
