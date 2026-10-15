@@ -11,7 +11,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 
 import { getLynoxDir } from './config.js';
 import { modelCapability } from '../types/models.js';
@@ -718,6 +718,11 @@ function resolveOpenAIRequestTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
 }
 
+/** The per-instance Fireworks cache isolation key: a hash of the cache-key salt under its own label. */
+export function fireworksCacheIsolationKey(): string {
+  return createHash('sha256').update(`fireworks-cache-isolation:${getCacheKeySalt()}`).digest('hex').slice(0, 32);
+}
+
 export class OpenAIAdapter {
   private baseURL: string;
   private apiKeyProvider: ApiKeyProvider;
@@ -727,14 +732,19 @@ export class OpenAIAdapter {
   // insensitive (DNS is); exact-match prevents subdomain attacks like
   // `api.mistral.ai.evil.com` which would otherwise pass a `.endsWith` check.
   private readonly _isMistralHost: boolean;
+  // Fireworks gets its documented `prompt_cache_isolation_key`, derived per
+  // instance (see `fireworksCacheIsolationKey`). Same exact-match hostname gate
+  // as above.
+  private readonly _isFireworksHost: boolean;
 
   constructor(opts: { baseURL: string; apiKey: ApiKeyProvider; modelId: string }) {
     this.baseURL = opts.baseURL.replace(/\/+$/, '');
     this.apiKeyProvider = opts.apiKey;
     this.modelId = opts.modelId;
-    let isMistral = false;
-    try { isMistral = new URL(this.baseURL).hostname.toLowerCase() === 'api.mistral.ai'; } catch { /* malformed baseURL → gate stays closed */ }
-    this._isMistralHost = isMistral;
+    let host = '';
+    try { host = new URL(this.baseURL).hostname.toLowerCase(); } catch { /* malformed baseURL → gates stay closed */ }
+    this._isMistralHost = host === 'api.mistral.ai';
+    this._isFireworksHost = host === 'api.fireworks.ai';
   }
 
   private async resolveApiKey(): Promise<string> {
@@ -1071,6 +1081,15 @@ export class OpenAIAdapter {
       if (rawKey.length > 0 && rawKey.length <= 128 && /^[A-Za-z0-9_:-]+$/.test(rawKey)) {
         body['prompt_cache_key'] = `${getCacheKeySalt()}:${rawKey}`;
       }
+    }
+
+    // Fireworks cache isolation: on every request to api.fireworks.ai, whatever the
+    // caller set. The key is derived from the instance's cache-key salt (random,
+    // persisted per data dir) under its own label, so it is stable per instance and
+    // differs between instances. The body is built here, so no caller sets or
+    // overrides the field.
+    if (this._isFireworksHost) {
+      body['prompt_cache_isolation_key'] = fireworksCacheIsolationKey();
     }
 
     const apiKey = await this.resolveApiKey();
