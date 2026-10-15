@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getLynoxDir } from './config.js';
-import { containsEvictionMarker } from './artifact-eviction.js';
+import { containsEvictionMarker, EVICTION_MIN_CHARS } from './artifact-eviction.js';
 
 const SAFE_ID = /^[a-f0-9-]{8}$/;
 
@@ -33,11 +33,12 @@ export interface ArtifactMeta {
   /** Bumped on every save AND on every external edit (file tools / bash)
    *  detected by reconcile(). Legacy entries without it normalize to 1. */
   version: number;
-  /** Set when the content file holds the engine's placeholder for a saved
-   *  body instead of a document: a save that stored the placeholder lost the
-   *  document. The save handler refuses such content now; this marks the
-   *  artifacts saved before it did. Computed on read, never written to the
-   *  index; absent when the file is fine or unreadable. */
+  /** Set when the content file is the engine's placeholder for a saved body
+   *  rather than a document: a save that stored the placeholder lost the
+   *  document. `artifact_save` and the file tools refuse such content now;
+   *  this marks files written before they did, or by a path without that
+   *  check. Computed on read, never written to the index; absent when the file
+   *  is fine, larger than a placeholder can leave, or unreadable. */
   lostOnSave?: true;
 }
 
@@ -63,13 +64,21 @@ export interface ArtifactOverwrite {
   significant: boolean;
 }
 
+/** Eviction replaces only bodies longer than EVICTION_MIN_CHARS, with a
+ *  reference of a few hundred bytes at most; a document lost that way left a
+ *  file of about that size (measured on a real instance: 176–186 bytes). A larger file that contains the placeholder is a document that
+ *  quotes it, or one with a copied placeholder inside — it is still readable,
+ *  and the notice the UI shows ("only a placeholder was stored") would be false. */
+const LOST_ON_SAVE_MAX_BYTES = EVICTION_MIN_CHARS;
+
+function isLostOnSave(content: string): boolean {
+  return Buffer.byteLength(content, 'utf-8') <= LOST_ON_SAVE_MAX_BYTES && containsEvictionMarker(content);
+}
+
 export class ArtifactStore {
   private readonly dir: string;
   private readonly indexPath: string;
   private index: ArtifactMeta[] = [];
-  /** `lostOnSave` per artifact, keyed on the file's mtime and size so list()
-   *  reads a content file only when it changed since the last look. */
-  private readonly lostCache = new Map<string, { mtimeMs: number; size: number; lost: boolean }>();
 
   constructor(dir?: string) {
     this.dir = dir ?? join(getLynoxDir(), 'artifacts');
@@ -297,7 +306,7 @@ export class ArtifactStore {
     if (!meta) return null;
     try {
       const content = readFileSync(this.contentPath(id), 'utf-8');
-      return { ...meta, ...(containsEvictionMarker(content) ? { lostOnSave: true as const } : {}), content };
+      return { ...meta, ...(isLostOnSave(content) ? { lostOnSave: true as const } : {}), content };
     } catch {
       return null;
     }
@@ -310,18 +319,13 @@ export class ArtifactStore {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
-  /** Whether the content file holds the save placeholder (see `lostOnSave`).
-   *  The same test the save handler refuses with, so a file it would refuse
-   *  today is the file marked here. */
+  /** `lostOnSave` for an indexed artifact, read from its file. A file larger
+   *  than a placeholder can leave is not read at all. */
   private isLostOnSave(id: string): boolean {
     try {
       const p = this.contentPath(id);
-      const st = statSync(p);
-      const hit = this.lostCache.get(id);
-      if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.lost;
-      const lost = containsEvictionMarker(readFileSync(p, 'utf-8'));
-      this.lostCache.set(id, { mtimeMs: st.mtimeMs, size: st.size, lost });
-      return lost;
+      if (statSync(p).size > LOST_ON_SAVE_MAX_BYTES) return false;
+      return containsEvictionMarker(readFileSync(p, 'utf-8'));
     } catch {
       return false;
     }
