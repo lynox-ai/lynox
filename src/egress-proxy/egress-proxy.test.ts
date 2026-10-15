@@ -646,4 +646,32 @@ describe('contract: shell listener', () => {
     expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(504);
     await until(() => r.proxy.openTunnels === 0);
   });
+
+  it('answers a refusal with a fixed head and no body, naming no address and no list', async () => {
+    const fixed = (code: string) => `HTTP/1.1 ${code}\r\nContent-Length: 0\r\nConnection: close`;
+    const r = await rig({
+      addresses: { 'inward.example': ['93.184.215.14', '10.1.2.3'], 'listed.example': ['93.184.215.99'] },
+      deny: ['93.184.215.99'],
+    });
+    r.registry.put(CRED, reg(['inward.example', 'listed.example', 'gone.example', 'a.example']));
+    const cases: Array<[string, string]> = [
+      ['inward.example:443', '403 Forbidden'],
+      ['listed.example:443', '403 Forbidden'],
+      ['a.example:22', '403 Forbidden'],
+    ];
+    for (const [target, code] of cases) {
+      const res = await shellRequest(r, connectHead(target));
+      expect(res.head, target).toBe(fixed(code));
+      expect(res.data(), target).toBe('');
+    }
+    const full = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, limits: { tunnelsPerCred: 0 } });
+    full.registry.put(CRED, reg(['a.example']));
+    const busy = await shellRequest(full, connectHead('a.example:443'));
+    expect(busy.head).toBe(fixed('503 Service Unavailable'));
+    const r2 = await rig({ addresses: {}, connect: () => new Socket(), limits: { connectTimeoutMs: 30 } });
+    r2.registry.put(CRED, reg(['gone.example']));
+    const unresolved = await shellRequest(r2, connectHead('gone.example:443'));
+    expect(unresolved.head).toBe(fixed('502 Bad Gateway'));
+    expect(unresolved.data()).toBe('');
+  });
 });
