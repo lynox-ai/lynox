@@ -35,6 +35,7 @@ import { resolveContext } from './context.js';
 import type { LynoxContext } from '../types/index.js';
 import { setTenantWorkspace, ensureContextWorkspace } from './workspace.js';
 import { ensureWorkspaceRoot } from './workspace-root.js';
+import { workspaceAccess } from './workspace-access.js';
 
 import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
@@ -1413,6 +1414,8 @@ export class Engine {
       ensureWorkspaceRoot();
       const wsDir = ensureContextWorkspace(this.context);
       setTenantWorkspace(wsDir);
+      // Held from boot: backup, migration and the erasure reach the workspace only through it.
+      workspaceAccess();
     }
 
     // Generate session briefing

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
@@ -7,6 +7,7 @@ import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import { getWorkspaceDir, _resetCache } from './workspace.js';
 import { WorkspaceRootError } from './workspace-root.js';
+import { workspaceAccess, _resetWorkspaceAccess } from './workspace-access.js';
 
 /**
  * The workspace root as a real Engine boots on it. The unit tests call the root's functions
@@ -44,6 +45,7 @@ describe('Engine boot — workspace root', () => {
     setEnv('LYNOX_WORKSPACE_ROOT', undefined);
     reloadConfig();
     _resetCache();
+    _resetWorkspaceAccess();
     return dir;
   }
 
@@ -61,6 +63,17 @@ describe('Engine boot — workspace root', () => {
     const ws = join(data, 'workspace', 'http-api');
     expect(getWorkspaceDir()).toBe(ws);
     expect(statSync(ws).mode & 0o777).toBe(0o700);
+  });
+
+  it('holds the workspace anchor from boot (D1)', async () => {
+    const data = dataDir();
+    await boot();
+    const booted = statSync(join(data, 'workspace')).ino;
+    // Replaced by name after boot: an anchor held since boot still names the booted directory;
+    // one opened lazily now would name the new one.
+    rmSync(join(data, 'workspace'), { recursive: true });
+    mkdirSync(join(data, 'workspace'));
+    expect(fstatSync(workspaceAccess().anchor.fd).ino).toBe(booted);
   });
 
   it('boots on a symlinked <data>/workspace and keeps the by-name path', async () => {
