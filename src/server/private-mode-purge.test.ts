@@ -184,6 +184,27 @@ describe('PATCH /api/threads/:id { skip_extraction: true } removes what is store
     expect(ks.getEntry(seeded.id)).not.toBeNull(); // kept, so switching again can finish the job
   });
 
+  it('takes the profile line its entry seeded, and leaves the user\'s own profile line and the playbook', async () => {
+    // What the switch's text (`threads.private_on` / `private_off`) promises about the two
+    // always-loaded blocks: "the profile lines made from it" go, the playbook stays. Before
+    // core#1718 the text said the whole profile stays.
+    const { ts, ks } = stores();
+    const seededLine = 'Ruedi Kalt prefers mail to calls';
+    const ownLine = 'Ruedi Kalt works four days a week';
+    ks.setBlockContent('profile', `${ownLine}\n${seededLine}`);
+    ks.setBlockContent('playbook', 'Answer Ruedi Kalt in German');
+    ts.createThread('t-profile-seed', { title: 'chat t-profile-seed' });
+    const seeded = ks.write({ text: seededLine, sourceChannel: 'user', sourceUntrusted: false, sourceThreadId: 't-profile-seed' });
+    ks.recordProfileSeed(seeded.id);
+
+    const { status } = await setPrivate('t-profile-seed');
+
+    expect(status).toBe(200);
+    expect(ks.getBlock('profile')?.content).not.toContain(seededLine);
+    expect(ks.getBlock('profile')?.content).toContain(ownLine);
+    expect(ks.getBlock('playbook')?.content).toBe('Answer Ruedi Kalt in German');
+  });
+
   it('on the booted engine, `remember` refuses in the private chat and stores in another — subject graph off', async () => {
     // The tools read the chat's private flag through the tool context's thread store. That
     // store used to be wired only with the subject-graph flag on, which is off by default: the
