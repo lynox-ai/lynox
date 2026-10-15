@@ -331,6 +331,12 @@ describe('stageIn', () => {
 describe.runIf(LINUX)('names that are not UTF-8', () => {
   const raw = (): Buffer => Buffer.concat([Buffer.from(`${ws}/`), Buffer.from([0x66, 0xff])]);
   beforeEach(() => { writeFileSync(raw(), 'bytes'); writeFileSync(join(ws, 'normal'), 'n'); });
+  it('copyOut never copies another file under the lossy name', () => {
+    writeFileSync(join(ws, 'f\uFFFD'), 'real');
+    const copied: string[] = [];
+    copyOut(anchor, '', (rel) => { copied.push(rel); });
+    expect(copied.sort()).toEqual(['f\uFFFD', 'normal']);
+  });
   it('are listed as not exact, skipped by copyOut, and removed by emptyDir', () => {
     const odd = listDir(anchor, '').find((e) => !e.exactName);
     expect(odd?.type).toBe('file');

@@ -454,7 +454,6 @@ export function writeFileAt(anchor: WorkspaceAnchor, rel: string, data: string |
   const { dirParts, leaf } = splitLeaf(rel);
   const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
   try {
-    assertNotDir(dir, leaf);
     const { tmp } = writeTemp(dir, opts.fileMode, data);
     try {
       assertNotDir(dir, leaf);
