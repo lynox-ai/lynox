@@ -205,6 +205,13 @@ export function connectedAccountProfiles(url: string, apiStore: NonNullable<Tool
   return profilesOnHost(url, apiStore).filter((p) => p.auth?.oauth?.preset_id !== undefined);
 }
 
+/** The built-in provider whose API host `url` is on (`apiHosts`), whatever profiles exist: the
+ *  same predicate a profile is held to when it is saved (`presetNotFollowed`), asked for a
+ *  request that follows no provider. */
+function hostClaimant(url: string): OAuthPreset | undefined {
+  return presetNotFollowed({ base_url: url });
+}
+
 /** Every profile on `url`'s host, as {@link presetProfilesOnHost} finds them, with or without a preset. */
 function profilesOnHost(url: string, apiStore: NonNullable<ToolContext['apiStore']>): ApiProfile[] {
   const raw = new URL(url).hostname;
@@ -2357,6 +2364,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // share included, and the host is read without trailing root dots, which name the same
     // host to DNS and a different key to the profile map.
     const presetOnHost = isWriteMethod(gatedMethod) ? presetProfilesOnHost(input.url, toolContext) : [];
+    // A provider's API host (`apiHosts`) is a connected account by its host, not by a stored
+    // profile: a write there goes through a profile on the host, which `attachEngineManagedAuth`
+    // holds to the provider. With no profile on the host there is no account to read the write's
+    // context from and no credential of the engine's to send, so the write is refused before
+    // anything else is decided. Reads are not held.
+    const claimant = isWriteMethod(gatedMethod) ? hostClaimant(input.url) : undefined;
+    if (claimant !== undefined && (!toolContext?.apiStore || profilesOnHost(input.url, toolContext.apiStore).length === 0)) {
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`);
+    }
     if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
       const host = new URL(input.url).hostname.replace(/\.+$/, '');
       if (presetOnHost.length > 0) {
@@ -2928,7 +2944,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               writeMethodsNamed(redirectMethod, headers, nextUrl, hopBody).every((m) => contractGrants('http_request', { url: nextUrl, method: m }, contract)) &&
               !isOutboundEffectWrite(nextUrl, hop) &&
               // No contract grants a write to a connected account, on a hop either.
-              (!isWriteMethod(hop) || presetProfilesOnHost(nextUrl, toolContext).length === 0);
+              (!isWriteMethod(hop) || (presetProfilesOnHost(nextUrl, toolContext).length === 0 && hostClaimant(nextUrl) === undefined));
           }
         : isWriteMethod(gatedMethod)
           ? (nextUrl: string, redirectMethod: string): true | 'consent' => {

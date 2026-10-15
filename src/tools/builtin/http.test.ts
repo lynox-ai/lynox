@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 
 vi.mock('node:dns/promises', () => ({
   default: {
@@ -27,7 +27,7 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { runInCallSlot, type CallSlot } from '../../core/call-connection.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 import { bumpNow, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, sentBytes } from '../../core/outbound-write.js';
+import { OUTBOUND_EFFECT_PATHS, SHOWN_BODY_MAX_BYTES, sentBytes } from '../../core/outbound-write.js';
 import { flattenPrompt, offBoxPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 
@@ -1272,6 +1272,104 @@ describe('httpRequestTool', () => {
             const promptUser = vi.fn().mockResolvedValue('Allow');
             const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method: 'POST', body: '{"name_1":"x"}', headers: { 'Content-Type': 'application/json' } }, makeAgent({ promptUser }));
             expect(out).not.toContain('without going through');
+            expect(promptUser).toHaveBeenCalledTimes(1);
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+          });
+        });
+
+        // The provider's API host is a connected account by its host: a write there with no
+        // profile on the host is refused before the mandate check, the contract and the approval.
+        describe('a write to the bexio API with no profile on the host', () => {
+          const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
+          const bexioWrites: CapabilityContract = { ...withDelete, hostPatterns: ['api.bexio.com'], pathPatterns: ['/2.0/*'] };
+          async function withEmptyStore(): Promise<void> {
+            const { ApiStore } = await import('../../core/api-store.js');
+            testCtx.apiStore = new ApiStore();
+          }
+          async function withNoStore(): Promise<void> {
+            testCtx.apiStore = undefined;
+          }
+          async function withOtherHostProfile(): Promise<void> {
+            await withProfile('bexio', 'https://api.crm.example/v1');
+          }
+          it.each([
+            ['an empty store, a POST with a header of its own', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', { Authorization: 'Bearer secret:BEXIO_TOKEN' }, {}],
+            ['an empty store, a DELETE', withEmptyStore, 'https://api.bexio.com/2.0/contact/7', 'DELETE', {}, {}],
+            ['no store, a POST', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, {}],
+            ['a profile on another host only, a POST', withOtherHostProfile, 'https://api.bexio.com/2.0/contact', 'POST', {}, {}],
+            ['an empty store, the host with a root dot', withEmptyStore, 'https://api.bexio.com./2.0/contact', 'POST', {}, {}],
+            ['an empty store, a GET with _method in the query', withEmptyStore, 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', {}, {}],
+            ['an empty store, a contract that grants the write', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { capabilityContract: bexioWrites }],
+            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }],
+          ] as const)('refuses %s, and nothing is asked or sent', async (_label, setUp, url, method, headers, extras) => {
+            await setUp();
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const out = await visible({ url, method, headers: { ...headers }, ...(method === 'POST' ? { body: '{"name_1":"x"}' } : {}) }, makeAgent({ promptUser, ...extras }));
+            expect(out).toContain(REFUSED);
+            expect(promptUser).not.toHaveBeenCalled();
+            expect(fetchMock).not.toHaveBeenCalled();
+          });
+
+          // An Allow is not remembered for the host and asked again: the second write is refused
+          // like the first, not sent on the first one's answer.
+          it('refuses a second write the same way, with no approval held for the host', async () => {
+            await withEmptyStore();
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            const agent = makeAgent({ promptUser });
+            const write = { url: 'https://api.bexio.com/2.0/contact', method: 'POST', body: '{"name_1":"x"}' };
+            expect(await visible(write, agent)).toContain(REFUSED);
+            expect(await visible(write, agent)).toContain(REFUSED);
+            expect(promptUser).not.toHaveBeenCalled();
+            expect(fetchMock).not.toHaveBeenCalled();
+          });
+
+          it('does not follow a contract-granted write redirected onto the bexio API', async () => {
+            await withEmptyStore();
+            mockDnsPublic();
+            const fetchMock = vi.fn()
+              .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.bexio.com/2.0/contact/7' } }))
+              .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'api.bexio.com'], pathPatterns: ['/v1/*', '/2.0/*/*'] };
+            await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+          });
+
+          it('control: the same redirect onto a host no provider claims is followed', async () => {
+            await withEmptyStore();
+            mockDnsPublic();
+            const fetchMock = vi.fn()
+              .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: 'https://api.crm.example/2.0/contact/7' } }))
+              .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'api.crm.example'], pathPatterns: ['/v1/*', '/2.0/*/*'] };
+            await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+            expect(fetchMock).toHaveBeenCalledTimes(2);
+          });
+
+          it('control: a read with no profile goes out', async () => {
+            await withEmptyStore();
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method: 'GET' }, makeAgent());
+            expect(out).not.toContain('nothing was sent');
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+          });
+
+          it('control: a write with no profile to a host no provider claims is asked and sent', async () => {
+            await withEmptyStore();
+            mockDnsPublic();
+            const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+            vi.stubGlobal('fetch', fetchMock);
+            const promptUser = vi.fn().mockResolvedValue('Allow');
+            await handler({ url: 'https://api.crm.example/2.0/contact', method: 'POST', body: '{"name_1":"x"}' }, makeAgent({ promptUser }));
             expect(promptUser).toHaveBeenCalledTimes(1);
             expect(fetchMock).toHaveBeenCalledTimes(1);
           });
@@ -6300,7 +6398,14 @@ describe('the connection a call went through is stamped by the resolver, not the
  * the person sees; `fetch` is stubbed, so what is asserted is the gate, not a request.
  */
 describe('write approvals per method and host (270)', () => {
-  const BEXIO = 'https://api.bexio.com';
+  // The outbound-effect table's only host is bexio's API, where a write goes through the bexio
+  // provider (a connected account, asked every time) or is refused. The table's own rules are
+  // tested on a host it names for these tests alone, which no provider claims.
+  const TABLE = 'https://api.table.example';
+  const tableEntry = { host: 'api.table.example', segments: ['send', 'issue'] };
+  const table = OUTBOUND_EFFECT_PATHS as unknown as (typeof tableEntry)[];
+  beforeAll(() => { table.push(tableEntry); });
+  afterAll(() => { table.splice(table.indexOf(tableEntry), 1); });
   const ok = () => createMockResponse({ status: 200, statusText: 'OK', body: '{}' });
 
   function agent270(extras: {
@@ -6549,9 +6654,9 @@ describe('write approvals per method and host (270)', () => {
 
   it('(11, 12) a send path of the table asks even after the host was approved, and every time', async () => {
     const { agent, prompt } = agent270();
-    await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, agent);
-    await visible({ url: `${BEXIO}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, agent);
-    await visible({ url: `${BEXIO}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${TABLE}/2.0/contact`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${TABLE}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${TABLE}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(3);
     expect(question(prompt, 1)).toContain('asked every time');
   });
@@ -6567,17 +6672,17 @@ describe('write approvals per method and host (270)', () => {
     ['issue', '/2.0/kb_invoice/1/issue'],
   ])('(13) the %s form of a table path still asks after the host was approved', async (_form, path) => {
     const { agent, prompt } = agent270();
-    await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, agent);
-    await visible({ url: `${BEXIO}${path}`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${TABLE}/2.0/contact`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${TABLE}${path}`, method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
   });
 
   it('(13) a trailing root dot names the same host for the approval and for the table', async () => {
     const { agent, prompt } = agent270();
-    await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, agent);
-    await visible({ url: 'https://api.bexio.com./2.0/contact', method: 'POST', body: '{}' }, agent);
+    await visible({ url: `${TABLE}/2.0/contact`, method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://api.table.example./2.0/contact', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(1);
-    await visible({ url: 'https://api.bexio.com./2.0/kb_invoice/1/send', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'https://api.table.example./2.0/kb_invoice/1/send', method: 'POST', body: '{}' }, agent);
     expect(prompt).toHaveBeenCalledTimes(2);
   });
 
@@ -6586,17 +6691,17 @@ describe('write approvals per method and host (270)', () => {
       version: 7,
       grantedTools: ['http_request'],
       httpMethods: ['POST'],
-      hostPatterns: ['api.bexio.com'],
+      hostPatterns: ['api.table.example'],
       pathPatterns: ['/2.0/contact', '/2.0/kb_invoice/1/send'],
       paramConstraints: {},
     };
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
     // The contract does grant: a path outside the table goes through headless.
-    const granted = await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    const granted = await visible({ url: `${TABLE}/2.0/contact`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
     expect(granted).toContain('HTTP 200');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const out = await visible({ url: `${BEXIO}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    const out = await visible({ url: `${TABLE}/2.0/kb_invoice/1/send`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
     expect(out).toContain('requires user consent');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -6606,26 +6711,26 @@ describe('write approvals per method and host (270)', () => {
       version: 7,
       grantedTools: ['http_request'],
       httpMethods: ['POST'],
-      hostPatterns: ['api.bexio.com'],
+      hostPatterns: ['api.table.example'],
       pathPatterns: ['/2.0/contact', '/2.0/kb_invoice/1/send'],
       paramConstraints: {},
     };
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${BEXIO}/2.0/kb_invoice/1/send` } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${TABLE}/2.0/kb_invoice/1/send` } }))
       .mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
-    const out = await visible({ url: `${BEXIO}/2.0/contact`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+    const out = await visible({ url: `${TABLE}/2.0/contact`, method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(out).toContain("this run's grant does not cover");
   });
 
   it('(13f) a redirect onto a table path is not followed, and the note names the target', async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${BEXIO}/2.0/kb_invoice/1/send` } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 307, headers: { location: `${TABLE}/2.0/kb_invoice/1/send` } }))
       .mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
     const { agent } = agent270();
-    const out = await visible({ url: `${BEXIO}/2.0/kb_invoice/1`, method: 'POST', body: '{}' }, agent);
+    const out = await visible({ url: `${TABLE}/2.0/kb_invoice/1`, method: 'POST', body: '{}' }, agent);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(out).toContain('/send');
     expect(out).toContain('needs its own approval');
