@@ -39,13 +39,13 @@ import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import { channels } from './observability.js';
 import { detectInjectionAttempt } from './data-boundary.js';
 import { ToolCallTracker } from './output-guard.js';
-import { ChangesetManager, workspaceChangeset } from './changeset.js';
+import { workspaceChangeset, type ChangesetManager } from './changeset.js';
 import {
   ToolResultBlobStore,
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
   evictImagesFrom,
 } from './tool-result-blob-store.js';
-import { isWorkspaceActive, getWorkspaceCwd } from './workspace.js';
+import { isWorkspaceActive } from './workspace.js';
 import { checkPersistentBudget } from './session-budget.js';
 import {
   SYSTEM_PROMPT,

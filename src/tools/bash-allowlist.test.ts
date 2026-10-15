@@ -351,3 +351,15 @@ describe('proveBashCommand — runtime', () => {
     expect(performance.now() - t0).toBeLessThan(2000);
   });
 });
+
+// HOME inside the working directory makes it too wide, also when HOME's name below it starts
+// with two dots: that name is a child, not a parent.
+describe('proveBashCommand — HOME below the working directory under a name with two dots', () => {
+  it('is too wide, so nothing with a path is proven', () => {
+    const dotHome = join(ws, '..home');
+    mkdirSync(dotHome, { recursive: true });
+    expect(prove('cat notes.md', { ...env, home: dotHome }).proven).toBe(false);
+    // control: the same command with HOME outside the working directory is proven
+    expect(prove('cat notes.md', env).proven).toBe(true);
+  });
+});

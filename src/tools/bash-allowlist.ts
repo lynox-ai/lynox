@@ -27,7 +27,8 @@
  * caller hands in the directories and the sensitive-path test.
  */
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { isPathWithin } from '../core/workspace.js';
 
 /** Event type of the observe-mode record in the local security log. */
 export const BASH_OBSERVE_EVENT = 'bash_autonomy_observe';
@@ -271,10 +272,8 @@ function lex(cmd: string): Segment[] {
   return segments;
 }
 
-function within(child: string, parent: string): boolean {
-  const rel = relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-}
+/** The containment predicate every confinement in the engine shares (`workspace.ts`). */
+const within = isPathWithin;
 
 /** realpath, or for a path that does not exist, the real path of its longest existing ancestor plus the rest. */
 function realPathOf(p: string): string {
