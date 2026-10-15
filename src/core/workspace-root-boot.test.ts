@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { chmodSync, fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LynoxConfig } from '../types/index.js';
@@ -68,12 +68,11 @@ describe('Engine boot — workspace root', () => {
   it('holds the workspace anchor from boot (D1)', async () => {
     const data = dataDir();
     await boot();
-    const booted = statSync(join(data, 'workspace')).ino;
-    // Replaced by name after boot: an anchor held since boot still names the booted directory;
-    // one opened lazily now would name the new one.
+    // Replaced by name after boot: an anchor held since boot sees that its root is not the
+    // directory at the path any more; one opened lazily now would take the new one silently.
     rmSync(join(data, 'workspace'), { recursive: true });
     mkdirSync(join(data, 'workspace'));
-    expect(fstatSync(workspaceAccess().anchor.fd).ino).toBe(booted);
+    expect(() => workspaceAccess()).toThrow('no longer the directory this engine opened');
   });
 
   it('boots on a symlinked <data>/workspace and keeps the by-name path', async () => {

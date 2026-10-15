@@ -11,7 +11,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync, readdir
 import { dirname, join, relative } from 'node:path';
 import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
-import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from './backup-crypto.js';
+import { deriveBackupKey, encryptFile, decryptFile, decryptFileToBuffer, isEncryptedBackupFile } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
 import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 import { leaseWorkspaceFor } from './workspace-access.js';
@@ -756,22 +756,12 @@ export class BackupManager {
     const lease = leaseWorkspaceFor(this.lynoxDir, { create: true });
     if (lease === null) throw new Error('the workspace root could not be made');
     const anchor = lease.access.anchor;
-    const scratch = join(backupPath, '.workspace-restore.tmp');
     const source = function* (): Iterable<StageEntry> {
       for (const entry of entries) {
         const srcFile = join(backupPath, entry.path);
         if (!existsSync(srcFile)) continue;
-        let data: Buffer;
-        if (key !== null && isEncryptedBackupFile(srcFile)) {
-          try {
-            decryptFile(srcFile, scratch, key);
-            data = readFileSync(scratch);
-          } finally {
-            rmSync(scratch, { force: true });
-          }
-        } else {
-          data = readFileSync(srcFile);
-        }
+        // Decrypted in memory: no plaintext beside the backup, which may be synced elsewhere.
+        const data = key !== null && isEncryptedBackupFile(srcFile) ? decryptFileToBuffer(srcFile, key) : readFileSync(srcFile);
         yield { rel: entry.path.slice(WORKSPACE_PREFIX.length), data };
       }
     };

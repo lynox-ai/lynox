@@ -11,8 +11,9 @@ import { ensureWorkspaceRoot, resolveWorkspaceRoot, WorkspaceRootError, type Wor
  *
  * The anchor is opened BY NAME from `resolveWorkspaceRoot()` and kept. It is reopened only when
  * the resolved root names another path (a test that switches the data directory, a reconfigured
- * root); a root removed or replaced under the same name is not reopened silently — every
- * operation of the primitive checks the anchor and throws `GONE` when its directory was deleted.
+ * root); a root removed or replaced under the same name is not reopened silently. A root moved
+ * away and replaced (`mv`, a re-pointed link) throws here, before a backup copies the old
+ * directory as if it were the workspace; one deleted throws `GONE` in every primitive operation.
  */
 export interface WorkspaceAccess {
   readonly root: WorkspaceRoot;
@@ -27,7 +28,15 @@ let held: WorkspaceAccess | null = null;
  */
 export function workspaceAccess(): WorkspaceAccess {
   const root = resolveWorkspaceRoot();
-  if (held !== null && held.root.path === root.path && held.root.mode === root.mode) return held;
+  if (held !== null && held.root.path === root.path && held.root.mode === root.mode) {
+    if (!isAnchoredRoot(held, root.path)) {
+      throw new WorkspaceRootError(
+        `The workspace root ${root.path} is no longer the directory this engine opened at start: it was moved, replaced or removed. ` +
+        'Restart the engine to use the directory now at that path.',
+      );
+    }
+    return held;
+  }
   let anchor: WorkspaceAnchor;
   try {
     // The resolved path, not the name: the anchor refuses a link at its last component, and a

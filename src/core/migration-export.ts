@@ -571,7 +571,7 @@ export class MigrationExporter {
     );
     try {
       const copied = copyOut(lease.access.anchor, '', (rel, fd, size) => {
-        if (!isPortableDirEntryName(rel)) return;
+        if (!isPortableDirEntryName(rel)) { this.skipped.push(`workspace/${rel}`); return; }
         if (count >= maxEntries || total + size > maxBytes) throw tooBig;
         files[rel] = readFileSync(fd).toString('base64');
         count++;

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { fstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { fstatSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isAnchoredRoot, workspaceAccess, _resetWorkspaceAccess } from './workspace-access.js';
@@ -67,9 +67,31 @@ describe('workspace access — the anchored root', () => {
     rmSync(join(data, 'workspace'), { recursive: true });
     mkdirSync(join(data, 'workspace'));
     // Same name, another directory: the held anchor is not silently reopened.
-    expect(workspaceAccess()).toBe(access);
+    expect(() => workspaceAccess()).toThrow('no longer the directory this engine opened');
     expect(() => emptyDir(access.anchor, '')).toThrow(WorkspaceAccessError);
     try { emptyDir(access.anchor, ''); } catch (err) { expect((err as WorkspaceAccessError).code).toBe('GONE'); }
+  });
+
+  it('a root moved away and replaced is loud, never the old directory taken for the workspace', () => {
+    mkdirSync(join(data, 'workspace'));
+    workspaceAccess();
+    // The old directory still lives (no GONE), so only the identity check sees the swap.
+    renameSync(join(data, 'workspace'), join(tmp, 'archived'));
+    mkdirSync(join(data, 'workspace'));
+    expect(() => workspaceAccess()).toThrow(WorkspaceRootError);
+    expect(() => workspaceAccess()).toThrow('no longer the directory this engine opened');
+  });
+
+  it('a default link pointed somewhere else is loud', () => {
+    const first = join(tmp, 'first');
+    const second = join(tmp, 'second');
+    mkdirSync(first);
+    mkdirSync(second);
+    symlinkSync(first, join(data, 'workspace'));
+    workspaceAccess();
+    rmSync(join(data, 'workspace'));
+    symlinkSync(second, join(data, 'workspace'));
+    expect(() => workspaceAccess()).toThrow('no longer the directory this engine opened');
   });
 
   it('throws WorkspaceRootError when the root cannot be opened', () => {

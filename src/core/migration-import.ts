@@ -903,18 +903,29 @@ export class MigrationImporter {
       const fileKeys = new Set<string>();
       const dirKeys = new Set<string>();
       const accepted: Array<[string, string]> = [];
+      // What the target holds at a path, asked once. Below an absent directory nothing is asked:
+      // the stage makes it fresh, and the primitive cannot walk into what is not there.
+      const onTarget = new Map<string, 'absent' | 'dir' | 'other'>();
+      const kindOf = (rel: string): 'absent' | 'dir' | 'other' => {
+        let kind = onTarget.get(rel);
+        if (kind === undefined) {
+          const st = statEntry(anchor, rel);
+          kind = st === null ? 'absent' : st.type === 'dir' ? 'dir' : 'other';
+          onTarget.set(rel, kind);
+        }
+        return kind;
+      };
       const takes = (rel: string): boolean => {
         const parts = rel.split('/');
         for (let i = 1; i < parts.length; i++) {
           const prefix = parts.slice(0, i).join('/');
           if (fileKeys.has(prefix)) return false;
-          if (dirKeys.has(prefix)) continue;
-          const st = statEntry(anchor, prefix);
-          if (st === null) return !dirKeys.has(rel);   // absent: everything below is made fresh
-          if (st.type !== 'dir') return false;
+          const kind = kindOf(prefix);
+          if (kind === 'absent') return !dirKeys.has(rel);   // everything below is made fresh
+          if (kind !== 'dir') return false;
         }
         if (dirKeys.has(rel)) return false;
-        return statEntry(anchor, rel)?.type !== 'dir';
+        return kindOf(rel) !== 'dir';
       };
       for (const [rel, b64] of entries) {
         if (typeof b64 !== 'string') continue;

@@ -277,6 +277,42 @@ describe('portable directories survive a migration', () => {
     expect([...(importer?.portableDirSkipped ?? [])].sort()).toEqual(['workspace/adir', 'workspace/afile/x.txt', 'workspace/sub/deeper/pwn.txt']);
   });
 
+  it('workspace: lands every file in directories the target does not have yet (P18 D6)', () => {
+    const dstDir = tmp('lynox-pdwn-dst-');
+    mkdirSync(join(dstDir, 'workspace', 'http-api'), { recursive: true });
+    const b64 = (t: string): string => Buffer.from(t, 'utf-8').toString('base64');
+    const files = {
+      'http-api/reports/q1.pdf': b64('Q1'), 'http-api/reports/q2.pdf': b64('Q2'),
+      'd/a': b64('A'), 'd/b': b64('B'), 'd/e/f': b64('F'), 'd/e/g': b64('G'),
+    };
+    const importer = importCraftedWith(dstDir, 'workspace', files);
+    expect(importer?.portableDirFilesImported).toBe(6);
+    expect(importer?.portableDirSkipped).toBeUndefined();
+    for (const [rel, data] of Object.entries(files)) {
+      expect(readFileSync(join(dstDir, 'workspace', rel), 'utf-8')).toBe(Buffer.from(data, 'base64').toString('utf-8'));
+    }
+  });
+
+  it('workspace: under a new directory, a file where the bundle needs a directory is skipped, not the whole set (P18 D6)', () => {
+    const dstDir = tmp('lynox-pdwk-dst-');
+    mkdirSync(join(dstDir, 'workspace'), { recursive: true });
+    const b64 = (t: string): string => Buffer.from(t, 'utf-8').toString('base64');
+    const importer = importCraftedWith(dstDir, 'workspace', { 'n/x/y': b64('Y'), 'n/x': b64('X'), 'n/z': b64('Z') });
+    expect(importer?.portableDirSkipped).toEqual(['workspace/n/x']);
+    expect(readFileSync(join(dstDir, 'workspace', 'n', 'x', 'y'), 'utf-8')).toBe('Y');
+    expect(readFileSync(join(dstDir, 'workspace', 'n', 'z'), 'utf-8')).toBe('Z');
+  });
+
+  it('workspace: the export names a file whose name cannot travel, never drops it silently (P18 D6)', () => {
+    const srcDir = tmp('lynox-pdwx-src-');
+    mkdirSync(join(srcDir, 'workspace'), { recursive: true });
+    writeFileSync(join(srcDir, 'workspace', 'two\nlines.txt'), 'X');
+    writeFileSync(join(srcDir, 'workspace', 'a.txt'), 'A');
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY });
+    const importer = new MigrationImporter({ lynoxDir: tmp('lynox-pdwx-dst-'), vaultKey: DST_KEY });
+    expect(exporter.export(handshake(importer)).skipped).toEqual(['workspace/two\nlines.txt']);
+  });
+
   it('workspace: the export names a link it did not carry (P18 D6)', () => {
     const srcDir = tmp('lynox-pdwe-src-');
     const outside = tmp('lynox-pdwe-out-');

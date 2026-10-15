@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BackupManager } from './backup.js';
 import { reloadConfig } from './config.js';
-import { _resetWorkspaceAccess } from './workspace-access.js';
+import { _resetWorkspaceAccess, workspaceAccess } from './workspace-access.js';
 
 const IS_ROOT = process.getuid?.() === 0;
 
@@ -64,6 +64,20 @@ describe('backup — the workspace root', () => {
     expect(readFileSync(ws('http-api/later.txt'), 'utf8')).toBe('ZZ-later');
     // No temp of the stage left behind.
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
+  });
+
+  it('restores an encrypted backup, decrypting in memory with nothing left beside the backup', async () => {
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-secret');
+    const key = ['test', 'vault', 'k'.repeat(24)].join('-');
+    const encrypted = new BackupManager(data, { backupDir, retentionDays: 30, encrypt: true }, key);
+    const created = await encrypted.createBackup();
+    expect(created.success).toBe(true);
+    expect(readFileSync(join(created.path, 'workspace', 'http-api', 'a.txt')).includes('ZZ-secret')).toBe(false);
+    rmSync(ws('http-api/a.txt'));
+    const restored = await encrypted.restoreBackup(created.path);
+    expect(restored.error).toBeUndefined();
+    expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-secret');
+    expect(readdirSync(created.path).filter(n => n.includes('restore'))).toEqual([]);
   });
 
   it('skips a link and a FIFO, never follows them, and names them in the result (I2)', async () => {
@@ -132,6 +146,33 @@ describe('backup — the workspace root', () => {
     expect(restored.success).toBe(false);
     expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
     expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
+  });
+
+  it('a failed swap of the DATA-DIR set never commits the workspace set (I2)', async () => {
+    writeFileSync(join(data, 'config.json'), JSON.stringify({ default_tier: 'balanced' }));
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a');
+    const created = await manager().createBackup();
+    expect(created.success).toBe(true);
+    writeFileSync(ws('http-api/a.txt'), 'ZZ-a-live');
+    // A directory where the backup has a file: staging beside it succeeds, the rename over it fails.
+    rmSync(join(data, 'config.json'));
+    mkdirSync(join(data, 'config.json'));
+    writeFileSync(join(data, 'config.json', 'keep'), 'x');
+    const restored = await manager().restoreBackup(created.path);
+    expect(restored.success).toBe(false);
+    expect(readFileSync(ws('http-api/a.txt'), 'utf8')).toBe('ZZ-a-live');
+    expect(readdirSync(ws('http-api')).filter(n => n.startsWith('.lynox-stage-'))).toEqual([]);
+  });
+
+  it('fails the backup when the root was moved away and replaced, never backs up the old one', async () => {
+    writeFileSync(ws('http-api/old.txt'), 'ZZ-old');
+    workspaceAccess();
+    renameSync(join(data, 'workspace'), join(tmp, 'archived'));
+    mkdirSync(join(data, 'workspace', 'http-api'), { recursive: true });
+    writeFileSync(ws('http-api/new.txt'), 'ZZ-new');
+    const created = await manager().createBackup();
+    expect(created.success).toBe(false);
+    expect(created.error).toMatch(/no longer the directory/);
   });
 
   it('a manager on another data directory backs up that directory\'s workspace, not this engine\'s', async () => {

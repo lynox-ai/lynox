@@ -12642,7 +12642,7 @@ export class LynoxHTTPApi {
 
         // 3. Export + Encrypt
         sendEvent('progress', { phase: 'exporting', message: 'Exporting and encrypting data...' });
-        const { manifest, chunks } = exporter.export(transferKey, (p) => {
+        const { manifest, chunks, skipped: exportSkipped } = exporter.export(transferKey, (p) => {
           sendEvent('progress', { phase: p.phase, message: p.currentName, current: p.currentChunk, total: p.totalChunks });
         });
 
@@ -12684,7 +12684,8 @@ export class LynoxHTTPApi {
         if (!rRes.ok) throw new Error(`Restore failed: ${await rRes.text()}`);
 
         const result = await rRes.json() as { success: boolean; verification: unknown };
-        sendEvent('done', { success: true, verification: result.verification });
+        // Files the export could not carry (a link, a name that cannot travel) are named, never dropped silently.
+        sendEvent('done', { success: true, verification: result.verification, ...(exportSkipped !== undefined ? { skipped: exportSkipped } : {}) });
       } catch (err: unknown) {
         sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
       } finally {
