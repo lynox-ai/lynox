@@ -121,8 +121,16 @@ jobs:
             echo "::error::gate-record: could not compute this PR's diff ($BASE_SHA...$HEAD_SHA) — refusing to pass on a diff this check cannot see. git said: $(tr '\n' ' ' < /tmp/pr-diff-err)"
             exit 1
           fi
+          # The commit messages, for the open-work wording warning: a squash merge here takes them
+          # as the message on `main`. Into a file, never echoed. A failed read is said, not hidden,
+          # and does not fail the step: that check only ever warns.
+          if ! git log --format='%h%x1f%B%x1e' "$BASE_SHA..$HEAD_SHA" > /tmp/pr-commits.txt 2>/dev/null; then
+            echo "::warning::gate-record: could not read this PR's commit messages; their wording was not checked."
+            : > /tmp/pr-commits.txt
+          fi
           node scripts/gate-record.mjs \
             --event-file "$GITHUB_EVENT_PATH" \
+            --commits-file /tmp/pr-commits.txt \
             --head "$HEAD_SHA" \
             --files-file /tmp/pr-files.txt \
             --author "$PR_AUTHOR"

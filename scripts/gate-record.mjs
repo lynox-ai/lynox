@@ -23,7 +23,10 @@
  *
  * Usage:
  *   node scripts/gate-record.mjs --body-file <path> --head <sha> \
- *        --files-file <path> [--author <login>] [--repo-visibility public|private]
+ *        --files-file <path> [--author <login>] [--repo-visibility public|private] \
+ *        [--title-file <path>] [--commits-file <path>]
+ *   In CI `--event-file <path>` replaces `--body-file`/`--title-file`. `--commits-file` holds
+ *   `git log --format='%h%x1f%B%x1e' <base>..<head>`; its wording is warned about, never refused.
  *
  * ⚠ Without `--repo-visibility`, a LOCAL run resolves to `unknown` and is therefore judged as
  * PUBLIC — the strict case. In THIS repo that is also the right answer, so the flag only matters
@@ -36,6 +39,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { proseOpenCountLines } from './guard-patterns/prose-open-count.mjs';
 import { LEGAL_APPROVERS, approvedVerdict } from './guard-patterns/legal-sign-off.mjs';
+import { proseWarnings } from './disclosure-vocabulary-scan.mjs';
 
 /**
  * The token that opens the record block, assembled rather than written.
@@ -568,11 +572,56 @@ export function registerIdLines(body) {
   return out;
 }
 
+/**
+ * Lines of the title, body and commit messages that use the wording
+ * `disclosure-vocabulary-scan.mjs` warns about in code: a gap left open, work put off, a
+ * pointer at where open work is tracked. A squash merge here takes the branch's commit
+ * messages as its own, so they reach `main` as permanently as the title.
+ *
+ * A WARNING, never a refusal, for the reason that scan gives: wording only approximates
+ * meaning, and a sentence about what a feature does on purpose is honest and stays.
+ * It names the place by line number and never repeats the text: the log is public.
+ */
+export function openWorkWarnings({ title = '', body = '', commits = [] } = {}) {
+  const out = [];
+  const say = (where, hits) => {
+    if (hits.length === 0) return;
+    out.push(
+      `${where} may say that work is left open or put off (line ${hits.map((h) => h.line).join(', ')}). ` +
+      'In this public repo an open gap is described in the private register, not here; what a ' +
+      'feature does on purpose can stay. A hint for whoever merges; it does not fail this check.',
+    );
+  };
+  say('the TITLE', proseWarnings(title));
+  say('the body', proseWarnings(body));
+  for (const c of commits) say(`the message of commit ${c.sha}`, proseWarnings(c.message));
+  return out;
+}
+
+/**
+ * Commit messages from `git log --format='%h%x1f%B%x1e'`: one record per commit. A message
+ * may itself contain the separator bytes, so a record counts only when what stands before
+ * its `\x1f` is a hex SHA: the SHA is printed in the warning, and author text must not be.
+ * A message that forges a record this way can split itself, and the forged tail is then
+ * either dropped or attributed to the hex word it names — never printed.
+ */
+export function parseCommits(text) {
+  return String(text ?? '')
+    .split('\x1e')
+    .filter((r) => r.includes('\x1f'))
+    .map((r) => {
+      const i = r.indexOf('\x1f');
+      return { sha: r.slice(0, i).trim(), message: r.slice(i + 1) };
+    })
+    .filter((c) => /^[0-9a-f]{4,40}$/.test(c.sha));
+}
+
 export function evaluate(input) {
   const verdict = evaluateRecord(input);
-  const { body, title, author, visibility = 'unknown' } = input;
+  const { body, title, commits = [], author, visibility = 'unknown' } = input;
   // Same scope as the field rule: public or unknown, never a bot's body.
   if (visibility === 'private' || (author && /\[bot\]$/.test(author))) return verdict;
+  const warnings = openWorkWarnings({ title, body, commits });
   const extra = [];
   if (registerIdLines(title).length > 0) {
     extra.push('the TITLE names a register row, and the title becomes the commit subject on the public main branch. Take it out.');
@@ -602,9 +651,10 @@ export function evaluate(input) {
     ...verdict,
     ...(verdict.errors ? { errors: verdict.errors.map(withoutRegisterIds) } : {}),
   };
-  if (extra.length === 0) return masked;
+  if (extra.length === 0) return { ...masked, ...(warnings.length ? { warnings } : {}) };
   return {
     ...masked,
+    ...(warnings.length ? { warnings } : {}),
     ok: false,
     errors: [
       ...(masked.errors ?? []),
@@ -1101,6 +1151,7 @@ function main() {
   const event = args['event-file'] ? readEventPr(args['event-file']) : null;
   const body = event ? event.body : args['body-file'] ? readFileSync(args['body-file'], 'utf-8') : '';
   const title = event ? event.title : args['title-file'] ? readFileSync(args['title-file'], 'utf-8') : '';
+  const commits = args['commits-file'] ? parseCommits(readFileSync(args['commits-file'], 'utf-8')) : [];
   const files = args['files-file']
     ? readFileSync(args['files-file'], 'utf-8').split('\n').map((s) => s.trim()).filter(Boolean)
     : [];
@@ -1113,9 +1164,10 @@ function main() {
     repoSlug: process.env.GITHUB_REPOSITORY,
     explicit: args['repo-visibility'],
   });
-  const verdict = evaluate({ body, title, head: args.head ?? '', files, author: args.author ?? '', visibility });
+  const verdict = evaluate({ body, title, commits, head: args.head ?? '', files, author: args.author ?? '', visibility });
 
   for (const n of verdict.notes ?? []) console.log(`${MARK}: ${n}`);
+  for (const w of verdict.warnings ?? []) console.log(`::warning::${MARK}: ${w}`);
   if (verdict.ok) {
     console.log(`${MARK}: ok`);
     return;

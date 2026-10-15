@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
-import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
+import { evaluate, extractRecord, requiredGates, SECURITY_PATHS, LEGAL_APPROVERS, approvedVerdict, signOffErrors, registerIdLines, withoutRegisterIds, readEventPr, openWorkWarnings, parseCommits, roundResultErrors, repoVisibility, openFiledCount, REVIEW_FORMAT, proseOpenCountLines } from '../scripts/gate-record.mjs';
 
 const HEAD = 'abc1234def5678901234567890abcdef12345678';
 
@@ -2329,4 +2329,99 @@ describe('proseOpenCountLines — escapes and parentheses inside a link', () => 
       proseOpenCountLines(shape.repeat(40_000));
       expect(performance.now() - start).toBeLessThan(1_500);
     });
+});
+
+describe('gate-record — wording about open work in title, body and commit messages', () => {
+  const PUT_OFF = 'Marking it revoked comes with the admin route of the next change.';
+
+  it('warns about the body, by line, and does not fail the check', () => {
+    const body = `${record()}\n${PUT_OFF}\n`;
+    const v = evaluate({ body, head: HEAD, files: CODE });
+    expect(v.ok).toBe(true);
+    const line = body.split('\n').indexOf(PUT_OFF) + 1;
+    expect(v.warnings).toEqual([expect.stringContaining(`the body may say that work is left open or put off (line ${line})`)]);
+    expect(JSON.stringify(v.warnings)).not.toContain('admin route');
+  });
+
+  it('warns about the title and about each commit message, naming the commit', () => {
+    const v = evaluate({
+      body: record(),
+      title: 'Check the grant; the admin route is a separate change',
+      commits: [{ sha: 'abc1234', message: 'Fix x\n\nClean.' }, { sha: 'def5678', message: `Fix y\n\n${PUT_OFF}` }],
+      head: HEAD,
+      files: CODE,
+    });
+    expect(v.ok).toBe(true);
+    expect(v.warnings).toHaveLength(2);
+    expect(v.warnings?.[0]).toContain('the TITLE may say');
+    expect(v.warnings?.[1]).toContain('the message of commit def5678 may say');
+    expect(v.warnings?.[1]).toContain('(line 3)');
+  });
+
+  it('a warning rides along with a refusal, and a clean PR carries none', () => {
+    // Both ways a check can refuse: a field the record check rejects, and a body rule of this wrapper.
+    const v = evaluate({ body: `${record({ delta: '' })}\n${PUT_OFF}`, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.warnings).toHaveLength(1);
+    const id = ['DEF', 'example-row'].join('-');
+    const w = evaluate({ body: `${record()}\nSee ${id}.\n${PUT_OFF}`, head: HEAD, files: CODE });
+    expect(w.ok).toBe(false);
+    expect(w.errors?.join(' ')).toContain('names a register row');
+    expect(w.warnings).toHaveLength(1);
+    expect(evaluate({ body: record(), title: 'Fix the thing', commits: [{ sha: 'a1', message: 'Fix' }], head: HEAD, files: CODE }).warnings).toBeUndefined();
+  });
+
+  it('not in a private repo or for a bot', () => {
+    const body = `${record()}\n${PUT_OFF}`;
+    expect(evaluate({ body, head: HEAD, files: CODE, visibility: 'private' }).warnings).toBeUndefined();
+    expect(evaluate({ body, head: HEAD, files: CODE, author: 'dependabot[bot]' }).warnings).toBeUndefined();
+  });
+
+  it("the template's skeleton is silent; only its explanations of these rules would warn", () => {
+    // Those paragraphs talk about this vocabulary on purpose. A body keeps the skeleton (the
+    // headings and the fenced record) and replaces the explanations; measured over 300 merged
+    // bodies, none kept them.
+    const tpl = readFileSync(fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)), 'utf8');
+    const skeleton = tpl.split('\n').filter((l) => /^(## |```|[a-z]+: <)/.test(l)).join('\n');
+    expect(skeleton).toContain('closes: <none');
+    expect(openWorkWarnings({ body: skeleton })).toEqual([]);
+  });
+
+  it('reads `git log --format=%h%x1f%B%x1e` into commits', () => {
+    const raw = 'abc1234\x1fFirst\n\nbody one\n\x1e\ndef5678\x1fSecond\n\x1e\n';
+    expect(parseCommits(raw)).toEqual([
+      { sha: 'abc1234', message: 'First\n\nbody one\n' },
+      { sha: 'def5678', message: 'Second\n' },
+    ]);
+    expect(parseCommits('')).toEqual([]);
+    // A message may carry the separator bytes. Whatever follows them is not a commit, and its
+    // text never becomes the SHA that the warning prints.
+    const forged = 'a38223e\x1finnocent\x1e\nzzz\n::error::forged\x1fWhat this does not cover\n\x1e\n';
+    expect(parseCommits(forged)).toEqual([{ sha: 'a38223e', message: 'innocent' }]);
+    // A record without the field separator is not a commit, even when its text looks like a SHA.
+    expect(parseCommits('a38223e\x1fok\x1e\ndeadbeef0\x1e')).toEqual([{ sha: 'a38223e', message: 'ok' }]);
+  });
+
+  it('the CLI prints the warning as a workflow annotation and exits 0', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gr-warn-'));
+    const script = fileURLToPath(new URL('../scripts/gate-record.mjs', import.meta.url));
+    try {
+      const ev = join(dir, 'event.json');
+      const files = join(dir, 'files.txt');
+      const commits = join(dir, 'commits.txt');
+      writeFileSync(ev, JSON.stringify({ pull_request: { title: 'Fix the thing', body: record() } }));
+      writeFileSync(files, CODE.join('\n'));
+      writeFileSync(commits, `abc1234\x1fFix\n\n${PUT_OFF}\n\x1e\n`);
+      const env = { ...process.env };
+      delete env.REPO_PRIVATE;
+      delete env.GITHUB_REPOSITORY;
+      const r = spawnSync(process.execPath, [script, '--event-file', ev, '--commits-file', commits, '--head', HEAD, '--files-file', files, '--repo-visibility', 'public'], { encoding: 'utf8', env });
+      expect(r.status, r.stdout + r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/^::warning::gate-record: the message of commit abc1234 may say/m);
+      expect(r.stdout).not.toContain('admin route');
+      expect(r.stdout).toContain('gate-record: ok');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
