@@ -299,6 +299,11 @@ describe('proseWarnings — pull-request text and commit messages', () => {
     for (const inside of ['findings left open in a later PR, filed privately', 'findings not fixed here, filed privately', 'findings are pre-existing gaps, filed privately']) {
       expect(proseWarnings(inside), inside).toEqual([{ line: 1, kind: 'marks work as put off' }]);
     }
+    // The subject stays: findings said to be open are read as such.
+    for (const open of ['Findings filed privately and still open', 'Findings are filed privately and remain open']) {
+      expect(proseWarnings(open), open).toEqual([{ line: 1, kind: 'marks work as put off' }]);
+    }
+    expect(proseWarnings('Findings filed  privately.')).toEqual([]);
     // The spellings in use pass.
     for (const ok of ['Findings outside the change are filed privately.', 'Findings were fixed here or filed privately.', 'Further findings filed privately.']) {
       expect(proseWarnings(ok), ok).toEqual([]);

@@ -96,10 +96,10 @@ export const PUTS_WORK_OFF = [
  * (`findings filed privately`, the `gate-record` template). It names no gap and no record,
  * so prose reading leaves it out. Only the spellings in use, word for word: `findings` as
  * what is filed (`a gap filed privately`, `the rest is filed privately` name something and
- * warn), and nothing else between, so no other form can sit inside the exception. Every
- * other word on the line is still read.
+ * warn), and nothing else between, so no other form can sit inside the exception. The
+ * match is replaced by `findings`, so every other word on the line is still read with it.
  */
-const PRESCRIBED_FORM = /\b(further\s+)?findings?\s+((outside|beyond)\s+(this|the)\s+(change|PR)\s+)?((were|are|is|have been)\s+)?(fixed here or\s+)?filed privately\b/gi;
+const PRESCRIBED_FORM = /\b(further\s+)?findings?\s+((outside|beyond)\s+(this|the)\s+(change|PR)\s+)?((were|are|is|have been)\s+)?(fixed here or\s+)?filed\s+privately\b/gi;
 
 /**
  * The lines of a pull request's title, body or commit messages that say one of the
@@ -118,7 +118,9 @@ export function proseWarnings(text) {
       return;
     }
     if (fence !== null) return;
-    const kind = kindOf(raw.replace(PRESCRIBED_FORM, ''));
+    // Replaced by its subject, not removed: `findings filed privately and still open` must
+    // still read as findings left open.
+    const kind = kindOf(raw.replace(PRESCRIBED_FORM, 'findings'));
     if (kind !== null) out.push({ line: i + 1, kind });
   });
   return out;
