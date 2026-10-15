@@ -61,7 +61,7 @@ Without docker-compose, SearXNG is not included. Add `SEARXNG_URL` pointing to y
 | `LYNOX_HTTP_SECRET` | Auto-generated | Web UI access token (login password) |
 | `LYNOX_HTTP_PORT` | No | Engine HTTP API port (default: 3000 in Docker, 3100 locally) |
 | `LYNOX_WORKSPACE` | No | CLI only: an existing directory that bash starts in and that the file tools are limited to (besides `/tmp` and the artifacts directory; reads also from `/app`). A path that does not exist is ignored. Unset, the CLI's file writes go to the workspace root. The server ignores it and uses `<workspace root>/http-api`. |
-| `LYNOX_WORKSPACE_ROOT` | No | Directory that holds the workspaces (default: `<data dir>/workspace`, i.e. `/home/lynox/.lynox/workspace` in the image). Another directory must be one of its own: the engine refuses a root whose path is the data directory, contains it, or lies inside it, and if bind mounts make the two overlap anyway, backup, export and the data erasure refuse. Backup, export and the data erasure reach the workspaces there. |
+| `LYNOX_WORKSPACE_ROOT` | No | Directory that holds the workspaces (default: `<data dir>/workspace`, i.e. `/home/lynox/.lynox/workspace` in the image). Another directory must be one of its own: the engine refuses a root whose path is the data directory, contains it, or lies inside it. If bind mounts make the two overlap anyway, the data erasure refuses either way, and backup and export refuse when the data directory ends up inside the root. Backup, export and the data erasure reach the workspaces there. |
 | `LYNOX_EMBEDDING_PROVIDER` | No | `onnx` (default) |
 | `GOOGLE_CLIENT_ID` | No | Google Workspace OAuth |
 | `GOOGLE_CLIENT_SECRET` | No | Google Workspace OAuth |
