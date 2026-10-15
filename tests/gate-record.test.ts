@@ -1987,3 +1987,80 @@ describe('proseOpenCountLines — the markdown link strip and long mark runs', (
       expect(performance.now() - start).toBeLessThan(1_500);
     });
 });
+
+describe('proseOpenCountLines — the parentheses after a link', () => {
+  // The count is assembled, so this file carries no literal count for a text check to read.
+  const W = 'findings';
+  const V = 'filed';
+  const C = `2 ${W} ${V}`;
+
+  it.each([
+    ['a "double" title', `See [x](https://example.invalid/a "${C}").`],
+    ["a 'single' title", `See [x](https://example.invalid/a '${C}').`],
+    ['a (paren) title', `See [x](https://example.invalid/a (${C})).`],
+    ['a title with a space before the `)`', `See [x](https://example.invalid/a "${C}" ).`],
+    ['a title with an escaped quote', `See [x](https://example.invalid/a "q \\" ${C}").`],
+    ['an image title', `See ![x](https://example.invalid/a.png "${C}").`],
+  ])('reads a count inside %s: the raw body carries it', (_label, text) => {
+    expect(proseOpenCountLines(text)).toEqual([1]);
+  });
+
+  it('reads a count in parentheses that are not a link target: GitHub shows that text', () => {
+    expect(proseOpenCountLines(`See [a](b ${C}).`)).toEqual([1]);
+    expect(proseOpenCountLines(`See [a](https://example.invalid/b] ${C}).`)).toEqual([1]);
+  });
+
+  it('reads each title on its own, so two titles never form one count', () => {
+    expect(proseOpenCountLines(`[x](https://example.invalid/a "2") and [y](https://example.invalid/b "${W} ${V}").`)).toEqual([]);
+    // A tag opened in one title and closed in the next must not join them either.
+    expect(proseOpenCountLines(`[x](u "2 <a") [y](v "> ${W} ${V}")`)).toEqual([]);
+    expect(proseOpenCountLines(`[x](u "2 <!--") [y](v "--> ${W} ${V}")`)).toEqual([]);
+  });
+
+  // A title of any form is taken out of the RENDERED text, so it cannot split a count around it.
+  it.each([
+    ['a "double" title', '"the round"'],
+    ["a 'single' title", "'the round'"],
+    ['a (paren) title', '(the round)'],
+    ['a title with an escaped quote', '"the \\" round"'],
+    ['a title with a space before the `)`', '"the round" '],
+  ])('reads a count around a link with %s', (_label, title) => {
+    expect(proseOpenCountLines(`The round left [2](https://example.invalid/a ${title}) ${W} ${V}.`)).toEqual([1]);
+  });
+
+  // Links GitHub renders that the CommonMark reading here does not take apart: the bounded
+  // reading still finds the count, as the scan did before.
+  it.each([
+    ['a `<` inside the target', '[2](https://example.invalid/a<b)'],
+    ['a query with `<`', '[2](https://example.invalid/?q=a<b)'],
+    ['an ideographic space in the target', '[2](https://example.invalid/a\u3000b)'],
+    ['a no-break space in the target', '[2](https://example.invalid/a\u00A0b)'],
+  ])('reads a count after a link with %s', (_label, link) => {
+    expect(proseOpenCountLines(`The round left ${link} ${W} ${V}.`)).toEqual([1]);
+  });
+
+  // Each title form is recognised as a title, so its text never stays in the rendered reading,
+  // where a tag opened in one title and closed in the next would join them into one count.
+  it.each([
+    ['"double"', (t: string) => `"${t}"`],
+    ["'single'", (t: string) => `'${t}'`],
+    ['(paren)', (t: string) => `(${t})`],
+    ['escaped-quote', (t: string) => `"q \\" ${t}"`],
+    ['space-before-paren', (t: string) => `"${t}" `],
+  ])('keeps two %s titles apart across a tag', (_label, title) => {
+    expect(proseOpenCountLines(`[x](u ${title('2 <a')}) [y](v ${title(`> ${W} ${V}`)})`)).toEqual([]);
+  });
+
+  it('still reads a count around a titled link, and passes one without a count', () => {
+    expect(proseOpenCountLines(`The round left [2](https://example.invalid/a "the round") ${W} ${V}.`)).toEqual([1]);
+    expect(proseOpenCountLines(`2 [${W}](<https://example.invalid/a b> "t") ${V}`)).toEqual([1]);
+    expect(proseOpenCountLines('See [docs](https://example.invalid/d "Docs") and [x](<a b>).')).toEqual([]);
+  });
+
+  it.each(['](a "', '](a "b") ', "](a '", '](a (', '](<', '](a "\\', '](a     ', '](a "b" "', '[x](u "t") '])(
+    'reads 40,000 × %j in one pass', (shape) => {
+      const start = performance.now();
+      proseOpenCountLines(shape.repeat(40_000));
+      expect(performance.now() - start).toBeLessThan(1_500);
+    });
+});
