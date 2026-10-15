@@ -297,6 +297,18 @@ export function ensureSubAnchor(anchor: WorkspaceAnchor, name: string, dirMode: 
   return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
 }
 
+/**
+ * Open the directory `rel` below `anchor` as its own anchor, every component with O_NOFOLLOW.
+ * Creates nothing: a missing component is ENOENT, a symlink on the way is refused. `rel` must
+ * name at least one component (the anchor itself is not handed out twice).
+ */
+export function openSubAnchor(anchor: WorkspaceAnchor, rel: string): WorkspaceAnchor {
+  const parts = splitRel(rel);
+  if (parts.length === 0) throw new WorkspaceAccessError('BAD_PATH', 'a sub-anchor needs at least one component');
+  const dir = walkDir(anchor, parts);
+  return { kind: 'anchor', fd: dir.fd, pathBuf: dir.pathBuf };
+}
+
 /** The Linux mount id of an open fd (from /proc/self/fdinfo), or null off Linux. */
 export function mountIdOf(fd: number): number | null {
   if (!IS_LINUX) return null;
@@ -408,6 +420,59 @@ export function readFileAt(anchor: WorkspaceAnchor, rel: string, maxBytes = Numb
     return Buffer.concat(chunks, total);
   } finally {
     closeSync(fd);
+  }
+}
+
+export interface OpenWriteOptions {
+  /** Create the file with this mode (fchmod, not umask-masked) when it does not exist; omit to require it. */
+  readonly createMode?: number | undefined;
+  /** Mode for directories created on the way; omit to require that they exist. */
+  readonly dirMode?: number | undefined;
+}
+
+function refuseWriteOpen(dir: DirHandle, leaf: Buffer, err: unknown): never {
+  const code = errno(err);
+  if (code === 'ELOOP') throw new WorkspaceAccessError('SYMLINK', `${show(dir, leaf)} is a symlink`);
+  if (code === 'ENXIO' || code === 'ENODEV' || code === 'EAGAIN' || code === 'EWOULDBLOCK' || code === 'EISDIR') {
+    throw new WorkspaceAccessError('NOT_FILE', `${show(dir, leaf)} is not a regular file`);
+  }
+  throw err;
+}
+
+/**
+ * Open a regular file for writing IN PLACE, without truncating it: the same inode, so its owner,
+ * mode, ACLs and the kernel's permission check stay as they are (a read-only file is EACCES, as
+ * with a plain write by name). A symlink at the file is refused (O_NOFOLLOW), and so are FIFOs,
+ * sockets and devices. With `createMode`, a missing file is created with O_EXCL. The caller
+ * truncates, writes and closes the fd.
+ */
+export function openWrite(anchor: WorkspaceAnchor, rel: string, opts: OpenWriteOptions = {}): { fd: number; created: boolean } {
+  const { dirParts, leaf } = splitLeaf(rel);
+  const dir = walkDir(anchor, dirParts, opts.dirMode !== undefined ? { dirMode: opts.dirMode } : undefined);
+  try {
+    let fd: number;
+    let created = false;
+    try {
+      fd = openSync(at(dir, leaf), constants.O_WRONLY | O_NOFOLLOW | O_NONBLOCK);
+    } catch (err) {
+      if (errno(err) !== 'ENOENT' || opts.createMode === undefined) refuseWriteOpen(dir, leaf, err);
+      try {
+        fd = openSync(at(dir, leaf), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600);
+        created = true;
+      } catch (createErr) {
+        refuseWriteOpen(dir, leaf, createErr);
+      }
+    }
+    try {
+      if (!fstatSync(fd).isFile()) throw new WorkspaceAccessError('NOT_FILE', `${show(dir, leaf)} is not a regular file`);
+      if (created && opts.createMode !== undefined) fchmodSync(fd, opts.createMode);
+    } catch (err) {
+      closeSync(fd);
+      throw err;
+    }
+    return { fd, created };
+  } finally {
+    closeDir(dir, anchor);
   }
 }
 

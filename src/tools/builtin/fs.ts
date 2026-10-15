@@ -1,4 +1,4 @@
-import { openSync, closeSync, fstatSync, readSync, readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
+import { openSync, closeSync, fstatSync, ftruncateSync, readSync, readFileSync, writeFileSync, writeSync, mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, resolve, basename, join, isAbsolute } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { isWorkspaceActive, validatePath, isPathWithin } from '../../core/workspace.js';
@@ -8,7 +8,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { checkWriteContent } from '../../core/output-guard.js';
 import { containsEvictionMarker } from '../../core/artifact-eviction.js';
 import { toWorkspaceRel, workspaceBase } from '../../core/workspace-rel.js';
-import { openRead, readFileAt, statEntry, writeFileAt, type EntryInfo, type WorkspaceAnchor } from '../../core/workspace-fd.js';
+import { openRead, openWrite, readFileAt, type WorkspaceAnchor } from '../../core/workspace-fd.js';
 
 /**
  * Per-Session byte budget for write_file. Previously enforced via the
@@ -148,20 +148,25 @@ function isolatedTarget(raw: string, operation: 'read' | 'write'): Target {
   return { kind: 'path', path: real };
 }
 
-/** The entry at a workspace path, or null when it or a directory on the way does not exist yet. */
-function priorEntry(target: Extract<Target, { kind: 'anchored' }>): EntryInfo | null {
+/**
+ * Write a workspace file IN PLACE through the workspace's open directory: the same inode, so the
+ * file keeps its owner, mode and permissions, and a file the engine may not write stays unwritten
+ * (EACCES), as with a write by name. A symlink at the file is refused, not written through. A file
+ * with more than one link is refused: the other name may be outside the workspace. With
+ * `create`, a missing file (and missing directories) are made, 0644 and 0755.
+ */
+function writeInPlace(target: Extract<Target, { kind: 'anchored' }>, text: string, create: boolean): void {
+  const { fd } = openWrite(target.anchor, target.rel, create ? { createMode: NEW_FILE_MODE, dirMode: NEW_DIR_MODE } : {});
   try {
-    return statEntry(target.anchor, target.rel);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
-  }
-}
-
-/** A symlink at a workspace file is not written through: replacing it would drop the user's link. */
-function refuseLinkLeaf(target: Extract<Target, { kind: 'anchored' }>, kind: string | undefined): void {
-  if (kind === 'symlink') {
-    throw new Error(`${target.shown} is a symlink. Links in the workspace are not followed; write to the file it points to by its own path.`);
+    if (fstatSync(fd).nlink > 1) {
+      throw new Error(`${target.shown} has more than one name (a hard link); the file tools do not write such a file.`);
+    }
+    ftruncateSync(fd, 0);
+    const buf = Buffer.from(text, 'utf-8');
+    let off = 0;
+    while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off, off);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -326,12 +331,7 @@ export const writeFileTool: ToolEntry<WriteFileInput> = {
         const target = isolatedTarget(input.path, 'write');
         if (target.kind === 'anchored') {
           refuseEvictionPlaceholder(input.content, target.shown);
-          const prior = priorEntry(target);
-          refuseLinkLeaf(target, prior?.type);
-          writeFileAt(target.anchor, target.rel, input.content, {
-            fileMode: prior?.type === 'file' ? prior.mode : NEW_FILE_MODE,
-            dirMode: NEW_DIR_MODE,
-          });
+          writeInPlace(target, input.content, true);
           agent.sessionCounters.writeBytes += contentBytes;
           return `Written to ${target.shown}`;
         }
@@ -398,16 +398,17 @@ export const editFileTool: ToolEntry<EditFileInput> = {
         target = { kind: 'path', path: resolveWritablePath(input.path) };
       }
       const realPath = target.kind === 'anchored' ? target.shown : target.path;
-      // One read, then one write of the same file: in the workspace both go through its open
-      // directory, and the file keeps its mode.
-      let fileMode: number | undefined;
+      // In the workspace the read and the write both go through its open directory.
       let original: string;
       if (target.kind === 'anchored') {
-        const prior = priorEntry(target);
-        if (prior === null) throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
-        // A link at the file is refused by the read itself (O_NOFOLLOW).
-        fileMode = prior.mode;
-        original = readFileAt(target.anchor, target.rel).toString('utf-8');
+        try {
+          original = readFileAt(target.anchor, target.rel).toString('utf-8');
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
+          }
+          throw err;
+        }
       } else {
         if (!existsSync(realPath)) {
           throw new Error(`file does not exist: ${realPath}. Use write_file to create it.`);
@@ -440,7 +441,7 @@ export const editFileTool: ToolEntry<EditFileInput> = {
         throw new Error(`Session write limit (${MAX_WRITE_BYTES_PER_SESSION} bytes) exceeded.`);
       }
       if (target.kind === 'anchored') {
-        writeFileAt(target.anchor, target.rel, updated, { fileMode: fileMode ?? NEW_FILE_MODE });
+        writeInPlace(target, updated, false);
       } else {
         writeFileSync(realPath, updated, 'utf-8');
       }

@@ -1,9 +1,10 @@
-import { realpathSync, statSync, fstatSync } from 'node:fs';
-import { basename, dirname, relative, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { relative, resolve } from 'node:path';
+import { getLynoxDir } from './config.js';
 import { getWorkspaceDir } from './workspace.js';
-import { workspaceAccess, isAnchoredRoot, type WorkspaceAccess } from './workspace-access.js';
-import { closeAnchor, ensureSubAnchor, openAnchor, splitRel, WorkspaceAccessError, type WorkspaceAnchor } from './workspace-fd.js';
-import { resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, WorkspaceRootError } from './workspace-root.js';
+import { workspaceAccess, type WorkspaceAccess } from './workspace-access.js';
+import { closeAnchor, openAnchor, openSubAnchor, splitRel, type WorkspaceAnchor } from './workspace-fd.js';
+import { resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, unsafeRoot, WorkspaceRootError } from './workspace-root.js';
 
 /**
  * The model-facing half of the workspace's fd access: a path a tool receives is mapped onto a
@@ -16,11 +17,13 @@ import { resolveWorkspaceRoot, translateLegacyWorkspacePath, isPathWithin, Works
  */
 
 /**
- * Paths whose kernel resolution reaches another directory through a process handle. Resolving
- * them (realpath, open) would hand the decision to whatever fd, cwd or root they name, so they are
- * refused by their spelling, before any filesystem call.
+ * The usual spellings of a path through a process handle (`/proc/<pid>/fd|root|cwd/…`, also below
+ * `task/<tid>/`, and `/dev/fd`, `/dev/std*`). Resolving them hands the decision to whatever fd, cwd
+ * or root they name, so they are refused by their spelling, before any filesystem call. A spelling
+ * this misses is not let in by it: it maps `outside`, `validatePath` resolves it, and a result in
+ * the workspace is refused (`isolatedTarget` in fs.ts).
  */
-const PROCESS_HANDLE = /^\/(?:proc\/[^/]+\/(?:fd|fdinfo|root|cwd|map_files)|dev\/fd)(?:\/|$)/;
+const PROCESS_HANDLE = /^\/(?:proc\/[^/]+\/(?:task\/[^/]+\/)?(?:fd|fdinfo|root|cwd|map_files)|dev\/(?:fd|stdin|stdout|stderr))(?:\/|$)/;
 
 export type WorkspaceRel =
   | { readonly kind: 'inside'; readonly rel: string; readonly shown: string }
@@ -82,12 +85,6 @@ function dropBase(): void {
   base = null;
 }
 
-function sameObject(a: number, path: string): boolean {
-  const own = fstatSync(a);
-  const byName = statSync(path);
-  return own.dev === byName.dev && own.ino === byName.ino;
-}
-
 /**
  * The context workspace's open directory, or null without isolation.
  *
@@ -96,6 +93,12 @@ function sameObject(a: number, path: string): boolean {
  * then hold a closed fd number the kernel may hand to something else. A new `WorkspaceAccess`
  * object means the root was deliberately changed: the sub-anchor is closed and derived again. A
  * workspace directory removed while held is not reopened by name; the primitives throw `GONE`.
+ *
+ * Below the root is decided by PATH, and the directory is then reached from the root's anchor one
+ * component at a time with O_NOFOLLOW, creating nothing: a workspace entry that is a symlink, or a
+ * link on the way to it, is refused, not followed to wherever it points. Only a workspace whose
+ * path lies outside the root gets an anchor of its own, opened by name once, and only when it
+ * neither holds nor lies inside the data directory (the check the root itself gets).
  */
 export function workspaceBase(): { readonly ws: string; readonly anchor: WorkspaceAnchor } | null {
   const ws = getWorkspaceDir();
@@ -103,33 +106,27 @@ export function workspaceBase(): { readonly ws: string; readonly anchor: Workspa
     dropBase();
     return null;
   }
-  const real = realOr(ws);
-  const parent = dirname(real);
-  const name = basename(real);
-  let access: WorkspaceAccess | null = null;
-  try {
-    access = workspaceAccess();
-  } catch (err) {
-    // A workspace outside the root does not need the root; one inside it does.
-    if (!(err instanceof WorkspaceRootError)) throw err;
-    if (isPathWithin(real, realOr(resolveWorkspaceRoot().path))) throw err;
-  }
-  const underRoot = access !== null && isAnchoredRoot(access, parent);
-  const from = underRoot ? access : null;
+  const wsPath = resolve(ws);
+  const rootPath = resolve(resolveWorkspaceRoot().path);
+  const below = isPathWithin(wsPath, rootPath) && wsPath !== rootPath;
+  // Below the root needs the root; a root that cannot be reached is the tool's error.
+  const from = below ? workspaceAccess() : null;
   if (base !== null && base.ws === ws && base.from === from) return base;
 
   dropBase();
   let anchor: WorkspaceAnchor;
   if (from !== null) {
-    anchor = ensureSubAnchor(from.anchor, name, 0o700);
+    anchor = openSubAnchor(from.anchor, relative(rootPath, wsPath));
   } else {
-    // A workspace configured outside the root (`LYNOX_WORKSPACE` elsewhere): its own directory
-    // is the base, opened once with O_NOFOLLOW on its resolved path.
+    const real = realpathSync(wsPath);
+    const unsafe = unsafeRoot(real, realOr(resolve(getLynoxDir())));
+    if (unsafe !== null) {
+      throw new WorkspaceRootError(
+        `The workspace ${ws} ${unsafe === 'holds-data-dir' ? 'is the data directory or contains it' : 'is inside the data directory'}; ` +
+        'the file tools do not write there. Use a directory of its own.',
+      );
+    }
     anchor = openAnchor(real);
-  }
-  if (!sameObject(anchor.fd, ws)) {
-    closeAnchor(anchor);
-    throw new WorkspaceAccessError('GONE', `the workspace ${ws} is not the directory that was opened for it`);
   }
   base = { ws, from, anchor };
   return base;

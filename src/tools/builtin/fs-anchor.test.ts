@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -83,6 +83,32 @@ describe('file tools reach the workspace through its open directory', () => {
     await writeFileTool.handler({ path: join(ws, 'deep', 'new.txt'), content: 'n' }, agent());
     expect(statSync(join(ws, 'deep', 'new.txt')).mode & 0o777).toBe(0o644);
     expect(statSync(join(ws, 'deep')).mode & 0o777).toBe(0o755);
+  });
+
+  it('writes and edits a workspace file in place: same inode, so owner and permissions stay', async () => {
+    writeFileSync(join(ws, 'keep.txt'), 'one');
+    const ino = statSync(join(ws, 'keep.txt')).ino;
+    await writeFileTool.handler({ path: join(ws, 'keep.txt'), content: 'two' }, agent());
+    expect(statSync(join(ws, 'keep.txt')).ino).toBe(ino);
+    await editFileTool.handler({ path: join(ws, 'keep.txt'), old_string: 'two', new_string: 'three' }, agent());
+    expect(statSync(join(ws, 'keep.txt')).ino).toBe(ino);
+    expect(readFileSync(join(ws, 'keep.txt'), 'utf8')).toBe('three');
+  });
+
+  it.skipIf(process.getuid?.() === 0)('leaves a read-only file unwritten, as a write by name does (skipped as root)', async () => {
+    writeFileSync(join(ws, 'ro.txt'), 'fixed');
+    chmodSync(join(ws, 'ro.txt'), 0o444);
+    await expect(writeFileTool.handler({ path: join(ws, 'ro.txt'), content: 'over' }, agent())).rejects.toThrow(/EACCES/);
+    await expect(editFileTool.handler({ path: join(ws, 'ro.txt'), old_string: 'fixed', new_string: 'over' }, agent())).rejects.toThrow(/EACCES/);
+    expect(readFileSync(join(ws, 'ro.txt'), 'utf8')).toBe('fixed');
+  });
+
+  it('refuses a file with a second name, which may be outside the workspace', async () => {
+    writeFileSync(join(outside, 'target.txt'), 'kept');
+    linkSync(join(outside, 'target.txt'), join(ws, 'hard.txt'));
+    await expect(writeFileTool.handler({ path: join(ws, 'hard.txt'), content: 'over' }, agent())).rejects.toThrow(/hard link/);
+    await expect(editFileTool.handler({ path: join(ws, 'hard.txt'), old_string: 'kept', new_string: 'over' }, agent())).rejects.toThrow(/hard link/);
+    expect(readFileSync(join(outside, 'target.txt'), 'utf8')).toBe('kept');
   });
 
   it('edits only an existing file and never through a link at the file', async () => {

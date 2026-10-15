@@ -599,6 +599,13 @@ function evictionPlaceholders(): Array<[string, string]> {
 }
 
 describe('file tools refuse the eviction placeholder inside the artifacts directory', () => {
+  // The server's layout: the workspace is `<data>/workspace/http-api`, the artifacts beside it.
+  function serverWorkspace(d: string): string {
+    const ws = join(d, 'workspace', 'http-api');
+    mkdirSync(ws, { recursive: true });
+    return ws;
+  }
+
   async function withDataDir(fn: (d: string) => Promise<void>): Promise<void> {
     const d = await makeTempDir();
     const prev = process.env['LYNOX_DATA_DIR'];
@@ -645,7 +652,7 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
 
   it('write_file: the placeholder into an artifact throws and leaves the file as it was (workspace mode)', async () => {
     await withDataDir(async (d) => {
-      setTenantWorkspace(d);
+      setTenantWorkspace(serverWorkspace(d));
       const p = join(d, 'artifacts', 'abcdef12.html');
       writeFileSync(p, '# Pitch', 'utf-8');
       for (const [form, placeholder] of evictionPlaceholders()) {
@@ -660,8 +667,9 @@ describe('file tools refuse the eviction placeholder inside the artifacts direct
 
   it('outside the artifacts directory the placeholder text is written like any other text', async () => {
     await withDataDir(async (d) => {
-      setTenantWorkspace(d);
-      const p = join(d, 'notes.md');
+      const ws = serverWorkspace(d);
+      setTenantWorkspace(ws);
+      const p = join(ws, 'notes.md');
       for (const [form, placeholder] of evictionPlaceholders()) {
         await writeFileTool.handler({ path: p, content: placeholder }, makeAgent());
         expect(await readFile(p, 'utf-8'), form).toBe(placeholder);
