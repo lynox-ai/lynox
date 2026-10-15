@@ -57,6 +57,9 @@ export interface InboxEvalReport {
    * mail in Needs-You is one click.
    */
   missedRequiresUser: number;
+  /** The fixture ids behind {@link missedRequiresUser}, in corpus order, so a run names the
+   *  mail it lost and two runs can be compared mail by mail. */
+  missedRequiresUserIds: ReadonlyArray<string>;
   /**
    * Count of `auto_handled` fixtures the classifier surfaced in
    * `requires_user` or `draft_ready` — the inverse asymmetric direction
@@ -194,6 +197,9 @@ export async function runInboxEval(
   // surfacing in requires_user — is one extra click. The .eval.test.ts
   // asserts missedRequiresUser === 0 as the dangerous-direction gate.
   const missedRequiresUser = confusion.requires_user.auto_handled;
+  const missedRequiresUserIds = samples
+    .filter((s) => s.fixture.expectedBucket === 'requires_user' && s.predicted === 'auto_handled')
+    .map((s) => s.fixture.id);
   const autoHandledNoise = confusion.auto_handled.requires_user
     + confusion.auto_handled.draft_ready;
   return {
@@ -201,6 +207,7 @@ export async function runInboxEval(
     bucketMatch,
     bucketMatchPct,
     missedRequiresUser,
+    missedRequiresUserIds,
     autoHandledNoise,
     confusion,
     perCategory,
@@ -217,6 +224,7 @@ export function formatReport(r: InboxEvalReport): string {
   lines.push(`Inbox classifier eval — ${r.total} fixtures`);
   lines.push(`  bucket match: ${r.bucketMatch}/${r.total} (${(r.bucketMatchPct * 100).toFixed(1)}%)`);
   lines.push(`  missed requires_user (silently auto-archived): ${r.missedRequiresUser}  ← MUST be 0`);
+  if (r.missedRequiresUserIds.length > 0) lines.push(`    missed ids: ${r.missedRequiresUserIds.join(', ')}`);
   lines.push(`  auto_handled noise (in requires_user/draft_ready): ${r.autoHandledNoise}`);
   lines.push('');
   lines.push('  Confusion matrix (rows=expected, cols=predicted):');

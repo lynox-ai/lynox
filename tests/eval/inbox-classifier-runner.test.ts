@@ -119,6 +119,31 @@ describe('runInboxEval', () => {
     expect(report.samples[0]?.confidence).toBe(0);
   });
 
+  // A run that loses a requires_user mail names it, in the report and in the list the gated
+  // evals assert on; one that loses none names nothing.
+  it('names the requires_user fixtures it silently archived, by id', async () => {
+    const corpus = loadCorpus();
+    // Two whose stub key (subject and sender) no other fixture shares, so only they are lost.
+    const keyCount = new Map<string, number>();
+    for (const f of corpus.fixtures) keyCount.set(fixtureKey(f), (keyCount.get(fixtureKey(f)) ?? 0) + 1);
+    const lost = corpus.fixtures.filter((f) => f.expectedBucket === 'requires_user' && keyCount.get(fixtureKey(f)) === 1).slice(0, 2);
+    expect(lost).toHaveLength(2);
+    const lostKeys = new Set(lost.map(fixtureKey));
+    const llm = bucketStub((key) => lostKeys.has(key) ? 'auto_handled' : corpus.fixtures.find((f) => fixtureKey(f) === key)?.expectedBucket ?? 'requires_user');
+    const report = await runInboxEval(corpus, llm);
+    expect(report.missedRequiresUser).toBe(lost.length);
+    expect(report.missedRequiresUserIds).toEqual(lost.map((f) => f.id));
+    expect(formatReport(report)).toContain(`missed ids: ${lost.map((f) => f.id).join(', ')}`);
+  });
+
+  it('control: an auto_handled mail placed in requires_user is not named as missed', async () => {
+    const corpus = loadCorpus();
+    const llm = bucketStub(() => 'requires_user');
+    const report = await runInboxEval(corpus, llm);
+    expect(report.missedRequiresUserIds).toEqual([]);
+    expect(formatReport(report)).not.toContain('missed ids:');
+  });
+
   it('formats a one-screen ASCII report', async () => {
     const corpus = loadCorpus();
     const llm = bucketStub((key) => corpus.fixtures.find((f) => fixtureKey(f) === key)?.expectedBucket ?? 'requires_user');
