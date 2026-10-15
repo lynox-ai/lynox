@@ -12,12 +12,12 @@ const src = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.
 const live = (key: string): string[] => src.split('\n').filter(l => l.startsWith(`\t'${key}': `));
 
 describe('private-mode switch text', () => {
-	it('says what stays and that saved workflows run later without private mode', () => {
+	it('says what goes, what stays, and that saved workflows run later without private mode', () => {
 		expect(live('threads.private_on')).toEqual([
-			"\t'threads.private_on': { de: 'Privat-Modus an: Aus diesem Chat kommt nichts Neues ins Gedächtnis. Was er schon gespeichert hatte, ist entfernt, bis auf Notizbuch, Profil, Playbook und Subjekte. Workflows, die du hier speicherst, laufen später ohne Privat-Modus.', en: 'Private mode on: nothing new from this chat goes into memory, and what it had stored is removed, except notebook, profile, playbook and subjects. Workflows you save here run later without private mode.' },",
+			"\t'threads.private_on': { de: 'Privat-Modus an: Aus diesem Chat kommt nichts Neues ins Gedächtnis. Was nur dieser Chat gespeichert hatte, ist entfernt, auch Subjekte, die er angelegt hat und an denen sonst nichts hängt. Notizbuch, Profil und Playbook bleiben, bis auf Profilzeilen aus der Einrichtung in diesem Chat, die du nicht bearbeitet hast. Workflows, die du hier speicherst, laufen später ohne Privat-Modus.', en: 'Private mode on: nothing new from this chat goes into memory. What only this chat had stored is removed, including subjects it created that nothing else uses. Notebook, profile and playbook stay, except profile lines from setup in this chat that you have not edited. Workflows you save here run later without private mode.' },",
 		]);
 		expect(live('threads.private_off')).toEqual([
-			"\t'threads.private_off': { de: 'Privat-Modus aus: Klicken, und aus diesem Chat kommt nichts Neues mehr ins Gedächtnis. Was er gespeichert hat, wird entfernt, bis auf Notizbuch, Profil, Playbook und Subjekte.', en: 'Private mode off: click to keep anything new from this chat out of memory and remove what it has stored, except notebook, profile, playbook and subjects.' },",
+			"\t'threads.private_off': { de: 'Privat-Modus aus: Klicken, und aus diesem Chat kommt nichts Neues mehr ins Gedächtnis. Was nur dieser Chat gespeichert hat, wird entfernt, auch Subjekte, die er angelegt hat und an denen sonst nichts hängt. Notizbuch, Profil und Playbook bleiben, bis auf Profilzeilen aus der Einrichtung in diesem Chat, die du nicht bearbeitet hast.', en: 'Private mode off: click to keep anything new from this chat out of memory and remove what only this chat has stored, including subjects it created that nothing else uses. Notebook, profile and playbook stay, except profile lines from setup in this chat that you have not edited.' },",
 		]);
 	});
 
