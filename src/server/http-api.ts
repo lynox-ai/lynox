@@ -9,7 +9,7 @@
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
-import { readFileSync, accessSync, existsSync } from 'node:fs';
+import { readFileSync, accessSync, existsSync, lstatSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, basename, dirname, join } from 'node:path';
@@ -11821,7 +11821,9 @@ export class LynoxHTTPApi {
         }
         const wsErasure: WorkspaceErasure = {
           external: wsAccess.root.mode === 'external',
-          isRoot: (path) => isAnchoredRoot(wsAccess, path),
+          // A `<data>/workspace` that is a link is refused as before (409, its content is at the
+          // target): emptying the target through the anchor waits for the check of where it points.
+          isRoot: (path) => !lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() && isAnchoredRoot(wsAccess, path),
           mountBoundaries: () => wsBoundaries,
         };
         let scan: ReturnType<typeof scanDataDir>;
