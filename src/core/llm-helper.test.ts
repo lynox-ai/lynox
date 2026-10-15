@@ -9,8 +9,10 @@ import {
   SchemaValueError,
   ExtractShapeError,
   extractionSpendOf,
+  CutOffError,
   type ExtractSchema,
 } from './llm-helper.js';
+import { calculateCost, _resetOverridePricingForTests } from './pricing.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
 import { MODEL_MAP, modelCapability } from '../types/models.js';
 import { ForcedToolNotCalledError, forcedToolMissCounts, forcedToolCutOffCounts } from './llm-wire-rules.js';
@@ -747,7 +749,7 @@ describe('callForStructuredJson — a reply that lost the forced call', () => {
     expect(err).toBeInstanceOf(ExtractShapeError);
     expect(forcedToolMissCounts()['llm-helper']).toBe(before + 1);
     // The paid reply travels with the error, priced at the model's rate: 100 in at $4/M, 50 out at $20/M.
-    expect(extractionSpendOf(err)).toEqual({ costUsd: expect.closeTo(0.0014, 9) as number, tier: 'deep' });
+    expect(extractionSpendOf(err)).toEqual({ costUsd: expect.closeTo(0.0014, 9) as number, tier: 'deep', inputTokens: 100, outputTokens: 50 });
   });
 });
 
@@ -805,5 +807,67 @@ describe('callForStructuredJson — a reply cut off at max_tokens', () => {
     expect(err).toBeInstanceOf(Error);
     expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
     expect(forcedToolCutOffCounts()['llm-helper'] ?? 0).toBe(before);
+  });
+});
+
+describe('callForStructuredJson — options for a caller that gates and books every request', () => {
+  const VALID = { name: 'a', count: 1, level: 'low' };
+  const recordingClient = (stopReason = 'tool_use'): { client: Anthropic; calls: unknown[][] } => {
+    const calls: unknown[][] = [];
+    const client = {
+      messages: {
+        create: async (...args: unknown[]) => {
+          calls.push(args);
+          return {
+            content: [{ type: 'tool_use', id: 't', name: 'extract', input: VALID }],
+            stop_reason: stopReason,
+            usage: { input_tokens: 1000, output_tokens: 100 },
+          };
+        },
+      },
+    } as unknown as Anthropic;
+    return { client, calls };
+  };
+  const base = { system: 'Extract.', user: 'Sample', schema: SCHEMA, model: 'claude-sonnet-4-6' };
+
+  it('hands maxRetries to the request, and nothing when it is not set', async () => {
+    const withIt = recordingClient();
+    await callForStructuredJson({ ...base, client: withIt.client, maxRetries: 0 });
+    expect(withIt.calls[0]![1]).toEqual({ maxRetries: 0 });
+    const without = recordingClient();
+    await callForStructuredJson({ ...base, client: without.client });
+    expect(without.calls[0]![1]).toBeUndefined();
+  });
+
+  it('refuseCutOff: a cut-off reply that parses is refused with its spend; without it, it is returned', async () => {
+    const err = await callForStructuredJson({ ...base, client: recordingClient('max_tokens').client, refuseCutOff: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CutOffError);
+    expect((err as Error).message).not.toContain('low');
+    expect(extractionSpendOf(err)?.costUsd).toBeGreaterThan(0);
+    // The usage comes with it, for a caller that books tokens.
+    expect(extractionSpendOf(err)?.inputTokens).toBeGreaterThan(0);
+    expect(extractionSpendOf(err)?.outputTokens).toBeGreaterThan(0);
+    // The default stays as api_setup relies on it: a schema-valid cut-off is accepted.
+    const ok = await callForStructuredJson({ ...base, client: recordingClient('max_tokens').client });
+    expect(ok.data).toEqual(VALID);
+  });
+
+  it('pricing "run" prices an unregistered model like a run; the default keeps the helper price', async () => {
+    _resetOverridePricingForTests({});
+    try {
+      const model = 'acme-local-7b';
+      expect(modelCapability(model)).toBeUndefined();
+      const helper = await callForStructuredJson({ ...base, model, client: recordingClient().client });
+      const run = await callForStructuredJson({ ...base, model, client: recordingClient().client, pricing: 'run' });
+      expect(helper.costUsd).toBeCloseTo((1000 * 3 + 100 * 15) / 1e6, 12);
+      expect(run.costUsd).toBeCloseTo(calculateCost(model, { input_tokens: 1000, output_tokens: 100 }), 12);
+      expect(run.costUsd).not.toBeCloseTo(helper.costUsd, 6);
+      // api_setup's pre-flight cap reads the default: it must not move for an unregistered model.
+      expect(estimateCostUsd(10_000, 4_000, model)).toBeCloseTo((10_000 * 3 + 2_500 * 15) / 1e6, 12);
+      expect(estimateCostUsd(10_000, 4_000, model, 'run')).toBeCloseTo((10_000 * 5 + 2_500 * 25) / 1e6, 12);
+    } finally {
+      _resetOverridePricingForTests(null);
+    }
   });
 });

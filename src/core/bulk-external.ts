@@ -189,15 +189,28 @@ export function planExternal(source: readonly SourceRow[], host: string, scan: (
     if (isMailProviderTarget(key)) return { key, invalid: 'mail_api' };
     if (urlScanForms(key).some((form) => scan(form) !== null)) return { key, invalid: 'secret_in_target' };
     const after = row.after;
-    if (!isPlainObject(after) || Object.keys(after).length === 0) return { key, invalid: 'after_not_object' };
-    if (!Object.values(after).every(isScalar)) return { key, invalid: 'field_not_scalar' };
-    const text = JSON.stringify(after);
-    if (Buffer.byteLength(text, 'utf8') > BULK_MAX_TARGET_BYTES) return { key, invalid: 'target_too_large' };
-    if (scan(text) !== null) return { key, invalid: 'secret_in_after' };
-    if (outboundEffectField(key, after) !== null) return { key, invalid: 'effect_field' };
-    charge(text);
+    const refused = refuseExternalAfter(key, after, scan);
+    if (refused !== null) return { key, invalid: refused };
+    charge(JSON.stringify(after));
     return { key, after: after as ExternalImage };
   });
+}
+
+/**
+ * Why an after-state cannot be written to an external target, or null. The checks every
+ * planned after-state passes — and every verdict of a judged run before it is recorded (PRD
+ * bulk-loop §3.1): one function, so a verdict cannot skip one a plan makes.
+ */
+export function refuseExternalAfter(
+  key: string, after: unknown, scan: (text: string) => string | null,
+): 'after_not_object' | 'field_not_scalar' | 'target_too_large' | 'secret_in_after' | 'effect_field' | null {
+  if (!isPlainObject(after) || Object.keys(after).length === 0) return 'after_not_object';
+  if (!Object.values(after).every(isScalar)) return 'field_not_scalar';
+  const text = JSON.stringify(after);
+  if (Buffer.byteLength(text, 'utf8') > BULK_MAX_TARGET_BYTES) return 'target_too_large';
+  if (scan(text) !== null) return 'secret_in_after';
+  if (outboundEffectField(key, after) !== null) return 'effect_field';
+  return null;
 }
 
 /**

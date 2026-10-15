@@ -8280,7 +8280,7 @@ export class LynoxHTTPApi {
       errorResponse(res, 409, 'This run was planned under an access that has ended, or one that cannot be confirmed, so it cannot be approved or started.', 'mandate_ended');
       return true;
     };
-    const checksumOf = (body: unknown, field: 'checksum' | 'listChecksum' = 'checksum'): string | null => {
+    const checksumOf = (body: unknown, field: 'checksum' | 'listChecksum' | 'judgeRuleHash' = 'checksum'): string | null => {
       if (!body || typeof body !== 'object') return null;
       const c = (body as Record<string, unknown>)[field];
       return typeof c === 'string' && c.length > 0 ? c : null;
@@ -8302,6 +8302,8 @@ export class LynoxHTTPApi {
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
       source_running: [409, 'The bulk run this undo takes back is still writing. Approve the undo once that run has stopped.'],
       undo_stale: [409, 'The bulk run this undo takes back has changed since the undo was planned. If it wrote more targets, plan the undo again. If another undo already took it back, nothing is left for this one to undo.'],
+      cost_cap: [400, 'Starting a judged run needs "costCapUsd": the most it may spend on model calls, in US dollars, a whole number of cents above zero.'],
+      not_at_this_start: [400, 'This start only reads the list. Give the spend limit and "supersedes" when you start the judging, once the list is read.'],
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
@@ -8340,11 +8342,20 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { runs: ledger.listRuns(50).map(withBinding) });
     }, READS);
 
-    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id', async (_req, res, params) => {
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/bulk/runs/:id', async (req, res, params) => {
       const ledger = bulkLedger(res);
       if (!ledger) return;
       const status = ledger.getStatus(params['id']!);
       if (!status) { errorResponse(res, 404, 'Bulk run not found.'); return; }
+      // A judged run: the rule the owner starts it with — its text and schema are the planner's
+      // words and its hash is what the start presents, so they go to the owner only (PRD
+      // bulk-loop §3.1) — and the model it would be judged on now (§4).
+      const judgeRule = status.judge !== null && isOwnerPrincipal(this._principalOf(req)) ? ledger.getJudgeRuleForOwner(params['id']!) : null;
+      let judgeModel: string | null = null;
+      if (status.judge !== null) {
+        const { judgeModelId } = await import('../core/bulk-judge.js');
+        judgeModel = judgeModelId(engine.getUserConfig(), status.judge.tier, getActiveProvider());
+      }
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
       const actionable = status.phase === 'previewed' || status.phase === 'approved' || status.phase === 'writing';
@@ -8362,6 +8373,9 @@ export class LynoxHTTPApi {
         // source's confirmation, so the note's promise of one target first would not hold.
         writeFormNote: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_NOTE : null,
         writeFormConfirmation: status.writeForm === 'unmeasured' && status.kind === 'apply' ? BULK_UNMEASURED_CONFIRMATION : null,
+        judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
+        judgeRuleHash: judgeRule?.hash ?? null,
+        judgeModel,
       });
     }, READS));
 
@@ -8416,7 +8430,33 @@ export class LynoxHTTPApi {
           errorResponse(res, 400, 'Missing "listChecksum" — start the list read you were shown.');
           return;
         }
-        const read = ledger.resumePreview(params['id']!, Date.now(), { listChecksum: listChecksum ?? undefined });
+        const fields = (body ?? {}) as Record<string, unknown>;
+        if ((ledger.getStatus(params['id']!)?.judge ?? null) !== null) {
+          // A judged run reports one metered cost per model call. On a tenant whose model key the
+          // control plane does not supply, those reports are not debited and pile up until the
+          // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
+          const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
+          if (billingTier && !cpSuppliesLLMKey(billingTier)) {
+            errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
+            return;
+          }
+        }
+        const rawCap = fields['costCapUsd'];
+        const rawSupersedes = fields['supersedes'];
+        const read = ledger.resumePreview(params['id']!, Date.now(), {
+          listChecksum: listChecksum ?? undefined,
+          judgeRuleHash: checksumOf(body, 'judgeRuleHash') ?? undefined,
+          // Anything but a number goes to the ledger as NaN, which its whole-cents check refuses.
+          costCapUsd: rawCap === undefined ? undefined : typeof rawCap === 'number' ? rawCap : Number.NaN,
+          supersedes: typeof rawSupersedes === 'string' && rawSupersedes.length > 0 ? rawSupersedes : undefined,
+        });
+        if (!read.ok && read.reason === 'supersede_required') {
+          // Never replaced silently: the start names the run it replaces.
+          errorResponse(res, 409, 'Another judged run is started and not yet approved. Starting this one ends it, keeping what it spent: start again with "supersedes" set to its id.', 'supersede_required', {
+            supersedable: { id: read.supersedable.id, costUsd: read.supersedable.costUsd },
+          });
+          return;
+        }
         if (!read.ok) { refuse(res, read.reason); return; }
         jsonResponse(res, 200, withBinding(read.status));
         return;

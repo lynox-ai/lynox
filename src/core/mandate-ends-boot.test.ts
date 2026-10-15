@@ -107,7 +107,8 @@ describe('Engine boot — mandate ends', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-mandatesweepboot-'));
     dirs.push(dir);
     // The engine's 5-minute intervals, caught, not waited for: the prompt sweep is the first, the
-    // running-work sweep (§3.13 B8) the second.
+    // running-work sweep (§3.13 B8) the second, the judged bulk runs' retention sweep the third —
+    // that one runs with the bulk flag off too.
     const real = globalThis.setInterval;
     const sweeps: (() => void)[] = [];
     const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void, ms?: number) => {
@@ -116,7 +117,7 @@ describe('Engine boot — mandate ends', () => {
     }) as typeof setInterval);
     let engine: Engine;
     try { engine = await boot(dir); } finally { spy.mockRestore(); }
-    expect(sweeps).toHaveLength(2);
+    expect(sweeps).toHaveLength(3);
     const ends = engine.getMandateEnds()!;
     const store = engine.getPromptStore()!;
     const now = Math.floor(Date.now() / 1000);

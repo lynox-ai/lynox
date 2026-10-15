@@ -20,7 +20,14 @@ import { tmpdir } from 'node:os';
  * `baseParams`). Measured when written: 37 lines, 29 distinct.
  */
 const MENTIONS: ReadonlyArray<readonly [string, number]> = [
+  // Not the trigger's field: the provider SDK's own retry of one request, under the same name.
+  // `callForStructuredJson` passes it on, and the bulk judge sets it to 0 — one gate per paid
+  // request, so a retry inside the SDK would be a call no gate saw (PRD bulk-loop §3.1).
+  ["src/core/bulk-judge.ts: *  (ten minutes) once — the call runs with `maxRetries: 0` — and a minute's margin. */", 1],
+  ["src/core/bulk-judge.ts: maxRetries: 0, refuseCutOff: true, pricing: 'run',", 1],
   ["src/core/engine-db.ts: max_retries INTEGER,", 1],
+  ["src/core/llm-helper.ts: maxRetries?: number;", 1],
+  ["src/core/llm-helper.ts: }, opts.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : undefined));", 1],
   ["src/core/run-history-persistence.ts: max_retries: number | null;", 1],
   ["src/core/run-history.ts: ALTER TABLE tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 0;", 1],
   ["src/core/run-history.ts: last_run_status, task_type, watch_config, max_retries, retry_count,", 2],

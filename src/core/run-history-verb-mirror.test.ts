@@ -820,7 +820,7 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // ran six other test files and found this only through a review. The roster above is
     // the reason to keep it that way: it is a list of what the schema IS, maintained
     // because the number beside it refuses to be wrong.
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(61);
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(62);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });

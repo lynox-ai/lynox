@@ -156,6 +156,9 @@ const INTERRUPTED_RESULT =
  * cannot be skipped by whoever adds the next one — and the answer is `false` unless the
  * effect is shown to repeat nothing. A bulk run claims each target once
  * (`BulkLedger.claimTarget`), and its preview skips the targets it has already read.
+ * `bulk_judge` skips targets with a verdict and claims each one before its call is paid
+ * (`BulkLedger.claimJudge`): a run started again after a loss pays at most one more call per
+ * target whose claim expired (PRD bulk-loop §3.1).
  */
 const RESUMES_AFTER_LOSS = {
   run_workflow: false,
@@ -165,6 +168,7 @@ const RESUMES_AFTER_LOSS = {
   bulk_apply: true,
   bulk_undo: true,
   bulk_preview: true,
+  bulk_judge: true,
 } as const satisfies Record<TriggerEffect, boolean>;
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000; // 5 minutes per task execution
@@ -1370,7 +1374,9 @@ export class WorkerLoop {
       await workerTaskStorage.run(taskCtx, async () => {
         // Dispatch on the EFFECT axis (S3-behaviour-a). This switch IS the
         // money-vs-deterministic boundary: run_workflow/run_agent may mint a Run
-        // (→ managed onBeforeRun gate / onAfterRun debit); backup/notify never do.
+        // (→ managed onBeforeRun gate / onAfterRun debit); backup/notify never do. The one
+        // stated exception: an effect may spend without minting a Run only if it gates and
+        // debits each model call by itself — `bulk_judge` (PRD bulk-loop §3.1).
         // `effect` is read as a plain string (the store casts it from a TEXT column,
         // so a value the union doesn't know — a newer schema, a synced/corrupt row —
         // is possible at runtime) → the default fails CLOSED, never a money run.
@@ -1452,6 +1458,14 @@ export class WorkerLoop {
             // cannot drift apart — and so no list of effect names has to be kept true.
             entry.readsSignal = true;
             await this.executeBulkPreview(task, controller.signal, () => entry.stopRequested === true);
+            break;
+          case 'bulk_judge':
+            // Spends money without minting a Run: one model call per target, each behind its
+            // own gate and booked by its own report (the stated exception to the boundary
+            // above). Armed only by the owner's start of a judged run; the handler refuses
+            // any run that is not planned and unhalted. Reads the signal between targets.
+            entry.readsSignal = true;
+            await this.executeBulkJudge(task, controller.signal, () => entry.stopRequested === true);
             break;
           default:
             // Fail-closed (RU2): an unknown effect must NOT reach an autonomous
@@ -1618,17 +1632,31 @@ export class WorkerLoop {
     // Built only for an external run: a local run needs none of the stores it reads.
     const external = ledger.getRunForApply(task.bulk_run_id)?.targetSystem.startsWith('http:') === true;
     const clientFor = external ? await this.bulkClientFactory() : (): null => null;
-    const outcome = await runBulkEffect(task.bulk_run_id, effect, {
-      ledger,
-      writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
-        const client = clientFor(r.contractJson);
-        const contract = parseBulkContract(r.contractJson);
-        const method = contract ? writeMethodOf(contract) : null;
-        return client && method ? externalWriter(client, { method }) : null;
-      }),
-      signal,
-      ownerStopped,
-    });
+    let outcome: Awaited<ReturnType<typeof runBulkEffect>>;
+    try {
+      outcome = await runBulkEffect(task.bulk_run_id, effect, {
+        ledger,
+        writerFor: (run) => bulkWriterFor(run, dataStore, (r) => {
+          const client = clientFor(r.contractJson);
+          const contract = parseBulkContract(r.contractJson);
+          const method = contract ? writeMethodOf(contract) : null;
+          return client && method ? externalWriter(client, { method }) : null;
+        }),
+        signal,
+        ownerStopped,
+      });
+    } catch (err: unknown) {
+      // What leaves here reaches the run result, the notification, the follow-up prompt and the
+      // error tracker (the dispatch catch above). Today only fixed texts are thrown inside, but
+      // a write handles target content, so nothing of a thrown message leaves: the tracker gets
+      // the class and status, the rest a fixed text (PRD bulk-loop §3.1, error classes). Rethrown, so the
+      // dispatch keeps deciding retry, timeout and stop as before.
+      const { judgeErrorForTracker } = await import('./bulk-judge.js');
+      void import('./error-reporting.js').then(({ captureError }) => captureError(judgeErrorForTracker(err, effect))).catch(() => {});
+      const fixed = new Error('The bulk write stopped on an error inside lynox.');
+      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) fixed.name = err.name;
+      throw fixed;
+    }
     if (outcome.status === 'stopped') {
       // Recorded as the owner's stop, not a failure: no retry, and no notification — the
       // owner is the one who asked. The summary names how many targets were written.
@@ -1704,6 +1732,91 @@ export class WorkerLoop {
       if (signal.aborted && ownerStopped()) {
         ledger.haltPreview(task.bulk_run_id, BULK_HALT_REASONS.stoppedByOwner);
         this.#recordRun(this.engine.getTaskManager(), task.id, 'Bulk preview stopped on your instruction.', 'stopped');
+        return;
+      }
+      this.#recordRun(this.engine.getTaskManager(), task.id, outcome.summary, 'success');
+      this.engine.getRunHistory()?.updateTrigger(task.id, {
+        status: 'open',
+        nextRunAt: new Date(outcome.retryAt ?? Date.now()).toISOString(),
+      });
+      return;
+    }
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
+  }
+
+  /**
+   * Judge a bulk run off its read phase's trigger (PRD bulk-loop §3.1): an external run's targets
+   * are read first, with the preview's read, then each target gets its verdict. A judge that
+   * waits (a 429 or 5xx, the host budget, a stopped tick) is re-armed for when it may go on; every
+   * other outcome ends the trigger — a halt waits for the owner's start.
+   */
+  private async executeBulkJudge(task: TriggerRecord, signal: AbortSignal, ownerStopped: () => boolean): Promise<void> {
+    const ledger = this.engine.getBulkLedger();
+    if (!ledger || task.bulk_run_id === undefined) {
+      this.recordAndNotify(task, 'Bulk runs are not available on this instance — skipped.', false);
+      return;
+    }
+    const runId = task.bulk_run_id;
+    const { runBulkJudge, resolveJudgeModel, judgeErrorForTracker } = await import('./bulk-judge.js');
+    const { runBulkPreview } = await import('./bulk-preview.js');
+    const { externalHostOf, BULK_HALT_REASONS } = await import('./bulk-ledger.js');
+    const { dataStoreColumns } = await import('./bulk-plan.js');
+    const { fireBeforeRunGate, reportMeteredCost } = await import('./metered-request.js');
+    const { checkPersistentBudget } = await import('./session-budget.js');
+    const { getActiveProvider } = await import('./llm-client.js');
+    const { detectSecretInContent } = await import('../tools/builtin/http.js');
+    const capture = (err: Error): void => { void import('./error-reporting.js').then(({ captureError }) => captureError(err)).catch(() => {}); };
+    const clientFor = await this.bulkClientFactory();
+    const apiStore = this.engine.getApiStore();
+    const secretStore = this.engine.getSecretStore();
+    const dataStore = this.engine.getDataStore();
+    const history = this.engine.getRunHistory();
+    const run = ledger.getRunForPreview(runId);
+    const host = run ? externalHostOf(run.targetSystem) : null;
+    const cost = host === null ? undefined : apiStore?.getByHostname(host)?.cost;
+    let outcome: Awaited<ReturnType<typeof runBulkJudge>>;
+    try {
+      outcome = await runBulkJudge(runId, {
+        ledger,
+        signal,
+        readTargets: host === null ? undefined : () => runBulkPreview(runId, {
+          ledger,
+          signal,
+          costPerCallUsd: cost?.model === 'per_call' ? cost.rate_usd : undefined,
+          clientFor: (r, listQuery) => clientFor(r.contractJson, listQuery),
+        }),
+        resolveModel: (tier) => resolveJudgeModel(this.engine.getUserConfig(), tier, this.engine.client, getActiveProvider()),
+        gate: (tier) => fireBeforeRunGate(this.engine, tier),
+        report: (gateRunId, usd, tier) => reportMeteredCost(this.engine, gateRunId, usd, tier),
+        bookSpend: (entry) => history?.recordBulkJudgeCost(entry),
+        budgetAllows: () => checkPersistentBudget().allowed,
+        scanSecret: detectSecretInContent,
+        maskVault: (text) => secretStore ? secretStore.maskSecrets(text) : text,
+        columns: (collection) => {
+          if (!dataStore) return null;
+          try {
+            return dataStoreColumns(dataStore, collection);
+          } catch {
+            return null;
+          }
+        },
+        captureError: capture,
+      });
+    } catch (err: unknown) {
+      // A judge that threw (the ledger, SQLite) would leave its run planned and unhalted with no
+      // trigger left. Halted, the owner can start it again. Reported by class only: the original
+      // error may carry a target's text (PRD bulk-loop §3.1, error classes).
+      capture(judgeErrorForTracker(err));
+      ledger.haltPreview(runId, BULK_HALT_REASONS.unavailable);
+      const reason = ledger.getStatus(runId)?.haltReason;
+      this.recordAndNotify(task, reason ? `Bulk judge halted: ${reason}.` : 'Bulk judge stopped.', false);
+      return;
+    }
+    if (outcome.status === 'pending') {
+      // The owner's stop, not a deadline or shutdown: see `executeBulkPreview`.
+      if (signal.aborted && ownerStopped()) {
+        ledger.haltPreview(runId, BULK_HALT_REASONS.stoppedByOwner);
+        this.#recordRun(this.engine.getTaskManager(), task.id, 'Bulk judge stopped on your instruction.', 'stopped');
         return;
       }
       this.#recordRun(this.engine.getTaskManager(), task.id, outcome.summary, 'success');

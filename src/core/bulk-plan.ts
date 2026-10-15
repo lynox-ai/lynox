@@ -263,6 +263,61 @@ export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAcc
   }));
 }
 
+/** A data-store collection a bulk run can address: one single-column unique key, not a subject. */
+export function dataStoreColumns(store: DataStore, collection: string): {
+  info: NonNullable<ReturnType<DataStore['getCollectionInfo']>>;
+  keyCol: string;
+  colDefs: Map<string, NonNullable<ReturnType<DataStore['getCollectionInfo']>>['columns'][number]>;
+} {
+  const info = store.getCollectionInfo(collection);
+  if (!info) throw new BulkSourceError('The target collection does not exist.');
+  if (!info.uniqueKey || info.uniqueKey.length !== 1) {
+    throw new BulkSourceError('The target collection needs a single-column unique key to address its rows.');
+  }
+  const keyCol = info.uniqueKey[0]!;
+  const colDefs = new Map(info.columns.map((c) => [c.name, c]));
+  if (colDefs.get(keyCol)!.type === 'subject') {
+    throw new BulkSourceError('The target collection is keyed on a subject column, which a dry run cannot resolve without writing.');
+  }
+  return { info, keyCol, colDefs };
+}
+
+/**
+ * The named fields of an after-state as the collection stores them, or why they cannot be:
+ * `unknown_column`, `subject_column`, `bad_value`, or `bad_key` for a key that would be nulled
+ * or changed. The one mapping both a plan and a judge's verdict go through (PRD
+ * bulk-loop §3.1) — a verdict merged any other way would skip these checks.
+ */
+export function mapToColumns(
+  after: unknown,
+  colDefs: ReturnType<typeof dataStoreColumns>['colDefs'],
+  keyCol: string,
+  key: string,
+): { planned: Record<string, unknown> } | { invalid: 'unknown_column' | 'subject_column' | 'bad_value' | 'bad_key' } {
+  if (after === null || typeof after !== 'object' || Array.isArray(after)) return { invalid: 'bad_value' };
+  const planned: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(after as Record<string, unknown>)) {
+    const col = colDefs.get(field);
+    if (!col) return { invalid: 'unknown_column' };
+    if (col.type === 'subject') return { invalid: 'subject_column' };
+    // An empty CSV cell means "no value" for a typed column; only text keeps ''.
+    const absent = value === null || value === undefined || (value === '' && col.type !== 'string');
+    if (absent) {
+      // Nulling the key would plan a row that no longer answers to its key.
+      if (field === keyCol) return { invalid: 'bad_key' };
+      planned[field] = null;
+      continue;
+    }
+    try {
+      planned[field] = coercePlainColumnValue(value, col);
+    } catch {
+      return { invalid: 'bad_value' };
+    }
+    if (field === keyCol && String(planned[field]) !== key) return { invalid: 'bad_key' };
+  }
+  return { planned };
+}
+
 /**
  * Plan data-store targets in one collection. The collection needs a single-column
  * unique key; `target` is that key's value. The after-state is the FULL row the rule
@@ -271,17 +326,8 @@ export function planWorkspace(source: readonly SourceRow[], access: WorkspaceAcc
  * one an apply writes.
  */
 export function planDataStore(source: readonly SourceRow[], store: DataStore, collection: string): PlannedTarget[] {
-  const info = store.getCollectionInfo(collection);
-  if (!info) throw new BulkSourceError('The target collection does not exist.');
-  if (!info.uniqueKey || info.uniqueKey.length !== 1) {
-    throw new BulkSourceError('The target collection needs a single-column unique key to address its rows.');
-  }
-  const keyCol = info.uniqueKey[0]!;
-  const colDefs = new Map(info.columns.map((c) => [c.name, c]));
+  const { info, keyCol, colDefs } = dataStoreColumns(store, collection);
   const keyDef = colDefs.get(keyCol)!;
-  if (keyDef.type === 'subject') {
-    throw new BulkSourceError('The target collection is keyed on a subject column, which a dry run cannot resolve without writing.');
-  }
 
   // The key as the column stores it, so "12" and "12.0" on a number key are one
   // target, not two plans for the same row.
@@ -311,30 +357,9 @@ export function planDataStore(source: readonly SourceRow[], store: DataStore, co
   const budget = new ByteBudget();
   return chargeKeys(budget, keyed.map(({ row, stored, key }): PlannedTarget => {
     if (key === null) return { key: row.target, invalid: 'bad_key' };
-    const after = row.after;
-    if (after === null || typeof after !== 'object' || Array.isArray(after)) {
-      return { key, invalid: 'bad_value' };
-    }
-    const planned: Record<string, unknown> = {};
-    for (const [field, value] of Object.entries(after as Record<string, unknown>)) {
-      const col = colDefs.get(field);
-      if (!col) return { key, invalid: 'unknown_column' };
-      if (col.type === 'subject') return { key, invalid: 'subject_column' };
-      // An empty CSV cell means "no value" for a typed column; only text keeps ''.
-      const absent = value === null || value === undefined || (value === '' && col.type !== 'string');
-      if (absent) {
-        // Nulling the key would plan a row that no longer answers to its key.
-        if (field === keyCol) return { key, invalid: 'bad_key' };
-        planned[field] = null;
-        continue;
-      }
-      try {
-        planned[field] = coercePlainColumnValue(value, col);
-      } catch {
-        return { key, invalid: 'bad_value' };
-      }
-      if (field === keyCol && String(planned[field]) !== key) return { key, invalid: 'bad_key' };
-    }
+    const mapped = mapToColumns(row.after, colDefs, keyCol, key);
+    if ('invalid' in mapped) return { key, invalid: mapped.invalid };
+    const planned = mapped.planned;
     const existing = beforeByKey.get(key);
     const before: BeforeImage = existing ? { absent: false, value: existing } : { absent: true };
     const full: Record<string, unknown> = existing

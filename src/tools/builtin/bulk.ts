@@ -6,7 +6,9 @@ import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
   parseSourceText, planDataStore, planWorkspace, readBulkImage, resolveBulkFilePath, rowsToSource,
+  dataStoreColumns,
 } from '../../core/bulk-plan.js';
+import { judgeTemplate, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -29,6 +31,7 @@ interface BulkPlanInput {
   source_filter?: Record<string, unknown> | undefined;
   source_list?: unknown;
   atomic?: boolean | undefined;
+  judge?: unknown;
 }
 
 interface BulkStatusInput {
@@ -58,6 +61,10 @@ function formatStatus(s: BulkRunStatus): string {
     lines.push('effect_field: the after-state sets a field whose value sets off an effect at the provider — ' +
       'an email to a customer, a payment, or a change of someone\'s access or data. A bulk run never writes ' +
       'such a field: leave it out, or make that change in the provider\'s own interface.');
+  }
+  if (s.judge !== null) {
+    lines.push(`A model (${s.judge.tier} tier) decides each target's new values with the run's rule: ` +
+      `${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
   }
   // Model spend exists only on a run with a judge; every other run would print "$0" here.
   if (s.costUsd > 0 || s.costCapUsd !== null) {
@@ -109,7 +116,7 @@ function queryAllRows(agent: IAgent, collection: string, filter: Record<string, 
 
 /** Record a run whose targets come from a list on the host (PRD bulk-loop §3.2): nothing
  *  is read here — the list is read once the user starts the run. */
-function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger): string {
+function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judgeInput: unknown): string {
   if (input.target_system !== 'http') throw new BulkSourceError('source_list needs target_system "http".');
   // Said, not dropped: a planner who gave one expects it to narrow or shape the run.
   const unused = (['source_filter', 'source_format', 'target_collection'] as const).filter((k) => input[k] !== undefined && input[k] !== null);
@@ -117,9 +124,19 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger): stri
   const host = input.target_host === undefined ? null : canonicalHost(input.target_host);
   if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
   if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
-  const source = parseListSource(host, input.source_list, input.write_method ?? 'PATCH', detectSecretInContent);
+  let listInput = input.source_list;
+  let judge: JudgeRule | undefined;
+  if (judgeInput !== undefined) {
+    const raw = typeof listInput === 'object' && listInput !== null ? listInput as Record<string, unknown> : {};
+    if (raw['after'] !== undefined) throw new BulkSourceError('With judge, source_list takes no "after": the model decides each target\'s values.');
+    const idField = typeof raw['id_field'] === 'string' ? raw['id_field'] : 'id';
+    judge = normalizeJudgeRule(judgeInput, { idField });
+    // Every listed element is planned with the rule's template — its fields F, null — until its verdict.
+    listInput = { ...raw, after: judgeTemplate(judge) };
+  }
+  const source = parseListSource(host, listInput, input.write_method ?? 'PATCH', detectSecretInContent);
   const out = ledger.recordExternalListPlan({
-    createdBy: agent.currentThreadId, principal: agent.principal, host, source, readContract: listReadContract(host, source),
+    createdBy: agent.currentThreadId, principal: agent.principal, host, source, readContract: listReadContract(host, source), judge,
   });
   if (!out.ok) {
     return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -127,11 +144,26 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger): stri
   return [
     'List dry run recorded — nothing was sent, read or written. Nothing is read until the user starts it outside this chat.',
     formatStatus(out.status),
+    ...(judge ? [JUDGE_NOTE] : []),
     'Once started, the engine reads the list page by page with the host\'s stored API credential and stops, so the user sees how many targets it holds. ' +
       'Each target is read only after the user starts the run a second time; bulk_status shows phase previewed when that is done. ' +
       'What the list and the targets hold is in the run\'s ledger for the user to review; it is not shown to you.',
   ].join('\n');
 }
+
+/** The column types a verdict field of each schema type is written into without loss
+ *  (`coercePlainColumnValue`): text into a number or true/false column could not be read back. */
+const JUDGE_COLUMN_TYPES: Record<string, readonly string[]> = {
+  string: ['string', 'date', 'json'],
+  number: ['number', 'string', 'json'],
+  integer: ['number', 'string', 'json'],
+  boolean: ['boolean', 'string', 'json'],
+};
+
+/** What a planner is told about a judged run. Counts and rules only — never a verdict. */
+const JUDGE_NOTE = 'With judge, no model is called until the user starts the run outside this chat and sets a spend limit for it. ' +
+  'Then a model decides each target\'s new values with your rule, one target at a time, without tools. ' +
+  'The user reviews every verdict before anything is written.';
 
 export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
   // Writes only the ledger — but recording a run also drops the oldest unapproved
@@ -148,7 +180,9 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       'The list is read only after the user starts the run, with the host\'s stored API credential; what it holds is never shown to you. ' +
       'Elements can be missed when the list changes while it is read, and the number of targets is known only once it is read. ' +
       'You get back counts only. The user reviews the per-target before/after and approves the run outside this chat — you cannot apply it, and there is no screen or button for it you could point them to. ' +
-      'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole.',
+      'atomic: true when the targets only make sense together — the run is then written whole or rolled back, and can only be undone whole. ' +
+      'judge: instead of giving each target\'s new values, give a rule and the fields it decides; a model then decides the values per target, after the user started the run with a spend limit. ' +
+      'With judge, only each source row\'s target is read (no "after"), and target_system must be "data_store" or "http".',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -173,6 +207,16 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           required: ['path', 'after'],
         },
         atomic: { type: 'boolean', description: 'Write all targets or none (default false: targets are independent).' },
+        judge: {
+          type: 'object',
+          description: 'A rule a model applies to each target instead of a given "after".',
+          properties: {
+            rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
+            schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
+            tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Model tier. Default fast.' },
+          },
+          required: ['rule', 'schema'],
+        },
       },
       required: ['target_system'],
     },
@@ -183,7 +227,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
     try {
       const sources = [input.source_file, input.source_collection, input.source_list].filter((v) => v !== undefined).length;
       if (sources !== 1) throw new BulkSourceError('Give exactly one of source_file, source_collection or source_list.');
-      if (input.source_list !== undefined) return planList(input, agent, ledger);
+      if (input.source_list !== undefined) return planList(input, agent, ledger, input.judge);
+      if (input.judge !== undefined && input.target_system === 'workspace') {
+        // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
+        throw new BulkSourceError('judge needs target_system "data_store" or "http": a workspace file has no fields to decide.');
+      }
+      if (input.judge !== undefined && input.atomic === true) throw new BulkSourceError('A run with judge cannot be atomic.');
       let rows: Record<string, unknown>[];
       if (input.source_file !== undefined) {
         const path = resolveBulkFilePath(input.source_file);
@@ -202,10 +251,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       } else {
         rows = queryAllRows(agent, input.source_collection!, input.source_filter);
       }
-      const source = rowsToSource(rows);
+      // With a judge, a row names only its target: the model decides the values.
+      const source = input.judge === undefined ? rowsToSource(rows) : rowsToSource(rows).map((r) => ({ target: r.target, after: {} }));
 
       let targets: PlannedTarget[];
       let scope: string;
+      let judge: JudgeRule | undefined;
       if (input.target_system === 'workspace') {
         targets = planWorkspace(source, {
           resolve: resolveBulkFilePath,
@@ -216,19 +267,41 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         const store = agent.toolContext.dataStore;
         if (!store) throw new BulkSourceError('The data store is not available.');
         if (!input.target_collection) throw new BulkSourceError('target_system "data_store" needs target_collection.');
-        targets = planDataStore(source, store, input.target_collection);
+        if (input.judge !== undefined) {
+          const { keyCol, colDefs } = dataStoreColumns(store, input.target_collection);
+          judge = normalizeJudgeRule(input.judge, { idField: keyCol });
+          for (const f of Object.keys(judge.schema.properties)) {
+            const col = colDefs.get(f);
+            if (!col) throw new BulkSourceError(`judge.schema names ${f}, which is not a column of the target collection.`);
+            if (col.type === 'subject') throw new BulkSourceError(`judge.schema names ${f}, a subject column, which a run cannot set.`);
+            // Refused here, before any call is paid: a verdict the column cannot take would make
+            // every target invalid after its call.
+            const fieldType = judge.schema.properties[f]!.type;
+            if (!(JUDGE_COLUMN_TYPES[fieldType] ?? []).includes(col.type)) {
+              throw new BulkSourceError(`judge.schema gives ${f} the type ${fieldType}, which its ${col.type} column does not take.`);
+            }
+          }
+          const template = judgeTemplate(judge);
+          // A verdict replaces F on an existing row; a row that is not there has nothing to judge.
+          targets = planDataStore(source, store, input.target_collection).map((t): PlannedTarget =>
+            'invalid' in t ? t : t.before.absent ? { key: t.key, invalid: 'not_found' } : { key: t.key, before: t.before, after: template });
+        } else {
+          targets = planDataStore(source, store, input.target_collection);
+        }
         scope = `data_store:${input.target_collection}`;
       } else if (input.target_system === 'http') {
         const host = input.target_host === undefined ? null : canonicalHost(input.target_host);
         if (host === null) throw new BulkSourceError('target_system "http" needs target_host: a plain host name such as api.example.com.');
         // An external host has no transaction to roll back into (PRD §3.4).
         if (input.atomic === true) throw new BulkSourceError('target_system "http" cannot be atomic: an external host has no rollback.');
-        const external = planExternal(source, host, detectSecretInContent);
+        if (input.judge !== undefined) judge = normalizeJudgeRule(input.judge);
+        const template = judge ? judgeTemplate(judge) : null;
+        const external = planExternal(template ? source.map((r) => ({ target: r.target, after: template })) : source, host, detectSecretInContent);
         const keys = external.filter((t) => !('invalid' in t)).map((t) => t.key);
         const method = input.write_method ?? 'PATCH';
         if (!(BULK_WRITE_METHODS as readonly string[]).includes(method)) throw new BulkSourceError('write_method must be PATCH, PUT or POST.');
         const out = ledger.recordExternalPlan({
-          createdBy: agent.currentThreadId, principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method),
+          createdBy: agent.currentThreadId, principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method), judge,
         });
         if (!out.ok) {
           return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -238,6 +311,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
             ? 'External dry run recorded — nothing was sent or written. Nothing is read either until the user starts it outside this chat.'
             : 'Dry run recorded — nothing was written, and no target was valid, so there is nothing to read.',
           formatStatus(out.status),
+          ...(judge ? [JUDGE_NOTE] : []),
           'Once the user has started it, the engine reads each target in the background and bulk_status shows phase previewed when it is done. ' +
             'The before- and after-state of each target is then in the run\'s ledger for the user to review; it is not shown to you. ' +
             'Only the user can start and approve it, outside this chat.',
@@ -250,10 +324,12 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         createdBy: agent.currentThreadId, principal: agent.principal, targetSystem: input.target_system, scope, targets,
         targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
         atomic: input.atomic === true,
+        judge,
       });
       return [
         'Dry run recorded — nothing was written to any target.',
         formatStatus(status),
+        ...(judge ? [JUDGE_NOTE] : []),
         'The before- and after-state of each target is in the run\'s ledger for the user to review; it is not shown to you. ' +
           'Only the user can approve and apply it, outside this chat; bulk_status shows how far it got.',
       ].join('\n');

@@ -26,6 +26,8 @@ import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
+import { judgeAfterBound, type JudgeRule } from './bulk-judge-rule.js';
+import type { ModelTier } from '../types/index.js';
 
 /** Local target systems a run can plan and write. An external run's system is
  *  `http:<host>` ({@link BulkLedger.recordExternalPlan}); it is planned and previewed,
@@ -103,7 +105,14 @@ export type BulkInvalidReason =
   /** the element's address would lie outside the list's path */
   | 'list_item_outside_list'
   /** the target read at the element's address is not the element that was listed */
-  | 'list_item_mismatch';
+  | 'list_item_mismatch'
+  // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
+  /** the target's current state holds something shaped like a credential, so it is not sent to a model */
+  | 'secret_in_before'
+  /** the model's reply was cut off before its verdict was complete */
+  | 'cut_off'
+  /** the model's verdict did not fit the rule's schema */
+  | 'verdict_invalid';
 
 export interface BulkRunStatus {
   id: string;
@@ -157,6 +166,10 @@ export interface BulkRunStatus {
   /** The most this run may spend on model calls, set by the owner at the start of a run
    *  with a judge; null when none was set. */
   costCapUsd: number | null;
+  /** A run whose after-states a model decides (`bulk_judge`, PRD bulk-loop §3.1): its tier and
+   *  how many targets have no verdict yet. Null on every other run. Counts only — the rule's
+   *  text is the owner's, shown by the owner's route, never in a status. */
+  judge: { tier: ModelTier; unjudged: number } | null;
 }
 
 export interface BulkListStatus {
@@ -208,6 +221,12 @@ export const BULK_HALT_REASONS = {
   listTooLarge: 'the list is longer, or larger, than a bulk run may hold',
   listNoProgress: 'a full page of the list held no target not seen before',
   listFormWithdrawn: 'the list\'s path is no longer one a bulk run may read',
+  // A run with a judge (`bulk_judge`, PRD bulk-loop §3.1):
+  superseded: 'the owner started another run with a judge in its place',
+  costCap: 'the run reached the model spend limit set at its start',
+  spendLimit: 'the daily or monthly spending limit is reached',
+  creditRefused: 'the model call was refused: no credit, or the control plane could not be reached',
+  judgeModel: 'no model the operator allows can judge this run',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
@@ -237,6 +256,38 @@ export const BULK_APPROVAL_MAX_MS = 24 * 60 * 60_000;
  *  approve. */
 export const BULK_MAX_PREVIEWED_RUNS = 10;
 
+/** How long a started, unapproved judged run is kept (PRD bulk-loop §3.1): its
+ *  before-images were sent to a model and are held encrypted until the owner approves the run or
+ *  this runs out. */
+export const BULK_JUDGED_RETENTION_MS = 30 * 24 * 60 * 60_000;
+/** A run never approved: still before its approval, or ended there — replaced by another
+ *  judged start, or planned under an access that ended. */
+const UNAPPROVED_JUDGED = `(phase IN ('planned','previewed')
+  OR (phase = 'aborted' AND halt_reason IN ('${BULK_HALT_REASONS.superseded}', '${BULK_HALT_REASONS.mandateEnded}')))`;
+
+/** A spend limit as the start takes it: finite, above zero, in whole cents: spend shown
+ *  rounded down beside a limit with a fraction of a cent would read an overrun limit as below it. */
+export function isWholeCents(usd: number): boolean {
+  if (!Number.isFinite(usd) || usd <= 0) return false;
+  const cents = usd * 100;
+  return Math.abs(cents - Math.round(cents)) < 1e-6;
+}
+
+/** A judged run as its judge reads it. Not model-facing. */
+export interface BulkJudgeRun {
+  id: string;
+  kind: BulkRunKind;
+  targetSystem: string;
+  targetCollection: string | null;
+  phase: BulkPhase;
+  haltReason: string | null;
+  rule: JudgeRule;
+  costUsd: number;
+  costCapUsd: number | null;
+  /** The run's list is still to be read: the judge does not run yet. */
+  listPending: boolean;
+}
+
 export type TargetDiff =
   | { kind: 'none' }
   /** One hunk: lines [from, from+removed.length) of before become `added`. Common
@@ -257,6 +308,10 @@ export interface PreviewTarget {
   before: BeforeImage | null;
   after: unknown;
   diff: TargetDiff;
+  /** How many fields the write changes — the number the owner checks a judged run by (PRD
+   *  bulk-loop §4). A text value counts as one. Null for a judged run's target
+   *  that has no verdict yet: its after-state is not decided. */
+  changedFields: number | null;
   error: string | null;
 }
 
@@ -268,6 +323,7 @@ interface RunRow {
   contract_json: string | null; created_by: string | null; principal: string | null; mandate_id: string | null;
   list_source: string | null; list_state: ListState | null; list_page: number; list_calls: number; list_bytes: number;
   cost_usd: number; cost_cap_usd: number | null;
+  judge_rule: string | null; judge_rule_hash: string | null; judge_started_at: string | null;
 }
 
 /** Where the read of a run's list stands: `pending` while it is read, `done` once its targets
@@ -551,7 +607,15 @@ export class BulkLedger {
     /** The data-store collection the run writes; null for workspace runs. */
     targetCollection?: string | null | undefined;
     atomic?: boolean | undefined;
+    /** A rule a model applies per target (`bulk_judge`, PRD bulk-loop §3.1). The run then lands
+     *  `planned` and halted until the owner starts it, every target planned with
+     *  {@link judgeTemplate} as its after-state until its verdict; a data-store run only. */
+    judge?: JudgeRule | undefined;
   }): BulkRunStatus {
+    if (params.judge !== undefined && params.targetSystem !== 'data_store') {
+      // A workspace target is text, not fields: a verdict over F has nothing to replace in it.
+      throw new Error('A judged bulk run needs a data-store or an external target system.');
+    }
     // Key uniqueness lives here, not in the schema: `target_key` is stored encrypted
     // (see engine-db v13), so no index could enforce it.
     const seen = new Set<string>();
@@ -565,10 +629,11 @@ export class BulkLedger {
     for (const t of params.targets) if (!('invalid' in t)) undoKinds.add(undoFor(t.before));
     const runUndo: UndoKind | 'mixed' = undoKinds.size === 1 ? [...undoKinds][0]! : undoKinds.size === 0 ? 'none' : 'mixed';
 
+    const judged = params.judge !== undefined;
     const insertRun = db.prepare(
       `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, target_collection,
-         principal, mandate_id)
-       VALUES (?, ?, ?, ?, ?, 'previewed', ?, ?, ?, ?, ?)`,
+         principal, mandate_id, halt_reason, judge_rule, judge_rule_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const insertTarget = db.prepare(
       `INSERT INTO bulk_targets (run_id, seq, target_key, change, undo, before, after_planned, error)
@@ -579,8 +644,13 @@ export class BulkLedger {
         // Keyed: a plain hash over (key, after) pairs would let a copy of the file confirm
         // guessed keys — the very values `target_key` is encrypted to protect.
         id, params.createdBy ?? null, this.engineDb.keyedHash(rulePairs(params.targetSystem, params.scope, params.targets)),
-        params.targetSystem, runUndo, params.targets.length, params.atomic === true ? 1 : 0, params.targetCollection ?? null,
+        params.targetSystem, runUndo,
+        // A judged run is read as planned, and waits for the owner's start: its calls cost money.
+        judged ? 'planned' : 'previewed',
+        params.targets.length, params.atomic === true ? 1 : 0, params.targetCollection ?? null,
         ...planner(params.principal),
+        judged ? BULK_HALT_REASONS.awaitingStart : null,
+        ...this.judgeColumns(params.judge),
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -589,13 +659,21 @@ export class BulkLedger {
           return;
         }
         insertTarget.run(
-          id, seq, key, classifyChange(t.before, t.after), undoFor(t.before),
+          // Until its verdict, a judged target's change is not known: `update`, as an unread one.
+          id, seq, key, judged ? 'update' : classifyChange(t.before, t.after), undoFor(t.before),
           this.engineDb.enc(JSON.stringify(t.before)), this.engineDb.enc(JSON.stringify(t.after ?? null)), null,
         );
       });
       this.pruneUnapproved();
     })();
     return this.getStatus(id)!;
+  }
+
+  /** The two judge columns of a new run: the rule encrypted, and its keyed hash. */
+  private judgeColumns(judge: JudgeRule | undefined): [string | null, string | null] {
+    if (judge === undefined) return [null, null];
+    const text = canonicalJson(judge);
+    return [this.engineDb.enc(text), this.engineDb.keyedHash(['bulk-judge-rule-v1', text])];
   }
 
   /**
@@ -606,9 +684,16 @@ export class BulkLedger {
    */
   private pruneUnapproved(): void {
     const db = this.engineDb.getDb();
+    // A run whose judge was started holds paid verdicts: not dropped for a newer plan (PRD
+    // bulk-loop §3.1) — its end is the owner's start of another one (superseded, which then
+    // joins this set) or the retention sweep. "Started" is the limit being set, not spend
+    // above zero: a run whose first call is in flight has spent nothing yet.
+    const prunable = `kind = 'apply' AND (
+         (phase IN ('previewed','planned') AND NOT (judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL))
+         OR (phase = 'aborted' AND halt_reason = '${BULK_HALT_REASONS.superseded}'))`;
     const doomed = db.prepare(
-      `SELECT id FROM bulk_runs WHERE phase IN ('previewed','planned') AND kind = 'apply' AND id NOT IN (
-         SELECT id FROM bulk_runs WHERE phase IN ('previewed','planned') AND kind = 'apply'
+      `SELECT id FROM bulk_runs WHERE ${prunable} AND id NOT IN (
+         SELECT id FROM bulk_runs WHERE ${prunable}
          ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
     ).all(BULK_MAX_PREVIEWED_RUNS) as { id: string }[];
     const triggers = new TriggerStore(this.engineDb);
@@ -636,6 +721,8 @@ export class BulkLedger {
     host: string;
     targets: readonly ExternalPlanned[];
     contract: CapabilityContract;
+    /** A rule a model applies per target; the targets are planned with its template. */
+    judge?: JudgeRule | undefined;
   }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
     const seen = new Set<string>();
     for (const t of params.targets) {
@@ -657,8 +744,8 @@ export class BulkLedger {
       if (reading.n > 0) return false;
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
-           principal, mandate_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+           principal, mandate_id, judge_rule, judge_rule_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id, params.createdBy ?? null,
         this.engineDb.keyedHash(rulePairs(targetSystem, params.host, params.targets)),
@@ -669,6 +756,7 @@ export class BulkLedger {
         // is what the model can make; a request with the host's credential is not.
         valid ? BULK_HALT_REASONS.awaitingStart : null,
         ...planner(params.principal),
+        ...this.judgeColumns(params.judge),
       );
       params.targets.forEach((t, seq) => {
         const key = this.engineDb.enc(t.key);
@@ -700,6 +788,8 @@ export class BulkLedger {
     host: string;
     source: BulkListSource;
     readContract: CapabilityContract;
+    /** A rule a model applies per listed target; `source.after` is then its template. */
+    judge?: JudgeRule | undefined;
   }): { ok: true; status: BulkRunStatus } | { ok: false; reason: 'external_in_progress' } {
     const db = this.engineDb.getDb();
     const id = randomUUID();
@@ -712,8 +802,8 @@ export class BulkLedger {
       if (reading.n > 0) return false;
       db.prepare(
         `INSERT INTO bulk_runs (id, created_by, rule_hash, target_system, undo, phase, targets_total, atomic, contract_json, halt_reason,
-           principal, mandate_id, list_source, list_state)
-         VALUES (?, ?, ?, ?, 'restorable', 'planned', 0, 0, ?, ?, ?, ?, ?, 'pending')`,
+           principal, mandate_id, list_source, list_state, judge_rule, judge_rule_hash)
+         VALUES (?, ?, ?, ?, 'restorable', 'planned', 0, 0, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       ).run(
         id, params.createdBy ?? null,
         // Until the list is read there are no (key, after) pairs: the rule is the source itself.
@@ -721,6 +811,7 @@ export class BulkLedger {
         this.engineDb.keyedHash(['bulk-list-rule-v1', targetSystem, sourceJson]),
         targetSystem, JSON.stringify(params.readContract), BULK_HALT_REASONS.awaitingStart,
         ...planner(params.principal), this.engineDb.enc(sourceJson),
+        ...this.judgeColumns(params.judge),
       );
       this.pruneUnapproved();
       return true;
@@ -737,7 +828,12 @@ export class BulkLedger {
   listStartChecksum(runId: string): string | null {
     const run = this.runRow(runId);
     if (!run || run.list_state !== 'pending' || run.list_source === null) return null;
-    return this.engineDb.keyedHash(['bulk-list-start-v1', run.target_system, this.engineDb.dec(run.list_source), run.contract_json ?? '']);
+    // A judged list's start also binds its rule: the owner who starts the list read starts the
+    // run whose rule they were shown (PRD bulk-loop §3.1).
+    return this.engineDb.keyedHash([
+      'bulk-list-start-v1', run.target_system, this.engineDb.dec(run.list_source), run.contract_json ?? '',
+      ...(run.judge_rule_hash !== null ? ['judge', run.judge_rule_hash] : []),
+    ]);
   }
 
   /** A run whose list is being read, or null. */
@@ -801,7 +897,12 @@ export class BulkLedger {
       });
       const total = run.targets_total + fresh.length;
       const valid = known.size;
-      if (total > BULK_MAX_TARGETS || valid * Buffer.byteLength(afterText, 'utf8') > BULK_MAX_TOTAL_BYTES) {
+      // A judged run's after-state is decided later: what each target may take is the verdict's
+      // byte bound, not the template's size — so the cap cannot fail after calls were paid.
+      const perTarget = run.judge_rule !== null
+        ? judgeAfterBound(this.judgeRuleOf(run).schema)
+        : Buffer.byteLength(afterText, 'utf8');
+      if (total > BULK_MAX_TARGETS || valid * perTarget > BULK_MAX_TOTAL_BYTES) {
         return { ok: false, reason: 'too_large' };
       }
       const insert = db.prepare(
@@ -856,12 +957,14 @@ export class BulkLedger {
     })();
   }
 
-  private armPreviewTrigger(runId: string, now: number): string {
+  /** The read phase's trigger (`bulkPreviewTriggerId`): `bulk_preview`, or `bulk_judge` for a
+   *  judged run past its list — never both in one run at once. */
+  private armPreviewTrigger(runId: string, now: number, effect: 'bulk_preview' | 'bulk_judge' = 'bulk_preview'): string {
     return new TriggerStore(this.engineDb).armBulkEffect({
       runId,
-      effect: 'bulk_preview',
+      effect,
       // Engine text only: a trigger title is listed to the model by task_list.
-      title: `Bulk preview ${runId}`,
+      title: effect === 'bulk_judge' ? `Bulk judge ${runId}` : `Bulk preview ${runId}`,
       nextRunAt: new Date(now).toISOString(),
     });
   }
@@ -930,23 +1033,29 @@ export class BulkLedger {
    */
   getPreview(runId: string, opts: { offset?: number | undefined; limit?: number | undefined } = {}): PreviewTarget[] {
     const rows = this.engineDb.getDb().prepare(
-      `SELECT seq, target_key, change, undo, before, after_planned, error FROM bulk_targets
+      `SELECT seq, target_key, change, undo, before, after_planned, error, judged_at FROM bulk_targets
        WHERE run_id = ? ORDER BY seq LIMIT ? OFFSET ?`,
     ).all(runId, Math.max(1, Math.min(opts.limit ?? 500, 500)), Math.max(0, opts.offset ?? 0)) as {
       seq: number; target_key: string; change: BulkChange; undo: UndoKind | null;
-      before: string | null; after_planned: string | null; error: string | null;
+      before: string | null; after_planned: string | null; error: string | null; judged_at: string | null;
     }[];
-    const external = externalHostOf(this.runRow(runId)?.target_system ?? '') !== null;
+    const run = this.runRow(runId);
+    const external = externalHostOf(run?.target_system ?? '') !== null;
+    const judged = (run?.judge_rule ?? null) !== null;
     return rows.map((r) => {
       const before = r.before === null ? null : JSON.parse(this.engineDb.dec(r.before)) as BeforeImage;
-      const after: unknown = r.after_planned === null ? null : JSON.parse(this.engineDb.dec(r.after_planned));
+      // A judged target without its verdict holds the template (every field null), not a plan:
+      // shown as no after-state, never as a write that empties every field.
+      const undecided = judged && r.judged_at === null && r.change !== 'invalid';
+      const after: unknown = undecided || r.after_planned === null ? null : JSON.parse(this.engineDb.dec(r.after_planned));
       const prior = before !== null && !before.absent ? before.value : null;
       const sentUnchanged = external && prior !== null && typeof prior === 'object' && after !== null && typeof after === 'object'
         ? Object.keys(after).sort().filter((f) => canonicalJson((prior as Record<string, unknown>)[f]) === canonicalJson((after as Record<string, unknown>)[f]))
         : undefined;
+      const diff: TargetDiff = before === null || undecided ? { kind: 'none' } : diffTarget(before, after);
       return {
-        seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after,
-        diff: before === null ? { kind: 'none' } : diffTarget(before, after),
+        seq: r.seq, key: this.engineDb.dec(r.target_key), change: r.change, undo: r.undo, before, after, diff,
+        changedFields: undecided ? null : diff.kind === 'none' ? 0 : diff.kind === 'text' ? 1 : diff.fields.length,
         error: r.error,
         ...(sentUnchanged !== undefined ? { sentUnchanged } : {}),
       };
@@ -980,7 +1089,18 @@ export class BulkLedger {
       list: this.listStatus(row),
       costUsd: row.cost_usd,
       costCapUsd: row.cost_cap_usd,
+      judge: row.judge_rule === null ? null : {
+        tier: this.judgeRuleOf(row).tier,
+        unjudged: (db.prepare(
+          `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND judged_at IS NULL`,
+        ).get(row.id) as { n: number }).n,
+      },
     };
+  }
+
+  /** A judged run's rule, decrypted. Only for a row whose `judge_rule` is set. */
+  private judgeRuleOf(row: Pick<RunRow, 'judge_rule'>): JudgeRule {
+    return JSON.parse(this.engineDb.dec(row.judge_rule!)) as JudgeRule;
   }
 
   /** What a list run's owner is shown before starting it: the source as the planner gave it. */
@@ -1034,6 +1154,11 @@ export class BulkLedger {
       if (run!.list_source !== null) {
         yield 'list';
         yield db.dec(run!.list_source);
+      }
+      // Only on a judged run: the owner approves the verdicts and the rule that made them.
+      if (run!.judge_rule_hash !== null) {
+        yield 'judge';
+        yield run!.judge_rule_hash;
       }
       for (const r of rows) {
         yield String(r.seq);
@@ -1442,8 +1567,11 @@ export class BulkLedger {
     const row = db.prepare('SELECT after_planned FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { after_planned: string | null } | undefined;
     if (!row || row.after_planned === null) return false;
     const before: BeforeImage = { absent: false, value: read.before };
-    // The before-image holds exactly F, so comparing whole images compares over F (§6 P4).
-    const change = classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
+    // The before-image holds exactly F, so comparing whole images compares over F (§6 P4). A
+    // judged target's after-state is its template until the verdict: its change is not known.
+    const change = (this.runRow(runId)?.judge_rule ?? null) !== null
+      ? 'update'
+      : classifyChange(before, JSON.parse(this.engineDb.dec(row.after_planned)) as unknown);
     return db.prepare(`UPDATE bulk_targets SET before = ?, change = ?, error = NULL WHERE ${guard}`)
       .run(this.engineDb.enc(JSON.stringify(before)), change, runId, seq, runId).changes === 1;
   }
@@ -1494,8 +1622,9 @@ export class BulkLedger {
       return db.prepare(
         // A run whose list is still being read has none of its targets yet: an empty unread set
         // says nothing about it.
+        // A judged run is previewed by its verdicts (`finishJudge`), not by its reads.
         `UPDATE bulk_runs SET phase = 'previewed', undo = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL
-           AND (list_state IS NULL OR list_state = 'done')`,
+           AND (list_state IS NULL OR list_state = 'done') AND judge_rule IS NULL`,
       ).run(valid.n > 0 ? 'restorable' : 'none', runId).changes === 1;
     })();
   }
@@ -1504,35 +1633,241 @@ export class BulkLedger {
    * Start a planned run's read, or start it again after a halt (plan §6 Q5): the owner's
    * route clears the halt — the start gate included — and the preview trigger is due at
    * once. Targets already read stay read.
+   *
+   * A judged run (PRD bulk-loop §3.1) is started with the hash of the rule the owner was
+   * shown and a spend limit in whole cents, and arms `bulk_judge`. A list's first start reads
+   * only the list and takes neither: a list can end empty, and an empty run must not have
+   * replaced anything. Starting a judged run ends the instance's other started, unapproved judged
+   * run — only when the start names it (`supersedes`), so nothing paid is replaced silently.
    */
-  resumePreview(runId: string, now: number = Date.now(), opts: { listChecksum?: string | undefined } = {}):
-    { ok: true; status: BulkRunStatus; triggerId: string } | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' } {
+  resumePreview(runId: string, now: number = Date.now(), opts: {
+    listChecksum?: string | undefined;
+    judgeRuleHash?: string | undefined;
+    costCapUsd?: number | undefined;
+    supersedes?: string | undefined;
+  } = {}):
+    { ok: true; status: BulkRunStatus; triggerId: string }
+    | { ok: false; reason: 'not_found' | 'wrong_phase' | 'external_in_progress' | 'checksum' | 'cost_cap' | 'not_at_this_start' }
+    | { ok: false; reason: 'supersede_required'; supersedable: { id: string; costUsd: number } } {
     const run = this.runRow(runId);
     if (!run) return { ok: false, reason: 'not_found' };
     if (run.phase !== 'planned' || run.halt_reason === null) return { ok: false, reason: 'wrong_phase' };
+    const listPending = run.list_state === 'pending';
     // Starting a list read sends requests with the host's credential to an address the planner
     // chose: the owner presents the checksum of the list they were shown (PRD bulk-loop §3.2).
-    if (run.list_state === 'pending' && (opts.listChecksum === undefined || opts.listChecksum !== this.listStartChecksum(runId))) {
+    if (listPending && (opts.listChecksum === undefined || opts.listChecksum !== this.listStartChecksum(runId))) {
       return { ok: false, reason: 'checksum' };
+    }
+    const judging = run.judge_rule !== null && !listPending;
+    if (run.judge_rule !== null && listPending && (opts.costCapUsd !== undefined || opts.supersedes !== undefined)) {
+      return { ok: false, reason: 'not_at_this_start' };
+    }
+    if (judging) {
+      if (opts.judgeRuleHash === undefined || opts.judgeRuleHash !== run.judge_rule_hash) return { ok: false, reason: 'checksum' };
+      if (opts.costCapUsd === undefined ? run.cost_cap_usd === null : !isWholeCents(opts.costCapUsd)) return { ok: false, reason: 'cost_cap' };
     }
     const db = this.engineDb.getDb();
     let triggerId = '';
-    const moved = db.transaction((): 'moved' | 'busy' | 'gone' => {
+    let supersedable: { id: string; costUsd: number } | null = null;
+    const moved = db.transaction((): 'moved' | 'busy' | 'gone' | 'supersede' => {
       // The ordering rule is decided here, where a read starts — plans land halted, so
       // at plan time nothing is reading yet.
       const reading = db.prepare(
         `SELECT COUNT(*) AS n FROM bulk_runs WHERE phase = 'planned' AND halt_reason IS NULL
            AND target_system LIKE 'http:%' AND id != ?`,
       ).get(runId) as { n: number };
-      if (reading.n > 0) return 'busy';
-      const res = db.prepare(`UPDATE bulk_runs SET halt_reason = NULL WHERE id = ? AND phase = 'planned' AND halt_reason IS NOT NULL`).run(runId);
+      if (run.target_system.startsWith('http:') && reading.n > 0) return 'busy';
+      if (judging) {
+        // At most one started, unapproved judged run per instance (PRD bulk-loop §3.1).
+        const other = db.prepare(
+          `SELECT id, cost_usd FROM bulk_runs WHERE judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL
+             AND phase IN ('planned','previewed') AND id != ? ORDER BY created_at LIMIT 1`,
+        ).get(runId) as { id: string; cost_usd: number } | undefined;
+        if (other !== undefined) {
+          if (opts.supersedes !== other.id) {
+            supersedable = { id: other.id, costUsd: other.cost_usd };
+            return 'supersede';
+          }
+          const ended = db.prepare(
+            `UPDATE bulk_runs SET phase = 'aborted', halt_reason = ? WHERE id = ? AND phase IN ('planned','previewed')`,
+          ).run(BULK_HALT_REASONS.superseded, other.id);
+          // Its read phase's trigger goes with it: it would fire into an aborted run, maybe with a
+          // paid call in flight.
+          if (ended.changes === 1) new TriggerStore(this.engineDb).remove(bulkPreviewTriggerId(other.id));
+        }
+      }
+      const res = db.prepare(
+        `UPDATE bulk_runs SET halt_reason = NULL, cost_cap_usd = COALESCE(?, cost_cap_usd),
+           judge_started_at = CASE WHEN ? = 1 THEN COALESCE(judge_started_at, ?) ELSE judge_started_at END
+         WHERE id = ? AND phase = 'planned' AND halt_reason IS NOT NULL`,
+      ).run(judging ? opts.costCapUsd ?? null : null, judging ? 1 : 0, new Date(now).toISOString(), runId);
       if (res.changes !== 1) return 'gone';
-      triggerId = this.armPreviewTrigger(runId, now);
+      triggerId = this.armPreviewTrigger(runId, now, judging ? 'bulk_judge' : 'bulk_preview');
       return 'moved';
-    })();
+    // IMMEDIATE: the write lock before the check, so two starts at once cannot both see no other
+    // judged run and both start.
+    }).immediate();
     if (moved === 'busy') return { ok: false, reason: 'external_in_progress' };
+    if (moved === 'supersede') return { ok: false, reason: 'supersede_required', supersedable: supersedable! };
     if (moved !== 'moved') return { ok: false, reason: 'wrong_phase' };
     return { ok: true, status: this.getStatus(runId)!, triggerId };
+  }
+
+  // ── The judge's reads and writes (bulk-judge.ts) ────────────────────────────
+
+  /** A judged run as its judge reads it, or null. Not model-facing: it holds the rule. */
+  getJudgeRun(runId: string): BulkJudgeRun | null {
+    const r = this.runRow(runId);
+    if (!r || r.judge_rule === null) return null;
+    return {
+      id: r.id, kind: r.kind, targetSystem: r.target_system, targetCollection: r.target_collection, phase: r.phase,
+      haltReason: r.halt_reason, rule: this.judgeRuleOf(r), costUsd: r.cost_usd, costCapUsd: r.cost_cap_usd,
+      listPending: r.list_state === 'pending',
+    };
+  }
+
+  /** The rule of a judged run as its owner is shown it before the start, or null. Owner-only:
+   *  the text and schema are the planner's words, the hash is what the start presents. */
+  getJudgeRuleForOwner(runId: string): (JudgeRule & { hash: string }) | null {
+    const r = this.runRow(runId);
+    if (!r || r.judge_rule === null || r.judge_rule_hash === null) return null;
+    return { ...this.judgeRuleOf(r), hash: r.judge_rule_hash };
+  }
+
+  /** Targets read and without a verdict, in seq order. */
+  listUnjudged(runId: string): number[] {
+    return (this.engineDb.getDb().prepare(
+      `SELECT seq FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND before IS NOT NULL AND judged_at IS NULL ORDER BY seq`,
+    ).all(runId) as { seq: number }[]).map((r) => r.seq);
+  }
+
+  /**
+   * Take the claim on one target before its call is paid for: atomically, only when the target
+   * has no verdict and no live claim, and only while the run is planned and not halted. A claim
+   * older than `staleMs` belongs to a loop that died. Two loops after a lost lease thus pay for
+   * a target at most once per expired claim (PRD bulk-loop §3.1).
+   */
+  claimJudge(runId: string, seq: number, token: string, now: number, staleMs: number): boolean {
+    return this.engineDb.getDb().prepare(
+      `UPDATE bulk_targets SET judge_claimed_at = ?, judge_claim_token = ?
+       WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL AND judged_at IS NULL
+         AND (judge_claimed_at IS NULL OR judge_claimed_at < ?)
+         AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL)`,
+    ).run(new Date(now).toISOString(), token, runId, seq, new Date(now - staleMs).toISOString(), runId).changes === 1;
+  }
+
+  /** Give a claim back, when the call ends without a verdict (a halt, a wait): the next tick
+   *  tries the target again at once instead of after the claim expires. */
+  releaseJudgeClaim(runId: string, seq: number, token: string): void {
+    this.engineDb.getDb().prepare(
+      `UPDATE bulk_targets SET judge_claimed_at = NULL, judge_claim_token = NULL
+       WHERE run_id = ? AND seq = ? AND judge_claim_token = ? AND judged_at IS NULL`,
+    ).run(runId, seq, token);
+  }
+
+  /** A target the judge is to decide: its key and before-image. */
+  loadJudgeTarget(runId: string, seq: number): { key: string; before: BeforeImage } | null {
+    const r = this.engineDb.getDb().prepare(
+      `SELECT target_key, before FROM bulk_targets WHERE run_id = ? AND seq = ? AND change != 'invalid' AND before IS NOT NULL`,
+    ).get(runId, seq) as { target_key: string; before: string } | undefined;
+    if (!r) return null;
+    return { key: this.engineDb.dec(r.target_key), before: JSON.parse(this.engineDb.dec(r.before)) as BeforeImage };
+  }
+
+  /** Book a paid call into the run's spend. No phase guard: what was paid stays counted,
+   *  whether its verdict is recorded or not. */
+  addJudgeCost(runId: string, usd: number): void {
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    this.engineDb.getDb().prepare('UPDATE bulk_runs SET cost_usd = cost_usd + ? WHERE id = ?').run(usd, runId);
+  }
+
+  /**
+   * Record one target's verdict — its after-state and the change that follows — or why it has
+   * none. Only under the claim's own token (compare-and-set), only while the target has no
+   * verdict, and only while the run is `planned`: a loop whose claim expired cannot overwrite
+   * the verdict of the loop that took it over, and a verdict in flight does not write into a run
+   * that was superseded (PRD bulk-loop §3.1).
+   */
+  recordJudgement(runId: string, seq: number, token: string, verdict: { after: unknown } | { invalid: BulkInvalidReason }, now: number = Date.now()): boolean {
+    const db = this.engineDb.getDb();
+    const guard = `run_id = ? AND seq = ? AND judge_claim_token = ? AND judged_at IS NULL AND change != 'invalid'
+      AND EXISTS (SELECT 1 FROM bulk_runs WHERE id = ? AND phase = 'planned')`;
+    const at = new Date(now).toISOString();
+    return db.transaction((): boolean => {
+      if ('invalid' in verdict) {
+        return db.prepare(
+          `UPDATE bulk_targets SET change = 'invalid', undo = NULL, error = ?, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+        ).run(verdict.invalid, at, runId, seq, token, runId).changes === 1;
+      }
+      const row = db.prepare('SELECT before FROM bulk_targets WHERE run_id = ? AND seq = ?').get(runId, seq) as { before: string | null } | undefined;
+      if (!row || row.before === null) return false;
+      const before = JSON.parse(this.engineDb.dec(row.before)) as BeforeImage;
+      return db.prepare(
+        `UPDATE bulk_targets SET after_planned = ?, change = ?, error = NULL, judged_at = ?, judge_claimed_at = NULL, judge_claim_token = NULL WHERE ${guard}`,
+      ).run(this.engineDb.enc(JSON.stringify(verdict.after)), classifyChange(before, verdict.after), at, runId, seq, token, runId).changes === 1;
+    })();
+  }
+
+  /**
+   * Close a judged run: `planned` → `previewed` once every target is read and has a verdict, and
+   * its `rule_hash` rewritten over the verdicts — what `approve` and `resume` compare. False when
+   * the run is not ready, or moved on.
+   */
+  finishJudge(runId: string): boolean {
+    const db = this.engineDb.getDb();
+    return db.transaction((): boolean => {
+      const run = db.prepare(
+        `SELECT * FROM bulk_runs WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL AND judge_rule IS NOT NULL
+           AND (list_state IS NULL OR list_state = 'done')`,
+      ).get(runId) as RunRow | undefined;
+      if (!run) return false;
+      const open = db.prepare(
+        `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change != 'invalid' AND (before IS NULL OR judged_at IS NULL)`,
+      ).get(runId) as { n: number };
+      if (open.n > 0) return false;
+      const rows = db.prepare(`SELECT target_key, change, after_planned, error FROM bulk_targets WHERE run_id = ? ORDER BY seq`)
+        .all(runId) as { target_key: string; change: BulkChange; after_planned: string | null; error: string | null }[];
+      const targets = rows.map((r) => {
+        const key = this.engineDb.dec(r.target_key);
+        return r.change === 'invalid' || r.after_planned === null
+          ? { key, invalid: (r.error ?? 'verdict_invalid') as BulkInvalidReason }
+          : { key, after: JSON.parse(this.engineDb.dec(r.after_planned)) as unknown };
+      });
+      const host = externalHostOf(run.target_system);
+      const scope = host ?? `data_store:${run.target_collection ?? ''}`;
+      const valid = targets.some((t) => !('invalid' in t));
+      return db.prepare(
+        `UPDATE bulk_runs SET phase = 'previewed', undo = ?, rule_hash = ? WHERE id = ? AND phase = 'planned' AND halt_reason IS NULL`,
+      ).run(valid ? run.undo === 'none' ? 'restorable' : run.undo : 'none', this.engineDb.keyedHash(rulePairs(run.target_system, scope, targets)), runId).changes === 1;
+    })();
+  }
+
+  /**
+   * Delete every started, unapproved judged run whose start is more than `maxAgeMs` ago, with
+   * its read phase's trigger and its encrypted before-images (PRD bulk-loop §3.1).
+   * A started judged run is kept from the prune; this is what bounds how long it is kept. That
+   * includes a run ended before approval — replaced by another start, or planned under an access
+   * that has ended — whose before-images went to a model all the same; never a run that was
+   * approved (an atomic run aborted while writing keeps its own reason). Run at boot and every 5
+   * minutes by the engine's bulk sweep, not only when a plan is recorded. Returns how many went.
+   */
+  expireStaleJudgedRuns(now: number = Date.now(), maxAgeMs: number = BULK_JUDGED_RETENTION_MS): number {
+    const db = this.engineDb.getDb();
+    const doomed = db.prepare(
+      `SELECT id FROM bulk_runs WHERE judge_rule IS NOT NULL AND cost_cap_usd IS NOT NULL AND ${UNAPPROVED_JUDGED}
+         AND judge_started_at IS NOT NULL AND judge_started_at < ?`,
+    ).all(new Date(now - maxAgeMs).toISOString()) as { id: string }[];
+    if (doomed.length === 0) return 0;
+    const triggers = new TriggerStore(this.engineDb);
+    const drop = db.prepare(`DELETE FROM bulk_runs WHERE id = ? AND ${UNAPPROVED_JUDGED}`);
+    let n = 0;
+    db.transaction(() => {
+      for (const { id } of doomed) {
+        triggers.remove(bulkPreviewTriggerId(id));
+        n += drop.run(id).changes;
+      }
+    })();
+    return n;
   }
 
   // ── The effect loop's reads and writes (bulk-apply.ts) ──────────────────────
