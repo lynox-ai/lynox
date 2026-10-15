@@ -304,6 +304,9 @@ describe('gate-record — which gates a diff requires', () => {
     expect(missing.ok).toBe(false);
     // Matched on text unique to the MISSING branch — both errors mention `approved:`.
     expect(missing.errors.join(' ')).toContain('needs an `approved:` line');
+    // The diff OWES the gate here, so the message says so, not that the record only names it.
+    expect(missing.errors.join(' ')).toContain('this diff changes a binding customer text');
+    expect(missing.errors.join(' ')).not.toContain('NAMES');
 
     const undated = evaluate({
       body: record({ gates: 'legal', approved: 'rafael', delta: '', mutations: '' }),

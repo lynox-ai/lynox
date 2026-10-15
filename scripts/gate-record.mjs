@@ -981,8 +981,8 @@ function evaluateRecord({ body, head, files, author, visibility = 'unknown' }) {
     } else if (/^pending/i.test(approved)) {
       // An explicit "not yet" is the true answer while the wording is unseen, so it blocks the
       // merge. Before this branch it passed: the line only had to carry an ISO date, and
-      // `approved: PENDING — … agreed 2026-10-15` carries one. The rule, its trigger and its wording
-      // are the private repo's. `/^pending/i` has no `\b` on purpose: with one,
+      // `approved: PENDING — … agreed 2026-10-15` carries one. Rule and trigger are ported from the
+      // private repo's gate record. `/^pending/i` has no `\b` on purpose: with one,
       // `pendingapproval rafael 2026-10-02` finds no boundary and its date reads as a sign-off.
       errors.push(
         `\`approved: ${approved}\` says the sign-off is PENDING — which is the honest answer, so this`,
