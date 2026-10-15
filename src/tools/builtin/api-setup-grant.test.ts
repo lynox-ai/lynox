@@ -2082,6 +2082,19 @@ describe('the renewal fires on expiry and not otherwise', () => {
     expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('MINTED_BY_RENEWAL');
   });
 
+  // An expired token is not renewed over plain http: the renewal runs fetch_token, which
+  // refuses a token endpoint that is not https, and the stored token stays. The test
+  // above is the control: the same profile over https renews.
+  it('does not renew against a token endpoint that is not https', async () => {
+    const past = Date.now() - 1000;
+    const { calls, vault } = await callApi(
+      crmProfile({ auth: { ...crmProfile().auth!, oauth: { ...crmProfile().auth!.oauth!, token_url: 'http://api.crm.example/oauth/token', token_expires_at: past } } }),
+      SEED,
+    );
+    expect(calls.some((u) => u.includes('/oauth/token')), `a token POST went out over http; calls were ${calls.join(', ')}`).toBe(false);
+    expect(vault.peek('CRM_API_ACCESS_TOKEN')).toBe('OLD_TOKEN');
+  });
+
   it('leaves a token alone while it is outside the buffer', async () => {
     const farFuture = Date.now() + 24 * 60 * 60 * 1000;
     const { calls, vault } = await callApi(

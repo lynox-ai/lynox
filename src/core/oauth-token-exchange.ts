@@ -137,6 +137,12 @@ export interface VettedTokenEndpoint {
 export interface TokenEndpointRefused {
   /** The hostname, or the raw value when it does not parse. Never the full URL. */
   readonly host: string;
+  /**
+   * `not-https`: the endpoint is not `https:`, and the client secret would go out in
+   * clear. Checked first, whatever the host: an accepted or allowlisted host does not
+   * make plain http safe. `not-vetted`: the host is neither allowlisted nor accepted.
+   */
+  readonly reason: 'not-https' | 'not-vetted';
 }
 
 /**
@@ -153,12 +159,15 @@ export function vetTokenEndpoint(
   url: string,
   ack: CustomEndpointAck | undefined,
 ): VettedTokenEndpoint | TokenEndpointRefused {
-  if (isVettedEgressHost(url) || isEndpointAcked(ack, url)) {
+  let parsed: URL | null = null;
+  try { parsed = new URL(url); } catch { /* refused below as not vetted */ }
+  if (parsed !== null && parsed.protocol !== 'https:') {
+    return { host: parsed.hostname, reason: 'not-https' };
+  }
+  if (parsed !== null && (isVettedEgressHost(url) || isEndpointAcked(ack, url))) {
     return { url, ack } as VettedTokenEndpoint;
   }
-  let host = url;
-  try { host = new URL(url).hostname; } catch { /* keep the raw value */ }
-  return { host };
+  return { host: parsed?.hostname ?? url, reason: 'not-vetted' };
 }
 
 /** `true` when `vetTokenEndpoint` refused. */
@@ -207,7 +216,9 @@ export async function exchangeToken(
   if (isTokenEndpointRefused(stillVetted)) {
     return {
       ok: false,
-      message: `token exchange refused: ${stillVetted.host} is not a vetted endpoint for this profile.`,
+      message: stillVetted.reason === 'not-https'
+        ? `token exchange refused: the token endpoint on ${stillVetted.host} is not https, and the client secret would be sent in clear.`
+        : `token exchange refused: ${stillVetted.host} is not a vetted endpoint for this profile.`,
     };
   }
 

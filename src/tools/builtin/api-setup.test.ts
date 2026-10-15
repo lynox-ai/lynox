@@ -496,6 +496,21 @@ describe('api_setup tool', () => {
       expect(res).toContain('non-vetted sub-processor');
     });
 
+    // The client secret is posted to token_url: https only, like every stored credential.
+    it('refuses to save an oauth2 profile whose token_url is not https, and stores nothing', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
+      const res = await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'plain-token', base_url: 'https://api.openai.com/v1',
+        auth: { type: 'oauth2', vault_keys: ['PT_ID'], oauth: {
+          token_url: 'http://api.openai.com/oauth/token', grant_type: 'client_credentials',
+          client_id_key: 'PT_ID', client_secret_key: 'PT_SECRET',
+        } },
+      } }, agent);
+      expect(res).toContain('token_url: it must be an https:// URL');
+      expect(store.get('plain-token')).toBeUndefined();
+    });
+
     it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
@@ -3049,6 +3064,30 @@ describe('api_setup tool', () => {
 
       expect(result).toMatch(/session HTTP request limit/i);
       expect(fetchSpy).not.toHaveBeenCalled(); // blocked BEFORE the client_secret POST
+    });
+
+    // A profile saved before the https rule (or dropped into the apis dir) never passed
+    // the save check. The exchange refuses it, on an accepted host too, and posts nothing.
+    it('refuses fetch_token for a stored profile whose token_url is not https, even on an accepted host', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      }));
+      const ack = { accepted: true as const, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' };
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack, auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, token_url: 'http://shop.myshopify.com/admin/oauth/access_token' } } });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toContain('token_url is not https');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // Control: the same profile over https, with an empty vault, gets past the gate
+      // and stops at the missing credentials instead.
+      const control = new ApiStore();
+      control.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack });
+      const passed = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, createMockAgent(control, makeMockSecretStore({})));
+      expect(passed).toMatch(/missing the OAuth credentials/i);
     });
 
     // Runtime egress gate: a profile that entered the store WITHOUT the

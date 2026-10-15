@@ -1032,7 +1032,7 @@ describe('a save cannot take a profile off its built-in provider', () => {
 
   it.each([
     ['update', 'drops preset_id for its own OAuth app', { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: {
-      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_url: 'http://shop.local/token', scope: 'write_all',
+      client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', token_url: 'https://shop.local/token', scope: 'write_all',
     } }],
     ['update', 'names another provider', { type: 'oauth2', oauth: {
       client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' },
