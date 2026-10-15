@@ -1283,7 +1283,7 @@ describe('httpRequestTool', () => {
           const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent.';
           // The way out, by who asks: the owner sets up the profile, a run with no store cannot, a
           // mandate has the owner connect the provider first (it does not write to a connected
-          // account even with a profile, and a task it proposed is refused until then).
+          // account even with a profile, and a task it proposed would be refused when run until then).
           const SET_UP = ' To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
           const NO_STORE = ' This run has no api_profile store, so it cannot write there.';
           const AS_TASK = ' This session does not write there. Tell the owner which change you would make: the owner first connects bexio through that provider, and the change can then be proposed as a task (task_create) the owner approves.';
