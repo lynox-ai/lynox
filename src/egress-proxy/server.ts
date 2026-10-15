@@ -16,7 +16,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server as 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isIPv4 } from 'node:net';
 import { hostInSet, type CredentialRegistry, type DenialReason, type TunnelHandle } from './registry.js';
-import { ALLOWED_PORTS, credentialFromHeader, isCredential, parseAuthority, parseClientHello, parseRegistration, pickAddress } from './policy.js';
+import { ALLOWED_PORTS, credentialFromHeader, isCredential, isHelloRetryRequest, parseAuthority, parseClientHello, parseRegistration, pickAddress } from './policy.js';
 
 export interface ProxyLimits {
   /** Request head of the shell side, request line and headers. */
@@ -31,6 +31,8 @@ export interface ProxyLimits {
   tunnelsTotal: number;
   /** Connections to the shell listener at once, authenticated or not. */
   connectionsTotal: number;
+  /** A refused connection is closed this long after its answer, whether the client closes or not. */
+  replyLingerMs: number;
   /** Body of a registration request. */
   maxBodyBytes: number;
 }
@@ -43,6 +45,7 @@ export const DEFAULT_LIMITS: ProxyLimits = {
   tunnelsPerCred: 32,
   tunnelsTotal: 256,
   connectionsTotal: 512,
+  replyLingerMs: 1000,
   maxBodyBytes: 64 * 1024,
 };
 
@@ -69,10 +72,7 @@ const REASONS: Record<number, string> = {
 
 const AUTHENTICATE = 'Proxy-Authenticate: Basic realm="lynox-egress"\r\n';
 
-function reply(socket: Socket, code: number, extra = ''): void {
-  if (socket.destroyed) return;
-  socket.end(`HTTP/1.1 ${String(code)} ${REASONS[code] ?? ''}\r\n${extra}Content-Length: 0\r\nConnection: close\r\n\r\n`);
-}
+
 
 interface RequestHead {
   method: string;
@@ -114,6 +114,16 @@ export class ShellProxy {
     return this.open;
   }
 
+  /**
+   * Answer and close. The socket is closed after a short linger even if the client never
+   * closes its side, so refused connections do not hold the connection cap.
+   */
+  private reply(socket: Socket, code: number, extra = ''): void {
+    if (socket.destroyed) return;
+    socket.end(`HTTP/1.1 ${String(code)} ${REASONS[code] ?? ''}\r\n${extra}Content-Length: 0\r\nConnection: close\r\n\r\n`);
+    setTimeout(() => { socket.destroy(); }, this.limits.replyLingerMs).unref();
+  }
+
   private accept(socket: Socket): void {
     let buf = Buffer.alloc(0);
     socket.on('error', () => { /* the client went away; nothing to report */ });
@@ -122,10 +132,10 @@ export class ShellProxy {
       buf = Buffer.concat([buf, chunk]);
       const end = buf.indexOf('\r\n\r\n');
       if (end === -1) {
-        if (buf.length > this.limits.maxHeaderBytes) { clearTimeout(deadline); socket.off('data', onData); reply(socket, 431); }
+        if (buf.length > this.limits.maxHeaderBytes) { clearTimeout(deadline); socket.off('data', onData); this.reply(socket, 431); }
         return;
       }
-      if (end > this.limits.maxHeaderBytes) { clearTimeout(deadline); socket.off('data', onData); reply(socket, 431); return; }
+      if (end > this.limits.maxHeaderBytes) { clearTimeout(deadline); socket.off('data', onData); this.reply(socket, 431); return; }
       clearTimeout(deadline);
       socket.off('data', onData);
       socket.pause();
@@ -139,17 +149,17 @@ export class ShellProxy {
 
   private async handle(socket: Socket, rawHead: string, rest: Buffer): Promise<void> {
     const req = parseHead(rawHead);
-    if (req === null) { reply(socket, 400); return; }
+    if (req === null) { this.reply(socket, 400); return; }
 
     // 1. The credential, before anything about the request is looked at.
     const cred = credentialFromHeader(req.proxyAuthorization);
     const entry = cred === null ? null : this.deps.registry.lookup(cred);
-    if (cred === null || entry === null) { reply(socket, 407, AUTHENTICATE); return; }
+    if (cred === null || entry === null) { this.reply(socket, 407, AUTHENTICATE); return; }
     const tag = credTag(cred);
     const deny = (host: string, port: number, reason: DenialReason, detail = ''): void => {
       this.deps.registry.recordDenial(cred, host, port, reason);
       this.deps.log(`deny cred=${tag} host=${JSON.stringify(host.slice(0, 255))} port=${String(port)} why=${reason}${detail}`);
-      reply(socket, 403);
+      this.reply(socket, 403);
     };
 
     // Plain http is answered here rather than left to fail on the network, so the engine can
@@ -167,7 +177,7 @@ export class ShellProxy {
     const opening = this.opening.get(cred) ?? 0;
     if (this.open >= this.limits.tunnelsTotal || this.deps.registry.tunnelCount(cred) + opening >= this.limits.tunnelsPerCred) {
       this.deps.log(`busy cred=${tag} host=${host}`);
-      reply(socket, 503);
+      this.reply(socket, 503);
       return;
     }
     this.open++;
@@ -191,7 +201,7 @@ export class ShellProxy {
         } catch {
           this.deps.log(`unresolved cred=${tag} host=${host}`);
           this.open--;
-          reply(socket, 502);
+          this.reply(socket, 502);
           return;
         }
       }
@@ -224,52 +234,102 @@ export class ShellProxy {
     // The credential may have been revoked while the name was resolving.
     if (!this.deps.registry.attach(cred, handle)) {
       this.open--;
-      reply(client, 407, AUTHENTICATE);
+      this.reply(client, 407, AUTHENTICATE);
       return;
     }
     let established = false;
-    const up = this.deps.connect(ip, port);
+    let up: Socket;
+    try {
+      up = this.deps.connect(ip, port);
+    } catch {
+      this.reply(client, 502);
+      handle.close();
+      return;
+    }
     upstream = up;
     const connectTimer = setTimeout(() => {
-      if (!established) { reply(client, 504); handle.close(); }
+      if (!established) { this.reply(client, 504); handle.close(); }
     }, this.limits.connectTimeoutMs);
     up.on('error', () => {
       clearTimeout(connectTimer);
-      if (!established) reply(client, 502);
+      if (!established) this.reply(client, 502);
       handle.close();
     });
     client.on('close', () => { handle.close(); });
     up.on('close', () => { handle.close(); });
+    const refuse = (verdict: { why: DenialReason; name?: string }): void => {
+      this.deps.registry.recordDenial(cred, verdict.name ?? host, port, verdict.why);
+      this.deps.log(`deny cred=${tag} host=${host} port=${String(port)} why=${verdict.why}`);
+      handle.close();
+    };
+    const start = (): void => {
+      this.deps.log(`open cred=${tag} host=${host} ip=${ip} port=${String(port)}`);
+      client.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
+      up.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
+      client.pipe(up);
+      up.pipe(client);
+      client.resume();
+    };
     up.once('connect', () => {
       clearTimeout(connectTimer);
       if (closed) { up.destroy(); return; }
       established = true;
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      const start = (first: Buffer): void => {
-        this.deps.log(`open cred=${tag} host=${host} ip=${ip} port=${String(port)}`);
-        if (first.length > 0) up.write(first);
-        client.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
-        up.setTimeout(this.limits.idleTimeoutMs, () => { handle.close(); });
-        client.pipe(up);
-        up.pipe(client);
-        client.resume();
-      };
-      if (!checkName) { start(rest); return; }
-      this.readHello(client, host, rest, (verdict, hello) => {
+      if (!checkName) {
+        if (rest.length > 0) up.write(rest);
+        start();
+        return;
+      }
+      this.readHello(client, host, rest, false, (verdict, hello) => {
         if (closed) return;
-        if (verdict === null) { start(hello); return; }
-        this.deps.registry.recordDenial(cred, verdict.name ?? host, port, verdict.why);
-        this.deps.log(`deny cred=${tag} host=${host} port=${String(port)} why=${verdict.why}`);
-        handle.close();
+        if (verdict !== null) { refuse(verdict); return; }
+        up.write(hello);
+        // The client stays paused until the server has answered: a HelloRetryRequest makes
+        // the client send a second hello, and that one must name the same host.
+        this.readServerFirst(up, (retry, answer) => {
+          if (closed) return;
+          // A server that does not answer is not the client's doing: closed, not a denial.
+          if (retry === null) { handle.close(); return; }
+          client.write(answer);
+          if (!retry) { start(); return; }
+          this.readHello(client, host, Buffer.alloc(0), true, (again, hello2) => {
+            if (closed) return;
+            if (again !== null) { refuse(again); return; }
+            up.write(hello2);
+            start();
+          });
+        });
       });
     });
   }
 
+  /** The server's first bytes, and whether they are a HelloRetryRequest; `null` when none came in time. */
+  private readServerFirst(up: Socket, done: (retry: boolean | null, bytes: Buffer) => void): void {
+    let buf = Buffer.alloc(0);
+    let finished = false;
+    const finish = (retry: boolean | null): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      up.off('data', onData);
+      up.pause();
+      done(retry, buf);
+    };
+    const timer = setTimeout(() => { finish(null); }, this.limits.idleTimeoutMs);
+    const onData = (chunk: Buffer): void => {
+      buf = Buffer.concat([buf, chunk]);
+      const r = isHelloRetryRequest(buf);
+      if (r !== 'more') finish(r === 'yes');
+    };
+    up.on('data', onData);
+    up.resume();
+  }
+
   /**
-   * Read the client hello and hold it to the tunnel's name. Nothing reaches the upstream
+   * Read a client hello and hold it to the tunnel's name. Nothing reaches the upstream
    * before the verdict. `done(null, bytes)` passes the bytes read so far on.
    */
-  private readHello(client: Socket, host: string, first: Buffer, done: (refused: { why: DenialReason; name?: string } | null, bytes: Buffer) => void): void {
+  private readHello(client: Socket, host: string, first: Buffer, afterRetry: boolean, done: (refused: { why: DenialReason; name?: string } | null, bytes: Buffer) => void): void {
     let buf = first;
     let finished = false;
     const finish = (refused: { why: DenialReason; name?: string } | null): void => {
@@ -282,7 +342,7 @@ export class ShellProxy {
     };
     const timer = setTimeout(() => { finish({ why: 'hello-timeout' }); }, this.limits.headerTimeoutMs);
     const check = (): void => {
-      const r = parseClientHello(buf);
+      const r = parseClientHello(buf, afterRetry);
       if (r.state === 'more') return;
       if (r.state === 'bad') { finish({ why: 'bad-hello' }); return; }
       if (r.sni === null) { finish({ why: 'no-sni' }); return; }

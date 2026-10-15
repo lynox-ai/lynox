@@ -4,7 +4,7 @@ import { connect as tlsConnect } from 'node:tls';
 import type { Server as HttpServer } from 'node:http';
 import { MAX_EXEC_TIMEOUT_MS } from '../shell-sidecar/protocol.js';
 import { CredentialRegistry, DENIAL_REASONS, DENIAL_RETENTION_MS, MAX_CREDS, MAX_DENIED_HOST_CHARS, MAX_DENIALS_PER_CRED, MAX_TTL_S, type TunnelHandle } from './registry.js';
-import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
+import { MAX_HELLO_BYTES, credentialFromHeader, isExactHostname, isHelloRetryRequest, parseAuthority, parseClientHello, parseDenyIps, parseRegistration, pickAddress } from './policy.js';
 import { ShellProxy, bearerMatches, createAdminServer, type ProxyLimits } from './server.js';
 import { interfaceAddress, secretFromEnv } from './main.js';
 
@@ -21,7 +21,7 @@ const u24 = (n: number): Buffer => Buffer.from([(n >> 16) & 0xff, (n >> 8) & 0xf
  * A minimal TLS 1.2-shaped client hello. `names` go into one server_name extension (none:
  * no extension); `sniExtensions` repeats it; `records` splits the handshake into that many.
  */
-function hello(names: string[] | null, opts: { records?: number; sniExtensions?: number; padding?: number } = {}): Buffer {
+function hello(names: string[] | null, opts: { records?: number; sniExtensions?: number; padding?: number; extension?: number } = {}): Buffer {
   const exts: Buffer[] = [];
   if (names !== null) {
     const list = Buffer.concat(names.map((n) => Buffer.concat([Buffer.from([0]), u16(n.length), Buffer.from(n, 'latin1')])));
@@ -29,10 +29,11 @@ function hello(names: string[] | null, opts: { records?: number; sniExtensions?:
     for (let i = 0; i < (opts.sniExtensions ?? 1); i++) exts.push(Buffer.concat([u16(0), u16(data.length), data]));
   }
   if (opts.padding) exts.push(Buffer.concat([u16(21), u16(opts.padding), Buffer.alloc(opts.padding)]));
+  if (opts.extension !== undefined) exts.push(Buffer.concat([u16(opts.extension), u16(4), Buffer.alloc(4)]));
   const extBlock = Buffer.concat(exts);
   const body = Buffer.concat([
     Buffer.from([3, 3]), Buffer.alloc(32), Buffer.from([0]), u16(2), Buffer.from([0x13, 0x01]), Buffer.from([1, 0]),
-    ...(names === null && !opts.padding ? [] : [u16(extBlock.length), extBlock]),
+    ...(extBlock.length === 0 ? [] : [u16(extBlock.length), extBlock]),
   ]);
   const hs = Buffer.concat([Buffer.from([1]), u24(body.length), body]);
   const n = opts.records ?? 1;
@@ -44,6 +45,17 @@ function hello(names: string[] | null, opts: { records?: number; sniExtensions?:
   }
   return Buffer.concat(recs);
 }
+
+/** A plaintext ServerHello record; with `retry` its random marks it as a HelloRetryRequest. */
+function serverHello(retry: boolean): Buffer {
+  const random = retry ? Buffer.from('cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c', 'hex') : Buffer.alloc(32, 7);
+  const body = Buffer.concat([Buffer.from([3, 3]), random, Buffer.from([0]), Buffer.from([0x13, 0x01]), Buffer.from([0]), u16(0)]);
+  const hs = Buffer.concat([Buffer.from([2]), u24(body.length), body]);
+  return Buffer.concat([Buffer.from([22, 3, 3]), u16(hs.length), hs]);
+}
+
+/** The change_cipher_spec record a TLS 1.3 client may send before its second hello. */
+const CCS = Buffer.from([20, 3, 3, 0, 1, 1]);
 
 /** The first bytes a real `node:tls` client sends for `servername`. */
 function realHello(servername: string): Promise<Buffer> {
@@ -149,6 +161,52 @@ describe('policy', () => {
   });
 });
 
+describe('policy: TLS hellos', () => {
+  it('refuses a hello whose records are not all handshake records, or that is not a client hello', () => {
+    const two = hello(['a.example'], { records: 2 });
+    const firstLen = 5 + two.readUInt16BE(3);
+    const mixed = Buffer.from(two);
+    mixed[firstLen] = 23;
+    expect(parseClientHello(two)).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(mixed)).toEqual({ state: 'bad', error: 'not a TLS handshake' });
+    const notClient = Buffer.from(hello(['a.example']));
+    notClient[5] = 2;
+    expect(parseClientHello(notClient)).toEqual({ state: 'bad', error: 'not a client hello' });
+  });
+
+  it('refuses records that hold more than the one hello', () => {
+    const h = hello(['a.example']);
+    const extra = Buffer.from([1, 0, 0, 0]);
+    const rec = Buffer.concat([Buffer.from([22, 3, 1]), u16(h.length - 5 + extra.length), h.subarray(5), extra]);
+    expect(parseClientHello(rec)).toEqual({ state: 'bad', error: 'more than one handshake message' });
+  });
+
+  it('refuses a hello that carries an encrypted inner hello', () => {
+    expect(parseClientHello(hello(['a.example'], { extension: 0xfe0d }))).toEqual({ state: 'bad', error: 'encrypted client hello' });
+    expect(parseClientHello(hello(['a.example'], { extension: 0xffce }))).toEqual({ state: 'bad', error: 'encrypted client hello' });
+    expect(parseClientHello(hello(['a.example'], { extension: 0x002b }))).toEqual({ state: 'hello', sni: 'a.example' });
+  });
+
+  it('takes a change_cipher_spec record before a second hello only', () => {
+    const second = Buffer.concat([CCS, hello(['a.example'])]);
+    expect(parseClientHello(second, true)).toEqual({ state: 'hello', sni: 'a.example' });
+    expect(parseClientHello(second)).toEqual({ state: 'bad', error: 'not a TLS handshake' });
+    expect(parseClientHello(CCS.subarray(0, 4), true)).toEqual({ state: 'more' });
+    expect(parseClientHello(Buffer.from([20, 3, 3, 0, 2, 1, 1]), true).state).toBe('bad');
+  });
+
+  it('tells a HelloRetryRequest from a ServerHello and anything else', () => {
+    expect(isHelloRetryRequest(serverHello(true))).toBe('yes');
+    expect(isHelloRetryRequest(serverHello(false))).toBe('no');
+    expect(isHelloRetryRequest(serverHello(true).subarray(0, 20))).toBe('more');
+    expect(isHelloRetryRequest(Buffer.alloc(0))).toBe('more');
+    expect(isHelloRetryRequest(Buffer.from([21, 3, 3, 0, 2, 2, 40]))).toBe('no');
+    const notServer = Buffer.from(serverHello(true));
+    notServer[5] = 1;
+    expect(isHelloRetryRequest(notServer)).toBe('no');
+  });
+});
+
 describe('registry', () => {
   const clock = () => { const c = { t: 1_000_000, now: () => c.t }; return c; };
   const tunnel = (host: string) => { const t = { host, closed: 0, close: () => { t.closed++; } }; return t; };
@@ -209,7 +267,7 @@ describe('registry', () => {
     expect(d.closed).toBe(1);
   });
 
-  it('names every denial reason in a closed set; each one is produced by a shell-listener test below', () => {
+  it('names every denial reason in a closed set', () => {
     expect([...DENIAL_REASONS].sort()).toEqual(
       ['bad-hello', 'bad-target', 'hello-timeout', 'no-sni', 'not-in-set', 'plain-http', 'port', 'sni-mismatch', 'ssrf'],
     );
@@ -275,13 +333,21 @@ function listen(server: Server | HttpServer): Promise<number> {
   });
 }
 
-/** A TCP server standing in for the internet: echoes what it gets, prefixed. */
-async function origin(): Promise<{ port: number; received: () => string; sockets: Socket[] }> {
+/**
+ * A TCP server standing in for the internet: echoes what it gets, prefixed. With `firstAnswer`
+ * it answers the first bytes of each connection with those instead (a ServerHello, say).
+ */
+async function origin(firstAnswer?: Buffer): Promise<{ port: number; received: () => string; sockets: Socket[] }> {
   let got = '';
   const sockets: Socket[] = [];
   const server = createServer((s) => {
     sockets.push(s);
-    s.on('data', (d) => { got += d.toString('latin1'); s.write(`echo:${d.toString('latin1')}`); });
+    let answered = firstAnswer === undefined;
+    s.on('data', (d) => {
+      got += d.toString('latin1');
+      if (!answered) { answered = true; s.write(firstAnswer!); return; }
+      s.write(`echo:${d.toString('latin1')}`);
+    });
     s.on('error', () => { /* closed by the test */ });
   });
   closers.push(async () => { for (const s of sockets) s.destroy(); });
@@ -673,5 +739,125 @@ describe('contract: shell listener', () => {
     const unresolved = await shellRequest(r2, connectHead('gone.example:443'));
     expect(unresolved.head).toBe(fixed('502 Bad Gateway'));
     expect(unresolved.data()).toBe('');
+  });
+
+  it('holds the second hello after a HelloRetryRequest to the same name', async () => {
+    const o = await origin(serverHello(true));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const first = hello(['a.example']).toString('latin1');
+
+    const bad = await open(r);
+    await until(() => bad.data().length > 0);
+    expect(bad.data()).toBe(serverHello(true).toString('latin1'));
+    const badClosed = closedOf(bad.socket);
+    bad.socket.write(Buffer.concat([CCS, hello(['other.cdn.example'])]));
+    await until(badClosed);
+    expect(o.received()).toBe(first);
+
+    const good = await open(r);
+    await until(() => good.data().length > 0);
+    good.socket.write(Buffer.concat([CCS, hello(['a.example'])]));
+    await until(() => o.received().length === 2 * first.length + CCS.length + hello(['a.example']).length);
+    good.socket.write('after');
+    await until(() => o.received().endsWith('after'));
+    expect(r.registry.denials(CRED)?.map((d) => [d.host, d.reason])).toEqual([['other.cdn.example', 'sni-mismatch']]);
+  });
+
+  it('starts the tunnel when the server answers with a plain ServerHello', async () => {
+    const o = await origin(serverHello(false));
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await open(r);
+    await until(() => res.data().length > 0);
+    // Not a retry: what follows is not checked as a hello.
+    res.socket.write(hello(['other.cdn.example']));
+    await until(() => res.data().includes('echo:'));
+    expect(r.registry.denials(CRED)).toEqual([]);
+  });
+
+  it('closes the tunnel when the server does not answer the hello in time', async () => {
+    const silent = createServer((s) => { s.on('error', () => { /* closed by the test */ }); closers.push(async () => { s.destroy(); }); });
+    const port = await listen(silent);
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: port, limits: { idleTimeoutMs: 50 } });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await open(r);
+    await until(closedOf(res.socket));
+    expect(r.proxy.openTunnels).toBe(0);
+    expect(r.registry.denials(CRED)).toEqual([]);
+  });
+
+  it('refuses a hello with an encrypted inner hello', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port });
+    r.registry.put(CRED, reg(['a.example']));
+    const res = await shellRequest(r, connectHead('a.example:443'));
+    const closed = closedOf(res.socket);
+    res.socket.write(hello(['a.example'], { extension: 0xfe0d }));
+    await until(closed);
+    expect(o.received()).toBe('');
+    expect(r.registry.denials(CRED)?.map((d) => d.reason)).toEqual(['bad-hello']);
+  });
+
+  it('closes a refused connection after the linger even if the client keeps it open', async () => {
+    const r = await rig({ limits: { connectionsTotal: 1, replyLingerMs: 30 } });
+    const held = await shellRequest(r, connectHead('a.example:443', null));
+    expect(held.status).toBe(407);
+    await until(closedOf(held.socket));
+    expect((await shellRequest(r, connectHead('a.example:443', null))).status).toBe(407);
+  });
+
+  it('answers 502 and gives the slot back when opening the connection throws', async () => {
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, connect: () => { throw new Error('no socket'); } });
+    r.registry.put(CRED, reg(['a.example']));
+    expect((await shellRequest(r, connectHead('a.example:443'))).status).toBe(502);
+    expect(r.proxy.openTunnels).toBe(0);
+    expect(r.registry.tunnelCount(CRED)).toBe(0);
+  });
+
+  it('gives the slot back when a name does not resolve', async () => {
+    const r = await rig({ addresses: {}, limits: { tunnelsTotal: 1 } });
+    r.registry.put(CRED, reg(['gone.example', 'gone2.example']));
+    expect((await shellRequest(r, connectHead('gone.example:443'))).status).toBe(502);
+    expect(r.proxy.openTunnels).toBe(0);
+    expect((await shellRequest(r, connectHead('gone2.example:443'))).status).toBe(502);
+  });
+
+  it('opens nothing for a client that leaves while its name resolves', async () => {
+    const o = await origin();
+    const r = await rig({ addresses: { 'a.example': ['93.184.215.14'] }, originPort: o.port, lookupDelayMs: 40 });
+    r.registry.put(CRED, reg(['a.example']));
+    const s = connect({ host: '127.0.0.1', port: r.shellPort });
+    s.on('error', () => { /* closed by the test */ });
+    s.write(connectHead('a.example:443'));
+    await until(() => r.lookups.length === 1);
+    s.destroy();
+    await new Promise((x) => setTimeout(x, 80));
+    expect(r.connects).toEqual([]);
+    expect(r.proxy.openTunnels).toBe(0);
+  });
+
+  it('produces every reason in DENIAL_REASONS', async () => {
+    const r = await rig({
+      addresses: { 'a.example': ['93.184.215.14'], 'inward.example': ['10.0.0.1'] },
+      originPort: (await origin()).port, limits: { headerTimeoutMs: 50 },
+    });
+    r.registry.put(CRED, reg(['a.example', 'inward.example']));
+    const auth = `Proxy-Authorization: ${basic(CRED)}\r\n`;
+    await shellRequest(r, connectHead('b.example:443'));
+    await shellRequest(r, `GET http://a.example/ HTTP/1.1\r\n${auth}\r\n`);
+    await shellRequest(r, connectHead('a.example:22'));
+    await shellRequest(r, connectHead('[::1]:443'));
+    await shellRequest(r, connectHead('inward.example:443'));
+    for (const sni of [['b.example'], null, ['a.example', 'b.example']]) {
+      const res = await shellRequest(r, connectHead('a.example:443'));
+      const closed = closedOf(res.socket);
+      res.socket.write(hello(sni));
+      await until(closed);
+    }
+    const quiet = await shellRequest(r, connectHead('a.example:443'));
+    await until(closedOf(quiet.socket));
+    const produced = [...new Set(r.registry.denials(CRED)?.map((d) => d.reason))].sort();
+    expect(produced).toEqual([...DENIAL_REASONS].sort());
   });
 });

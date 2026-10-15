@@ -10,14 +10,17 @@
  *   4. every address the name resolves to is public and not on the deny list;
  *   5. the proxy connects to exactly the address it checked;
  *   6. with a set of names, the server name in the client's TLS hello must be that same
- *      name, so a tunnel opened for one name cannot ask a shared front end for another.
+ *      name — in the second hello too, when the server asks for one (HelloRetryRequest) —
+ *      and a hello that carries an encrypted inner hello (ECH) is refused, since the server
+ *      would route on the name inside it.
  *
  * What the client sends inside the encrypted session is not visible here. A front end that
- * routes on an encrypted Host header rather than on the server name can still be asked for
+ * routes on the encrypted Host header rather than on the server name can still be asked for
  * another of its sites through an allowed name; the proxy does not intercept TLS to see it.
  *
  * Plain http is not offered: its Host header and every later request on the connection
- * would have to be parsed and held to the name, and nothing in the shell needs it.
+ * would have to be parsed and held to the name. It is refused with its own reason, so a
+ * tool that tries it (a package mirror reached over http, say) is told to use https.
  */
 
 import { isIPv4, isIP } from 'node:net';
@@ -157,16 +160,26 @@ export type HelloResult =
   | { state: 'hello'; sni: string | null }
   | { state: 'bad'; error: string };
 
+/** Extensions that carry an encrypted inner hello: ECH, and the draft ESNI before it. */
+const ENCRYPTED_HELLO_EXTENSIONS: ReadonlySet<number> = new Set([0xfe0d, 0xffce]);
+
 /**
  * The server name of a TLS client hello at the start of `buf`. The hello may span several
  * handshake records; `more` asks for further bytes, up to MAX_HELLO_BYTES. `sni` is `null`
- * when the hello names no server, and lower-cased otherwise.
+ * when the hello names no server, and lower-cased otherwise. The records must hold the hello
+ * and nothing else. `afterRetry` allows the change_cipher_spec record a TLS 1.3 client may
+ * send before its second hello.
  */
-export function parseClientHello(buf: Buffer): HelloResult {
+export function parseClientHello(buf: Buffer, afterRetry = false): HelloResult {
   const hs: Buffer[] = [];
   let hsLen = 0;
   let off = 0;
   let need = -1;
+  if (afterRetry && buf.length > 0 && buf[0] === 20) {
+    if (buf.length < 6) return { state: 'more' };
+    if (buf.readUInt16BE(3) !== 1 || buf[5] !== 1) return { state: 'bad', error: 'bad change_cipher_spec' };
+    off = 6;
+  }
   while (need === -1 || hsLen < need) {
     if (off + 5 > buf.length) return buf.length >= MAX_HELLO_BYTES ? { state: 'bad', error: 'hello too large' } : { state: 'more' };
     if (buf[off] !== 22) return { state: 'bad', error: 'not a TLS handshake' };
@@ -183,6 +196,7 @@ export function parseClientHello(buf: Buffer): HelloResult {
       if (need > MAX_HELLO_BYTES) return { state: 'bad', error: 'hello too large' };
     }
   }
+  if (hsLen > need) return { state: 'bad', error: 'more than one handshake message' };
   const h = Buffer.concat(hs).subarray(4, need);
   try {
     let p = 2 + 32;
@@ -200,6 +214,7 @@ export function parseClientHello(buf: Buffer): HelloResult {
       const len = h.readUInt16BE(p + 2);
       const end = p + 4 + len;
       if (end > extEnd) return { state: 'bad', error: 'truncated extension' };
+      if (ENCRYPTED_HELLO_EXTENSIONS.has(type)) return { state: 'bad', error: 'encrypted client hello' };
       if (type === 0) {
         let q = p + 4 + 2;
         const listEnd = q + h.readUInt16BE(p + 4);
@@ -222,4 +237,21 @@ export function parseClientHello(buf: Buffer): HelloResult {
   } catch {
     return { state: 'bad', error: 'truncated hello' };
   }
+}
+
+/** The `random` of a ServerHello that is really a HelloRetryRequest (RFC 8446 §4.1.3). */
+const HELLO_RETRY_RANDOM = Buffer.from('cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c', 'hex');
+
+/**
+ * Whether the server's first bytes are a HelloRetryRequest, after which the client sends a
+ * second hello that must be checked too. Anything that is not a plaintext ServerHello is `no`.
+ */
+export function isHelloRetryRequest(buf: Buffer): 'yes' | 'no' | 'more' {
+  if (buf.length < 1) return 'more';
+  if (buf[0] !== 22) return 'no';
+  if (buf.length < 5) return 'more';
+  if (buf.readUInt16BE(3) < 4 + 2 + 32) return 'no';
+  if (buf.length < 5 + 4 + 2 + 32) return 'more';
+  if (buf[5] !== 2) return 'no';
+  return buf.subarray(5 + 4 + 2, 5 + 4 + 2 + 32).equals(HELLO_RETRY_RANDOM) ? 'yes' : 'no';
 }
