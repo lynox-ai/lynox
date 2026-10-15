@@ -1218,16 +1218,19 @@ describe('httpRequestTool', () => {
             testCtx.apiStore = store;
           }
           it.each([
-            ['a pasted token, a POST', withStoredBearer, 'POST'],
-            ['a pasted token, a DELETE', withStoredBearer, 'DELETE'],
-            ['an OAuth sign-in of its own, a POST', () => withProfile(undefined, 'https://api.bexio.com/2.0'), 'POST'],
-          ] as const)('refuses %s, and nothing is asked or sent', async (_label, setUp, method) => {
+            ['a pasted token, a POST', withStoredBearer, 'POST', '', {}],
+            ['a pasted token, a DELETE', withStoredBearer, 'DELETE', '', {}],
+            ['an OAuth sign-in of its own, a POST', () => withProfile(undefined, 'https://api.bexio.com/2.0'), 'POST', '', {}],
+            // A GET a server reads as a write is a write here too (`effectiveWriteMethod`).
+            ['a pasted token, a GET with a method override header', withStoredBearer, 'GET', '', { 'X-HTTP-Method-Override': 'DELETE' }],
+            ['a pasted token, a GET with _method in the query', withStoredBearer, 'GET', '?_method=DELETE', {}],
+          ] as const)('refuses %s, and nothing is asked or sent', async (_label, setUp, method, query, headers) => {
             await setUp();
             mockDnsPublic();
             const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
             vi.stubGlobal('fetch', fetchMock);
             const promptUser = vi.fn().mockResolvedValue('Allow');
-            const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method, ...(method === 'POST' ? { body: '{"name_1":"x"}' } : {}) }, makeAgent({ promptUser }));
+            const out = await visible({ url: `https://api.bexio.com/2.0/contact${query}`, method, headers: { ...headers }, ...(method === 'POST' ? { body: '{"name_1":"x"}' } : {}) }, makeAgent({ promptUser }));
             expect(out).toContain(REFUSED);
             expect(promptUser).not.toHaveBeenCalled();
             expect(fetchMock).not.toHaveBeenCalled();
@@ -1242,6 +1245,23 @@ describe('httpRequestTool', () => {
             const out = await visible({ url: 'https://api.bexio.com/2.0/contact', method: 'GET' }, makeAgent());
             expect(out).not.toContain('this write was not sent');
             expect(fetchMock).toHaveBeenCalledTimes(1);
+          });
+
+          // The profiles are looked up for a write only, and a lookup that fails fails the write.
+          // On `attachStoredCredential`, which (unlike `http_request`) asks the store nothing before.
+          it.each([[true, 'rejects'], [false, 'attaches']] as const)('a lookup that fails: write %s %s', async (write, outcome) => {
+            const { attachStoredCredential } = await import('./http.js');
+            const profile = {
+              id: 'shop', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'stub', auth: { type: 'bearer', vault_keys: ['SHOP_KEY'] },
+              custom_endpoint_ack: { accepted: true, hosts: ['api.shop.example'], accepted_at: '2026-10-15T00:00:00.000Z' },
+            };
+            const store = { getByHostname: () => profile, getHostConflict: () => undefined, get: () => { throw new Error('store unavailable'); } };
+            const headers: Record<string, string> = {};
+            const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
+              apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
+            });
+            if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
+            else expect(await attach).toBe(true);
           });
 
           it('control: the profile that goes through the provider is asked and sent', async () => {

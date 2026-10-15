@@ -1559,17 +1559,21 @@ async function attachEngineManagedAuth(
   const apiStore = toolContext?.apiStore;
   if (apiStore) stampResolvedConnection(url, apiStore);
   // A profile on a provider's API host that does not go through the provider: saved before
-  // `api_setup` refused one, or loaded from a file. Its writes are refused before anything is
-  // read or sent, with or without a vault: the provider's customer text and write question are
-  // about writes and a connection with write access. Its reads go on as before.
+  // `api_setup` refused one, or loaded from a file. Its writes are refused before its credential
+  // is read and before the write question, with or without a vault: the provider's customer text
+  // and write question are about writes and a connection with write access. Its reads go on as
+  // before. (A write that names a vault secret itself is asked about that secret first, in
+  // agent.ts, before this runs.) Looked up for a write only, and only the URL parse is caught:
+  // anything else that throws while the profiles are looked up fails the write rather than
+  // letting it through, and a read never looks.
   let astray: { profile: ApiProfile; provider: OAuthPreset } | undefined;
-  try {
-    for (const p of apiStore ? profilesOnHost(url, apiStore) : []) {
+  let parsed = true;
+  try { new URL(url); } catch { parsed = false; } // invalid URL — assertHostPolicy reports it downstream
+  if (write && parsed && apiStore) {
+    for (const p of profilesOnHost(url, apiStore)) {
       const provider = presetNotFollowed(p);
       if (provider) { astray = { profile: p, provider }; break; }
     }
-  } catch {
-    // invalid URL — assertHostPolicy reports it downstream
   }
   if (astray && write) {
     return { refusal: `Error: writes to ${astray.provider.label} go through this engine's built-in "${astray.provider.id}" provider, which shows the user what lynox may do there and asks each write with what it sends. api_profile "${astray.profile.id}" signs in another way, so this write was not sent; reading through it works as before. To write, change this profile with api_setup action "update" to auth.type "oauth2" with auth.oauth.preset_id "${astray.provider.id}" (one host holds one profile), then connect it with api_setup action "connect"; it reads again once it is connected.` };
