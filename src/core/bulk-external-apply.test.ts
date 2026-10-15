@@ -626,7 +626,10 @@ describe('applying an external run', () => {
       const c = client({ methods });
       await c.get(url(0));
       await c.write(url(0), 'PATCH', { price: '15' });
-      expect(methods).toEqual(['GET', 'PATCH']);
+      // A body that names another method is handed as the method a server reads it as, the one
+      // the contract was checked against.
+      expect(await c.write(url(1), 'POST', { _method: 'PATCH', price: '16' })).not.toEqual({ kind: 'not_granted' });
+      expect(methods).toEqual(['GET', 'PATCH', 'PATCH']);
     } finally {
       restore();
     }

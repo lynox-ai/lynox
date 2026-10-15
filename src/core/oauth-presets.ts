@@ -393,13 +393,10 @@ export function presetNotFollowed(
   } catch {
     return undefined;
   }
-  for (const id of register.ids()) {
-    const preset = register.get(id);
-    if (!preset?.apiHosts.includes(host)) continue;
-    const follows = profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
-    return follows ? undefined : preset;
-  }
-  return undefined;
+  // Every provider that claims the host: a profile that follows any of them is in order.
+  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p?.apiHosts.includes(host) === true);
+  const follows = (preset: OAuthPreset): boolean => profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
+  return claiming.some(follows) ? undefined : claiming[0];
 }
 
 /** The ids a profile may name, for a message that lists what exists. */

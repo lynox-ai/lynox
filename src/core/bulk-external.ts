@@ -377,7 +377,9 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     // Compared before and after the attach, as `http_request` does: a slot that changed what the
     // contract was checked against is not sent with (`gateReading`), and the run halts.
     const readBeforeAttach = gateReading(method, headers, url, payload);
-    if (!(await deps.attach(url, headers, method))) return { kind: 'no_credential' };
+    // The method a server acts on, as the contract was checked: a GET that names a write method
+    // in its query is a write to the attach as well.
+    if (!(await deps.attach(url, headers, gated))) return { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);

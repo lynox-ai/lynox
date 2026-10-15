@@ -1210,7 +1210,7 @@ describe('httpRequestTool', () => {
         // A profile saved before api_setup refused one, or loaded from a file: the request is
         // where it is held. Before the question, and for a read as well.
         describe('a profile on the bexio API that does not go through the provider', () => {
-          const REFUSED = 'signs in another way, so this write was not sent; reading through it works as before. To write, create a profile with auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
+          const REFUSED = 'signs in another way, so this write was not sent; reading through it works as before. To write, change this profile with api_setup action "update" to auth.type "oauth2" with auth.oauth.preset_id "bexio" (one host holds one profile), then connect it with api_setup action "connect"; it reads again once it is connected.';
           async function withStoredBearer(): Promise<void> {
             const { ApiStore } = await import('../../core/api-store.js');
             const store = new ApiStore();

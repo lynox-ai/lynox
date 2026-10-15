@@ -163,6 +163,16 @@ describe('the bexio API is reached only through the provider', () => {
     expect(out).toContain(PREFIX);
   });
 
+  // A stored profile with a pasted token is refined only into the provider's form: the reason
+  // is the engine's own and is said, and the way out is this profile's update.
+  it('refuses a refine of a stored profile with a pasted token, and says why', async () => {
+    const store = new ApiStore();
+    store.register({ ...bearer('https://api.bexio.com/2.0'), ...rest });
+    const out = await apiSetupTool.handler({ action: 'refine', id: 'bexio-pat', refine: { addNotes: ['x'] } }, agentWith(store)) as string;
+    expect(out).toContain('Error: the stored profile "bexio-pat" cannot be refined: the API of bexio is connected only through this engine\'s built-in "bexio" provider');
+    expect(out).toContain('Change this profile with api_setup action="update"; reading through it works until then.');
+  });
+
   it('control: saves the profile that goes through the provider', async () => {
     const { out, store } = await save('create', bexioProfile('contact_show'));
     expect(out).not.toContain('Invalid profile');

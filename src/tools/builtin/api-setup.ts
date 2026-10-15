@@ -22,7 +22,7 @@ import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, i
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
@@ -164,6 +164,12 @@ function builtInPresetOf(profile: ApiProfile): ReturnType<typeof OAUTH_PRESETS.g
   return typeof presetId === 'string' ? OAUTH_PRESETS.get(presetId) : undefined;
 }
 
+/** Why a profile on a provider's API host has to go through the provider, and how. Names only
+ *  the engine's own provider, never a value of the profile. */
+function notThroughProvider(provider: OAuthPreset): string {
+  return `the API of ${provider.label} is connected only through this engine's built-in "${provider.id}" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "${provider.id}", then api_setup action "connect".`;
+}
+
 function validateProfile(profile: ApiProfile): string | null {
   for (const field of REQUIRED_FIELDS) {
     if (!profile[field] || (typeof profile[field] === 'string' && (profile[field] as string).trim() === '')) {
@@ -182,9 +188,7 @@ function validateProfile(profile: ApiProfile): string | null {
   // name the provider is the wrong one. A stored profile that fails here is refused at every
   // request as well (`http_request`), so a profile saved before this check holds nothing.
   const provider = presetNotFollowed(profile);
-  if (provider) {
-    return `Invalid profile: the API of ${provider.label} is connected only through this engine's built-in "${provider.id}" provider, which shows the user what lynox may do there before a write access and asks every write with what it sends. A profile with another sign-in, a pasted token included, would reach the same account past both. Use auth.type "oauth2" with auth.oauth.preset_id "${provider.id}", then api_setup action "connect".`;
-  }
+  if (provider) return `Invalid profile: ${notThroughProvider(provider)}`;
   if (profile.auth) {
     if (!VALID_AUTH_TYPES.has(profile.auth.type)) {
       return `Invalid auth.type "${profile.auth.type}": must be none, basic, bearer, header, query, or oauth2`;
@@ -1777,6 +1781,11 @@ ${draftJson}
         // input, and the specific message is what it needs to correct it. Checked after
         // the merge, not before, so a patch that repairs a stored field still saves.
         if (validateProfile(existing) !== null) {
+          // A stored profile on a provider's API host with another sign-in: the reason is the
+          // engine's own, so it is said, and the way out is to change this profile (one host
+          // holds one profile, so a second one for the provider is refused).
+          const provider = presetNotFollowed(existing);
+          if (provider) return `Error: the stored profile "${input.id}" cannot be refined: ${notThroughProvider(provider)} Change this profile with api_setup action="update"; reading through it works until then.`;
           return `Error: the stored profile "${input.id}" does not pass validation on its own, so it cannot be refined. Its values are not repeated here. Replace it with api_setup action="update" and a complete profile.`;
         }
         return `Validation error after refine: ${err}`;

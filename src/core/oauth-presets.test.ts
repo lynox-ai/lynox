@@ -411,6 +411,18 @@ describe('presetNotFollowed: a profile on a provider\'s API host goes through th
   ] as const)('holds %s to bexio', (_label, base_url, auth) => {
     expect(presetNotFollowed({ base_url, auth })?.id).toBe('bexio');
   });
+  // Two providers on one host: following either is in order, following neither is not.
+  it('holds a profile to the providers that claim its host, any of them', () => {
+    const base = OAUTH_PRESETS.get('bexio')!;
+    const register = presetRegisterOf([
+      { ...base, id: 'first', apiHosts: ['api.shared.example'] },
+      { ...base, id: 'second', apiHosts: ['api.shared.example'] },
+    ]);
+    const at = (preset_id: string | undefined) => presetNotFollowed({ base_url: 'https://api.shared.example/v1', auth: { type: 'oauth2', oauth: preset_id === undefined ? {} : { preset_id } } }, register);
+    expect(at('second')).toBeUndefined();
+    expect(at('first')).toBeUndefined();
+    expect(at(undefined)?.id).toBe('first');
+  });
   it.each([
     ['the profile that goes through bexio', 'https://api.bexio.com/2.0', viaBexio],
     ['a host no provider claims', 'https://api.crm.example/v1', { type: 'bearer' }],

@@ -1572,7 +1572,7 @@ async function attachEngineManagedAuth(
     // invalid URL — assertHostPolicy reports it downstream
   }
   if (astray && write) {
-    return { refusal: `Error: writes to ${astray.provider.label} go through this engine's built-in "${astray.provider.id}" provider, which shows the user what lynox may do there and asks each write with what it sends. api_profile "${astray.profile.id}" signs in another way, so this write was not sent; reading through it works as before. To write, create a profile with auth.type "oauth2" and auth.oauth.preset_id "${astray.provider.id}", then connect it with api_setup action "connect".` };
+    return { refusal: `Error: writes to ${astray.provider.label} go through this engine's built-in "${astray.provider.id}" provider, which shows the user what lynox may do there and asks each write with what it sends. api_profile "${astray.profile.id}" signs in another way, so this write was not sent; reading through it works as before. To write, change this profile with api_setup action "update" to auth.type "oauth2" with auth.oauth.preset_id "${astray.provider.id}" (one host holds one profile), then connect it with api_setup action "connect"; it reads again once it is connected.` };
   }
   if (!apiStore || !vault) return {};
 
