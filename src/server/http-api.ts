@@ -7167,6 +7167,14 @@ export class LynoxHTTPApi {
         const dateFrom = url.searchParams.get('dateFrom');
         const dateTo = url.searchParams.get('dateTo');
         const sessionId = url.searchParams.get('sessionId') ?? url.searchParams.get('thread_id');
+        // A date filter starts with a calendar date: SQLite reads a bare number as a Julian day
+        // (`datetime('2026')` is a date in the year -4707), so `2026` would match everything or nothing.
+        for (const [name, value] of [['dateFrom', dateFrom], ['dateTo', dateTo]] as const) {
+          if (value && !/^\d{4}-\d{2}-\d{2}/.test(value)) {
+            errorResponse(res, 400, `Invalid ${name} — expected a date (YYYY-MM-DD)`);
+            return;
+          }
+        }
         if (status) filters.status = status;
         if (model) filters.model = model;
         if (dateFrom) filters.dateFrom = dateFrom;

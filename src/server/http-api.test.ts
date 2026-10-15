@@ -6089,6 +6089,17 @@ describe('LynoxHTTPApi', () => {
       expect(mockHistorySearchRuns).toHaveBeenCalledWith('search', 20, 0);
     });
 
+    it('GET /api/history/runs refuses a date filter that is no date, and takes a date or an ISO time', async () => {
+      for (const q of ['dateFrom=2026', 'dateTo=2026', 'dateFrom=abc', 'dateTo=20260401']) {
+        const res = await jsonFetch(`/api/history/runs?${q}`);
+        expect(res.status, q).toBe(400);
+      }
+      for (const q of ['dateFrom=2026-04-01', 'dateTo=2026-04-30', 'dateFrom=2026-04-01T10:00:00.000Z']) {
+        const res = await jsonFetch(`/api/history/runs?${q}`);
+        expect(res.status, q).toBe(200);
+      }
+    });
+
     it('GET /api/history/runs/:id returns run detail', async () => {
       const res = await jsonFetch('/api/history/runs/run-1');
       expect(res.status).toBe(200);
