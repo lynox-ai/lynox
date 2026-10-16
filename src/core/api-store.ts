@@ -778,20 +778,21 @@ export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_i
 }
 
 /**
- * The names a profile signs in with: its basic credentials and its OAuth client pair. A token is
- * never the right value for any of them. A basic profile signs in with `vault_keys` too: the
- * attach falls back to its first two entries for the pair, and reads the first as the encoded
- * credential (`http.ts`), so those positions count here as it reads them. Not what any other
- * profile READS as a token: `vault_keys`, which it sends, and `refresh_token_key`, which it renews
- * with. Another profile may read this one's tokens through either on purpose — one account behind
- * two profiles — and that is sharing.
+ * The names a profile signs in with: its basic pair and its OAuth client pair. A token is never
+ * the right value for any of them. A `user_pass_split` basic profile without its own
+ * `username_key`/`password_key` signs in with the first two `vault_keys` instead — the attach's
+ * own precedence (`http.ts`) — so those count as it counts them. Not what any profile READS as
+ * a token: other `vault_keys`, which it sends, and `refresh_token_key`, which it renews with.
+ * Another profile may read this one's tokens through either on purpose — one account behind two
+ * profiles — and that is sharing.
  */
 function signInNames(profile: ApiProfile): string[] {
   const auth = profile.auth;
   const names: unknown[] = [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key];
-  if (auth?.type === 'basic') {
-    const vaultKeys: unknown = auth.vault_keys;
-    if (vaultKeys !== undefined && vaultKeys !== null) names.push((vaultKeys as Record<number, unknown>)[0], (vaultKeys as Record<number, unknown>)[1]);
+  if (auth?.type === 'basic' && auth.basic_format === 'user_pass_split') {
+    const vaultKeys = auth.vault_keys as Record<number, unknown> | undefined | null;
+    if (auth.username_key === undefined) names.push(vaultKeys?.[0]);
+    if (auth.password_key === undefined) names.push(vaultKeys?.[1]);
   }
   return names.filter((n): n is string => typeof n === 'string' && n.length > 0);
 }
@@ -1741,8 +1742,9 @@ export class ApiStore {
     // Nor may the derived pair meet a name ANOTHER profile signs in with — see
     // `derivedPairCollision`. A save is asked both ways, so it does not matter which of the two
     // arrived first. The boot asks only whether the arriving profile signs in with a name another
-    // profile's pair holds, so it never drops the oauth2 profile, whose connection works: a holder
-    // stored after it is not registered, and a holder stored before it stays as it was.
+    // profile's pair holds, so the profile it refuses is never the oauth2 one, whose connection
+    // works. A holder registered before the oauth2 profile arrives is not asked again at boot; a
+    // save of either one then asks both ways.
     const collision = derivedPairCollision(profile, this.profiles.values(), mode === 'load');
     if (collision !== null) {
       const { holder, name, deriver } = collision;

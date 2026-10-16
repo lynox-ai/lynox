@@ -28,9 +28,9 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
     ['its client id on the refresh name', () => oauth('crm', 'api.crm.example', { client_id_key: 'SHOP_API_REFRESH_TOKEN' }), 'SHOP_API_REFRESH_TOKEN'],
     ['its basic password on the access name', () => basic('crm', 'api.crm.example', 'CRM_USER', 'SHOP_API_ACCESS_TOKEN'), 'SHOP_API_ACCESS_TOKEN'],
     ['its basic user on the refresh name', () => basic('crm', 'api.crm.example', 'SHOP_API_REFRESH_TOKEN', 'CRM_PASSWORD'), 'SHOP_API_REFRESH_TOKEN'],
-    // The basic attach falls back to the first two `vault_keys` for the pair.
-    ['its basic user through vault_keys on the access name', () => ({ ...bearer('crm', 'api.crm.example', 'SHOP_API_ACCESS_TOKEN'), auth: { type: 'basic', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'CRM_PASSWORD'] } }), 'SHOP_API_ACCESS_TOKEN'],
-    ['its basic password through vault_keys on the refresh name', () => ({ ...bearer('crm', 'api.crm.example', 'CRM_USER'), auth: { type: 'basic', vault_keys: ['CRM_USER', 'SHOP_API_REFRESH_TOKEN'] } }), 'SHOP_API_REFRESH_TOKEN'],
+    // A user_pass_split profile without its own keys signs in with the first two `vault_keys`.
+    ['its basic user through vault_keys on the access name', () => ({ ...bearer('crm', 'api.crm.example', 'X'), auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'CRM_PASSWORD'] } }), 'SHOP_API_ACCESS_TOKEN'],
+    ['its basic password through vault_keys on the refresh name', () => ({ ...bearer('crm', 'api.crm.example', 'X'), auth: { type: 'basic', basic_format: 'user_pass_split', vault_keys: ['CRM_USER', 'SHOP_API_REFRESH_TOKEN'] } }), 'SHOP_API_REFRESH_TOKEN'],
   ];
 
   describe.each(['save', 'load'] as const)('in %s mode', (mode) => {
@@ -54,7 +54,7 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
         expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain(`api_profile "shop-api" is oauth2 and writes its tokens to ${name}`);
       });
     } else {
-      // The boot never drops the oauth2 profile, whose connection works: a holder stored before it stays as it was.
+      // The boot never refuses the oauth2 profile, whose connection works; a holder registered before it is not asked again at boot.
       it.each(needs)('keeps the oauth2 profile and the holder when %s was stored first', (_label, other) => {
         const store = new ApiStore();
         expect(store.register(other(), mode)).toBe(true);
@@ -103,6 +103,15 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
     const own = oauth('shop-api', 'api.shop.example', { refresh_token_key: 'SHOP_API_REFRESH_TOKEN' });
     expect(store.register(own, 'save')).toBe(true);
     expect(store.register(own, 'save')).toBe(true);
+  });
+
+  it.each([
+    ['names its own pair, so vault_keys are not its sign-in names', { type: 'basic', basic_format: 'user_pass_split', username_key: 'CRM_USER', password_key: 'CRM_PASSWORD', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'] }],
+    ['is pre-encoded, which the engine does not sign in with from vault_keys', { type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'] }],
+  ] as const)('control: a basic profile that %s is admitted beside the oauth2 profile', (_label, auth) => {
+    const store = new ApiStore();
+    expect(store.register(shop(), 'save')).toBe(true);
+    expect(store.register({ ...bearer('crm', 'api.crm.example', 'X'), auth: { ...auth, vault_keys: [...auth.vault_keys] } }, 'save')).toBe(true);
   });
 
   it('control: a profile that is not oauth2 derives no pair, so its own names are not asked', () => {
