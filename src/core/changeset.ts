@@ -27,9 +27,10 @@ export class ChangesetManager {
   /** The pre-run bytes of each `modified` entry. Held here, not read back from the backup
    *  copy: that copy can be a symlink to the live file, or shared with another manager. */
   private originalBytes: Map<string, Buffer> = new Map();
-  /** The tracked files in the context workspace (isolation): reached only through its open
-   *  directory, one component at a time without following a link, never by name. */
-  private anchored: Set<string> = new Set();
+  /** The tracked files in the context workspace (isolation), each with the workspace it was
+   *  backed up in: reached only through that workspace's open directory, one component at a
+   *  time without following a link, never by name. */
+  private anchored: Map<string, string> = new Map();
   /** Created by the first backup, not by the constructor: a run that writes nothing leaves
    *  no directory behind. `cleanup()` sets it back to null, so a backup after it makes a new
    *  private (0700) directory instead of re-creating the removed path with default modes. */
@@ -85,8 +86,14 @@ export class ChangesetManager {
    * confined real path, as without isolation, unless it reaches the workspace through a link:
    * that one is not tracked by name. Null when it is not tracked.
    */
-  private _locate(filePath: string): { abs: string; anchored: boolean } | null {
-    const base = heldBase();
+  private _locate(filePath: string): { abs: string; ws: string | null } | null {
+    let base: ReturnType<typeof workspaceBase>;
+    try {
+      base = workspaceBase();
+    } catch {
+      // Isolation is on and its directory cannot be reached: nothing is tracked by name instead.
+      return null;
+    }
     if (base !== null) {
       let mapped;
       try {
@@ -94,22 +101,25 @@ export class ChangesetManager {
       } catch {
         return null;
       }
-      if (mapped.kind === 'inside') return mapped.rel === '' ? null : { abs: resolve(realOr(base.ws), mapped.rel), anchored: true };
+      if (mapped.kind === 'inside') return mapped.rel === '' ? null : { abs: resolve(realOr(base.ws), mapped.rel), ws: base.ws };
     }
     const abs = this._confine(filePath);
     if (abs === null) return null;
-    if (base !== null && (isPathWithin(abs, resolve(base.ws)) || isPathWithin(abs, realOr(base.ws)))) return null;
-    return { abs, anchored: false };
+    // With isolation, neither the context workspace nor the one this manager was made for is
+    // reached by name, also not by a path that leads there through a link.
+    if (base !== null && [resolve(base.ws), realOr(base.ws), this.realCwd].some((d) => isPathWithin(abs, d))) return null;
+    return { abs, ws: null };
   }
 
   /**
    * The open directory and the path in it of a file tracked through it, while its key still
-   * names a file in the CURRENT context workspace. A run whose workspace changed since the
-   * backup reaches nothing: its keys are under the old workspace's path.
+   * names a file in the CURRENT context workspace, and that is the workspace it was backed up
+   * in. A run whose workspace changed since the backup reaches nothing, also when the new
+   * workspace holds the old one.
    */
   private _at(abs: string): { anchor: WorkspaceAnchor; rel: string } | null {
     const base = heldBase();
-    if (base === null) return null;
+    if (base === null || base.ws !== this.anchored.get(abs)) return null;
     let mapped;
     try {
       mapped = toWorkspaceRel(abs, base.ws);
@@ -163,11 +173,13 @@ export class ChangesetManager {
     if (this._confine(abs) !== abs) return null;
     let fd: number;
     try {
-      fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+      // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+      fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch {
       return null;
     }
     try {
+      if (!fstatSync(fd).isFile()) return null;
       return readFileSync(fd);
     } catch {
       return null;
@@ -195,9 +207,12 @@ export class ChangesetManager {
     if (loc === null) return;
     const abs = loc.abs;
     if (this.entries.has(abs)) return; // Already backed up — first write wins
-    const present = loc.anchored ? this._presentAnchored(abs) : existsSync(abs);
-    if (present === null) return;
-    if (loc.anchored) this.anchored.add(abs);
+    if (loc.ws !== null) this.anchored.set(abs, loc.ws);
+    const present = loc.ws !== null ? this._presentAnchored(abs) : existsSync(abs);
+    if (present === null) {
+      this.anchored.delete(abs);
+      return;
+    }
 
     let originalContent: string | null = null;
     let status: 'added' | 'modified' = 'added';
@@ -435,7 +450,11 @@ export class ChangesetManager {
         let fd: number | undefined;
         try {
           // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
-          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o666);
+          // O_NONBLOCK and the check after it: a FIFO or device at the file is not opened for
+          // long nor written; only a regular file is truncated.
+          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
+          if (!fstatSync(fd).isFile()) return;
+          ftruncateSync(fd, 0);
           const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
           let off = 0;
           while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);

@@ -79,6 +79,7 @@ import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { isWorkspaceActive } from './workspace.js';
 import { openRead } from './workspace-fd.js';
 import { resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
@@ -264,13 +265,26 @@ export function readForDiffPreview(path: string): string {
       if (fstatSync(fd).nlink > 1) return '';
       return readFileSync(fd, 'utf-8');
     }
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return '';
     return readFileSync(fd, 'utf-8');
   } catch {
     return ''; // absent, unreadable, or a symlink — the preview shows a new file
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+/**
+ * The text a write to `rawPath` would change, for the diff preview. The path is resolved as
+ * write_file and edit_file resolve it, and a path they refuse throws. With isolation the file is
+ * read by the path as given: its workspace part is walked without following a link, where the
+ * resolved path has every link on the way already followed.
+ */
+export function diffPreviewText(rawPath: string): string {
+  const target = resolveWritablePath(rawPath);
+  return readForDiffPreview(isWorkspaceActive() ? resolve(rawPath) : target);
 }
 
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
@@ -4176,10 +4190,8 @@ export class Agent implements IAgent {
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
         if (input.path) {
-          // The file the write would change, resolved as write_file and edit_file resolve it.
-          // A path they refuse throws here and skips the preview; the tool reports it.
-          const target = resolveWritablePath(input.path);
-          const existing = readForDiffPreview(target);
+          // A path the write tools refuse throws here and skips the preview; the tool reports it.
+          const existing = diffPreviewText(input.path);
           let updated: string | undefined;
           if (tc.name === 'write_file' && typeof input.content === 'string') {
             updated = input.content;

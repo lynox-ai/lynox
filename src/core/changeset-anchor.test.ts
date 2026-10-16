@@ -226,6 +226,80 @@ describe('the changeset with isolation', () => {
   });
 });
 
+describe('the changeset, from the security round', () => {
+  it('when the workspace cannot be reached, nothing is tracked by name instead', () => {
+    mkdirSync(join(ws, 'real'));
+    writeFileSync(join(ws, 'real', 'f.txt'), 'before', 'utf-8');
+    symlinkSync(join(ws, 'real'), join(ws, 'ln'));
+    const mgr = new ChangesetManager(ws, 'run');
+    setTenantWorkspace(join(outside, 'gone'));
+    mgr.backupBeforeWrite(join(ws, 'ln', 'f.txt'));
+    mgr.backupBeforeWrite(join(ws, 'real', 'f.txt'));
+    setTenantWorkspace(ws);
+    writeFileSync(join(ws, 'real', 'f.txt'), 'after', 'utf-8');
+    expect(mgr.getChanges()).toEqual([]);
+    // positive control: with the workspace reachable, the same file is tracked
+    mgr.backupBeforeWrite(join(ws, 'real', 'f.txt'));
+    writeFileSync(join(ws, 'real', 'f.txt'), 'again', 'utf-8');
+    expect(mgr.getChanges().map(c => c.file)).toEqual(['real/f.txt']);
+    mgr.cleanup();
+  });
+
+  it('a rollback after the workspace became a directory holding the old one reaches nothing', () => {
+    const inner = join(ws, 'ctx');
+    mkdirSync(inner);
+    writeFileSync(join(inner, 'f.txt'), 'before', 'utf-8');
+    setTenantWorkspace(inner);
+    const mgr = new ChangesetManager(inner, 'run');
+    mgr.backupBeforeWrite(join(inner, 'f.txt'));
+    mgr.backupBeforeWrite(join(inner, 'added.txt'));
+    writeFileSync(join(inner, 'f.txt'), 'after', 'utf-8');
+    writeFileSync(join(inner, 'added.txt'), 'added', 'utf-8');
+    setTenantWorkspace(ws);
+    mgr.rollbackAll();
+    expect(readFileSync(join(inner, 'f.txt'), 'utf-8')).toBe('after');
+    expect(existsSync(join(inner, 'added.txt'))).toBe(true);
+    // positive control: back in its own workspace, the same rollback restores
+    setTenantWorkspace(inner);
+    mgr.rollbackAll();
+    expect(readFileSync(join(inner, 'f.txt'), 'utf-8')).toBe('before');
+    mgr.cleanup();
+  });
+
+  it('after the workspace changed, a file in the one the manager was made for is not tracked by name', () => {
+    writeFileSync(join(ws, 'f.txt'), 'before', 'utf-8');
+    const mgr = new ChangesetManager(ws, 'run');
+    const other = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-cs-ws3-')));
+    try {
+      setTenantWorkspace(other);
+      mgr.backupBeforeWrite(join(ws, 'f.txt'));
+      writeFileSync(join(ws, 'f.txt'), 'after', 'utf-8');
+      expect(mgr.getChanges()).toEqual([]);
+      mgr.rollbackAll();
+      expect(readFileSync(join(ws, 'f.txt'), 'utf-8')).toBe('after');
+    } finally {
+      setTenantWorkspace(ws);
+      mgr.cleanup();
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform === 'linux')('a FIFO in another root neither hangs the backup, the review nor the rollback', () => {
+    const mgr = new ChangesetManager(ws, 'run', [outside]);
+    writeFileSync(join(outside, 'f.txt'), 'before', 'utf-8');
+    mgr.backupBeforeWrite(join(outside, 'f.txt'));
+    execFileSync('mkfifo', [join(outside, 'p')]);
+    mgr.backupBeforeWrite(join(outside, 'p'));
+    rmSync(join(outside, 'f.txt'));
+    execFileSync('mkfifo', [join(outside, 'f.txt')]);
+    expect(mgr.getChanges()).toEqual([]);
+    mgr.rollbackAll();
+    expect(statSync(join(outside, 'f.txt')).isFIFO()).toBe(true);
+    expect(readForDiffPreview(join(outside, 'p'))).toBe('');
+    mgr.cleanup();
+  }, 10_000);
+});
+
 describe('the diff preview with isolation', () => {
   it('reads a file in the workspace', () => {
     writeFileSync(join(ws, 'f.txt'), 'text', 'utf-8');
@@ -244,6 +318,15 @@ describe('the diff preview with isolation', () => {
     writeFileSync(join(outside, 'vault.txt'), 'outside', 'utf-8');
     linkSync(join(outside, 'vault.txt'), join(ws, 'f.txt'));
     expect(readForDiffPreview(join(ws, 'f.txt'))).toBe('');
+  });
+
+  it('the preview before a write does not follow a directory link in the workspace', async () => {
+    const { diffPreviewText } = await import('./agent.js');
+    mkdirSync(join(ws, 'real'));
+    writeFileSync(join(ws, 'real', 'f.txt'), 'text', 'utf-8');
+    symlinkSync(join(ws, 'real'), join(ws, 'ln'));
+    expect(diffPreviewText(join(ws, 'real', 'f.txt')), 'positive control').toBe('text');
+    expect(diffPreviewText(join(ws, 'ln', 'f.txt'))).toBe('');
   });
 
   it('reads a file outside the workspace by name, as before', () => {
