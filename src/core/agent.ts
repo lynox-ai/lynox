@@ -77,7 +77,9 @@ import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
-import { readFileSync, openSync, closeSync, constants } from 'node:fs';
+import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
+import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { openRead } from './workspace-fd.js';
 import { resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
@@ -248,11 +250,20 @@ function stableStringify(value: unknown): string {
  * The text of the file a write would change, for the diff preview, or '' when there is none.
  * `path` is the path the write tool resolved; it is opened without following a symlink at the
  * file itself, so a file swapped for a link after that resolution shows nothing rather than
- * the link's target.
+ * the link's target. With isolation, a file in the context workspace is read through its open
+ * directory, one component at a time without following a link, and a file with a second name
+ * shows nothing, as read_file reads neither.
  */
 export function readForDiffPreview(path: string): string {
   let fd: number | undefined;
   try {
+    const base = workspaceBase();
+    const mapped = base === null ? null : toWorkspaceRel(path, base.ws);
+    if (base !== null && mapped !== null && mapped.kind === 'inside') {
+      fd = openRead(base.anchor, mapped.rel);
+      if (fstatSync(fd).nlink > 1) return '';
+      return readFileSync(fd, 'utf-8');
+    }
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     return readFileSync(fd, 'utf-8');
   } catch {
