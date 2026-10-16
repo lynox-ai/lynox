@@ -86,6 +86,8 @@ export function listArea(t: AreaTarget): EntryInfo[] {
  * second name (the other name may be outside the area). The caller closes the fd.
  */
 export function openAreaFile(t: AreaTarget, maxBytes: number, tooLarge: string): { fd: number; size: number } {
+  // The area itself is a directory.
+  if (t.rel === '') throw new AreaRefusal(400, 'Not a file');
   let fd: number;
   try {
     fd = openRead(t.anchor, t.rel);
