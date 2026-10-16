@@ -9,6 +9,7 @@
 
 import { buildClassifierPrompt, type ClassifierPromptInput, type ClassifierProvider } from './prompt.js';
 import { parseClassifierResponse, type ClassifierVerdict } from './schema.js';
+import { isForwardedByPerson } from './forwarded.js';
 
 /**
  * Identifier persisted in `inbox_items.classifier_version`. Bumping this
@@ -64,7 +65,11 @@ export async function classifyMail(
     user: built.user,
     signal: opts.signal,
   });
-  const verdict = parseClassifierResponse(raw);
+  const parsed = parseClassifierResponse(raw);
+  // After the model, whatever it said: a person's forward is never archived unseen.
+  const verdict: ClassifierVerdict = parsed.bucket === 'auto_handled' && isForwardedByPerson(input)
+    ? { ...parsed, bucket: 'requires_user', failReason: 'forwarded_by_person' }
+    : parsed;
   return {
     ...verdict,
     classifierVersion: opts.classifierVersion ?? CLASSIFIER_VERSION,
