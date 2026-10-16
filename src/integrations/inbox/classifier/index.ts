@@ -9,6 +9,7 @@
 
 import { buildClassifierPrompt, type ClassifierPromptInput, type ClassifierProvider } from './prompt.js';
 import { parseClassifierResponse, type ClassifierVerdict } from './schema.js';
+import { FORWARDED_REASON_DE, isForwardedByPerson } from './forwarded.js';
 
 /**
  * Identifier persisted in `inbox_items.classifier_version`. Bumping this
@@ -64,7 +65,12 @@ export async function classifyMail(
     user: built.user,
     signal: opts.signal,
   });
-  const verdict = parseClassifierResponse(raw);
+  const parsed = parseClassifierResponse(raw);
+  // After the model: a mail that matches the forward patterns from a person's address is
+  // not left in auto_handled (`forwarded.ts` names what it does not match).
+  const verdict: ClassifierVerdict = parsed.bucket === 'auto_handled' && isForwardedByPerson(input)
+    ? { ...parsed, bucket: 'requires_user', reasonDe: FORWARDED_REASON_DE, failReason: 'forwarded_by_person' }
+    : parsed;
   return {
     ...verdict,
     classifierVersion: opts.classifierVersion ?? CLASSIFIER_VERSION,
