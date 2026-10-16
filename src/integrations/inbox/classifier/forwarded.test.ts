@@ -54,6 +54,14 @@ describe('a mail that matches the forward patterns from a person is not left arc
     })).toBe(true);
   });
 
+  it('reads a long run of dashes in linear time', () => {
+    // An unbounded `-{2,}` took seconds here; a mail body is sender-controlled.
+    const body = '-'.repeat(50_000);
+    const t0 = performance.now();
+    expect(isForwardedByPerson({ subject: 'Rechnung', fromAddress: 'a.mustermann@example.com', body })).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
   it('does not count a forward a system sent', () => {
     expect(isForwardedByPerson({ subject: 'Fwd: Rechnung', fromAddress: 'no-reply@acme.example', body: 'FYI' })).toBe(false);
     // control: the same mail from a person

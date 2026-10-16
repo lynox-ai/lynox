@@ -25,8 +25,12 @@ const FORWARD_SUBJECT = /^\s*(?:fwd?|wg|wtr|tr)\s*:/i;
  * Body markers mail clients write above a FORWARDED message. Outlook's "Original Message" /
  * "Ursprüngliche Nachricht" are left out on purpose: Outlook writes them above a quoted reply
  * as well, so they do not tell a forward from an answer.
+ *
+ * `--`, not `-{2,}`: only presence matters, and an unbounded run is tried again from every
+ * dash, which is quadratic in a long run of dashes. The body reaching this is a provider
+ * snippet today; a full body would make that a stall on the event loop.
  */
-const FORWARD_HEADER = /-{2,}\s*(?:forwarded message|weitergeleitete nachricht)|begin forwarded message/i;
+const FORWARD_HEADER = /--\s*(?:forwarded message|weitergeleitete nachricht)|begin forwarded message/i;
 
 /**
  * Local parts of addresses no person writes from. A system that forwards (an alias, a
