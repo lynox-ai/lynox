@@ -2570,11 +2570,15 @@ ${draftJson}
       // counts for each profile, not over a list per kind of slot. The derived access name is not
       // asked here: a renewal writes there, and a profile that reads it on purpose shares this
       // profile's token through it.
-      if (outputName !== accessTokenKey(input.id) && apiStore) {
-        const holder = apiStore.getAll().find((p) => p.id !== profile.id && collectVaultKeys(p).includes(outputName));
-        if (holder !== undefined) {
-          return `Error: output_secret_name "${outputName}" is a name API profile "${holder.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
-        }
+      // Asked again right before the write below: the POST in between awaits, and a profile
+      // saved meanwhile can name the same slot.
+      const ownAccessName = accessTokenKey(input.id);
+      const outputHolder = (): ApiProfile | undefined => outputName === ownAccessName || !apiStore
+        ? undefined
+        : apiStore.getAll().find((p) => p.id !== profile.id && collectVaultKeys(p).includes(outputName));
+      const heldBefore = outputHolder();
+      if (heldBefore !== undefined) {
+        return `Error: output_secret_name "${outputName}" is a name API profile "${heldBefore.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       // The same question for the refresh slot: a provider that rotates the refresh token on
       // this exchange has it written there below, whatever grant was asked for.
@@ -2800,6 +2804,14 @@ ${draftJson}
       // Which value this write replaces in the derived access slot, read before it is gone: the
       // save below asks whether this epoch recorded it (PRD connection-attribution A2(2')).
       const replacedAccessFp = outputName === accessTokenKey(input.id) ? apiStore?.currentFingerprint(outputName) : undefined;
+      // The answer above was given before the POST; a profile saved while it ran can have taken
+      // the name since. The access token is then not stored. A rotated refresh token still goes
+      // to this profile's own derived slot, because the provider has already spent the one sent.
+      const heldNow = outputHolder();
+      if (heldNow !== undefined) {
+        if (rotated !== null) secretStore.set(refreshName, rotated);
+        return `Error: output_secret_name "${outputName}" became a name API profile "${heldNow.id}" uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
+      }
       secretStore.set(outputName, accessToken);
       exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       // Stash refresh_token too if the response carries a new one (for later refresh_token grants).

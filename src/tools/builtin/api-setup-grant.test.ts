@@ -1185,6 +1185,27 @@ describe('fetch_token — what a successful exchange records', () => {
       expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
     });
 
+    it.each([
+      ['without a new refresh token', undefined],
+      ['and keeps the new refresh token the provider sent', 'rt-2'],
+    ])('does not store the access token under a name another profile took while the POST ran, %s', async (_label, rotatedRefresh) => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
+      // The profile arrives while the exchange is on the wire.
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        store.register(feedProfile());
+        return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      const feedProfile = (): ApiProfile => ({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" became a name API profile "feed" uses while the token was being fetched');
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('feed-key');
+      expect(vault.peek(REFRESH)).toBe(rotatedRefresh ?? 'rt-1');
+    });
+
     it('control: a name its own earlier exchange wrote takes the token again', async () => {
       const store = new ApiStore();
       store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_OWN_TOKEN: 'at-0' }) } }));
