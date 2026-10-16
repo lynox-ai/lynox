@@ -1,10 +1,23 @@
 import {
   mkdtempSync, readFileSync, writeFileSync, existsSync, unlinkSync, rmdirSync, rmSync, realpathSync,
-  openSync, closeSync, writeSync, constants,
+  openSync, closeSync, writeSync, constants, fstatSync, ftruncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
 import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
+import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { openRead, openWrite, rmdirAt, statEntry, unlinkAt, WorkspaceAccessError, type WorkspaceAnchor } from './workspace-fd.js';
+
+const realOr = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
+
+/** The context workspace's open directory, or null without isolation or when it cannot be reached. */
+function heldBase(): ReturnType<typeof workspaceBase> {
+  try {
+    return workspaceBase();
+  } catch {
+    return null;
+  }
+}
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ChangesetEntry, ChangesetDiff } from '../types/index.js';
@@ -14,6 +27,10 @@ export class ChangesetManager {
   /** The pre-run bytes of each `modified` entry. Held here, not read back from the backup
    *  copy: that copy can be a symlink to the live file, or shared with another manager. */
   private originalBytes: Map<string, Buffer> = new Map();
+  /** The tracked files in the context workspace (isolation), each with the workspace it was
+   *  backed up in: reached only through that workspace's open directory, one component at a
+   *  time without following a link, never by name. */
+  private anchored: Map<string, string> = new Map();
   /** Created by the first backup, not by the constructor: a run that writes nothing leaves
    *  no directory behind. `cleanup()` sets it back to null, so a backup after it makes a new
    *  private (0700) directory instead of re-creating the removed path with default modes. */
@@ -62,17 +79,107 @@ export class ChangesetManager {
     return this.roots.some((root) => isPathWithin(real, root)) ? real : null;
   }
 
+  /**
+   * Where a write to `filePath` is tracked. With isolation, a path in the context workspace is
+   * tracked through its open directory, keyed by its path under the workspace's real path (the
+   * key the review shows and a rollback names). A path in another root is tracked by its
+   * confined real path, as without isolation, unless it reaches the workspace through a link:
+   * that one is not tracked by name. Null when it is not tracked.
+   */
+  private _locate(filePath: string): { abs: string; ws: string | null } | null {
+    let base: ReturnType<typeof workspaceBase>;
+    try {
+      base = workspaceBase();
+    } catch {
+      // Isolation is on and its directory cannot be reached: nothing is tracked by name instead.
+      return null;
+    }
+    if (base !== null) {
+      let mapped;
+      try {
+        mapped = toWorkspaceRel(filePath, base.ws);
+      } catch {
+        return null;
+      }
+      if (mapped.kind === 'inside') return mapped.rel === '' ? null : { abs: resolve(realOr(base.ws), mapped.rel), ws: base.ws };
+    }
+    const abs = this._confine(filePath);
+    if (abs === null) return null;
+    // With isolation, neither the context workspace nor the one this manager was made for is
+    // reached by name, also not by a path that leads there through a link.
+    if (base !== null && [resolve(base.ws), realOr(base.ws), this.realCwd].some((d) => isPathWithin(abs, d))) return null;
+    return { abs, ws: null };
+  }
+
+  /**
+   * The open directory and the path in it of a file tracked through it, while its key still
+   * names a file in the CURRENT context workspace, and that is the workspace it was backed up
+   * in. A run whose workspace changed since the backup reaches nothing, also when the new
+   * workspace holds the old one.
+   */
+  private _at(abs: string): { anchor: WorkspaceAnchor; rel: string } | null {
+    const base = heldBase();
+    if (base === null || base.ws !== this.anchored.get(abs)) return null;
+    let mapped;
+    try {
+      mapped = toWorkspaceRel(abs, base.ws);
+    } catch {
+      return null;
+    }
+    return mapped.kind === 'inside' && mapped.rel !== '' ? { anchor: base.anchor, rel: mapped.rel } : null;
+  }
+
+  /**
+   * Whether a file in the workspace is there, reached through the open directory. Null when a
+   * link is on the way or at the file: such a path is not tracked, as a path out of the
+   * workspace is not, so a later backup of the same path once it is a real file records it.
+   * Anything else but a missing name counts as there, so a rollback never deletes a file it
+   * could not see.
+   */
+  private _presentAnchored(abs: string): boolean | null {
+    const at = this._at(abs);
+    if (at === null) return null;
+    try {
+      const st = statEntry(at.anchor, at.rel);
+      return st === null ? false : st.type === 'symlink' ? null : true;
+    } catch (err) {
+      if (err instanceof WorkspaceAccessError && (err.code === 'SYMLINK' || err.code === 'NOT_DIR')) return null;
+      return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+    }
+  }
+
   /** The bytes of a tracked file, read only while it is still inside a root and
    *  not through a symlink at the file itself. Null when it is neither, or unreadable. */
   private _readTracked(abs: string): Buffer | null {
+    if (this.anchored.has(abs)) {
+      const at = this._at(abs);
+      if (at === null) return null;
+      let fd: number;
+      try {
+        fd = openRead(at.anchor, at.rel);
+      } catch {
+        return null;
+      }
+      try {
+        // A file with a second name may be a file outside the workspace: not read, as the file tools do not.
+        if (fstatSync(fd).nlink > 1) return null;
+        return readFileSync(fd);
+      } catch {
+        return null;
+      } finally {
+        closeSync(fd);
+      }
+    }
     if (this._confine(abs) !== abs) return null;
     let fd: number;
     try {
-      fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+      // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+      fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch {
       return null;
     }
     try {
+      if (!fstatSync(fd).isFile()) return null;
       return readFileSync(fd);
     } catch {
       return null;
@@ -96,14 +203,23 @@ export class ChangesetManager {
   backupBeforeWrite(filePath: string): void {
     // Outside the workspace: not tracked. The write tool refuses such a path; if it is
     // allowed elsewhere (`/tmp`), it is not this review's to show or roll back.
-    const abs = this._confine(filePath);
-    if (abs === null) return;
+    const loc = this._locate(filePath);
+    if (loc === null) return;
+    const abs = loc.abs;
     if (this.entries.has(abs)) return; // Already backed up — first write wins
+    if (loc.ws !== null) this.anchored.set(abs, loc.ws);
+    const present = loc.ws !== null ? this._presentAnchored(abs) : existsSync(abs);
+    if (present === null) {
+      // Not tracked: no key is left marked as reached through a workspace, so a later backup of
+      // the same path by name (isolation turned off within the run) is read and restored by name.
+      this.anchored.delete(abs);
+      return;
+    }
 
     let originalContent: string | null = null;
     let status: 'added' | 'modified' = 'added';
 
-    if (existsSync(abs)) {
+    if (present) {
       // The file exists, so it is `modified` whatever fails below. Treating it as `added`
       // would make "Rollback all" delete a file the user had before the run.
       status = 'modified';
@@ -241,6 +357,7 @@ export class ChangesetManager {
   cleanup(): void {
     this.entries.clear();
     this.originalBytes.clear();
+    this.anchored.clear();
     if (this.backupDir === null) return;
     try {
       rmSync(this.backupDir, { recursive: true, force: true });
@@ -272,6 +389,7 @@ export class ChangesetManager {
       if (backupPath !== null) rmSync(backupPath, { force: true });
       this.entries.delete(abs);
       this.originalBytes.delete(abs);
+      this.anchored.delete(abs);
     }
     if (this.entries.size === 0) this.cleanup();
   }
@@ -304,6 +422,10 @@ export class ChangesetManager {
   }
 
   private _rollbackOne(abs: string, entry: ChangesetEntry): void {
+    if (this.anchored.has(abs)) {
+      this._rollbackAnchored(abs, entry);
+      return;
+    }
     // Checked again here: a directory on the way may have become a symlink out of the
     // workspace since the backup. Such a file is left alone.
     if (this._confine(abs) !== abs) return;
@@ -330,7 +452,10 @@ export class ChangesetManager {
         let fd: number | undefined;
         try {
           // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
-          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o666);
+          // O_NONBLOCK: a FIFO at the file does not hold the process. ftruncate refuses anything
+          // but a regular file (EINVAL), so a FIFO or device is never written.
+          fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
+          ftruncateSync(fd, 0);
           const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
           let off = 0;
           while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off);
@@ -340,6 +465,47 @@ export class ChangesetManager {
           if (fd !== undefined) closeSync(fd);
         }
       }
+    }
+  }
+
+  /** {@link _rollbackOne} through the workspace's open directory: nothing on the way is followed. */
+  private _rollbackAnchored(abs: string, entry: ChangesetEntry): void {
+    const at = this._at(abs);
+    if (at === null) return;
+    if (entry.status === 'added') {
+      try {
+        // New file — delete it (unlinkat removes a link itself, never its target)
+        unlinkAt(at.anchor, at.rel);
+        // Empty parent directories up to the workspace, never the workspace itself
+        const parts = at.rel.split('/');
+        for (let n = parts.length - 1; n > 0; n--) {
+          try {
+            rmdirAt(at.anchor, parts.slice(0, n).join('/'));
+          } catch {
+            break; // Dir not empty
+          }
+        }
+      } catch {
+        // File already gone
+      }
+      return;
+    }
+    if (entry.originalContent === null) return;
+    let fd: number | undefined;
+    try {
+      // In place, as before: the file keeps its inode, owner and mode; one that is gone is made
+      // again with the mode a write by name gives it. Its directories are not made again.
+      ({ fd } = openWrite(at.anchor, at.rel, { createMode: 0o666 & ~processUmask() }));
+      // A file with a second name may be a file outside the workspace: not written.
+      if (fstatSync(fd).nlink > 1) return;
+      const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
+      ftruncateSync(fd, 0);
+      let off = 0;
+      while (off < bytes.length) off += writeSync(fd, bytes, off, bytes.length - off, off);
+    } catch {
+      // Best-effort
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
   }
 }

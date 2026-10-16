@@ -77,7 +77,9 @@ import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
-import { readFileSync, openSync, closeSync, constants } from 'node:fs';
+import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
+import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
+import { openRead } from './workspace-fd.js';
 import { resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
 import type {
@@ -248,18 +250,37 @@ function stableStringify(value: unknown): string {
  * The text of the file a write would change, for the diff preview, or '' when there is none.
  * `path` is the path the write tool resolved; it is opened without following a symlink at the
  * file itself, so a file swapped for a link after that resolution shows nothing rather than
- * the link's target.
+ * the link's target. With isolation, a file in the context workspace is read through its open
+ * directory, one component at a time without following a link, and a file with a second name
+ * shows nothing, as read_file reads neither.
  */
 export function readForDiffPreview(path: string): string {
   let fd: number | undefined;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const base = workspaceBase();
+    const mapped = base === null ? null : toWorkspaceRel(path, base.ws);
+    if (base !== null && mapped !== null && mapped.kind === 'inside') {
+      fd = openRead(base.anchor, mapped.rel);
+      if (fstatSync(fd).nlink > 1) return '';
+      return readFileSync(fd, 'utf-8');
+    }
+    // O_NONBLOCK: a FIFO at the file must not hold the process until a writer comes.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return '';
     return readFileSync(fd, 'utf-8');
   } catch {
     return ''; // absent, unreadable, or a symlink — the preview shows a new file
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+/**
+ * The text a write to `rawPath` would change, for the diff preview: the file the write would
+ * change, resolved as write_file and edit_file resolve it. A path they refuse throws.
+ */
+export function diffPreviewText(rawPath: string): string {
+  return readForDiffPreview(resolveWritablePath(rawPath));
 }
 
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;
@@ -4165,10 +4186,8 @@ export class Agent implements IAgent {
       try {
         const input = tc.input as { path?: string; content?: string; old_string?: string; new_string?: string };
         if (input.path) {
-          // The file the write would change, resolved as write_file and edit_file resolve it.
-          // A path they refuse throws here and skips the preview; the tool reports it.
-          const target = resolveWritablePath(input.path);
-          const existing = readForDiffPreview(target);
+          // A path the write tools refuse throws here and skips the preview; the tool reports it.
+          const existing = diffPreviewText(input.path);
           let updated: string | undefined;
           if (tc.name === 'write_file' && typeof input.content === 'string') {
             updated = input.content;
