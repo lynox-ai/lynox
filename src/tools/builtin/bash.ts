@@ -5,6 +5,8 @@ import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { execViaSidecar, SidecarOverflowError } from '../../shell-sidecar/client.js';
+import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES, withNetworkLines } from '../../shell-sidecar/egress.js';
+import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 
 interface BashInput {
   command: string;
@@ -162,6 +164,50 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
   throw new ToolSoftFailure(combined || `Command failed: ${input.command}`, reason);
 }
 
+/**
+ * A sidecar call with the egress proxy (PRD 152 v2 §4.2, W2): the call reaches the network
+ * only through a credential registered for this call with the hosts `network_policy` allows.
+ * What the proxy refused is added to the result, on success and on failure alike: a refused
+ * `wget` exits non-zero, and that is when the model needs to read why. The credential is
+ * revoked before the result goes back, and its plain forms are removed from what the call
+ * printed (hygiene, not a boundary).
+ */
+async function runInSidecarWithEgress(socketPath: string, input: BashInput, env: NodeJS.ProcessEnv, agent: IAgent): Promise<string> {
+  // Only the engine's own proxy variables reach the call, never ones from the isolation config.
+  for (const name of PROXY_ENV_NAMES) delete env[name];
+  const config = egressConfigFromEnv();
+  // No egress proxy configured: the call has no network, as before.
+  if (config.secret === undefined || config.secret === '') return runInSidecar(socketPath, input, env);
+  const ctx = agent.toolContext;
+  const egress = await openShellEgress({
+    policy: {
+      networkPolicy: ctx.networkPolicy,
+      allowedHosts: ctx.allowedHosts,
+      allowedWildcards: ctx.allowedWildcards,
+      ackHosts: resolveGuardedAckHosts(ctx),
+    },
+    timeoutMs: input.timeout_ms,
+    run: agent.currentRunId,
+    session: agent.currentThreadId ?? agent.originThreadId,
+    config,
+  });
+  if (egress === null) return runInSidecar(socketPath, input, env);
+  Object.assign(env, egress.env);
+  let out: string;
+  try {
+    out = await runInSidecar(socketPath, input, env);
+  } catch (err: unknown) {
+    const lines = await egress.finish();
+    if (err instanceof ToolSoftFailure) throw new ToolSoftFailure(withNetworkLines(lines, egress.redact(err.agentVisibleResult)), egress.redact(err.reason));
+    // A hard error keeps its `bash: ` prefix first; its message is short. No `cause`: it would
+    // carry the text before redaction.
+    const message = egress.redact(err instanceof Error ? err.message : String(err));
+    throw new Error(lines === '' ? message : `${message}\n\n${lines}`);
+  }
+  const lines = await egress.finish();
+  return withNetworkLines(lines, egress.redact(out));
+}
+
 // NOTE: This tool intentionally uses execSync with shell execution.
 // It is a bash tool for an autonomous agent — shell features are required by design.
 // Input comes from the LLM agent, not from untrusted external users.
@@ -211,7 +257,7 @@ export const bashTool: ToolEntry<BashInput> = {
     // Set at all — even empty — means managed: an empty value is a broken config, not "run here".
     if (sidecarSocket !== undefined) {
       if (sidecarSocket === '') throw new Error('bash: LYNOX_SHELL_EXEC_SOCKET is set but empty');
-      return runInSidecar(sidecarSocket, input, safeEnv);
+      return runInSidecarWithEgress(sidecarSocket, input, safeEnv, agent);
     }
 
     try {

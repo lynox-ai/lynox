@@ -238,8 +238,10 @@ export function assertHostPolicy(
       // (engine-init.ts and the `network_policy` doc in types/config.ts state
       // the same scope; all three move together or two of them lie).
       // Still outside it: the LLM provider call, push notifications, error
-      // reporting, IMAP/SMTP mail, voice transcribe/TTS, and anything a shell
-      // command starts. This list is
+      // reporting, IMAP/SMTP mail, voice transcribe/TTS, and a shell command
+      // outside sidecar mode (in sidecar mode with the egress proxy, a shell
+      // command reaches only the exact host names this policy lets http_request
+      // reach; src/shell-sidecar/egress.ts). This list is
       // stated identically in engine-init.ts and types/config.ts; a review found
       // all three carrying DIFFERENT lists in the very change that introduced
       // the sentence claiming they move together.
