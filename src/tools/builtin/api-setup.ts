@@ -2805,15 +2805,14 @@ ${draftJson}
       // save below asks whether this epoch recorded it (PRD connection-attribution A2(2')).
       const replacedAccessFp = outputName === accessTokenKey(input.id) ? apiStore?.currentFingerprint(outputName) : undefined;
       // The answer above was given before the POST; a profile saved while it ran can have taken
-      // the name since. The access token is then not stored. A rotated refresh token still goes
-      // to this profile's own derived slot, because the provider has already spent the one sent.
+      // the name since. The access token is then not stored, and the save below records only what
+      // was written. A rotated refresh token still goes to this profile's own derived slot and onto
+      // the record, because the provider has already spent the one sent.
       const heldNow = outputHolder();
-      if (heldNow !== undefined) {
-        if (rotated !== null) secretStore.set(refreshName, rotated);
-        return `Error: output_secret_name "${outputName}" became a name API profile "${heldNow.id}" uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
+      if (heldNow === undefined) {
+        secretStore.set(outputName, accessToken);
+        exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       }
-      secretStore.set(outputName, accessToken);
-      exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       // Stash refresh_token too if the response carries a new one (for later refresh_token grants).
       if (rotated !== null) {
         // Derived from the profile id, and a protected derived name was refused at the
@@ -2840,7 +2839,7 @@ ${draftJson}
       // revoked. Every value this exchange wrote joins the record with its
       // fingerprint when the save goes through (see `persistGrant`), and that is
       // what a later delete removes — and all it removes.
-      const writes: WrittenSecret[] = [{ name: outputName, fp: tokenFingerprint(accessToken) }];
+      const writes: WrittenSecret[] = heldNow === undefined ? [{ name: outputName, fp: tokenFingerprint(accessToken) }] : [];
       if (rotated !== null) writes.push({ name: refreshName, fp: tokenFingerprint(rotated) });
       // The refresh token now in play: a new one if the answer carried it,
       // otherwise the one that just worked — which is also what an answer that
@@ -2859,7 +2858,7 @@ ${draftJson}
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
-      }, tokenExpiresAt, {
+      }, heldNow === undefined ? tokenExpiresAt : undefined, {
         // What this exchange ran on and wrote. The save mints when either the refresh token it
         // presented or the access value it replaced is not one this epoch recorded; otherwise it
         // records the values written here as the epoch's own.
@@ -2872,6 +2871,9 @@ ${draftJson}
       // record, and the delete already ran — so the tokens this exchange wrote
       // would sit in the vault with nothing left to remove them.
       if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
+      if (heldNow !== undefined) {
+        return `Error: output_secret_name "${outputName}" became a name API profile "${heldNow.id}" uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
+      }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       // The header http.ts attaches it under: the profile's own `header_name`, raw,
       // or Authorization with `Bearer`. The name is the profile's, so it is checked

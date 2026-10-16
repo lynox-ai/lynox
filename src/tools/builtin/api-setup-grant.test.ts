@@ -1203,7 +1203,18 @@ describe('fetch_token — what a successful exchange records', () => {
 
       expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" became a name API profile "feed" uses while the token was being fetched');
       expect(vault.peek('CRM_OWN_TOKEN')).toBe('feed-key');
+      expect(vault.peek(ACCESS)).toBeUndefined();
       expect(vault.peek(REFRESH)).toBe(rotatedRefresh ?? 'rt-1');
+      // The record holds what was written and nothing else, so a delete takes the refresh token with the profile.
+      const grant = store.get('crm-api')?.oauth_grant;
+      expect(grant?.written ?? []).toEqual(rotatedRefresh ? wrote({ [REFRESH]: rotatedRefresh }) : []);
+      expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeUndefined();
+      if (rotatedRefresh) {
+        expect(result).toContain(`The provider's new refresh token was stored as "${REFRESH}".`);
+        expect(grant?.minted_for).toBe(tokenFingerprint(rotatedRefresh));
+      } else {
+        expect(result).not.toContain('new refresh token');
+      }
     });
 
     it('control: a name its own earlier exchange wrote takes the token again', async () => {
