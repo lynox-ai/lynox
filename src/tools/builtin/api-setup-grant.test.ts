@@ -14,7 +14,7 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-import { apiSetupTool, providerBodySummary, sentCredentials } from './api-setup.js';
+import { apiSetupTool, exchangedTokenExpiryFor, providerBodySummary, sentCredentials } from './api-setup.js';
 import { isDangerous } from '../permission-guard.js';
 import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
@@ -1183,6 +1183,58 @@ describe('fetch_token — what a successful exchange records', () => {
 
       expect(result).not.toContain('Error');
       expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+    });
+
+    it.each([
+      ['without a new refresh token', undefined],
+      ['and keeps the new refresh token the provider sent', 'rt-2'],
+    ])('does not store the access token under a name another profile took while the POST ran, %s', async (_label, rotatedRefresh) => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
+      // The profile arrives while the exchange is on the wire.
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        store.register(feedProfile());
+        return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+      const feedProfile = (): ApiProfile => ({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
+      const expiryBefore = exchangedTokenExpiryFor('crm-api');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+      expect(exchangedTokenExpiryFor('crm-api')).toBe(expiryBefore);
+
+      expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" became a name API profile "feed" uses while the token was being fetched');
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('feed-key');
+      expect(vault.peek(ACCESS)).toBeUndefined();
+      expect(vault.peek(REFRESH)).toBe(rotatedRefresh ?? 'rt-1');
+      // The record holds what was written and nothing else, so a delete takes the refresh token with the profile.
+      const grant = store.get('crm-api')?.oauth_grant;
+      expect(grant?.written ?? []).toEqual(rotatedRefresh ? wrote({ [REFRESH]: rotatedRefresh }) : []);
+      expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeUndefined();
+      if (rotatedRefresh) {
+        expect(result).toContain(`The provider's new refresh token was stored as "${REFRESH}".`);
+        expect(grant?.minted_for).toBe(tokenFingerprint(rotatedRefresh));
+      } else {
+        expect(result).not.toContain('new refresh token');
+      }
+    });
+
+    it('takes the refresh token out again when the profile was also deleted while the POST ran', async () => {
+      const store = new ApiStore();
+      store.register(crmProfile());
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        store.register({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
+        store.unregister('crm-api');
+        return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+      });
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+      expect(result).toContain(`was deleted while it ran. Removed the tokens its exchanges wrote: ${REFRESH}.`);
+      expect(vault.peek(REFRESH)).toBeUndefined();
+      expect(vault.peek('CRM_OWN_TOKEN')).toBe('feed-key');
     });
 
     it('control: a name its own earlier exchange wrote takes the token again', async () => {
