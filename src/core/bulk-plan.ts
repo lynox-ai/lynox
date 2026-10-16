@@ -248,16 +248,24 @@ export function heldWorkspace(): ReturnType<typeof workspaceBase> {
 
 /**
  * The key a workspace file has in a bulk run: its absolute path. With isolation that is the path
- * in the context workspace (resolved against the files area, as {@link resolveFileAreaPath}
- * does), and the file is reached only through the workspace's open directory; without isolation,
- * the confined real path. Null when the target leaves the workspace. The key stays absolute so a
+ * under the context workspace's real path (resolved against the files area, as
+ * {@link resolveFileAreaPath} does), and the file is reached only through the workspace's open
+ * directory; without isolation, the confined real path. Null when the target leaves the workspace. The key stays absolute so a
  * run names the workspace it was planned in: applied in another one, its keys are not in it.
  */
 export function bulkFileKey(target: string): string | null {
   const base = heldWorkspace();
   if (base === null) return resolveBulkFilePath(target);
   const mapped = toWorkspaceRel(resolve(base.ws, target), base.ws);
-  return mapped.kind === 'inside' && mapped.rel !== '' ? mapped.shown : null;
+  if (mapped.kind !== 'inside' || mapped.rel === '') return null;
+  // Under the workspace's real path, as a key was before: the same however the root is spelled.
+  let real = base.ws;
+  try {
+    real = realpathSync(base.ws);
+  } catch {
+    /* the held directory is reached by its fd; the name is only the key's spelling */
+  }
+  return resolve(real, mapped.rel);
 }
 
 /**

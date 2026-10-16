@@ -129,6 +129,30 @@ describe('bulk keys name the file in the workspace the run was planned in', () =
     expect(existsSync(join(other, 'a.txt'))).toBe(false);
   });
 
+  it('applies and undoes a run whose workspace is named another way since the plan', async () => {
+    const link = join(dir, 'ws-link');
+    symlinkSync(ws, link);
+    writeFileSync(join(ws, 'r.txt'), 'before');
+    // Planned through the link, applied through the real path…
+    closeWorkspaceBase();
+    setTenantWorkspace(link);
+    const runId = runIdOf(await plan([{ target: 'r.txt', after: 'after' }]));
+    expect(ledger.getPreview(runId)[0]!.key).toBe(join(ws, 'r.txt'));
+    approve(runId);
+    closeWorkspaceBase();
+    setTenantWorkspace(ws);
+    expect((await apply(runId)).status).toBe('done');
+    expect(readFileSync(join(ws, 'r.txt'), 'utf8')).toBe('after');
+    // …and undone through the link again.
+    const undo = ledger.planUndo(runId);
+    if (!undo.ok) throw new Error(undo.reason);
+    approve(undo.status.id);
+    closeWorkspaceBase();
+    setTenantWorkspace(link);
+    expect((await apply(undo.status.id, 'bulk_undo')).status).toBe('done');
+    expect(readFileSync(join(ws, 'r.txt'), 'utf8')).toBe('before');
+  });
+
   it('does not carry setuid or setgid onto the file it writes', async () => {
     writeFileSync(join(ws, 's.sh'), 'before');
     chmodSync(join(ws, 's.sh'), 0o6755);
