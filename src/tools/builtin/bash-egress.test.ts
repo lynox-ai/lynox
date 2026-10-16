@@ -30,6 +30,8 @@ interface DaemonPlan {
   readonly code: number;
   readonly out?: (env: Record<string, string>) => string;
   readonly refuse?: { host: string; port: number; reason: 'not-in-set' | 'plain-http' };
+  /** Refuse the call with an error text built from its env (a hard error, not a soft failure). */
+  readonly refusal?: (env: Record<string, string>) => string;
 }
 
 function credOf(env: Record<string, string>): string | null {
@@ -55,7 +57,10 @@ async function daemon(plan: DaemonPlan): Promise<string> {
       setDuringCall = credDuringCall === null ? null : (registry.lookup(credDuringCall)?.set ?? null);
       if (plan.refuse && credDuringCall !== null) registry.recordDenial(credDuringCall, plan.refuse.host, plan.refuse.port, plan.refuse.reason);
       const out = plan.out ? JSON.stringify({ t: 'out', d: plan.out(req.env) }) + '\n' : '';
-      s.end(out + JSON.stringify({ t: 'exit', code: plan.code, signal: null, timedOut: false }) + '\n');
+      const exit = plan.refusal
+        ? { t: 'exit', code: null, signal: null, timedOut: false, error: plan.refusal(req.env) }
+        : { t: 'exit', code: plan.code, signal: null, timedOut: false };
+      s.end(out + JSON.stringify(exit) + '\n');
     });
   });
   await new Promise<void>((r) => daemonServer!.listen(sock, () => r()));
@@ -198,6 +203,15 @@ describe('bash with the egress proxy', () => {
     await configured({ code: 1, out: (env) => env['HTTPS_PROXY']! });
     const err = await failure(bashTool.handler({ command: 'env; false' }, agent('allow-all')));
     expect((err as { agentVisibleResult: string }).agentVisibleResult).not.toContain(credDuringCall!);
+  });
+
+  it('never returns the credential from a hard error either', async () => {
+    await configured({ code: 0, refusal: (env) => `bad env ${env['HTTPS_PROXY']!}` });
+    const err = await failure(bashTool.handler({ command: 'x' }, agent('allow-all')));
+    expect(isToolSoftFailure(err)).toBe(false);
+    const message = (err as Error).message;
+    expect(message.startsWith('bash: exec sidecar refused the call: bad env http://[egress credential]:x@proxy:3128')).toBe(true);
+    expect(message).not.toContain(credDuringCall!);
   });
 
   it('a refused registration gives the call no proxy, and says so', async () => {
