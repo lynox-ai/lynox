@@ -28,6 +28,9 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
     ['its client id on the refresh name', () => oauth('crm', 'api.crm.example', { client_id_key: 'SHOP_API_REFRESH_TOKEN' }), 'SHOP_API_REFRESH_TOKEN'],
     ['its basic password on the access name', () => basic('crm', 'api.crm.example', 'CRM_USER', 'SHOP_API_ACCESS_TOKEN'), 'SHOP_API_ACCESS_TOKEN'],
     ['its basic user on the refresh name', () => basic('crm', 'api.crm.example', 'SHOP_API_REFRESH_TOKEN', 'CRM_PASSWORD'), 'SHOP_API_REFRESH_TOKEN'],
+    // The basic attach falls back to the first two `vault_keys` for the pair.
+    ['its basic user through vault_keys on the access name', () => ({ ...bearer('crm', 'api.crm.example', 'SHOP_API_ACCESS_TOKEN'), auth: { type: 'basic', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'CRM_PASSWORD'] } }), 'SHOP_API_ACCESS_TOKEN'],
+    ['its basic password through vault_keys on the refresh name', () => ({ ...bearer('crm', 'api.crm.example', 'CRM_USER'), auth: { type: 'basic', vault_keys: ['CRM_USER', 'SHOP_API_REFRESH_TOKEN'] } }), 'SHOP_API_REFRESH_TOKEN'],
   ];
 
   describe.each(['save', 'load'] as const)('in %s mode', (mode) => {
@@ -41,14 +44,32 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
       expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain(`writes its tokens to ${name}, which api_profile "crm"`);
     });
 
-    it.each(needs)('refuses the oauth2 profile when %s came first', (_label, other, name) => {
-      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const store = new ApiStore();
-      expect(store.register(other(), mode)).toBe(true);
-      expect(store.register(shop(), mode)).toBe(false);
-      expect(store.get('shop-api')).toBeUndefined();
-      expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain(`api_profile "shop-api" is oauth2 and writes its tokens to ${name}`);
-    });
+    if (mode === 'save') {
+      it.each(needs)('refuses the oauth2 profile when %s came first', (_label, other, name) => {
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const store = new ApiStore();
+        expect(store.register(other(), mode)).toBe(true);
+        expect(store.register(shop(), mode)).toBe(false);
+        expect(store.get('shop-api')).toBeUndefined();
+        expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain(`api_profile "shop-api" is oauth2 and writes its tokens to ${name}`);
+      });
+    } else {
+      // The boot never drops the oauth2 profile, whose connection works: a holder stored before it stays as it was.
+      it.each(needs)('keeps the oauth2 profile and the holder when %s was stored first', (_label, other) => {
+        const store = new ApiStore();
+        expect(store.register(other(), mode)).toBe(true);
+        expect(store.register(shop(), mode)).toBe(true);
+        expect(store.get('crm')).toBeDefined();
+      });
+
+      it('tells the operator how to bring the refused holder back', () => {
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        const store = new ApiStore();
+        store.register(shop(), mode);
+        store.register(needs[0]![1](), mode);
+        expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain('So profile "crm" is not registered and cannot be used. Nothing was deleted');
+      });
+    }
 
     it('control: a profile that sends the access token on purpose is admitted, in either order', () => {
       const first = new ApiStore();

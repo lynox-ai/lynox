@@ -778,14 +778,21 @@ export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_i
 }
 
 /**
- * The names a profile signs in with: its basic pair and its OAuth client pair. A token is never
- * the right value for any of them. Not what a profile READS as a token: `vault_keys`, which it
- * sends, and `refresh_token_key`, which it renews with. Another profile may read this one's
- * tokens through either on purpose — one account behind two profiles — and that is sharing.
+ * The names a profile signs in with: its basic credentials and its OAuth client pair. A token is
+ * never the right value for any of them. A basic profile signs in with `vault_keys` too: the
+ * attach falls back to its first two entries for the pair, and reads the first as the encoded
+ * credential (`http.ts`), so those positions count here as it reads them. Not what any other
+ * profile READS as a token: `vault_keys`, which it sends, and `refresh_token_key`, which it renews
+ * with. Another profile may read this one's tokens through either on purpose — one account behind
+ * two profiles — and that is sharing.
  */
 function signInNames(profile: ApiProfile): string[] {
   const auth = profile.auth;
-  const names = [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key];
+  const names: unknown[] = [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key];
+  if (auth?.type === 'basic') {
+    const vaultKeys: unknown = auth.vault_keys;
+    if (vaultKeys !== undefined && vaultKeys !== null) names.push((vaultKeys as Record<number, unknown>)[0], (vaultKeys as Record<number, unknown>)[1]);
+  }
   return names.filter((n): n is string => typeof n === 'string' && n.length > 0);
 }
 
@@ -795,10 +802,12 @@ function signInNames(profile: ApiProfile): string[] {
  * derived pair, so such a name would be replaced by the next token, and that profile would sign
  * in with a token.
  *
- * Asked in both directions — `profile` as the one that derives the pair, and as the one whose
- * names meet another's pair — so the order in which two profiles arrive does not decide.
+ * Asked in both directions by default — `profile` as the one that derives the pair, and as the
+ * one whose names meet another's pair — so the order in which two profiles arrive does not
+ * decide. `asHolderOnly` asks only the second: whether `profile` signs in with a name another
+ * profile's pair holds.
  */
-export function derivedPairCollision(profile: ApiProfile, others: Iterable<ApiProfile>): { holder: string; name: string; deriver: string } | null {
+export function derivedPairCollision(profile: ApiProfile, others: Iterable<ApiProfile>, asHolderOnly = false): { holder: string; name: string; deriver: string } | null {
   const pairOf = (p: ApiProfile): { access: string; refresh: string } | null =>
     p.auth?.type === 'oauth2' ? { access: accessTokenKey(p.id), refresh: refreshTokenKey(p.id) } : null;
   const meets = (deriver: ApiProfile, holder: ApiProfile): string | null => {
@@ -811,7 +820,7 @@ export function derivedPairCollision(profile: ApiProfile, others: Iterable<ApiPr
   };
   for (const other of others) {
     if (other.id === profile.id) continue;
-    const own = meets(profile, other);
+    const own = asHolderOnly ? null : meets(profile, other);
     if (own !== null) return { holder: other.id, name: own, deriver: profile.id };
     const theirs = meets(other, profile);
     if (theirs !== null) return { holder: profile.id, name: theirs, deriver: other.id };
@@ -1730,14 +1739,16 @@ export class ApiStore {
       return `profile "${profile.id}" keeps its OAuth ${what} under ${name}, the name its own tokens are written to — the first token would replace it. Nothing was saved. ${move}. ${left}`;
     }
     // Nor may the derived pair meet a name ANOTHER profile signs in with — see
-    // `derivedPairCollision`. Same gate, same two modes: the boot admits profiles too, and
-    // asked both ways, so it does not matter which of the two arrived first.
-    const collision = derivedPairCollision(profile, this.profiles.values());
+    // `derivedPairCollision`. A save is asked both ways, so it does not matter which of the two
+    // arrived first. The boot asks only whether the arriving profile signs in with a name another
+    // profile's pair holds, so it never drops the oauth2 profile, whose connection works: a holder
+    // stored after it is not registered, and a holder stored before it stays as it was.
+    const collision = derivedPairCollision(profile, this.profiles.values(), mode === 'load');
     if (collision !== null) {
       const { holder, name, deriver } = collision;
       const clash = `api_profile "${deriver}" is oauth2 and writes its tokens to ${name}, which api_profile "${holder}" signs in with — the next token would replace it.`;
       if (mode === 'load') {
-        return `${clash} So profile "${profile.id}" is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use it again, point "${holder}" at a name of its own, or set "${deriver}" up under a different id.`;
+        return `${clash} So profile "${holder}" is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
       }
       return `${clash} Nothing was saved. Point "${holder}" at a name of its own, or set "${deriver}" up under a different id.`;
     }
