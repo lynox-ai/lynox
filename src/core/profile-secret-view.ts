@@ -438,14 +438,6 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
 }
 
 /**
- * The profile a mandate wrote whose tokens go under `name`, if any: its derived pair, or a name
- * one of its exchanges recorded writing.
- */
-export function mandateSlotHolder(apiStore: Pick<ApiStore, 'getAll'>, name: string): ApiProfile | undefined {
-  return apiStore.getAll().find((p) => isMandateAuthored(p) && grantTokenNames(p).has(name));
-}
-
-/**
  * Whether a token may be handed out at all (PRD §3.13 B9): no, while it belongs to a connection
  * a mandate consented to and that mandate is not live — ended, revoked, or never seen by this
  * engine. Asked by the store on every `resolve`, whoever calls it: the owner's turn, a run the

@@ -34,7 +34,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, mandateSlotHolder, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -2562,14 +2562,18 @@ ${draftJson}
       if (isMandateAuthored(profile) && outputName !== accessTokenKey(input.id)) {
         return `Error: output_secret_name "${outputName}" is not available for this profile. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
-      // And the other way round: a profile not written by a mandate does not store its token in a
-      // token slot of one that was. That profile would then hold the owner's token as if its own
-      // exchange had written it, and send it to the host its mandate chose. Asked of the input
-      // field, so a renewal (which names no output) is never refused here.
-      if (!isMandateAuthored(profile) && input.output_secret_name !== undefined && apiStore) {
-        const holder = mandateSlotHolder(apiStore, outputName);
+      // An access-token name of the caller's choosing is this profile's only while no other
+      // profile uses it: as a credential it signs in with, a key it sends, or where its tokens go.
+      // Writing over it would leave that profile failing as if its own setup were wrong, or, for a
+      // profile a mandate wrote, holding the owner's token as if its own exchange had written it
+      // and sending it to the host its mandate chose. Asked over the names `collectVaultKeys`
+      // counts for each profile, not over a list per kind of slot. The derived access name is not
+      // asked here: a renewal writes there, and a profile that reads it on purpose shares this
+      // profile's token through it.
+      if (outputName !== accessTokenKey(input.id) && apiStore) {
+        const holder = apiStore.getAll().find((p) => p.id !== profile.id && collectVaultKeys(p).includes(outputName));
         if (holder !== undefined) {
-          return `Error: output_secret_name "${outputName}" is where the tokens of API profile "${holder.id}" go, which was set up in a mandate's session. Nothing was sent. Leave output_secret_name out, or choose a name of this profile's own.`;
+          return `Error: output_secret_name "${outputName}" is a name API profile "${holder.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
         }
       }
       // The same question for the refresh slot: a provider that rotates the refresh token on
