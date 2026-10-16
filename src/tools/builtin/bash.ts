@@ -170,7 +170,7 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
  * What the proxy refused is added to the result, on success and on failure alike: a refused
  * `wget` exits non-zero, and that is when the model needs to read why. The credential is
  * revoked before the result goes back, and its plain forms are removed from what the call
- * printed (hygiene: a call can always print it encoded some other way).
+ * printed (hygiene, not a boundary).
  */
 async function runInSidecarWithEgress(socketPath: string, input: BashInput, env: NodeJS.ProcessEnv, agent: IAgent): Promise<string> {
   // Only the engine's own proxy variables reach the call, never ones from the isolation config.

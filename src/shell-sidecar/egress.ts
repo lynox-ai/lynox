@@ -9,9 +9,6 @@
  * Every failure here leaves the call without a proxy, which means without a network: the
  * sidecar has no other route. Nothing here can widen what a call reaches beyond the set it
  * computes from `network_policy`.
- *
- * Not here yet: hosts from this session's search results and URLs the user typed
- * (provenance, W2b), and a smaller set after the turn took in foreign content (W3).
  */
 
 import { randomBytes } from 'node:crypto';
@@ -121,8 +118,8 @@ export function proxyEnv(cred: string, shellProxy: string): Record<string, strin
 
 /**
  * The forms of the credential a call prints without trying (`env`, `curl -v`, `set -x`). This is
- * hygiene, not a boundary: a call can always print it encoded some other way. What bounds it is
- * that the credential is revoked before the result goes back, and that it reaches only the set.
+ * hygiene, not a boundary; what bounds it is that the credential is revoked before the result
+ * goes back, and that it reaches only the set.
  */
 export function credentialForms(cred: string): string[] {
   const forms = new Set<string>([cred]);
