@@ -43,7 +43,7 @@ export const PROXY_ENV_NAMES = [
 export interface ShellPolicyInput {
   readonly networkPolicy: NetworkPolicy | undefined;
   readonly allowedHosts: ReadonlySet<string> | undefined;
-  readonly allowedWildcards: readonly string[];
+  readonly allowedWildcards: readonly string[] | undefined;
   readonly ackHosts: ReadonlySet<string> | undefined;
 }
 
@@ -91,7 +91,7 @@ export function computeShellSet(input: ShellPolicyInput): ShellSet {
     if (typeof c === 'string' && isExactHostname(c)) hosts.add(c);
     else if (typeof c === 'string' && !guardedBaselineHostList().includes(c)) dropped.push(c);
   }
-  for (const w of input.allowedWildcards) dropped.push(`*.${w}`);
+  for (const w of input.allowedWildcards ?? []) dropped.push(`*.${w}`);
   if (hosts.size > MAX_SHELL_SET) {
     return { kind: 'none', why: `the network policy names more than ${String(MAX_SHELL_SET)} hosts, more than the egress proxy takes` };
   }
@@ -119,14 +119,18 @@ export function proxyEnv(cred: string, shellProxy: string): Record<string, strin
   };
 }
 
-/** The forms of the credential that can show up in a call's output (`env`, `curl -v`, `set -x`). */
+/**
+ * The forms of the credential a call prints without trying (`env`, `curl -v`, `set -x`). This is
+ * hygiene, not a boundary: a call can always print it encoded some other way. What bounds it is
+ * that the credential is revoked before the result goes back, and that it reaches only the set.
+ */
 export function credentialForms(cred: string): string[] {
-  return [
-    cred,
-    Buffer.from(`${cred}:x`).toString('base64'),
-    Buffer.from(`${cred}:`).toString('base64'),
-    Buffer.from(cred).toString('base64'),
-  ];
+  const forms = new Set<string>([cred]);
+  for (const plain of [`${cred}:x`, `${cred}:`, cred]) {
+    forms.add(Buffer.from(plain).toString('base64'));
+    forms.add(Buffer.from(plain).toString('base64url'));
+  }
+  return [...forms];
 }
 
 export function redactCredential(text: string, cred: string): string {
@@ -230,7 +234,7 @@ export interface ShellEgress {
   readonly env: Readonly<Record<string, string>>;
   /** Removes the credential from text the call produced. */
   redact(text: string): string;
-  /** Revokes the credential and returns the lines to add to the call's result ('' for none). */
+  /** Revokes the credential and returns the network lines for the call's result ('' for none). */
   finish(): Promise<string>;
 }
 
@@ -263,7 +267,15 @@ export function egressConfigFromEnv(): EgressConfig {
 const HEADER = 'Network (egress proxy):';
 
 function noted(notes: string[]): string {
-  return notes.length === 0 ? '' : `\n\n${HEADER}\n${notes.join('\n')}`;
+  return notes.length === 0 ? '' : `${HEADER}\n${notes.join('\n')}`;
+}
+
+/**
+ * The call's result with the engine's network lines. They go FIRST: a long result is cut from
+ * the end before the model reads it, and the lines must survive that.
+ */
+export function withNetworkLines(lines: string, text: string): string {
+  return lines === '' ? text : `${lines}\n\n${text}`;
 }
 
 function offline(notes: string[]): ShellEgress {

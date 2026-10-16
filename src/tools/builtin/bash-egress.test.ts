@@ -172,6 +172,19 @@ describe('bash with the egress proxy', () => {
     expect(result).not.toContain('q=secret');
   });
 
+  it('puts the network lines FIRST, so a long result cut from the end keeps them', async () => {
+    await configured({ code: 0, out: () => 'x'.repeat(100_000), refuse: { host: 'evil.example', port: 443, reason: 'not-in-set' } });
+    const result = await bashTool.handler({ command: 'x' }, agent('allow-all'));
+    expect(result.startsWith('Network (egress proxy):\n- refused "evil.example" port 443')).toBe(true);
+    expect(result.endsWith('x'.repeat(1000))).toBe(true);
+  });
+
+  it('puts the network lines first on a failed call too', async () => {
+    await configured({ code: 2, out: () => 'boom', refuse: { host: 'evil.example', port: 443, reason: 'not-in-set' } });
+    const err = await failure(bashTool.handler({ command: 'x' }, agent('allow-all')));
+    expect((err as { agentVisibleResult: string }).agentVisibleResult.startsWith('Network (egress proxy):')).toBe(true);
+  });
+
   it('never returns the credential, in any form the call might print it', async () => {
     await configured({ code: 0, out: (env) => `${env['HTTPS_PROXY']!}\n${Buffer.from(`${credOf(env)!}:x`).toString('base64')}` });
     const result = await bashTool.handler({ command: 'env' }, agent('allow-all'));

@@ -46,6 +46,11 @@ describe('the set a shell call may reach', () => {
     expect(s.dropped.sort()).toEqual(['*.wild.example', '203.0.113.7', 'Upper.Example', 'host.example:8443', 'trail.example.'].sort());
   });
 
+  it('no wildcard list at all is no wildcards, not an error', () => {
+    expect(computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: new Set(['a.example']), allowedWildcards: undefined })))
+      .toEqual({ kind: 'hosts', hosts: ['a.example'], dropped: [] });
+  });
+
   it('more names than the proxy takes is no network, not a cut list', () => {
     const many = new Set(Array.from({ length: MAX_SHELL_SET + 1 }, (_, i) => `h${String(i)}.example`));
     expect(computeShellSet(input({ networkPolicy: 'allow-list', allowedHosts: many })).kind).toBe('none');
@@ -71,7 +76,10 @@ describe('the credential', () => {
     for (const form of credentialForms(cred)) {
       expect(redactCredential(`before ${form} after`, cred)).toBe('before [egress credential] after');
     }
-    expect(credentialForms(cred)).toContain(Buffer.from(`${cred}:x`).toString('base64'));
+    for (const plain of [`${cred}:x`, `${cred}:`, cred]) {
+      expect(credentialForms(cred)).toContain(Buffer.from(plain).toString('base64'));
+      expect(credentialForms(cred)).toContain(Buffer.from(plain).toString('base64url'));
+    }
   });
 });
 

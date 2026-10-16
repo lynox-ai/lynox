@@ -5,7 +5,7 @@ import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { execViaSidecar, SidecarOverflowError } from '../../shell-sidecar/client.js';
-import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES } from '../../shell-sidecar/egress.js';
+import { egressConfigFromEnv, openShellEgress, PROXY_ENV_NAMES, withNetworkLines } from '../../shell-sidecar/egress.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 
 interface BashInput {
@@ -169,7 +169,8 @@ async function runInSidecar(socketPath: string, input: BashInput, env: NodeJS.Pr
  * only through a credential registered for this call with the hosts `network_policy` allows.
  * What the proxy refused is added to the result, on success and on failure alike: a refused
  * `wget` exits non-zero, and that is when the model needs to read why. The credential is
- * removed from everything the call returns.
+ * revoked before the result goes back, and its plain forms are removed from what the call
+ * printed (hygiene: a call can always print it encoded some other way).
  */
 async function runInSidecarWithEgress(socketPath: string, input: BashInput, env: NodeJS.ProcessEnv, agent: IAgent): Promise<string> {
   // Only the engine's own proxy variables reach the call, never ones from the isolation config.
@@ -196,11 +197,15 @@ async function runInSidecarWithEgress(socketPath: string, input: BashInput, env:
   try {
     out = await runInSidecar(socketPath, input, env);
   } catch (err: unknown) {
-    const tail = await egress.finish();
-    if (err instanceof ToolSoftFailure) throw new ToolSoftFailure(egress.redact(err.agentVisibleResult) + tail, egress.redact(err.reason));
-    throw new Error(egress.redact(err instanceof Error ? err.message : String(err)) + tail);
+    const lines = await egress.finish();
+    if (err instanceof ToolSoftFailure) throw new ToolSoftFailure(withNetworkLines(lines, egress.redact(err.agentVisibleResult)), egress.redact(err.reason));
+    // A hard error keeps its `bash: ` prefix first; its message is short. No `cause`: it would
+    // carry the text before redaction.
+    const message = egress.redact(err instanceof Error ? err.message : String(err));
+    throw new Error(lines === '' ? message : `${message}\n\n${lines}`);
   }
-  return egress.redact(out) + await egress.finish();
+  const lines = await egress.finish();
+  return withNetworkLines(lines, egress.redact(out));
 }
 
 // NOTE: This tool intentionally uses execSync with shell execution.
