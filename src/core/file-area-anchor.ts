@@ -61,10 +61,10 @@ function onTheWay(err: unknown): AreaRefusal | null {
 }
 
 /**
- * The entries of a directory in the area (lstat, no follow). A name that is not exact UTF-8 cannot
- * address its entry afterwards; it is left out of `entries` and counted in `omitted`.
+ * The entries of a directory in the area (lstat, no follow). An entry whose name is not exact
+ * UTF-8 (`exactName` false) cannot be addressed afterwards; the caller decides how to show it.
  */
-export function listArea(t: AreaTarget): { entries: EntryInfo[]; omitted: number } {
+export function listArea(t: AreaTarget): EntryInfo[] {
   let st;
   try {
     st = statEntry(t.anchor, t.rel);
@@ -75,9 +75,7 @@ export function listArea(t: AreaTarget): { entries: EntryInfo[]; omitted: number
   if (st.type === 'symlink') throw OUTSIDE();
   if (st.type !== 'dir') throw new AreaRefusal(400, 'Not a directory');
   try {
-    const all = listDir(t.anchor, t.rel);
-    const entries = all.filter((e) => e.exactName);
-    return { entries, omitted: all.length - entries.length };
+    return listDir(t.anchor, t.rel);
   } catch (err) {
     throw onTheWay(err) ?? err;
   }

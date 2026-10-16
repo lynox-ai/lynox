@@ -6,7 +6,7 @@ import { request as httpRequest, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -13191,6 +13191,43 @@ describe('LynoxHTTPApi', () => {
       expect(await status('/api/files?path=dir/secret.txt', { method: 'DELETE' })).toBe(403);
       expect(await status('/api/files?path=gone.txt', { method: 'DELETE' })).toBe(404);
       expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
+    });
+
+    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+
+    it('closes the open file when the answer cannot be sent, e.g. a name a header cannot carry', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, '日本語.txt'), 'x');
+      const before = openFds().filter((l) => l.endsWith('日本語.txt')).length;
+      for (let i = 0; i < 10; i++) expect(await status(`/api/files/download?path=${q('日本語.txt')}`)).toBe(404);
+      expect(openFds().filter((l) => l.endsWith('日本語.txt')).length).toBe(before);
+    });
+
+    it('closes the open file when the client goes away during a download', async () => {
+      repayRateWindow();
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), join(ws, 'big.bin')]);
+      for (let i = 0; i < 5; i++) {
+        await new Promise<void>((done) => {
+          const req = httpRequest(`${baseUrl}/api/files/download?path=big.bin`, { headers: authHeaders() }, (r) => {
+            r.once('data', () => { r.destroy(); req.destroy(); done(); });
+          });
+          req.on('error', () => done());
+          req.end();
+        });
+      }
+      await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big.bin'))).toEqual([]), { timeout: 5000 });
+    });
+
+    it('counts an unaddressable name only when it is shown, and makes a missing workspace', async () => {
+      repayRateWindow();
+      writeFileSync(Buffer.from(`${ws}/.hidden-\xff`, 'latin1'), 'h');
+      expect(await (await jsonFetch('/api/files?path=.')).json()).toEqual({ path: '.', entries: [{ name: 'safe', isDirectory: true, size: 0 }] });
+      expect((await (await jsonFetch('/api/files?path=.&hidden=1')).json() as { omitted?: number }).omitted).toBe(1);
+      const fresh = join(outside, 'fresh-ws');
+      closeWorkspaceBase();
+      setTenantWorkspace(fresh);
+      expect(await (await jsonFetch('/api/files?path=.')).json()).toEqual({ path: '.', entries: [] });
+      expect(existsSync(fresh)).toBe(true);
     });
 
     it('never names a process-handle path in an answer', async () => {
