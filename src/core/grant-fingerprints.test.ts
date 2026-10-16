@@ -431,11 +431,12 @@ describe('grant fingerprints', () => {
       expect(foreignOf('own')).toBeUndefined();
     });
 
-    it('the derived refresh name is not marked either when another profile reads it as a password', () => {
+    // The shape the marking once had to step around — another profile reading the derived refresh
+    // name as a password — is no longer admitted (`derivedPairCollision`).
+    it('a profile that would read the derived refresh name as a password is not saved', () => {
       connected('crm');
-      store.save({ ...bearer('shop'), auth: { type: 'basic', vault_keys: [], username_key: 'SHOP_USER', password_key: refreshTokenKey('crm') } });
-      consent('crm', 'acc-B', null);
-      expect(foreignOf('crm')).toBeUndefined();
+      expect(store.save({ ...bearer('shop'), auth: { type: 'basic', vault_keys: [], username_key: 'SHOP_USER', password_key: refreshTokenKey('crm') } }).ok).toBe(false);
+      expect(store.get('shop')).toBeUndefined();
     });
 
     it('a mint without a fingerprinter keeps the foreign tokens, so the leftover is still foreign once fingerprints return', () => {
