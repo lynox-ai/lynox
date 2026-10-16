@@ -105,6 +105,36 @@ describe('the changeset with isolation', () => {
     mgr.cleanup();
   });
 
+  it('a path through a link at its first backup is recorded by its second, once it is a real directory', () => {
+    mkdirSync(join(ws, 'real'));
+    symlinkSync(join(ws, 'real'), join(ws, 'sub'));
+    const mgr = new ChangesetManager(ws, 'run');
+    mgr.backupBeforeWrite(join(ws, 'sub', 'f.txt'));
+    rmSync(join(ws, 'sub'));
+    mkdirSync(join(ws, 'sub'));
+    writeFileSync(join(ws, 'sub', 'f.txt'), 'pre', 'utf-8');
+    mgr.backupBeforeWrite(join(ws, 'sub', 'f.txt'));
+    writeFileSync(join(ws, 'sub', 'f.txt'), 'post', 'utf-8');
+    mgr.rollbackAll();
+    expect(readFileSync(join(ws, 'sub', 'f.txt'), 'utf-8')).toBe('pre');
+    mgr.cleanup();
+  });
+
+  it('a link at the file is not tracked, and a rollback leaves what it points to', () => {
+    writeFileSync(join(ws, 'target.txt'), 'kept', 'utf-8');
+    symlinkSync(join(ws, 'target.txt'), join(ws, 'ln.txt'));
+    const mgr = new ChangesetManager(ws, 'run');
+    mgr.backupBeforeWrite(join(ws, 'ln.txt'));
+    rmSync(join(ws, 'ln.txt'));
+    writeFileSync(join(ws, 'ln.txt'), 'made in the run', 'utf-8');
+    mgr.backupBeforeWrite(join(ws, 'ln.txt'));
+    expect(mgr.getChanges(), 'not tracked: the second backup saw a file that was there').toEqual([]);
+    mgr.rollbackAll();
+    expect(readFileSync(join(ws, 'ln.txt'), 'utf-8')).toBe('made in the run');
+    expect(readFileSync(join(ws, 'target.txt'), 'utf-8')).toBe('kept');
+    mgr.cleanup();
+  });
+
   it('a file given a second name outside during the run is neither shown nor written', () => {
     writeFileSync(join(ws, 'f.txt'), 'before', 'utf-8');
     const mgr = new ChangesetManager(ws, 'run');

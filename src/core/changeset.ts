@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, relative, dirname, resolve, basename } from 'node:path';
 import { isPathWithin, getWorkspaceCwd, writeRootsBesidesWorkspace } from './workspace.js';
 import { processUmask, toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { openRead, openWrite, rmdirAt, statEntry, unlinkAt, type WorkspaceAnchor } from './workspace-fd.js';
+import { openRead, openWrite, rmdirAt, statEntry, unlinkAt, WorkspaceAccessError, type WorkspaceAnchor } from './workspace-fd.js';
 
 const realOr = (p: string): string => { try { return realpathSync(p); } catch { return resolve(p); } };
 
@@ -119,14 +119,21 @@ export class ChangesetManager {
     return mapped.kind === 'inside' && mapped.rel !== '' ? { anchor: base.anchor, rel: mapped.rel } : null;
   }
 
-  /** Whether a file tracked through the open directory is there. Anything other than a
-   *  missing name counts as there, so a rollback never deletes a file it could not see. */
-  private _existsAnchored(abs: string): boolean {
+  /**
+   * Whether a file in the workspace is there, reached through the open directory. Null when a
+   * link is on the way or at the file: such a path is not tracked, as a path out of the
+   * workspace is not, so a later backup of the same path once it is a real file records it.
+   * Anything else but a missing name counts as there, so a rollback never deletes a file it
+   * could not see.
+   */
+  private _presentAnchored(abs: string): boolean | null {
     const at = this._at(abs);
-    if (at === null) return true;
+    if (at === null) return null;
     try {
-      return statEntry(at.anchor, at.rel) !== null;
+      const st = statEntry(at.anchor, at.rel);
+      return st === null ? false : st.type === 'symlink' ? null : true;
     } catch (err) {
+      if (err instanceof WorkspaceAccessError && (err.code === 'SYMLINK' || err.code === 'NOT_DIR')) return null;
       return (err as NodeJS.ErrnoException).code !== 'ENOENT';
     }
   }
@@ -188,12 +195,14 @@ export class ChangesetManager {
     if (loc === null) return;
     const abs = loc.abs;
     if (this.entries.has(abs)) return; // Already backed up — first write wins
+    const present = loc.anchored ? this._presentAnchored(abs) : existsSync(abs);
+    if (present === null) return;
     if (loc.anchored) this.anchored.add(abs);
 
     let originalContent: string | null = null;
     let status: 'added' | 'modified' = 'added';
 
-    if (loc.anchored ? this._existsAnchored(abs) : existsSync(abs)) {
+    if (present) {
       // The file exists, so it is `modified` whatever fails below. Treating it as `added`
       // would make "Rollback all" delete a file the user had before the run.
       status = 'modified';
