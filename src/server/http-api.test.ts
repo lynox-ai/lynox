@@ -13156,7 +13156,7 @@ describe('LynoxHTTPApi', () => {
       linkSync(join(outside, 'secret.txt'), join(ws, 'hard.txt'));
       execFileSync('mkfifo', [join(ws, 'pipe.txt')]);
       for (const route of ['download', 'read']) {
-        for (const [p, want] of [['leaf.txt', 403], ['dir/secret.txt', 403], ['hard.txt', 403], ['pipe.txt', 400], ['safe', 400], ['nope.txt', 404]] as const) {
+        for (const [p, want] of [['leaf.txt', 403], ['dir/secret.txt', 403], ['hard.txt', 403], ['pipe.txt', 400], ['safe', 400], ['.', 400], [ws, 400], ['nope.txt', 404]] as const) {
           expect(`${route} ${p} → ${String(await status(`/api/files/${route}?path=${q(p)}`))}`).toBe(`${route} ${p} → ${String(want)}`);
         }
       }
