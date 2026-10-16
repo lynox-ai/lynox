@@ -120,6 +120,22 @@ describe('the changeset with isolation', () => {
     mgr.cleanup();
   });
 
+  it('a path left untracked under isolation is tracked by name once isolation is off within the run', () => {
+    writeFileSync(join(ws, 'target.txt'), 'kept', 'utf-8');
+    symlinkSync(join(ws, 'target.txt'), join(ws, 'f.txt'));
+    const mgr = new ChangesetManager(ws, 'run');
+    mgr.backupBeforeWrite(join(ws, 'f.txt'));
+    closeWorkspaceBase();
+    clearTenantWorkspace();
+    rmSync(join(ws, 'f.txt'));
+    writeFileSync(join(ws, 'f.txt'), 'pre', 'utf-8');
+    mgr.backupBeforeWrite(join(ws, 'f.txt'));
+    writeFileSync(join(ws, 'f.txt'), 'post', 'utf-8');
+    mgr.rollbackAll();
+    expect(readFileSync(join(ws, 'f.txt'), 'utf-8')).toBe('pre');
+    mgr.cleanup();
+  });
+
   it('a link at the file is not tracked, and a rollback leaves what it points to', () => {
     writeFileSync(join(ws, 'target.txt'), 'kept', 'utf-8');
     symlinkSync(join(ws, 'target.txt'), join(ws, 'ln.txt'));
@@ -350,13 +366,18 @@ describe('the diff preview with isolation', () => {
     expect(readForDiffPreview(join(ws, 'f.txt'))).toBe('');
   });
 
-  it('the preview before a write does not follow a directory link in the workspace', async () => {
+  // A path outside whose directory is a link into the workspace: the write tools accept it,
+  // because its real path is in the workspace. The preview reads that real path through the
+  // workspace's open directory, so a file there with a second name shows as new.
+  it('the preview before a write, by a link from outside into the workspace, shows nothing for a second name', async () => {
     const { diffPreviewText } = await import('./agent.js');
-    mkdirSync(join(ws, 'real'));
-    writeFileSync(join(ws, 'real', 'f.txt'), 'text', 'utf-8');
-    symlinkSync(join(ws, 'real'), join(ws, 'ln'));
-    expect(diffPreviewText(join(ws, 'real', 'f.txt')), 'positive control').toBe('text');
-    expect(diffPreviewText(join(ws, 'ln', 'f.txt'))).toBe('');
+    mkdirSync(join(ws, 'sub'));
+    writeFileSync(join(ws, 'sub', 'plain.txt'), 'plain', 'utf-8');
+    writeFileSync(join(outside, 'vault.txt'), 'outside', 'utf-8');
+    linkSync(join(outside, 'vault.txt'), join(ws, 'sub', 'f.txt'));
+    symlinkSync(join(ws, 'sub'), join(outside, 'd'));
+    expect(diffPreviewText(join(outside, 'd', 'plain.txt')), 'positive control: the path is accepted and read').toBe('plain');
+    expect(diffPreviewText(join(outside, 'd', 'f.txt'))).toBe('');
   });
 
   it('reads a file outside the workspace by name, as before', () => {

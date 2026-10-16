@@ -79,7 +79,6 @@ import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene
 import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { readFileSync, openSync, closeSync, constants, fstatSync } from 'node:fs';
 import { toWorkspaceRel, workspaceBase } from './workspace-rel.js';
-import { isWorkspaceActive } from './workspace.js';
 import { openRead } from './workspace-fd.js';
 import { resolveWritablePath } from '../tools/builtin/fs.js';
 import { resolve } from 'node:path';
@@ -277,14 +276,11 @@ export function readForDiffPreview(path: string): string {
 }
 
 /**
- * The text a write to `rawPath` would change, for the diff preview. The path is resolved as
- * write_file and edit_file resolve it, and a path they refuse throws. With isolation the file is
- * read by the path as given: its workspace part is walked without following a link, where the
- * resolved path has every link on the way already followed.
+ * The text a write to `rawPath` would change, for the diff preview: the file the write would
+ * change, resolved as write_file and edit_file resolve it. A path they refuse throws.
  */
 export function diffPreviewText(rawPath: string): string {
-  const target = resolveWritablePath(rawPath);
-  return readForDiffPreview(isWorkspaceActive() ? resolve(rawPath) : target);
+  return readForDiffPreview(resolveWritablePath(rawPath));
 }
 
 export const TOOL_AUDIT_INPUT_MAX_CHARS = 2000;

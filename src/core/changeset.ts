@@ -209,7 +209,12 @@ export class ChangesetManager {
     if (this.entries.has(abs)) return; // Already backed up — first write wins
     if (loc.ws !== null) this.anchored.set(abs, loc.ws);
     const present = loc.ws !== null ? this._presentAnchored(abs) : existsSync(abs);
-    if (present === null) return;
+    if (present === null) {
+      // Not tracked: no key is left marked as reached through a workspace, so a later backup of
+      // the same path by name (isolation turned off within the run) is read and restored by name.
+      this.anchored.delete(abs);
+      return;
+    }
 
     let originalContent: string | null = null;
     let status: 'added' | 'modified' = 'added';
