@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  closeSync, constants, existsSync, linkSync, openSync, readSync, writeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
   symlinkSync, writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -298,6 +298,36 @@ describe('the changeset, from the security round', () => {
     expect(readForDiffPreview(join(outside, 'p'))).toBe('');
     mgr.cleanup();
   }, 10_000);
+
+  // A FIFO that holds bytes: its writer wrote and left, a reader keeps the pipe alive. An open by
+  // name then succeeds at once and reads those bytes, so only the check for a regular file keeps
+  // them out of the review and the preview, and keeps the rollback from writing into the pipe.
+  it.runIf(process.platform === 'linux')('a FIFO holding bytes is neither shown nor written', () => {
+    const fifo = join(outside, 'f.txt');
+    writeFileSync(fifo, 'before', 'utf-8');
+    const mgr = new ChangesetManager(ws, 'run', [outside]);
+    mgr.backupBeforeWrite(fifo);
+    rmSync(fifo);
+    execFileSync('mkfifo', [fifo]);
+    const reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const writer = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+      writeSync(writer, 'in the pipe');
+      closeSync(writer);
+      expect(readForDiffPreview(fifo)).toBe('');
+      expect(mgr.getChanges()).toEqual([]);
+      mgr.rollbackAll();
+      const buf = Buffer.alloc(64);
+      let n = 0;
+      try { n = readSync(reader, buf, 0, 64, null); } catch { /* EAGAIN: the pipe is empty */ }
+      // Exactly the bytes the writer left: a read by the preview or the review would have taken
+      // them, a write by the rollback would have added to them.
+      expect(buf.subarray(0, n).toString()).toBe('in the pipe');
+    } finally {
+      closeSync(reader);
+      mgr.cleanup();
+    }
+  });
 });
 
 describe('the diff preview with isolation', () => {

@@ -209,10 +209,7 @@ export class ChangesetManager {
     if (this.entries.has(abs)) return; // Already backed up — first write wins
     if (loc.ws !== null) this.anchored.set(abs, loc.ws);
     const present = loc.ws !== null ? this._presentAnchored(abs) : existsSync(abs);
-    if (present === null) {
-      this.anchored.delete(abs);
-      return;
-    }
+    if (present === null) return;
 
     let originalContent: string | null = null;
     let status: 'added' | 'modified' = 'added';
@@ -450,10 +447,9 @@ export class ChangesetManager {
         let fd: number | undefined;
         try {
           // O_NOFOLLOW: a symlink planted at the file since the backup is not written through.
-          // O_NONBLOCK and the check after it: a FIFO or device at the file is not opened for
-          // long nor written; only a regular file is truncated.
+          // O_NONBLOCK: a FIFO at the file does not hold the process. ftruncate refuses anything
+          // but a regular file (EINVAL), so a FIFO or device is never written.
           fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666);
-          if (!fstatSync(fd).isFile()) return;
           ftruncateSync(fd, 0);
           const bytes = this.originalBytes.get(abs) ?? Buffer.from(entry.originalContent, 'utf-8');
           let off = 0;
