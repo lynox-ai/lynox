@@ -115,6 +115,9 @@ describe('policy', () => {
     expect(credentialFromHeader(basic(`${CRED}:`))).toBe(CRED);
     expect(credentialFromHeader(basic(CRED))).toBe(CRED);
     expect(credentialFromHeader(basic(`${CRED}:pw`))).toBe(CRED);
+    // The form the engine hands a shell call (src/shell-sidecar/egress.ts): node's fetch sends no
+    // header for an empty password, so the engine sets `x`. The password must stay ignored.
+    expect(credentialFromHeader(basic(`${CRED}:x`))).toBe(CRED);
     expect(credentialFromHeader(basic('short:'))).toBeNull();
     expect(credentialFromHeader(`Bearer ${CRED}`)).toBeNull();
     expect(credentialFromHeader(undefined)).toBeNull();

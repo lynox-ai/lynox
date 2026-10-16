@@ -236,6 +236,14 @@ export function isAllowlistedEndpoint(url: string): boolean {
  * about credentials rather than about egress, so the sentence above does not
  * generalise. See the note on `PRIVATE_LAN_PATTERNS`.
  */
+/**
+ * The host names `isGuardedBaselineHost` accepts, as a list: the shell's egress set under
+ * `guarded` (src/shell-sidecar/egress.ts) is built from it, so both read the one Set.
+ */
+export function guardedBaselineHostList(): string[] {
+  return [...ALLOWLISTED_HOSTS];
+}
+
 export function isGuardedBaselineHost(url: string): boolean {
   try {
     const u = new URL(url);

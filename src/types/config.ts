@@ -669,8 +669,10 @@ export interface LynoxUserConfig {
    * Workspace and the Drive backup upload used to be outside it and are now
    * inside. It does NOT gate: the LLM provider call (separate client), push
    * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
-   * anything a shell command starts — each is its own separately-configured
-   * egress surface. A cross-integration air-gap is a separate control.
+   * a shell command outside sidecar mode (in sidecar mode with the egress
+   * proxy, a shell command reaches only the exact host names this policy lets
+   * http_request reach; src/shell-sidecar/egress.ts) — each is its own
+   * separately-configured egress surface. A cross-integration air-gap is a separate control.
    *
    * ⚠ What that costs you if you have already set 'deny-all': a connected
    * Google account stops working, INCLUDING Gmail read/send over OAuth, which
