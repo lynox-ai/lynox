@@ -139,6 +139,11 @@ export const LynoxUserConfigSchema = z.object({
   changeset_review:     z.boolean().optional(),
   memory_auto_scope:    z.boolean().optional(),
   greeting:             z.boolean().optional(),
+  // `.nullable()` so Settings switches the mail back ON by deleting the key (`PUT
+  // {escalation_mail:null}` → the merge loop's delete branch): only `false` is ever stored.
+  // That keeps the rollback risk to owners who switched the mail OFF: an older engine's
+  // `.strict()` schema rejects their whole config.json (it stays on disk, unread).
+  escalation_mail:      z.boolean().nullable().optional(),
   // search_api_key / search_provider retained for migration compatibility
   // with older config.json snapshots (Tavily backend retired 2026-05-24).
   // The legacy `'tavily'` value is silently coerced to `undefined` so old

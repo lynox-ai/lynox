@@ -56,9 +56,10 @@ export interface UsageFlushResponse {
  * stays green. The CP raises an operator alert naming the provider on the FIRST
  * such report, not a fleet-wide pattern.
  *
- * `kind` is the literal `'provider_billing'` — the only kind the engine emits
- * today. The CP parses it tolerantly (an unrecognised future kind is ignored, not
- * an error), which is why a widened union here would stay backward-compatible.
+ * `kind` is the literal `'provider_billing'` — the only kind this route takes.
+ * The CP answers any other `kind` with 400, so a widened union here is NOT
+ * backward-compatible: a new kind of report gets its own route (see
+ * `EscalationNoticeRequest` below).
  * `provider_host` is the host the failing call targeted (e.g. `api.fireworks.ai`),
  * which the CP maps to a display label. `status` is the HTTP status that carried
  * the signal. No secrets, no run content — a class signal, not a payload.
@@ -67,6 +68,22 @@ export interface ProviderIncidentRequest {
   kind: 'provider_billing';
   provider_host: string;
   status: number;
+}
+
+// === Escalation notice — POST /internal/usage/:instanceId/escalation (engine → CP) ===
+
+/**
+ * The engine tells the control plane that an escalation (a scheduled workflow
+ * failed, or a watch found something) reached nobody: its push answered
+ * `not_delivered` or `no_channel`. The CP may then mail the instance's owner
+ * from a lynox sender, with a fixed text.
+ *
+ * A class signal and nothing else: no schedule id, no title, no text from the
+ * run. The CP's mail says that a notification did not arrive and where to look;
+ * what happened stays in the instance.
+ */
+export interface EscalationNoticeRequest {
+  kind: 'escalation';
 }
 
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
