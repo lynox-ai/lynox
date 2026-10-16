@@ -252,6 +252,9 @@ export function formatReport(r: InboxEvalReport): string {
   lines.push(`  auto_handled noise (in requires_user/draft_ready): ${r.autoHandledNoise}`);
   lines.push(`  model alone archived requires_user: ${r.modelMissedRequiresUserIds.length}${r.modelMissedRequiresUserIds.length > 0 ? ` (${r.modelMissedRequiresUserIds.join(', ')})` : ''}`);
   lines.push(`  moved by the forward check: ${r.forwardOverrideIds.length}${r.forwardOverrideIds.length > 0 ? ` (${r.forwardOverrideIds.join(', ')})` : ''}`);
+  // Its cost: the moved ones the label says needed nothing, each now a click instead of archived.
+  const cost = r.samples.filter((s) => s.modelPredicted !== s.predicted && s.fixture.expectedBucket === 'auto_handled').map((s) => s.fixture.id);
+  lines.push(`    of those labelled auto_handled (the check's cost): ${cost.length}${cost.length > 0 ? ` (${cost.join(', ')})` : ''}`);
   lines.push('');
   lines.push('  Confusion matrix (rows=expected, cols=predicted):');
   const order: ReadonlyArray<InboxBucket> = ['requires_user', 'draft_ready', 'auto_handled'];

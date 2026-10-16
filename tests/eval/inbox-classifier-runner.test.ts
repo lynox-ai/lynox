@@ -89,10 +89,14 @@ describe('runInboxEval', () => {
     expect(caught.length).toBeGreaterThan(0);
     expect(report.modelMissedRequiresUserIds).toEqual(requiresUser.map((f) => f.id));
     expect(report.missedRequiresUserIds).toEqual(requiresUser.map((f) => f.id).filter((id) => !caught.includes(id)));
-    expect(report.forwardOverrideIds.filter((id) => caught.includes(id))).toEqual(caught);
+    const forwards = corpus.fixtures.filter((f) => f.id.startsWith('forwarded-thread-'));
+    expect(report.forwardOverrideIds).toEqual(forwards.map((f) => f.id));
+    const cost = forwards.filter((f) => f.expectedBucket === 'auto_handled').map((f) => f.id);
+    expect(cost.length).toBeGreaterThan(0);
     const out = formatReport(report);
     expect(out).toContain(`model alone archived requires_user: ${requiresUser.length} (`);
-    expect(out).toContain(`moved by the forward check: ${report.forwardOverrideIds.length} (`);
+    expect(out).toContain(`moved by the forward check: ${forwards.length} (`);
+    expect(out).toContain(`of those labelled auto_handled (the check's cost): ${cost.length} (${cost.join(', ')})`);
   });
 
   it('counts auto_handled→other-bucket false-positives', async () => {
@@ -140,6 +144,9 @@ describe('runInboxEval', () => {
     const report = await runInboxEval(corpus, llm);
     expect(report.samples[0]?.predicted).toBe('requires_user');
     expect(report.samples[0]?.confidence).toBe(0);
+    // A failed call is neither the model archiving nor the forward check moving anything.
+    expect(report.samples[0]?.modelPredicted).toBe('requires_user');
+    expect(report.forwardOverrideIds).toEqual([]);
   });
 
   // A run that loses a requires_user mail names it, in the report and in the list the gated

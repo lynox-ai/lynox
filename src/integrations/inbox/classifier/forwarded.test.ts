@@ -17,7 +17,7 @@ const base = {
 interface Fixture { id: string; expectedBucket: string; fromAddress: string; subject: string; body: string }
 const corpus = (JSON.parse(readFileSync(join(import.meta.dirname, '../../../../tests/eval/inbox-classifier-fixtures.json'), 'utf8')) as { fixtures: Fixture[] }).fixtures;
 
-describe('a mail that matches the forward patterns from a person is not left archived', () => {
+describe('a mail that matches the forward patterns from a person is not left archived by the model', () => {
   it('shows it even when the model archives it, and says why', async () => {
     const out = await classifyMail(
       { ...base, subject: 'Fwd: Feedback zum Entwurf', fromAddress: 'a.mustermann@example.com', body: 'FYI' },
