@@ -14983,6 +14983,22 @@ describe('mail custom-server defaults are the same on both routes', () => {
         expect(readFileSync(join(uploadsDir, written[0]!), 'utf-8')).toBe(big);
       });
 
+      it('does not store a large upload through a link at uploads/, also one that stays in the area', async () => {
+        mkdirSync(join(tmpArea, 'real'));
+        symlinkSync(join(tmpArea, 'real'), join(tmpArea, 'uploads'));
+        const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`;
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'sum', files: [{ name: 'linked.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }] }),
+        });
+        expect(res.status).toBe(200);
+        // Nothing was written through the link; the upload is not lost but handled inline.
+        expect(readdirSync(join(tmpArea, 'real'))).toEqual([]);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        expect(taskArg?.some(b => b.type === 'text' && b.text?.includes('linked.csv'))).toBe(true);
+      });
+
       it('a small upload still rides inline unchanged', async () => {
         mockSessionRun.mockResolvedValueOnce('ok');
         const res = await jsonFetch('/api/sessions/test/run', {
