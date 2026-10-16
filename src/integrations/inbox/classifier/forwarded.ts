@@ -1,4 +1,4 @@
-// === Inbox classifier — the model does not archive a mail a person forwarded ===
+// === Inbox classifier — a forward from a person is not left in auto_handled by the model ===
 //
 // A mail a person forwarded is mostly sent so that the recipient looks at it, often with
 // no more than "FYI" on top. The model reads that "FYI" as "no action" now and then and
@@ -10,9 +10,10 @@
 // Scope: it overrides the MODEL's verdict only. A user rule or the duplicate check decides
 // before the model is asked, and this check does not reach them.
 //
-// Both directions are safe, and that is all it claims:
+// What it claims, in both directions:
 // - A forward in a form these patterns do not know (a reply prefix in front, another
-//   language, a client's own header) falls back to the model's verdict, as before.
+//   language, a client's own header) or from an address on the automated list falls back
+//   to the model's verdict: no better than before, and no worse.
 // - A mail the patterns match that needed nothing lands in the list that needs the user,
 //   with its notification, instead of being archived: a wrong match costs attention, not
 //   a lost mail.

@@ -17,7 +17,7 @@ const base = {
 interface Fixture { id: string; expectedBucket: string; fromAddress: string; subject: string; body: string }
 const corpus = (JSON.parse(readFileSync(join(import.meta.dirname, '../../../../tests/eval/inbox-classifier-fixtures.json'), 'utf8')) as { fixtures: Fixture[] }).fixtures;
 
-describe('a mail a person forwarded is never archived unseen', () => {
+describe('a mail that matches the forward patterns from a person is not left archived', () => {
   it('shows it even when the model archives it, and says why', async () => {
     const out = await classifyMail(
       { ...base, subject: 'Fwd: Feedback zum Entwurf', fromAddress: 'a.mustermann@example.com', body: 'FYI' },
@@ -30,7 +30,7 @@ describe('a mail a person forwarded is never archived unseen', () => {
   });
 
   it('does not take an Outlook reply for a forward', () => {
-    // Outlook writes this marker above a quoted reply too; only a subject prefix would make it one.
+    // Outlook writes this marker above a quoted reply too, so on its own it does not count.
     expect(isForwardedByPerson({ subject: 'AW: Angebot', fromAddress: 'a.mustermann@example.com', body: 'Passt.\n-----Ursprüngliche Nachricht-----\nVon: me@acme.example' })).toBe(false);
   });
 

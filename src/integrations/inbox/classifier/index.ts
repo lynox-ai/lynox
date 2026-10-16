@@ -66,7 +66,8 @@ export async function classifyMail(
     signal: opts.signal,
   });
   const parsed = parseClassifierResponse(raw);
-  // After the model: the model does not archive a mail a person forwarded (`forwarded.ts`).
+  // After the model: a mail that matches the forward patterns from a person's address is
+  // not left in auto_handled (`forwarded.ts` names what it does not match).
   const verdict: ClassifierVerdict = parsed.bucket === 'auto_handled' && isForwardedByPerson(input)
     ? { ...parsed, bucket: 'requires_user', reasonDe: FORWARDED_REASON_DE, failReason: 'forwarded_by_person' }
     : parsed;

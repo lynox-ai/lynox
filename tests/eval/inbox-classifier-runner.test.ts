@@ -57,7 +57,7 @@ function loadCorpus(): InboxEvalCorpus {
 }
 
 describe('runInboxEval', () => {
-  it('produces a 100% match when the stub mirrors expected buckets', async () => {
+  it('matches every fixture but the forwards the check moves when the stub mirrors expected buckets', async () => {
     const corpus = loadCorpus();
     // Pick the expected bucket by looking it up via subject.
     const expectedByKey = new Map(
@@ -65,11 +65,34 @@ describe('runInboxEval', () => {
     );
     const llm = bucketStub((key) => expectedByKey.get(key) ?? 'requires_user');
     const report = await runInboxEval(corpus, llm);
+    // A perfect model still loses these to the forward check: the forwards labelled auto_handled.
+    const moved = corpus.fixtures
+      .filter((f) => f.id.startsWith('forwarded-thread-') && f.expectedBucket === 'auto_handled')
+      .map((f) => f.id);
+    expect(moved.length).toBeGreaterThan(0);
     expect(report.total).toBe(corpus.fixtures.length);
-    expect(report.bucketMatch).toBe(corpus.fixtures.length);
-    expect(report.bucketMatchPct).toBe(1);
+    expect(report.forwardOverrideIds).toEqual(moved);
+    expect(report.bucketMatch).toBe(corpus.fixtures.length - moved.length);
+    expect(report.samples.every((s) => s.modelPredicted === s.fixture.expectedBucket)).toBe(true);
     expect(report.confusion.requires_user.auto_handled).toBe(0);
-    expect(report.confusion.auto_handled.requires_user).toBe(0);
+    expect(report.confusion.auto_handled.requires_user).toBe(moved.length);
+    expect(report.modelMissedRequiresUserIds).toEqual([]);
+  });
+
+  it('still sees what the model archived when the forward check catches it', async () => {
+    const corpus = loadCorpus();
+    // A model that archives everything: every requires_user fixture is lost by the MODEL;
+    // the user loses only the ones the forward check does not catch.
+    const report = await runInboxEval(corpus, bucketStub(() => 'auto_handled'));
+    const requiresUser = corpus.fixtures.filter((f) => f.expectedBucket === 'requires_user');
+    const caught = requiresUser.filter((f) => f.id.startsWith('forwarded-thread-')).map((f) => f.id);
+    expect(caught.length).toBeGreaterThan(0);
+    expect(report.modelMissedRequiresUserIds).toEqual(requiresUser.map((f) => f.id));
+    expect(report.missedRequiresUserIds).toEqual(requiresUser.map((f) => f.id).filter((id) => !caught.includes(id)));
+    expect(report.forwardOverrideIds.filter((id) => caught.includes(id))).toEqual(caught);
+    const out = formatReport(report);
+    expect(out).toContain(`model alone archived requires_user: ${requiresUser.length} (`);
+    expect(out).toContain(`moved by the forward check: ${report.forwardOverrideIds.length} (`);
   });
 
   it('counts auto_handled→other-bucket false-positives', async () => {
