@@ -33,6 +33,7 @@ import {
   type EnvRegistryRow,
   type EngineReadKind,
 } from '../src/contract/env-registry.js';
+import { CANONICAL_BILLING_TIERS } from '../src/contract/vocab.js';
 import { ENV_ALIASES, type CanonicalEnvName } from '../src/core/env.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -630,5 +631,42 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
 
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
     expect(pairProblems([...ENV_REGISTRY]), 'a pair descriptor is inert, incomplete or asymmetric').toEqual([]);
+  });
+});
+
+// `always` means "emitted for every provisioned tier" (EmitPolicy in env-registry.ts), and the
+// emit side's per-tier presence check reads `requiredForTier` — so an `always` row that names
+// fewer tiers, or none, drops that check for the missing tiers without anything failing.
+function tierScopeProblems(rows: readonly EnvRegistryRow[]): string[] {
+  const all = [...CANONICAL_BILLING_TIERS].sort();
+  const problems: string[] = [];
+  for (const row of rows) {
+    const tiers = [...new Set(row.requiredForTier ?? [])].sort();
+    if (row.emitPolicy === 'always' && tiers.join() !== all.join()) {
+      problems.push(`${row.name}: 'always' but requiredForTier is [${tiers.join(', ')}]`);
+    }
+    if (row.emitPolicy === 'tier' && tiers.length === 0) {
+      problems.push(`${row.name}: 'tier' without a tier`);
+    }
+  }
+  return problems;
+}
+
+describe('env-ABI: the emit policy and the tier scope agree', () => {
+  it('every always row requires every tier, and every tier row names one', () => {
+    expect(tierScopeProblems(ENV_REGISTRY)).toEqual([]);
+  });
+
+  it('the check rejects each broken shape (synthetic rows)', () => {
+    const base = { valueKind: 'opaque', engineConsumed: { kind: 'direct', readSite: 'x' } } as const;
+    const rows = [
+      { ...base, name: 'A_NONE', emitPolicy: 'always' },
+      { ...base, name: 'A_SOME', emitPolicy: 'always', requiredForTier: ['hosted'] },
+      { ...base, name: 'A_EMPTY', emitPolicy: 'always', requiredForTier: [] },
+      { ...base, name: 'T_NONE', emitPolicy: 'tier' },
+      { ...base, name: 'A_OK', emitPolicy: 'always', requiredForTier: [...CANONICAL_BILLING_TIERS] },
+      { ...base, name: 'T_OK', emitPolicy: 'tier', requiredForTier: ['managed'] },
+    ] as unknown as EnvRegistryRow[];
+    expect(tierScopeProblems(rows).map((p) => p.split(':')[0])).toEqual(['A_NONE', 'A_SOME', 'A_EMPTY', 'T_NONE']);
   });
 });
