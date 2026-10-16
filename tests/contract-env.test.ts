@@ -671,9 +671,10 @@ describe('env-ABI: the emit policy and the tier scope agree', () => {
   });
 });
 
-// A row whose name says it holds a credential must say so in `secret`: redaction, the env
-// preview and the vendored sweeps read that field, never the name.
-const CREDENTIAL_NAME = /(_SECRET|_TOKEN|_KEY|_PASSWORD)$/;
+// A row whose name says it holds a credential must say so in `secret`: the env preview and
+// the vendored sweeps read that field, not the name (some engine-side redaction matches
+// names too, but nothing here may rely on that).
+const CREDENTIAL_NAME = /(_SECRET|_TOKEN|_KEY|_PASSWORD|_DSN)$/;
 function unredactedCredentials(rows: readonly EnvRegistryRow[]): string[] {
   return rows.filter((r) => CREDENTIAL_NAME.test(r.name) && !r.secret).map((r) => r.name);
 }
@@ -690,9 +691,9 @@ describe('env-ABI: credential-named rows are marked secret', () => {
   it('the check rejects a credential-named row without one (synthetic rows)', () => {
     const base = { valueKind: 'opaque', emitPolicy: 'always', engineConsumed: { kind: 'direct', readSite: 'x' } } as const;
     const rows = [
-      { ...base, name: 'X_SECRET' }, { ...base, name: 'X_TOKEN' }, { ...base, name: 'X_KEY' }, { ...base, name: 'X_PASSWORD' },
+      { ...base, name: 'X_SECRET' }, { ...base, name: 'X_TOKEN' }, { ...base, name: 'X_KEY' }, { ...base, name: 'X_PASSWORD' }, { ...base, name: 'X_DSN' },
       { ...base, name: 'X_SECRET_OK', secret: { redact: 'exact-name' } }, { ...base, name: 'X_KEYS_DIR' },
     ] as unknown as EnvRegistryRow[];
-    expect(unredactedCredentials(rows)).toEqual(['X_SECRET', 'X_TOKEN', 'X_KEY', 'X_PASSWORD']);
+    expect(unredactedCredentials(rows)).toEqual(['X_SECRET', 'X_TOKEN', 'X_KEY', 'X_PASSWORD', 'X_DSN']);
   });
 });
