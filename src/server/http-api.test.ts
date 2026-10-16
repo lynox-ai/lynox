@@ -6,12 +6,13 @@ import { request as httpRequest, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync } from 'node:fs';
+import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
@@ -13097,6 +13098,148 @@ describe('LynoxHTTPApi', () => {
       }
     });
   });
+
+  describe('/api/files with isolation — through the workspace\'s open directory', () => {
+    let ws: string;
+    let outside: string;
+    const status = async (path: string, init?: RequestInit): Promise<number> => (await jsonFetch(path, init)).status;
+    const q = (p: string): string => encodeURIComponent(p);
+
+    beforeEach(() => {
+      ws = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-files-anchor-')));
+      outside = realpathSync(mkdtempSync(join(tmpdir(), 'lynox-files-out-')));
+      setTenantWorkspace(ws);
+      mkdirSync(join(ws, 'safe'));
+      writeFileSync(join(ws, 'safe', 'ok.txt'), 'hello');
+      writeFileSync(join(outside, 'secret.txt'), 'outside');
+    });
+    afterEach(() => {
+      closeWorkspaceBase();
+      clearTenantWorkspace();
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it('lists a directory, a link as an entry, and refuses a link as the directory, also one that stays inside', async () => {
+      repayRateWindow();
+      symlinkSync(join(ws, 'safe'), join(ws, 'inner'));
+      symlinkSync(outside, join(ws, 'outer'));
+      const res = await jsonFetch('/api/files?path=.');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { entries: Array<{ name: string; isDirectory: boolean; size: number }> };
+      expect(body.entries.sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+        { name: 'inner', isDirectory: false, size: 0 },
+        { name: 'outer', isDirectory: false, size: 0 },
+        { name: 'safe', isDirectory: true, size: 0 },
+      ]);
+      expect(await (await jsonFetch('/api/files?path=safe')).json()).toEqual({ path: 'safe', entries: [{ name: 'ok.txt', isDirectory: false, size: 5 }] });
+      for (const p of ['inner', 'outer', 'outer/sub', 'safe/ok.txt/x', '../x', `/proc/self/root${ws}/safe`, outside]) {
+        expect(`${p} → ${String(await status(`/api/files?path=${q(p)}`))}`).toBe(`${p} → 403`);
+      }
+      expect(await status('/api/files?path=safe/ok.txt')).toBe(400);
+      expect(await status('/api/files?path=nope')).toBe(404);
+      // A name that is not UTF-8 cannot address its file afterwards: counted, not silently missing.
+      writeFileSync(Buffer.from(`${join(ws, 'safe')}/bad-\xff.txt`, 'latin1'), 'b');
+      expect(await (await jsonFetch('/api/files?path=safe')).json()).toEqual({ path: 'safe', entries: [{ name: 'ok.txt', isDirectory: false, size: 5 }], omitted: 1 });
+    });
+
+    it('downloads and reads a file from the one open file, and refuses a link, a second name and a FIFO', async () => {
+      repayRateWindow();
+      const dl = await jsonFetch('/api/files/download?path=safe/ok.txt');
+      expect([dl.status, dl.headers.get('content-length'), await dl.text()]).toEqual([200, '5', 'hello']);
+      expect(await (await jsonFetch(`/api/files/read?path=${q(join(ws, 'safe', 'ok.txt'))}`)).json()).toEqual({ content: 'hello' });
+      writeFileSync(join(ws, 'empty.txt'), '');
+      const empty = await jsonFetch('/api/files/download?path=empty.txt');
+      expect([empty.status, await empty.text()]).toEqual([200, '']);
+      symlinkSync(join(outside, 'secret.txt'), join(ws, 'leaf.txt'));
+      symlinkSync(outside, join(ws, 'dir'));
+      linkSync(join(outside, 'secret.txt'), join(ws, 'hard.txt'));
+      execFileSync('mkfifo', [join(ws, 'pipe.txt')]);
+      for (const route of ['download', 'read']) {
+        for (const [p, want] of [['leaf.txt', 403], ['dir/secret.txt', 403], ['hard.txt', 403], ['pipe.txt', 400], ['safe', 400], ['.', 400], [ws, 400], ['nope.txt', 404]] as const) {
+          expect(`${route} ${p} → ${String(await status(`/api/files/${route}?path=${q(p)}`))}`).toBe(`${route} ${p} → ${String(want)}`);
+        }
+      }
+    });
+
+    it('refuses a file over the limit by the open file\'s size', async () => {
+      repayRateWindow();
+      execFileSync('truncate', ['-s', String(100 * 1024 * 1024 + 1), join(ws, 'big.bin')]);
+      execFileSync('truncate', ['-s', String(1024 * 1024 + 1), join(ws, 'mid.txt')]);
+      expect(await status('/api/files/download?path=big.bin')).toBe(413);
+      expect(await status('/api/files/read?path=mid.txt')).toBe(413);
+      writeFileSync(join(ws, 'max.txt'), 'x'.repeat(1024 * 1024));
+      expect(await status('/api/files/read?path=max.txt')).toBe(200);
+    });
+
+    it('deletes a file, a link itself (never its target), a second name, and refuses a directory and a path behind a link', async () => {
+      repayRateWindow();
+      expect(await status('/api/files?path=safe/ok.txt', { method: 'DELETE' })).toBe(200);
+      expect(existsSync(join(ws, 'safe', 'ok.txt'))).toBe(false);
+      writeFileSync(join(ws, 'target.txt'), 't');
+      symlinkSync(join(ws, 'target.txt'), join(ws, 'link.txt'));
+      symlinkSync(outside, join(ws, 'dir'));
+      symlinkSync(join(outside, 'secret.txt'), join(ws, 'out-link.txt'));
+      linkSync(join(outside, 'secret.txt'), join(ws, 'hard.txt'));
+      for (const p of ['link.txt', 'out-link.txt', 'hard.txt']) {
+        expect(`${p} → ${String(await status(`/api/files?path=${q(p)}`, { method: 'DELETE' }))}`).toBe(`${p} → 200`);
+      }
+      expect([existsSync(join(ws, 'link.txt')), existsSync(join(ws, 'hard.txt')), readFileSync(join(ws, 'target.txt'), 'utf8')]).toEqual([false, false, 't']);
+      execFileSync('mkfifo', [join(ws, 'pipe')]);
+      expect(await status('/api/files?path=pipe', { method: 'DELETE' })).toBe(400);
+      expect(await status('/api/files?path=safe', { method: 'DELETE' })).toBe(400);
+      expect(await status('/api/files?path=dir/secret.txt', { method: 'DELETE' })).toBe(403);
+      expect(await status('/api/files?path=gone.txt', { method: 'DELETE' })).toBe(404);
+      expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('outside');
+    });
+
+    const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+
+    it('closes the open file when the answer cannot be sent, e.g. a name a header cannot carry', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, '日本語.txt'), 'x');
+      const before = openFds().filter((l) => l.endsWith('日本語.txt')).length;
+      for (let i = 0; i < 10; i++) expect(await status(`/api/files/download?path=${q('日本語.txt')}`)).toBe(404);
+      expect(openFds().filter((l) => l.endsWith('日本語.txt')).length).toBe(before);
+    });
+
+    it('closes the open file when the client goes away during a download', async () => {
+      repayRateWindow();
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), join(ws, 'big.bin')]);
+      for (let i = 0; i < 5; i++) {
+        await new Promise<void>((done) => {
+          const req = httpRequest(`${baseUrl}/api/files/download?path=big.bin`, { headers: authHeaders() }, (r) => {
+            r.once('data', () => { r.destroy(); req.destroy(); done(); });
+          });
+          req.on('error', () => done());
+          req.end();
+        });
+      }
+      await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big.bin'))).toEqual([]), { timeout: 5000 });
+    });
+
+    it('counts an unaddressable name only when it is shown, and makes a missing workspace', async () => {
+      repayRateWindow();
+      writeFileSync(Buffer.from(`${ws}/.hidden-\xff`, 'latin1'), 'h');
+      expect(await (await jsonFetch('/api/files?path=.')).json()).toEqual({ path: '.', entries: [{ name: 'safe', isDirectory: true, size: 0 }] });
+      expect((await (await jsonFetch('/api/files?path=.&hidden=1')).json() as { omitted?: number }).omitted).toBe(1);
+      const fresh = join(outside, 'fresh-ws');
+      closeWorkspaceBase();
+      setTenantWorkspace(fresh);
+      expect(await (await jsonFetch('/api/files?path=.')).json()).toEqual({ path: '.', entries: [] });
+      expect(existsSync(fresh)).toBe(true);
+    });
+
+    it('never names a process-handle path in an answer', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, 'locked.txt'), 'x');
+      chmodSync(join(ws, 'locked.txt'), 0o000);
+      for (const p of ['/api/files/read?path=locked.txt', '/api/files/download?path=locked.txt', `/api/files?path=${q('/proc/self/fd/3')}`]) {
+        const text = await (await jsonFetch(p)).text();
+        expect(text, p).not.toMatch(/\/proc\/|\/dev\/fd/);
+      }
+    });
+  });
 });
 
 describe('looksBinaryUpload', () => {
@@ -14875,6 +15018,22 @@ describe('mail custom-server defaults are the same on both routes', () => {
         const written = readdirSync(uploadsDir).filter(f => f.endsWith('buchungen.csv'));
         expect(written).toHaveLength(1);
         expect(readFileSync(join(uploadsDir, written[0]!), 'utf-8')).toBe(big);
+      });
+
+      it('does not store a large upload through a link at uploads/, also one that stays in the area', async () => {
+        mkdirSync(join(tmpArea, 'real'));
+        symlinkSync(join(tmpArea, 'real'), join(tmpArea, 'uploads'));
+        const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`;
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'sum', files: [{ name: 'linked.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }] }),
+        });
+        expect(res.status).toBe(200);
+        // Nothing was written through the link; the upload is not lost but handled inline.
+        expect(readdirSync(join(tmpArea, 'real'))).toEqual([]);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        expect(taskArg?.some(b => b.type === 'text' && b.text?.includes('linked.csv'))).toBe(true);
       });
 
       it('a small upload still rides inline unchanged', async () => {

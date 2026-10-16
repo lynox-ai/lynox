@@ -9,7 +9,7 @@
 import { createServer } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { IncomingMessage, ServerResponse, Server } from 'node:http';
-import { readFileSync, accessSync, existsSync, fstatSync, statSync } from 'node:fs';
+import { readFileSync, accessSync, closeSync, existsSync, fstatSync, statSync } from 'node:fs';
 import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, basename, dirname, join } from 'node:path';
@@ -4060,7 +4060,8 @@ export class LynoxHTTPApi {
         const cutNote = (kept: number, omitted: number): string =>
           `CUT: only the first ${String(kept)} of ${String(kept + omitted)} chars are included; the remaining ${String(omitted)} chars are not available.`;
         // Lazy import — consistent with the other workspace imports below.
-        const { persistChatUpload: persistChatUploadRef } = await import('../core/workspace.js');
+        // With isolation the upload is stored through the workspace's open directory.
+        const { persistChatUploadInArea: persistChatUploadRef } = await import('../core/file-area-anchor.js');
         // Allowlist matches what Anthropic vision accepts AND what the frontend
         // resize path produces. Anything else here is either client tampering
         // or an unsupported format that we should reject before forwarding.
@@ -12485,6 +12486,23 @@ export class LynoxHTTPApi {
 
         const base = getFileAreaDir();
         try { await access(base); } catch { ensureDir(base); }
+        // With isolation: through the workspace's open directory, links not followed.
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const inArea = area.areaTarget(dirPath);
+          if (inArea !== null) {
+            const shown = area.listArea(inArea).filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)));
+            const entries = shown.filter(e => e.exactName)
+              .map(e => ({ name: e.name, isDirectory: e.type === 'dir', size: e.type === 'file' ? e.size : 0 }));
+            // A shown entry whose name cannot address it is counted, not silently missing.
+            const omitted = shown.length - entries.length;
+            jsonResponse(res, 200, omitted > 0 ? { path: dirPath, entries, omitted } : { path: dirPath, entries });
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         // Resolve + reject traversal AND symlink-escape (realpath) — the same
         // confinement /read, /download and DELETE apply via resolveWorkspacePath.
         // Without the realpath check a symlink inside the workspace pointing out
@@ -12534,6 +12552,41 @@ export class LynoxHTTPApi {
         const { createReadStream } = await import('node:fs');
         const { stat } = await import('node:fs/promises');
         const { basename } = await import('node:path');
+        // With isolation: the file is opened once through the workspace's open directory, and its
+        // size, its checks and the stream all come from that one open file.
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const target = area.areaTarget(filePath);
+          if (target !== null) {
+            const { fd, size } = area.openAreaFile(target, 100 * 1024 * 1024, 'File too large');
+            let stream: ReturnType<typeof createReadStream> | null = null;
+            try {
+              res.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(basename(target.shown))}"`,
+                'Content-Length': size,
+              });
+              // Bounded by the size answered in Content-Length, also when the file grows.
+              if (size > 0) stream = createReadStream('', { fd, start: 0, end: size - 1, autoClose: true });
+            } catch (err) {
+              // Nothing owns the fd yet (a header Node refuses, e.g. a name it cannot carry).
+              closeSync(fd);
+              throw err;
+            }
+            if (stream === null) {
+              closeSync(fd);
+              res.end();
+            } else {
+              // pipeline destroys the stream, and so closes the fd, when the client goes away.
+              const { pipeline } = await import('node:stream');
+              pipeline(stream, res, () => {});
+            }
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
         const st = await stat(resolved);
@@ -12556,6 +12609,17 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const target = area.areaTarget(filePath);
+          if (target !== null) {
+            jsonResponse(res, 200, { content: area.readAreaText(target, 1024 * 1024, 'File too large for preview (max 1 MB)') });
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         const { readFile, stat } = await import('node:fs/promises');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
@@ -12574,6 +12638,18 @@ export class LynoxHTTPApi {
       const filePath = url.searchParams.get('path');
       if (!filePath) { errorResponse(res, 400, 'Missing path parameter'); return; }
       try {
+        const area = await import('../core/file-area-anchor.js');
+        try {
+          const target = area.areaTarget(filePath);
+          if (target !== null) {
+            area.deleteAreaFile(target);
+            jsonResponse(res, 200, { ok: true });
+            return;
+          }
+        } catch (err) {
+          if (err instanceof area.AreaRefusal) { errorResponse(res, err.status, err.message); return; }
+          throw err;
+        }
         const { unlink, stat } = await import('node:fs/promises');
         const resolved = await resolveWorkspacePath(filePath);
         if (!resolved) { errorResponse(res, 403, 'Outside workspace'); return; }
