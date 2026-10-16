@@ -60,8 +60,11 @@ function onTheWay(err: unknown): AreaRefusal | null {
   return null;
 }
 
-/** The entries of a directory in the area (lstat, no follow); names that cannot address an entry are left out. */
-export function listArea(t: AreaTarget): EntryInfo[] {
+/**
+ * The entries of a directory in the area (lstat, no follow). A name that is not exact UTF-8 cannot
+ * address its entry afterwards; it is left out of `entries` and counted in `omitted`.
+ */
+export function listArea(t: AreaTarget): { entries: EntryInfo[]; omitted: number } {
   let st;
   try {
     st = statEntry(t.anchor, t.rel);
@@ -72,7 +75,9 @@ export function listArea(t: AreaTarget): EntryInfo[] {
   if (st.type === 'symlink') throw OUTSIDE();
   if (st.type !== 'dir') throw new AreaRefusal(400, 'Not a directory');
   try {
-    return listDir(t.anchor, t.rel).filter((e) => e.exactName);
+    const all = listDir(t.anchor, t.rel);
+    const entries = all.filter((e) => e.exactName);
+    return { entries, omitted: all.length - entries.length };
   } catch (err) {
     throw onTheWay(err) ?? err;
   }
@@ -119,7 +124,10 @@ export function readAreaText(t: AreaTarget, maxBytes: number, tooLarge: string):
   }
 }
 
-/** Remove a regular file from the area. A link is refused, not followed and not removed. */
+/**
+ * Remove a regular file, or a link itself, from the area. A link is never followed: `unlinkat`
+ * removes the name, not what it points to. A file with a second name loses only this one.
+ */
 export function deleteAreaFile(t: AreaTarget): void {
   let st;
   try {
@@ -128,7 +136,7 @@ export function deleteAreaFile(t: AreaTarget): void {
     throw onTheWay(err) ?? new AreaRefusal(404, 'File not found');
   }
   if (st === null) throw new AreaRefusal(404, 'File not found');
-  if (st.type !== 'file') throw new AreaRefusal(400, 'Not a file');
+  if (st.type !== 'file' && st.type !== 'symlink') throw new AreaRefusal(400, 'Not a file');
   unlinkAt(t.anchor, t.rel);
 }
 

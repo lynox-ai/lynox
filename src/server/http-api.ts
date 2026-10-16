@@ -12484,10 +12484,12 @@ export class LynoxHTTPApi {
         try {
           const inArea = area.areaTarget(dirPath);
           if (inArea !== null) {
-            const entries = area.listArea(inArea)
+            const listed = area.listArea(inArea);
+            const entries = listed.entries
               .filter(e => showHidden || (!e.name.startsWith('.') && !HIDDEN_PATTERNS.has(e.name)))
               .map(e => ({ name: e.name, isDirectory: e.type === 'dir', size: e.type === 'file' ? e.size : 0 }));
-            jsonResponse(res, 200, { path: dirPath, entries });
+            // Entries whose name cannot address them are counted, not silently missing.
+            jsonResponse(res, 200, listed.omitted > 0 ? { path: dirPath, entries, omitted: listed.omitted } : { path: dirPath, entries });
             return;
           }
         } catch (err) {

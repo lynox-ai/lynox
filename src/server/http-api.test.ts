@@ -6,7 +6,7 @@ import { request as httpRequest, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, lstatSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -13138,6 +13138,9 @@ describe('LynoxHTTPApi', () => {
       }
       expect(await status('/api/files?path=safe/ok.txt')).toBe(400);
       expect(await status('/api/files?path=nope')).toBe(404);
+      // A name that is not UTF-8 cannot address its file afterwards: counted, not silently missing.
+      writeFileSync(Buffer.from(`${join(ws, 'safe')}/bad-\xff.txt`, 'latin1'), 'b');
+      expect(await (await jsonFetch('/api/files?path=safe')).json()).toEqual({ path: 'safe', entries: [{ name: 'ok.txt', isDirectory: false, size: 5 }], omitted: 1 });
     });
 
     it('downloads and reads a file from the one open file, and refuses a link, a second name and a FIFO', async () => {
@@ -13169,15 +13172,21 @@ describe('LynoxHTTPApi', () => {
       expect(await status('/api/files/read?path=max.txt')).toBe(200);
     });
 
-    it('deletes a file, and refuses a link (leaving it and its target), a directory and a path behind a link', async () => {
+    it('deletes a file, a link itself (never its target), a second name, and refuses a directory and a path behind a link', async () => {
       repayRateWindow();
       expect(await status('/api/files?path=safe/ok.txt', { method: 'DELETE' })).toBe(200);
       expect(existsSync(join(ws, 'safe', 'ok.txt'))).toBe(false);
       writeFileSync(join(ws, 'target.txt'), 't');
       symlinkSync(join(ws, 'target.txt'), join(ws, 'link.txt'));
       symlinkSync(outside, join(ws, 'dir'));
-      expect(await status('/api/files?path=link.txt', { method: 'DELETE' })).toBe(400);
-      expect([lstatSync(join(ws, 'link.txt')).isSymbolicLink(), existsSync(join(ws, 'target.txt'))]).toEqual([true, true]);
+      symlinkSync(join(outside, 'secret.txt'), join(ws, 'out-link.txt'));
+      linkSync(join(outside, 'secret.txt'), join(ws, 'hard.txt'));
+      for (const p of ['link.txt', 'out-link.txt', 'hard.txt']) {
+        expect(`${p} → ${String(await status(`/api/files?path=${q(p)}`, { method: 'DELETE' }))}`).toBe(`${p} → 200`);
+      }
+      expect([existsSync(join(ws, 'link.txt')), existsSync(join(ws, 'hard.txt')), readFileSync(join(ws, 'target.txt'), 'utf8')]).toEqual([false, false, 't']);
+      execFileSync('mkfifo', [join(ws, 'pipe')]);
+      expect(await status('/api/files?path=pipe', { method: 'DELETE' })).toBe(400);
       expect(await status('/api/files?path=safe', { method: 'DELETE' })).toBe(400);
       expect(await status('/api/files?path=dir/secret.txt', { method: 'DELETE' })).toBe(403);
       expect(await status('/api/files?path=gone.txt', { method: 'DELETE' })).toBe(404);
