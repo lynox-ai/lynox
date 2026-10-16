@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { classifyMail, type LLMCaller } from './index.js';
-import { isForwardedByPerson } from './forwarded.js';
+import { FORWARDED_REASON_DE, isForwardedByPerson } from './forwarded.js';
 
 /** A model that archives everything: the worst case this check exists for. */
 const archivesAll: LLMCaller = async () =>
@@ -25,6 +25,13 @@ describe('a mail a person forwarded is never archived unseen', () => {
     );
     expect(out.bucket).toBe('requires_user');
     expect(out.failReason).toBe('forwarded_by_person');
+    // The model's reason for archiving is not what the user reads.
+    expect(out.reasonDe).toBe(FORWARDED_REASON_DE);
+  });
+
+  it('does not take an Outlook reply for a forward', () => {
+    // Outlook writes this marker above a quoted reply too; only a subject prefix would make it one.
+    expect(isForwardedByPerson({ subject: 'AW: Angebot', fromAddress: 'a.mustermann@example.com', body: 'Passt.\n-----Ursprüngliche Nachricht-----\nVon: me@acme.example' })).toBe(false);
   });
 
   it('leaves a mail that is not a forward to the model', async () => {
@@ -57,7 +64,7 @@ describe('a mail a person forwarded is never archived unseen', () => {
   // exactly the forwards. Of those, the ones labelled requires_user can no longer be lost (the
   // two the eval lost in real runs among them), and the ones labelled auto_handled are what it
   // costs: each now shown instead of archived.
-  it('moves exactly the corpus forwards, keeps the two lost ones, and names what it costs', async () => {
+  it('moves exactly the corpus forwards, 440 and 430 among them, and names what it costs', async () => {
     const moved: Fixture[] = [];
     for (const f of corpus) {
       const out = await classifyMail({ ...base, subject: f.subject, fromAddress: f.fromAddress, body: f.body }, archivesAll);
@@ -65,6 +72,7 @@ describe('a mail a person forwarded is never archived unseen', () => {
     }
     expect(moved.length).toBe(corpus.filter((f) => f.id.startsWith('forwarded-thread-')).length);
     expect(moved.every((f) => f.id.startsWith('forwarded-thread-'))).toBe(true);
+    // The two the eval lost in real runs; implied by the two lines above, named because they are why.
     expect(moved.map((f) => f.id)).toEqual(expect.arrayContaining(['forwarded-thread-de-440', 'forwarded-thread-en-430']));
     expect(moved.filter((f) => f.expectedBucket === 'auto_handled').map((f) => f.id).sort()).toEqual([
       'forwarded-thread-de-442', 'forwarded-thread-de-450', 'forwarded-thread-de-452',
