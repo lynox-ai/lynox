@@ -1453,4 +1453,48 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
       restore();
     }
   });
+
+  // The worker asks whether a target is a connected account in every form of its host, as the
+  // tool does: a target written with a root dot is the same account as the profile without one.
+  // The control without a preset is not refused as a connected account; where it stops after
+  // that (today: at the credential, none is attached for the dotted host) is not its subject.
+  it.each([
+    ['example-shop', true],
+    [undefined, false],
+  ] as const)('refuses an unmeasured write to a connected account named with a root dot (preset %s: refused as connected %s)', async (presetId, refusedAsConnected) => {
+    const s = shop();
+    const restore = serve(s);
+    formFixture.measured = false;
+    try {
+      const store = new ApiStore();
+      store.register({
+        id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'], ...(presetId === undefined ? {} : { oauth: { preset_id: presetId } }) } as never,
+        custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-10-15T00:00:00.000Z' },
+      });
+      const vault = {
+        resolve: (n: string): string | null => (n === 'SHOP_TOKEN' ? TOKEN : null),
+        resolveSecretRefs: (x: unknown): unknown => x,
+        extractSecretNames: (): string[] => [],
+        isEnvironmentSecret: (): boolean => false,
+        listNames: (): string[] => ['SHOP_TOKEN'],
+      };
+      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => createToolContext({}) };
+      const factory = await (WorkerLoop.prototype as unknown as {
+        bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null) => ExternalClient | null>;
+      }).bulkClientFactory.call({ engine });
+      const target = `https://${HOST}./products/0`;
+      const c = factory(JSON.stringify(mintBulkContract(`${HOST}.`, [target])))!;
+      const result = await c.write(target, 'PATCH', { price: '15' });
+      if (refusedAsConnected) {
+        expect(result).toEqual({ kind: 'not_granted' });
+        expect(s.requests).toEqual([]);
+      } else {
+        expect(result).not.toEqual({ kind: 'not_granted' });
+      }
+    } finally {
+      formFixture.measured = true;
+      restore();
+    }
+  });
 });

@@ -1455,6 +1455,10 @@ describe('httpRequestTool', () => {
         it.each([
           ['a base_url that ends in a dot', 'https://example.com./v1', 'https://example.com/v1/report'],
           ['a request host that ends in a dot', 'https://example.com/v1', 'https://example.com./v1/report'],
+          // Two dots: the raw form is the only one of the three that names the stored host.
+          ['a base_url and a request host that end in two dots', 'https://example.com../v1', 'https://example.com../v1/report'],
+          // Every trailing dot comes off for the bare form, not only the last one.
+          ['a request host that ends in two dots', 'https://example.com/v1', 'https://example.com../v1/report'],
         ])('counts the account as connected with %s', async (_label, baseUrl, url) => {
           await withProfile('example-shop', baseUrl);
           mockDnsPublic();
@@ -1481,6 +1485,28 @@ describe('httpRequestTool', () => {
           await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
           expect(fetchMock).toHaveBeenCalledTimes(calls);
           expect((fetchMock.mock.calls.at(-1)![1] as RequestInit).method).toBe('DELETE');
+        });
+
+        // A 303 turns the hop into a GET, and its target raises it back to a DELETE: the account
+        // check reads the hop's own method, not the method the redirect left it with.
+        it.each([
+          ['example-shop', 1],
+          [undefined, 2],
+        ] as const)('a contract hop that its target raises to a DELETE follows onto the account only without a preset (preset %s: %i requests)', async (presetId, calls) => {
+          await withProfile(presetId);
+          mockDnsPublic();
+          const fetchMock = vi.fn()
+            .mockResolvedValueOnce(createMockResponse({ status: 303, headers: { location: 'https://example.com/v1/report?_method=DELETE' } }))
+            .mockResolvedValue(createMockResponse({ status: 204, body: '' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const both: CapabilityContract = { ...withDelete, hostPatterns: ['other.example', 'example.com'] };
+          await handler({ url: 'https://other.example/v1/report', method: 'DELETE' }, makeAgent({ capabilityContract: both })).catch(() => undefined);
+          expect(fetchMock).toHaveBeenCalledTimes(calls);
+          // The hop that is followed is the one the target raises: a GET that names the DELETE.
+          if (calls === 2) {
+            expect(String(fetchMock.mock.calls[1]![0])).toContain('_method=DELETE');
+            expect((fetchMock.mock.calls[1]![1] as RequestInit).method).toBe('GET');
+          }
         });
 
         it('control: the same contract grants the DELETE on an account without a preset', async () => {
