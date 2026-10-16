@@ -23,7 +23,9 @@ import {
   BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, canonicalJson,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
-import { BULK_MAX_TARGET_BYTES, resolveBulkFilePath } from './bulk-plan.js';
+import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
+import { processUmask } from './workspace-rel.js';
+import { statEntry, unlinkAt, WorkspaceAccessError, writeFileAt } from './workspace-fd.js';
 
 export type BulkEffect = BulkWriteEffect;
 
@@ -342,11 +344,18 @@ async function rollBack(
  * and a symlink planted at the leaf is replaced rather than followed.
  */
 export function workspaceWriter(
-  /** The confinement resolver. Injected so a test can stand in for the moment a path is
-   *  swapped between this check and the file operation after it — a race no static
-   *  setup reproduces, and the only case the leaf guards below exist for. */
-  resolve: (target: string) => string | null = resolveBulkFilePath,
+  /** The confinement resolver of the by-name writer. Injected so a test can stand in for the
+   *  moment a path is swapped between this check and the file operation after it — a race no
+   *  static setup reproduces, and the only case the leaf guards below exist for. Without it, and
+   *  with isolation, the writer is {@link anchoredWorkspaceWriter}, which has no such check. */
+  resolve?: (target: string) => string | null,
 ): TargetWriter {
+  if (resolve === undefined && heldWorkspace() !== null) return anchoredWorkspaceWriter();
+  return workspaceWriterByName(resolve ?? resolveBulkFilePath);
+}
+
+/** {@link workspaceWriter} without isolation: by the confined real path, checked before each step. */
+function workspaceWriterByName(resolve: (target: string) => string | null): TargetWriter {
   const confined = (key: string): boolean => resolve(key) === key;
   return {
     async read(key) {
@@ -417,6 +426,75 @@ export function workspaceWriter(
         throw err;
       }
       return mode === undefined ? 'created' : 'written';
+    },
+  };
+}
+
+/**
+ * Workspace files with isolation: every read and write goes through the context workspace's open
+ * directory, one component at a time with O_NOFOLLOW, never by name. The key is the file's path
+ * relative to the workspace ({@link bulkKeyRel} maps a run's absolute key into it). A
+ * link on the way or at the file, or a non-directory on the way, is `path_changed`; a non-file, a
+ * file with a second name or one that is not text is `foreign`. Writes are atomic as before: a
+ * temp file beside the target, renamed over it. A write refuses anything but a file at the leaf.
+ */
+export function anchoredWorkspaceWriter(): TargetWriter {
+  const relOf = (key: string): { anchor: Parameters<typeof statEntry>[0]; rel: string } | null => {
+    const base = heldWorkspace();
+    if (base === null) throw new Error('the workspace is not set');
+    const rel = bulkKeyRel(key, base.ws);
+    return rel === null ? null : { anchor: base.anchor, rel };
+  };
+  return {
+    async read(key) {
+      const at = relOf(key);
+      if (at === null) return 'path_changed';
+      let image: ReturnType<typeof readBulkKey>;
+      try {
+        image = readBulkKey(key, BULK_MAX_TARGET_BYTES);
+      } catch (err: unknown) {
+        // A link on the way or at the file was not there when the run was planned (it would have
+        // been refused then): the path changed.
+        if (err instanceof BulkLinkOnTheWay) return 'path_changed';
+        if (err instanceof WorkspaceAccessError) {
+          if (err.code === 'SYMLINK' || err.code === 'NOT_DIR') return 'path_changed';
+          if (err.code === 'NOT_FILE') return 'foreign';
+        }
+        if (err instanceof BulkForeignFile) return 'foreign';
+        throw err;
+      }
+      if (image === 'too_large' || image === 'not_text') return 'foreign';
+      return image;
+    },
+    async write(key, after) {
+      const at = relOf(key);
+      if (at === null) throw new Error('path changed');
+      let st: ReturnType<typeof statEntry>;
+      try {
+        st = statEntry(at.anchor, at.rel);
+      } catch (err: unknown) {
+        // A missing directory on the way: writeFileAt makes it.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        st = null;
+      }
+      if (after.absent) {
+        if (st === null) throw new Error('not found');
+        if (st.type !== 'file') throw new Error('not a regular file');
+        unlinkAt(at.anchor, at.rel);
+        return 'deleted';
+      }
+      if (typeof after.value !== 'string') throw new Error('not text');
+      // Something other than a file at the leaf (a link planted since the read) is not what the
+      // run planned for — and a link's mode would be copied onto the new file.
+      if (st !== null && st.type !== 'file') throw new Error('not a regular file');
+      const umask = processUmask();
+      writeFileAt(at.anchor, at.rel, after.value, {
+        // The new file is the engine's: setuid and setgid are not carried over, as the kernel drops
+        // them on a write to the file in place.
+        fileMode: st !== null ? st.mode & ~0o6000 : 0o666 & ~umask,
+        dirMode: 0o777 & ~umask,
+      });
+      return st === null ? 'created' : 'written';
     },
   };
 }

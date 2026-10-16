@@ -5,7 +5,7 @@ import { listReadContract, parseListSource } from '../../core/bulk-list.js';
 import { detectSecretInContent } from './http.js';
 import {
   BULK_MAX_SOURCE_BYTES, BULK_MAX_TARGET_BYTES, BULK_MAX_TARGETS, BULK_QUERY_PAGE, BulkSourceError,
-  parseSourceText, planDataStore, planWorkspace, readBulkImage, resolveBulkFilePath, rowsToSource,
+  bulkFileKey, parseSourceText, planDataStore, planWorkspace, readBulkKey, rowsToSource,
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { judgeTemplate, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
@@ -235,11 +235,11 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       if (input.judge !== undefined && input.atomic === true) throw new BulkSourceError('A run with judge cannot be atomic.');
       let rows: Record<string, unknown>[];
       if (input.source_file !== undefined) {
-        const path = resolveBulkFilePath(input.source_file);
+        const path = bulkFileKey(input.source_file);
         if (path === null) throw new BulkSourceError('The source file must be inside the workspace.');
-        let image: ReturnType<typeof readBulkImage>;
+        let image: ReturnType<typeof readBulkKey>;
         try {
-          image = readBulkImage(path, BULK_MAX_SOURCE_BYTES);
+          image = readBulkKey(path, BULK_MAX_SOURCE_BYTES);
         } catch {
           throw new BulkSourceError('The source file is not a readable file.');
         }
@@ -259,8 +259,8 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       let judge: JudgeRule | undefined;
       if (input.target_system === 'workspace') {
         targets = planWorkspace(source, {
-          resolve: resolveBulkFilePath,
-          read: (p) => readBulkImage(p, BULK_MAX_TARGET_BYTES),
+          resolve: bulkFileKey,
+          read: (p) => readBulkKey(p, BULK_MAX_TARGET_BYTES),
         });
         scope = 'workspace';
       } else if (input.target_system === 'data_store') {

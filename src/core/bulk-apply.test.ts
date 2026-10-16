@@ -1152,8 +1152,8 @@ describe('workspace writes stay in the file area (A-review obligation)', () => {
     symlinkSync(secret, join(ws, 'leaf.txt'));
     await runBulkEffect(runId, 'bulk_apply', effectDeps(workspaceWriter()));
     expect(readFileSync(secret, 'utf-8')).toBe('before');
-    // The key no longer resolves to itself (its real path is the link's target), so the
-    // target is refused before anything is read — and the link is left as it is.
+    // The file is reached without following links, so the link at the leaf is refused before
+    // anything is read — and left as it is.
     const { lstatSync } = await import('node:fs');
     expect(lstatSync(join(ws, 'leaf.txt')).isSymbolicLink()).toBe(true);
     expect(ledger.getPreview(runId)[0]!.error).toBe('path_changed');

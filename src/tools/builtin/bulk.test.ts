@@ -218,10 +218,20 @@ describe('bulk_plan over workspace files', () => {
 
   it('keys two spellings of one file as one target and refuses the doubled plan', async () => {
     writeFileSync(join(ws, 'a.txt'), 'a');
-    symlinkSync(join(ws, 'a.txt'), join(ws, 'alias.txt'));
-    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'a.txt', after: '1' }, { target: 'alias.txt', after: '2' }]));
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'a.txt', after: '1' }, { target: `./sub/../a.txt`, after: '2' }]));
     expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent()))
       .toBe('Error: The source names the same target more than once.');
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'a.txt', after: '1' }, { target: join(ws, 'a.txt'), after: '2' }]));
+    expect(await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent()))
+      .toBe('Error: The source names the same target more than once.');
+  });
+
+  it('does not follow a link to a file in the workspace: the link is invalid, the file planned once', async () => {
+    writeFileSync(join(ws, 'a.txt'), 'a');
+    symlinkSync(join(ws, 'a.txt'), join(ws, 'alias.txt'));
+    writeFileSync(join(ws, 'plan.json'), JSON.stringify([{ target: 'a.txt', after: '1' }, { target: 'alias.txt', after: '2' }]));
+    const result = await bulkPlanTool.handler({ target_system: 'workspace', source_file: 'plan.json' }, agent());
+    expect(result).toContain('update 1, create 0, unchanged 0, invalid 1 (unreadable 1)');
   });
 
   it('refuses to read through a symlink at the leaf, even one planted after resolution', () => {
