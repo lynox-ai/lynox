@@ -1808,28 +1808,30 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(result).toContain(`Still in the vault: ${ACCESS}.`);
   });
 
+  // A recorded name of the exchange's choosing, not the derived pair: a profile that signs in with
+  // a name in another's derived pair is not admitted (`derivedPairCollision`).
   it('keeps a recorded token another profile reads as its basic password', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
-    store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: ACCESS } });
-    const vault = makeVault({ [ACCESS]: 'shared' });
+    store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
+    expect(store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: 'CRM_MINTED' } })).toBe(true);
+    const vault = makeVault({ CRM_MINTED: 'shared' });
     const agent = makeAgent(store, vault);
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
-    expect(vault.peek(ACCESS)).toBe('shared');
+    expect(vault.peek('CRM_MINTED')).toBe('shared');
   });
 
   it('keeps a recorded token another profile names as its oauth client secret', async () => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
-    store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: ACCESS } } });
-    const vault = makeVault({ [ACCESS]: 'shared' });
+    store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
+    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(true);
+    const vault = makeVault({ CRM_MINTED: 'shared' });
     const agent = makeAgent(store, vault);
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
-    expect(vault.peek(ACCESS)).toBe('shared');
+    expect(vault.peek('CRM_MINTED')).toBe('shared');
   });
 
   // PRD §3.13 (H2i): a token a mandate's consent wrote leaves with its profile, even when
@@ -1839,13 +1841,13 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     ['control: keeps it when the owner\'s consent wrote it', 'owner', 'shared'],
   ])('a recorded token another profile names: %s', async (_label, connectedBy, left) => {
     const store = new ApiStore();
-    store.register(crmProfile({ oauth_grant: { connected_by: connectedBy, written: wrote({ [ACCESS]: 'shared' }) } }));
-    store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: ACCESS } } });
-    const vault = makeVault({ [ACCESS]: 'shared' });
+    store.register(crmProfile({ oauth_grant: { connected_by: connectedBy, written: wrote({ CRM_MINTED: 'shared' }) } }));
+    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(true);
+    const vault = makeVault({ CRM_MINTED: 'shared' });
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(makeAgent(store, vault)));
 
-    expect(vault.peek(ACCESS)).toBe(left);
+    expect(vault.peek('CRM_MINTED')).toBe(left);
   });
 
   it('keeps a recorded token that another profile has on its own record', async () => {
