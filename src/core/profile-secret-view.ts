@@ -17,10 +17,10 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, refreshTokenKey } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
-import { derivePresetEndpoints, OAUTH_PRESETS } from './oauth-presets.js';
+import { derivePresetEndpoints, OAUTH_PRESETS, type OAuthPreset } from './oauth-presets.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { SecretReleases } from './secret-releases.js';
 import { shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
@@ -101,6 +101,143 @@ function credentialUrls(profile: ApiProfile): [URL | undefined, URL | undefined]
     try { return new URL(u); } catch { return undefined; /* not a URL: nothing to name */ }
   };
   return [parse(profile.base_url), parse(tokenUrl)];
+}
+
+/**
+ * In which role a token slot's value would leave the process:
+ * - `request` — as the credential of an HTTP request to `target` (the engine's attach, or a
+ *   `secret:` reference in `http_request`);
+ * - `exchange` — as the refresh token posted to the token endpoint `target`;
+ * - `client` — as an OAuth client id or client secret;
+ * - `other` — in the input of any tool other than `http_request`, whose destination the engine
+ *   cannot read.
+ */
+export type SlotRole = 'request' | 'exchange' | 'client' | 'other';
+
+/**
+ * Whose grant a vault name belongs to, read over every stored profile:
+ * - `free` — no profile holds it: not a token slot.
+ * - `contested` — more than one profile holds it.
+ * - `owned` — `owner` holds it; `members` are the owner and, only for the owner's own refresh
+ *   slot, the profiles that read that slot and share the grant through a built-in provider
+ *   ({@link sharedGrant}).
+ */
+type SlotGrant =
+  | { readonly kind: 'free' }
+  | { readonly kind: 'contested' }
+  | { readonly kind: 'owned'; readonly owner: ApiProfile; readonly members: readonly ApiProfile[]; readonly preset: OAuthPreset | undefined };
+
+/**
+ * The built-in provider two oauth2 profiles share a grant through, or undefined when they do
+ * not: the same `preset_id` in {@link OAUTH_PRESETS}, both bases on one of its `apiHosts` over
+ * https with no port of their own, and the same token endpoint as the preset derives it from
+ * each profile's parameters. A profile whose `base_url` does not parse shares nothing.
+ */
+function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
+  const presetId = a.auth?.type === 'oauth2' ? a.auth.oauth?.preset_id : undefined;
+  if (presetId === undefined || b.auth?.type !== 'oauth2' || b.auth.oauth?.preset_id !== presetId) return undefined;
+  const preset = OAUTH_PRESETS.get(presetId);
+  if (preset === undefined) return undefined;
+  const onApiHost = (p: ApiProfile): boolean => {
+    let base: URL;
+    try {
+      base = new URL(p.base_url);
+    } catch {
+      return false;
+    }
+    return base.protocol === 'https:' && base.port === '' && preset.apiHosts.includes(base.hostname);
+  };
+  if (!onApiHost(a) || !onApiHost(b)) return undefined;
+  const ea = derivePresetEndpoints(presetId, a.auth?.oauth?.preset_params);
+  const eb = derivePresetEndpoints(presetId, b.auth.oauth?.preset_params);
+  if ('kind' in ea || 'kind' in eb || ea.tokenUrl !== eb.tokenUrl) return undefined;
+  return preset;
+}
+
+/**
+ * The grant `name` belongs to among `profiles`. A profile holds a name its grant writes to
+ * ({@link grantTokenNames}: the pair an oauth2 profile's id derives, and the names its exchanges
+ * wrote). One holder owns the name; more than one, and the name is contested and belongs to no
+ * one, whichever of them was stored or loaded first. A refresh slot a profile only configures
+ * (`refresh_token_key`) is no claim: anybody can name any vault name there, so it would let one
+ * profile take another's credential. Such a profile is a member of the owner's grant only when
+ * it reads the owner's refresh slot and the two share the grant through a built-in provider.
+ */
+function slotGrant(profiles: readonly ApiProfile[], name: string): SlotGrant {
+  const holders = profiles.filter((p) => grantTokenNames(p).has(name));
+  const [owner] = holders;
+  if (owner === undefined) return { kind: 'free' };
+  if (holders.length > 1) return { kind: 'contested' };
+  let preset: OAuthPreset | undefined;
+  const members: ApiProfile[] = [owner];
+  // Only the owner's own refresh slot is shared; any other name of its grant has one member.
+  if (owner.auth?.type !== 'oauth2' || readersRefreshSlot(owner) !== name) return { kind: 'owned', owner, members, preset };
+  for (const p of profiles) {
+    if (p.id === owner.id || p.auth?.type !== 'oauth2' || readersRefreshSlot(p) !== name) continue;
+    const shared = sharedGrant(owner, p);
+    if (shared === undefined) continue;
+    preset = shared;
+    members.push(p);
+  }
+  return { kind: 'owned', owner, members, preset };
+}
+
+/** Whether `name` is a refresh slot of `p`: the one its id derives, or the one it configures. */
+function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
+  return p.auth?.type === 'oauth2' && (refreshTokenKey(p.id) === name || p.auth.oauth?.refresh_token_key === name);
+}
+
+/**
+ * Whether the value under `name` may leave the process in `role` to `target`, asked by the
+ * profile `asker` (none for a `secret:` reference). A name no stored profile claims is not a
+ * token slot and may go anywhere this predicate is concerned with. A token slot goes only to a
+ * target of the grant it belongs to:
+ * - `request`: an access token, never a refresh token, to the origin (scheme, host and port) of
+ *   the owner's `base_url` — or, when the owner shares its grant through a built-in provider, to
+ *   `https://<host>` for a host of that provider's `apiHosts`;
+ * - `exchange`: a refresh token, asked by the owner or by a profile sharing the grant, to the
+ *   owner's token endpoint (the preset's, else `token_url`), compared whole;
+ * - `client` and `other`: never.
+ * A contested name goes nowhere. The stored profiles are read ({@link ApiStore.knownProfiles}),
+ * so a profile the boot held back still counts as a claimant. Anything that throws while this
+ * is decided answers no. The owner's `base_url` not being a URL makes a request answer no;
+ * another profile's unparsable `base_url` only keeps that profile out of a shared grant.
+ */
+export function slotMayReach(
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
+  name: string,
+  role: SlotRole,
+  target: string | undefined,
+  asker?: ApiProfile,
+): boolean {
+  try {
+    const profiles = apiStore.knownProfiles();
+    const grant = slotGrant(profiles, name);
+    if (grant.kind === 'free') return true;
+    if (grant.kind === 'contested' || target === undefined) return false;
+    const { owner, members } = grant;
+    const refresh = members.some((m) => isRefreshSlotOf(m, name));
+    if (role === 'request') {
+      if (refresh) return false;
+      const destination = destinationOf(new URL(target));
+      // The owner's own refresh slot says whether it shares its grant, and through which provider;
+      // only when the owner is one of that grant's members.
+      const ownGrant = owner.auth?.type === 'oauth2' ? slotGrant(profiles, readersRefreshSlot(owner)) : undefined;
+      if (ownGrant?.kind === 'owned' && ownGrant.members.length > 1 && ownGrant.preset !== undefined && ownGrant.members.some((m) => m.id === owner.id)) {
+        return ownGrant.preset.apiHosts.some((h) => destination === `https://${h}`);
+      }
+      const [base] = credentialUrls(owner);
+      return base !== undefined && destination === destinationOf(base);
+    }
+    if (role === 'exchange') {
+      if (!refresh || asker === undefined || !members.some((m) => m.id === asker.id)) return false;
+      const [, endpoint] = credentialUrls(owner);
+      return endpoint !== undefined && new URL(target).href === endpoint.href;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**

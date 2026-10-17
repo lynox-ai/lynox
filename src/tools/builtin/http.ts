@@ -13,7 +13,7 @@ import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/o
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
+import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -1639,6 +1639,9 @@ async function attachEngineManagedAuth(
     headers[name] = value;
     return { slot: name.toLowerCase() };
   };
+  /** The first of `names` that holds a token this request may not carry to `url`, if any. */
+  const slotOffGrant = (names: ReadonlyArray<string | undefined>): string | undefined =>
+    names.find((n): n is string => typeof n === 'string' && !slotMayReach(apiStore, n, 'request', url, profile));
 
   // The engine is about to hand a stored credential to this host, so the host must
   // be vetted or carry a recorded human acceptance. `isVettedEgressHost`, not
@@ -1667,6 +1670,9 @@ async function attachEngineManagedAuth(
     if (!url.toLowerCase().startsWith('https://')) {
       return { refusal: `Error: api_profile "${profile.id}" uses a stored access token — refusing to attach it over a non-HTTPS URL. Use https://.` };
     }
+    // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
+    const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -1820,6 +1826,8 @@ async function attachEngineManagedAuth(
     if (protectedKeys.length > 0) {
       return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
+    const offGrant = slotOffGrant([userKey, passKey]);
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
     const user = secretStore.resolve(userKey);
     const pass = secretStore.resolve(passKey);
     // Truthiness, not a null check: an EMPTY vault value would ship
@@ -1864,6 +1872,8 @@ async function attachEngineManagedAuth(
     if (isProtectedSecretWrite(tokenKey)) {
       return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
+    const offGrant = slotOffGrant([tokenKey]);
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
     if (!hostVetted) {
       return { hint: () => `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
     }
@@ -1920,6 +1930,7 @@ async function attachEngineManagedAuth(
       slotFilled: filled,
       crossOriginRedirect: ctx.crossOriginRedirect,
       secretStore,
+      mayReference: (name) => slotMayReach(apiStore, name, 'request', url, profile),
     }),
   };
 }
@@ -2068,6 +2079,8 @@ function modelOwnedAuthHint(a: {
   slotFilled: boolean;
   crossOriginRedirect: boolean;
   secretStore: { resolve(key: string): string | null | undefined };
+  /** Whether a `secret:` reference to this name in a request to this URL would be sent at all. */
+  mayReference: (name: string) => boolean;
 }): string {
   const { auth } = a;
   const slot = modelOwnedSlot(auth);
@@ -2105,6 +2118,12 @@ function modelOwnedAuthHint(a: {
 
   const key = auth.type === 'basic' ? userKey : auth.vault_keys?.[0];
   const label = safeToken(key);
+
+  // A name that holds another connection's token, or one more than one profile claims: the
+  // engine refuses to send it here, so the hint does not recommend it, and does not look it up.
+  if (key !== undefined && !a.mayReference(key)) {
+    return `The engine did not attach this profile's credential: api_profile "${a.profileId}" names "${label ?? '?'}" as its credential, a vault name that holds the token of an OAuth connection this request does not go to (or that more than one profile claims). The engine sends that token only to where its own connection points, so a reference to it here is refused as well — do NOT reference it. Give this profile a credential of its own with api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.${vetting}`;
+  }
 
   // The key NAME comes from the profile, so it can name a slot that belongs to the
   // platform or holds the tenant's own provider key. The engine-owned branches refuse
@@ -2152,6 +2171,15 @@ function modelOwnedAuthHint(a: {
       ? `You set the ${slot} header on this request yourself; the engine neither added nor replaced it. Nothing here says the value is wrong — only that the engine is not the one supplying it.`
       : `This request carried no usable ${slot} header — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${auth.type === 'basic' ? 'Basic ' : ''}secret:${label ?? ''}" }.`}`;
   return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
+}
+
+/**
+ * A profile whose credential is a token slot this request may not carry (`slotMayReach`): the
+ * token of an OAuth connection whose grant does not point at this URL, a refresh token, or a
+ * name more than one profile claims.
+ */
+function slotReachRefusal(profileId: string, name: string, hostname: string): string {
+  return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
 /** Shared wording — the same refusal for basic and bearer/header. */

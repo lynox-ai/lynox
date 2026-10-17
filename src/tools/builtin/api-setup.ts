@@ -34,7 +34,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, slotMayReach, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -2393,7 +2393,7 @@ ${draftJson}
       if (!input.id) return 'Error: "id" is required for fetch_token action.';
       const apiStore = agent.toolContext?.apiStore;
       const profile = apiStore?.get(input.id);
-      if (!profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
+      if (!apiStore || !profile) return `Error: API profile "${input.id}" not found. Create it first with action=create.`;
       // A renewal on someone else's profile is what a read through it does anyway, and it
       // writes where that profile's tokens live. A name of the caller's choosing would copy
       // that account's token to where the profile's rules no longer reach it.
@@ -2454,6 +2454,18 @@ ${draftJson}
       const clientSecretKey = oauth.client_secret_key;
       if (!clientIdKey || !clientSecretKey) {
         return `Error: profile "${input.id}" auth.oauth is missing client_id_key or client_secret_key. Update the profile with the vault key names that hold the OAuth credentials.`;
+      }
+      // Before any of the three names is resolved: a token slot is never a client id or secret,
+      // and a refresh slot goes only to the token endpoint of the grant it belongs to, asked by
+      // the profile that holds that grant or one that shares it through a built-in provider.
+      // The renewal on attach runs this same handler.
+      const tokenAsClient = [clientIdKey, clientSecretKey].find((n) => !slotMayReach(apiStore, n, 'client', tokenUrl, profile));
+      if (tokenAsClient !== undefined) {
+        return `Error: profile "${input.id}" names "${slotNameForModel(tokenAsClient, refreshTokenKey(input.id))}" as its OAuth ${tokenAsClient === clientIdKey ? 'client id' : 'client secret'}, a vault name that holds an OAuth token, and a token is never sent as client credentials. Nothing was sent. Point the field at the vault name of this API's own client credential with api_setup update.`;
+      }
+      const exchangedSlot = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      if (grantType === 'refresh_token' && !slotMayReach(apiStore, exchangedSlot, 'exchange', tokenUrl, profile)) {
+        return `Error: profile "${input.id}" reads its refresh token from "${slotNameForModel(exchangedSlot, refreshTokenKey(input.id))}", and that token goes only to the token endpoint of the connection it belongs to, for that connection or a profile sharing it through a built-in provider — this profile is neither, or more than one profile holds the name. Nothing was sent. Another stored profile holds this vault name. Do not change or delete a profile to get past this: tell the user that another profile holds the connection behind this vault name, and let the user decide.`;
       }
       // The profile's view of the vault: a profile a mandate wrote does not get the
       // environment's values or a preset account's credentials (`profile-secret-view.ts`).

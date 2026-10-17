@@ -28,7 +28,7 @@ import {
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom } from '../core/profile-secret-view.js';
+import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
@@ -10304,6 +10304,12 @@ export class LynoxHTTPApi {
       const vetting = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
         sendOAuthHtml(res, 409, 'This connection points somewhere this engine may not send credentials. Nothing was changed.');
+        return;
+      }
+
+      // A token is never a client id or secret: asked on the names, before either is read.
+      if ([oauth.client_id_key, oauth.client_secret_key].some((n) => typeof n === 'string' && !slotMayReach(apiStore, n, 'client', endpoints.tokenUrl, profile))) {
+        sendOAuthHtml(res, 409, 'This connection names an OAuth token as its client credentials, which this engine does not send. Nothing was changed.');
         return;
       }
 

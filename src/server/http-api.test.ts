@@ -15371,6 +15371,37 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
   });
 
+  describe('a token slot named as the client credentials', () => {
+    // `shop-api`'s exchanges wrote SHOP_MINTED: a token of that connection, which never goes to
+    // a token endpoint as a client id or secret, this one's included.
+    async function withOwner(oauthExtra: Record<string, unknown>): Promise<string> {
+      const { cookie, store } = await arrange({ oauthExtra });
+      expect(store.register({
+        id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'Shop',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://api.shop.example/oauth/token', client_id_key: 'SHOP_CID', client_secret_key: 'SHOP_CSECRET' } },
+        oauth_grant: { written: [{ name: 'SHOP_MINTED', fp: 'fp-minted' }] },
+      })).toBe(true);
+      mockExchangeToken.mockClear();
+      return cookie;
+    }
+
+    it.each([['client secret', 'client_secret_key'], ['client id', 'client_id_key']])('refuses one named as the %s before anything is sent', async (_label, field) => {
+      const cookie = await withOwner({ [field]: 'SHOP_MINTED' });
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('names an OAuth token as its client credentials');
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    it('control: with its own client pair beside the same owner, the code is exchanged', async () => {
+      const cookie = await withOwner({});
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(200);
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // PRD §3.13 (H2i): the callback records whose consent the tokens came from, taken from the
   // signed start — and stores nothing for a mandate whose profile changed hands, or whose
   // mandate ended, while the consent was on the provider's page.

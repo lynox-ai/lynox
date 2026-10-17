@@ -1086,18 +1086,24 @@ export interface ExchangeFacts {
 }
 
 /** The refresh slot the readers use: the configured one, or the derived name. */
-function readersRefreshSlot(profile: ApiProfile): string {
+export function readersRefreshSlot(profile: ApiProfile): string {
   return profile.auth?.oauth?.refresh_token_key ?? refreshTokenKey(profile.id);
 }
 
 /**
- * The vault names an OAuth profile keeps its own tokens under: the derived access and refresh
- * names, and a configured refresh slot. None for any other profile — a password, a client
- * secret or an API key is never a token slot.
+ * The token slots of a profile, as one set: the names that hold its tokens
+ * ({@link grantTokenNames}: the derived pair of an oauth2 profile and the names its exchanges
+ * wrote) and, for an oauth2 profile, the refresh slot it reads, which it may configure. A
+ * password, a client secret or an API key is never a token slot. Whose grant a name belongs to
+ * is asked over {@link grantTokenNames} alone: a configured refresh slot is no claim on a name.
  */
-function tokenSlots(profile: ApiProfile): string[] {
-  if (profile.auth?.type !== 'oauth2') return [];
-  return [...new Set([accessTokenKey(profile.id), refreshTokenKey(profile.id), readersRefreshSlot(profile)])];
+export function tokenSlotNames(profile: ApiProfile): Set<string> {
+  const names = grantTokenNames(profile);
+  if (profile.auth?.type === 'oauth2') {
+    const refresh: unknown = readersRefreshSlot(profile);
+    if (typeof refresh === 'string' && refresh !== '') names.add(refresh);
+  }
+  return names;
 }
 
 /**
@@ -1313,11 +1319,11 @@ export class ApiStore {
 
   /**
    * The tokens `profile`'s token slots hold now, as plain token fingerprints. Only these ever
-   * feed the foreign set: no other name of a profile is a token slot ({@link tokenSlots}).
+   * feed the foreign set: no other name of a profile is a token slot ({@link tokenSlotNames}).
    */
   private _heldTokens(profile: ApiProfile, f: CredentialFingerprinter): Set<string> {
     const held = new Set<string>();
-    for (const slot of tokenSlots(profile)) {
+    for (const slot of tokenSlotNames(profile)) {
       const t = tokenOf(f, slot);
       if (t !== '') held.add(t);
     }
