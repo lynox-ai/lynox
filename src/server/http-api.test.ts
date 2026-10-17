@@ -13167,9 +13167,12 @@ describe('LynoxHTTPApi', () => {
         execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
         const counted = countResponseBytes();
         let grown;
+        let sentAtAppend = -1;
         try {
-          grown = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => appendFileSync(file, Buffer.alloc(1024 * 1024)));
+          grown = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => { sentAtAppend = counted.bytes(); appendFileSync(file, Buffer.alloc(1024 * 1024)); });
         } finally { counted.restore(); }
+        // The file grew while most of it was still unsent, so the bound is what held the answer at 20 MB.
+        expect(sentAtAppend).toBeLessThan(10 * 1024 * 1024);
         expect(counted.bytes()).toBe(20 * 1024 * 1024);
         expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
       } finally { rmSync(file, { force: true }); }
@@ -13341,9 +13344,12 @@ describe('LynoxHTTPApi', () => {
       execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
       const counted = countResponseBytes();
       let grown;
+      let sentAtAppend = -1;
       try {
-        grown = await downloadWhileChanging('/api/files/download?path=changing.bin', () => appendFileSync(file, Buffer.alloc(1024 * 1024)));
+        grown = await downloadWhileChanging('/api/files/download?path=changing.bin', () => { sentAtAppend = counted.bytes(); appendFileSync(file, Buffer.alloc(1024 * 1024)); });
       } finally { counted.restore(); }
+      // The file grew while most of it was still unsent, so the bound is what held the answer at 20 MB.
+      expect(sentAtAppend).toBeLessThan(10 * 1024 * 1024);
       expect(counted.bytes()).toBe(20 * 1024 * 1024);
       expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
     });

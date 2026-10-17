@@ -61,6 +61,16 @@ describe('attachmentDisposition', () => {
     expect(attachmentDisposition('a' + CR + LF + 'b' + QUOTE + BACKSLASH + '.txt')).toBe(`attachment; filename="ab.txt"; filename*=UTF-8''ab.txt`);
   });
 
+  it('replaces direction controls and line separators, and keeps joiners', () => {
+    const RLO = String.fromCharCode(0x202e);
+    expect(attachmentDisposition('inv' + RLO + 'fdp.exe')).toBe(`attachment; filename="inv_fdp.exe"; filename*=UTF-8''inv_fdp.exe`);
+    for (const cp of [0x061c, 0x200e, 0x200f, 0x202a, 0x2066, 0x2069, 0x2028, 0x2029]) {
+      expect(attachmentDisposition('a' + String.fromCharCode(cp) + 'b'), cp.toString(16)).toBe(`attachment; filename="a_b"; filename*=UTF-8''a_b`);
+    }
+    const ZWNJ = String.fromCharCode(0x200c);
+    expect(attachmentDisposition('می' + ZWNJ + 'خواهم.txt')).toContain(`filename*=UTF-8''${encodeURIComponent('می' + ZWNJ + 'خواهم')}.txt`);
+  });
+
   it('turns a lone surrogate into U+FFFD instead of throwing', () => {
     expect(attachmentDisposition('x' + String.fromCharCode(0xd800) + '.txt')).toBe(`attachment; filename="x_.txt"; filename*=UTF-8''x%EF%BF%BD.txt`);
   });

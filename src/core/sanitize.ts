@@ -78,7 +78,12 @@ export function sanitizeAttachmentFilename(name: string): string {
  */
 export function attachmentDisposition(name: string): string {
   // A lone surrogate would make encodeURIComponent throw; it becomes U+FFFD instead.
-  const clean = sanitizeAttachmentFilename(name).replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD');
+  // Direction controls would let a saved name read differently than it is (`inv\u202Efdp.exe`
+  // shows as `invexe.pdf`); they and the line/paragraph separators become `_`. Joiners stay:
+  // Persian and Indic names and emoji sequences need them.
+  const clean = sanitizeAttachmentFilename(name)
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD')
+    .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u2028\u2029]/g, '_');
   const ascii = clean.replace(/[^\x20-\x7e]/gu, '_');
   // encodeURIComponent leaves ' ( ) * ! unescaped; none of them is an attr-char but `!`.
   const encoded = encodeURIComponent(clean).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
