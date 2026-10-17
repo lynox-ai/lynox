@@ -465,15 +465,20 @@ describe('OAuthGraphProvider — at most 4 requests at once', () => {
       inFlight--;
       return url.includes('/attachments') ? json({ value: [] }) : json({ ...graphMessage('c'), body: { contentType: 'text', content: '' } });
     });
-    const all = Promise.all(envs.map((e) => provider.fetch({ uid: e.uid })));
-    // 12 requests (message + attachments for six). Let them pile up, then drain one by one.
-    for (let i = 0; i < 12; i++) {
-      await vi.waitFor(() => { expect(release.length).toBeGreaterThan(0); });
-      expect(inFlight).toBeLessThanOrEqual(GRAPH_MAX_CONCURRENT_REQUESTS);
-      release.shift()!();
+    // 12 requests per wave (message + attachments for six). Let them pile up, then drain one
+    // by one. TWO waves: a limiter that frees the slot AND wakes a waiter on handoff drifts
+    // its count down during the first drain, and only a wave started afterwards shows it.
+    for (let wave = 1; wave <= 2; wave++) {
+      peak = 0;
+      const all = Promise.all(envs.map((e) => provider.fetch({ uid: e.uid })));
+      for (let i = 0; i < 12; i++) {
+        await vi.waitFor(() => { expect(release.length).toBeGreaterThan(0); });
+        expect(inFlight).toBeLessThanOrEqual(GRAPH_MAX_CONCURRENT_REQUESTS);
+        release.shift()!();
+      }
+      await all;
+      expect(peak, `wave ${String(wave)}`).toBe(GRAPH_MAX_CONCURRENT_REQUESTS);
     }
-    await all;
-    expect(peak).toBe(GRAPH_MAX_CONCURRENT_REQUESTS);
     // The documented limit, written out: a changed constant must not carry the test along.
     expect(GRAPH_MAX_CONCURRENT_REQUESTS).toBe(4);
   });
@@ -531,7 +536,14 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
   });
 
   it('…and so is a deltaLink on another port or with credentials in it', async () => {
-    for (const bad of ['https://graph.microsoft.com:8443/v1.0/x', 'https://u:p@graph.microsoft.com/v1.0/x', 'http://graph.microsoft.com/v1.0/x']) {
+    // One defect per link: a link with both user AND password would be refused by either
+    // check, so neither check alone would be shown to work.
+    for (const bad of [
+      'https://graph.microsoft.com:8443/v1.0/x',
+      'https://u@graph.microsoft.com/v1.0/x',
+      'https://:p@graph.microsoft.com/v1.0/x',
+      'http://graph.microsoft.com/v1.0/x',
+    ]) {
       routes = [(url) => url.includes('/messages/delta?') ? json({ value: [], '@odata.deltaLink': bad }) : undefined];
       fetchMock.mockClear();
       const provider = new OAuthGraphProvider(makeAccount(), makeAuth());

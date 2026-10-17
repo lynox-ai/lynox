@@ -28,9 +28,11 @@
 //
 // `send` posts MIME to `/me/sendMail`, built by the same `buildRfc2822` the
 // Gmail provider uses. A reply is a send with In-Reply-To/References, like on
-// every other transport. Graph's `/reply` is NOT used: it puts the original
-// message under the comment, server-side, so what leaves would differ from
-// what the user confirmed in the preview.
+// every other transport. Graph's `/reply` is NOT used: it picks the recipients
+// on the server ("uses the sender of the original message as recipient"), so
+// the recipients the user confirmed in the preview would not necessarily be the
+// ones the message goes to. Whether `/reply` also adds the original to the text
+// is not documented on that page and does not enter the decision.
 
 import { randomUUID } from 'node:crypto';
 import type { MicrosoftAuth } from '../../microsoft/microsoft-auth.js';
