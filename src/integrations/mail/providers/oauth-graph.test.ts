@@ -819,7 +819,7 @@ describe('OAuthGraphProvider — review fixes', () => {
       if (url.includes('/messages/delta?changeType=')) {
         return lost
           ? json({ value: [graphMessage('a'), graphMessage('b')], '@odata.deltaLink': D1 })
-          : json({ value: [graphMessage('a')], '@odata.nextLink': P2 });
+          : json({ value: [graphMessage('a', { received: '2099-01-01T10:00:00Z' })], '@odata.nextLink': P2 });
       }
       if (url === P2) { lost = true; return graphError(410, 'Gone'); }
       if (url === D1) return json({ value: [], '@odata.deltaLink': D1 });
@@ -827,6 +827,11 @@ describe('OAuthGraphProvider — review fixes', () => {
     });
     const events = await collect(new OAuthGraphProvider(makeAccount(), makeAuth()), 1);
     expect(ids(events[0])).toEqual(['<a@example.com>', '<b@example.com>']);
+    // `a` is newer than the watch start; the restart still begins where the round did,
+    // so nothing between the start and `a` on the unread pages is skipped.
+    const firsts = calls().filter((c) => c.url.includes('/messages/delta?changeType=')).map((c) => query(c.url)['$filter']);
+    expect(firsts.length).toBe(2);
+    expect(firsts[1]).toBe(firsts[0]);
   });
 
   it('a parked nextLink keeps the round\'s starting point, so losing it skips nothing', async () => {
