@@ -2575,7 +2575,7 @@ ${draftJson}
       const ownAccessName = accessTokenKey(input.id);
       const outputHolder = (): ApiProfile | undefined => outputName === ownAccessName || !apiStore
         ? undefined
-        : apiStore.getAll().find((p) => p.id !== profile.id && collectVaultKeys(p).includes(outputName));
+        : apiStore.knownProfiles().find((p) => p.id !== profile.id && collectVaultKeys(p).includes(outputName));
       const heldBefore = outputHolder();
       if (heldBefore !== undefined) {
         return `Error: output_secret_name "${outputName}" is a name API profile "${heldBefore.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;

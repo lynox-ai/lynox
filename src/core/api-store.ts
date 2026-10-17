@@ -882,7 +882,7 @@ export interface TokenPurge {
  */
 export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): TokenPurge {
   const inUseElsewhere = new Set<string>();
-  for (const other of store.getAll()) {
+  for (const other of store.knownProfiles()) {
     if (other.id === profile.id) continue;
     for (const k of collectVaultKeys(other)) inUseElsewhere.add(k);
   }
@@ -1173,6 +1173,18 @@ function nonTokenNames(profile: ApiProfile): string[] {
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
   /**
+   * Profiles the boot read but did not register: refused by `_admit`, or registered and then
+   * unregistered by a profile loaded after them. They stay stored ("Nothing was deleted"), and
+   * their names come back the moment they are corrected and admitted. The checks whether another
+   * profile reads a name (credentials, purge, releases, mandate reads, client ids, connection
+   * tokens, the output of an exchange) and the save of a profile that is not registered read them
+   * through {@link knownProfiles}; otherwise a stored profile is invisible there, and the answer is
+   * "free" for a name that is not. The boot, a registered profile's own save, the host map and
+   * the grant reissues read registered profiles only. Not attached and not listed: {@link getAll}
+   * stays the set of usable profiles.
+   */
+  private readonly heldBack = new Map<string, ApiProfile>();
+  /**
    * hostname → every profile id whose `base_url` is on that host. A set rather
    * than one id: with one id per host the map was last-write-wins, and the
    * attach handed whichever profile loaded last its credential without a word.
@@ -1291,7 +1303,7 @@ export class ApiStore {
           fingerprints[slot] = f.ofValue(opts.consentRefresh);
           continue;
         }
-        if ([profile, ...this.profiles.values()].some((p) => nonTokenNames(p).includes(slot))) continue;
+        if ([profile, ...this.knownProfiles()].some((p) => nonTokenNames(p).includes(slot))) continue;
         const t = tokenOf(f, slot);
         if (t !== '') foreign.add(t);
       }
@@ -1319,6 +1331,10 @@ export class ApiStore {
    */
   private _othersWatching(id: string, names: readonly string[]): void {
     if (names.length === 0) return;
+    // Registered profiles only, as in `secretWritten` and `_followRenewal`: a profile the boot
+    // held back has no grant in use, and it comes back only through a save, which mints it as
+    // new (it is not in `profiles`, so `prev` is undefined), or through the next boot, whose
+    // fingerprint comparison reads the vault as it is then.
     for (const p of [...this.profiles.values()]) {
       if (p.id !== id && watchedNames(p).some((n) => names.includes(n))) this._reissue(p.id, 'engine-write');
     }
@@ -1675,6 +1691,8 @@ export class ApiStore {
     const refusal = this._admit(profile, mode);
     if (refusal !== null) {
       process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${refusal}\n`);
+      // A load reads a stored profile, and refusing it deletes nothing; a save refused stores nothing.
+      if (mode === 'load') this.heldBack.set(profile.id, profile);
       return false;
     }
     return true;
@@ -1685,7 +1703,7 @@ export class ApiStore {
    * reason it did not — so `save` can hand the actor the reason instead of
    * reconstructing it after the fact.
    */
-  private _admit(profile: ApiProfile, mode: RegisterMode): string | null {
+  private _admit(profile: ApiProfile, mode: RegisterMode, wasRegistered = this.profiles.has(profile.id)): string | null {
     if (!PROFILE_ID_PATTERN.test(profile.id)) {
       // Refuse the id at the gate so the in-memory Map's invariant holds
       // — every key is a safe filename component. `unregister` can then
@@ -1700,8 +1718,14 @@ export class ApiStore {
     // arrive through the boot load, and a collision that only a save can catch
     // is one a restart re-admits. Refused in BOTH modes — unlike a shared host,
     // a shared slot cannot be made safe by marking it.
+    // A save of a profile that is not registered is asked against every stored profile, the ones
+    // the boot held back included: a held-back profile writes to its slot again once it is
+    // corrected and admitted. The boot and a registered profile's own save are asked against the
+    // registered profiles only, as before; which of two stored rivals the boot keeps is not
+    // decided here.
+    const rivals = mode === 'save' && !wasRegistered ? this.knownProfiles() : [...this.profiles.values()];
     const slot = vaultSlotBase(profile.id);
-    for (const [otherId] of this.profiles) {
+    for (const { id: otherId } of rivals) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
         return `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${otherId}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`;
       }
@@ -1751,7 +1775,7 @@ export class ApiStore {
       `api_profile "${deriver}" is oauth2 and writes its tokens to ${name}, which api_profile "${holder}" signs in with — the next token would replace it.`;
     const notRegisteredAtBoot = (holder: string): string =>
       `So profile "${holder}" is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
-    const collision = derivedPairCollision(profile, this.profiles.values(), mode === 'load');
+    const collision = derivedPairCollision(profile, rivals, mode === 'load');
     if (collision !== null) {
       const { holder, deriver } = collision;
       if (mode === 'load') return `${clashOf(collision)} ${notRegisteredAtBoot(holder)}`;
@@ -1765,7 +1789,9 @@ export class ApiStore {
     // row. Placed after every refusal above, so a profile the boot refuses drops no one.
     if (mode === 'load') {
       for (let held = derivedPairCollision(profile, this.profiles.values()); held !== null; held = derivedPairCollision(profile, this.profiles.values())) {
-        if (!this.unregister(held.holder)) break;
+        const holder = this.profiles.get(held.holder);
+        if (holder === undefined || !this.unregister(held.holder)) break;
+        this.heldBack.set(holder.id, holder);
         process.stderr.write(`[lynox:api-store] Skipping profile "${held.holder}": ${clashOf(held)} ${notRegisteredAtBoot(held.holder)}\n`);
       }
     }
@@ -1795,6 +1821,7 @@ export class ApiStore {
     if (previous) this._releaseHost(previous);
 
     this.profiles.set(profile.id, profile);
+    this.heldBack.delete(profile.id);
     if (hostname !== null) {
       let ids = this.hostToIds.get(hostname);
       if (!ids) {
@@ -1900,6 +1927,7 @@ export class ApiStore {
    */
   save(profile: ApiProfile, apisDir?: string, options?: SaveOptions): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const prev = this.profiles.get(profile.id);
+    const heldBefore = this.heldBack.get(profile.id);
     const isNew = prev === undefined;
     const ledger = this.grantLedger;
     const exchange = options?.exchange;
@@ -1966,7 +1994,9 @@ export class ApiStore {
       // profile there — dropping it from memory and leaving the other one sole holder.
       // It unregisters no one: a save refuses a derived-pair clash in both directions, so no
       // registered profile signs in with a name from `prev`'s pair.
-      if (prev) this._admit(prev, 'load');
+      if (prev && this._admit(prev, 'load') !== null) this.heldBack.set(prev.id, prev);
+      // A held-back profile whose corrected save failed is still stored as it was.
+      if (!prev && heldBefore) this.heldBack.set(heldBefore.id, heldBefore);
       throw err;
     }
   }
@@ -1993,6 +2023,14 @@ export class ApiStore {
    * unlink fails.
    */
   remove(id: string, apisDir?: string): boolean {
+    const removed = this._removeStored(id, apisDir);
+    // Gone from the store, so no longer a profile any check has to see. Not before: a removal
+    // that throws leaves the stored profile in place, and it stays known.
+    this.heldBack.delete(id);
+    return removed;
+  }
+
+  private _removeStored(id: string, apisDir?: string): boolean {
     if (this.connStore) {
       const inMemory = this.unregister(id); // no apisDir → in-memory only, no file unlink
       // Kind-scoped so a cross-kind id collision (once mail/google/push land)
@@ -2027,11 +2065,22 @@ export class ApiStore {
    */
   forgetAll(): void {
     for (const id of [...this.profiles.keys()]) this.unregister(id);
+    this.heldBack.clear();
   }
 
   /** Get all registered profiles. */
   getAll(): ApiProfile[] {
     return [...this.profiles.values()];
+  }
+
+  /**
+   * Every stored profile: the registered ones and those the boot held back ({@link heldBack}).
+   * For a check whether ANOTHER profile uses a name or a slot; a held-back profile is not usable,
+   * but its names are its own again once it is admitted. Everything that attaches, lists or
+   * sends reads {@link getAll}.
+   */
+  knownProfiles(): ApiProfile[] {
+    return [...this.profiles.values(), ...[...this.heldBack.values()].filter((p) => !this.profiles.has(p.id))];
   }
 
   /**
