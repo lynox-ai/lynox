@@ -64,7 +64,8 @@ describe('attachmentDisposition', () => {
   it('replaces direction controls and line separators, and keeps joiners', () => {
     const RLO = String.fromCharCode(0x202e);
     expect(attachmentDisposition('inv' + RLO + 'fdp.exe')).toBe(`attachment; filename="inv_fdp.exe"; filename*=UTF-8''inv_fdp.exe`);
-    for (const cp of [0x061c, 0x200e, 0x200f, 0x202a, 0x2066, 0x2069, 0x2028, 0x2029]) {
+    // Every Bidi_Control character (Unicode 17), and the two separators.
+    for (const cp of [0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x2028, 0x2029]) {
       expect(attachmentDisposition('a' + String.fromCharCode(cp) + 'b'), cp.toString(16)).toBe(`attachment; filename="a_b"; filename*=UTF-8''a_b`);
     }
     const ZWNJ = String.fromCharCode(0x200c);
