@@ -1475,7 +1475,7 @@ export class ApiStore {
     // unsorted read would let a restart hand a live token to the other profile of
     // a colliding pair. The connections path is already ordered by created_at, id.
     const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
-    let loaded = 0;
+    const loaded: string[] = [];
 
     for (const file of files) {
       try {
@@ -1488,13 +1488,14 @@ export class ApiStore {
         const migrated = migrateV1Profile(profile);
         // Count registrations, not files: a refused profile is not in the store,
         // and reporting it as loaded is the same false confidence the save path
-        // had.
-        if (this.register(migrated, 'load')) loaded++;
+        // had. Counted at the end, because a profile read later can unregister one
+        // that landed earlier (see `_admit`).
+        if (this.register(migrated, 'load')) loaded.push(migrated.id);
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
-    return loaded;
+    return new Set(loaded.filter((id) => this.profiles.has(id))).size;
   }
 
   /**
@@ -1504,7 +1505,7 @@ export class ApiStore {
    * truth) — mirrors {@link loadFromDirectory}'s validate-then-register loop.
    */
   loadFromConnections(store: ConnectionStore): number {
-    let loaded = 0;
+    const loaded: string[] = [];
     for (const row of store.getByKind('api')) {
       try {
         const profile = connectionRowToProfile(row);
@@ -1512,15 +1513,17 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        // Counted only when it landed, as in `loadFromDirectory`: `register` refuses
-        // a slot collision or a protected derived slot, and a count of the rows
-        // read would report a profile the store does not hold.
-        if (this.register(migrateV1Profile(profile), 'load')) loaded++;
+        // Counted only when it landed and is still there at the end, as in
+        // `loadFromDirectory`: `register` refuses a slot collision or a protected
+        // derived slot, a later row can unregister an earlier one, and a count of
+        // the rows read would report a profile the store does not hold.
+        const migrated = migrateV1Profile(profile);
+        if (this.register(migrated, 'load')) loaded.push(migrated.id);
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
-    return loaded;
+    return new Set(loaded.filter((id) => this.profiles.has(id))).size;
   }
 
   /**
@@ -1744,14 +1747,27 @@ export class ApiStore {
     // arrived first. The boot asks only whether the arriving profile signs in with a name another
     // profile's pair holds: what it refuses is always the profile signing in with those names,
     // never the one whose pair they are, so a connection that works is not dropped at boot.
+    const clashOf = ({ holder, name, deriver }: { holder: string; name: string; deriver: string }): string =>
+      `api_profile "${deriver}" is oauth2 and writes its tokens to ${name}, which api_profile "${holder}" signs in with — the next token would replace it.`;
+    const notRegisteredAtBoot = (holder: string): string =>
+      `So profile "${holder}" is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
     const collision = derivedPairCollision(profile, this.profiles.values(), mode === 'load');
     if (collision !== null) {
-      const { holder, name, deriver } = collision;
-      const clash = `api_profile "${deriver}" is oauth2 and writes its tokens to ${name}, which api_profile "${holder}" signs in with — the next token would replace it.`;
-      if (mode === 'load') {
-        return `${clash} So profile "${holder}" is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
+      const { holder, deriver } = collision;
+      if (mode === 'load') return `${clashOf(collision)} ${notRegisteredAtBoot(holder)}`;
+      return `${clashOf(collision)} Nothing was saved. Point "${holder}" at a name of its own, or set "${deriver}" up under a different id.`;
+    }
+    // The boot's other order: the arriving profile is the one whose pair a profile loaded before
+    // it signs in with. That holder leaves memory, as it would not have been registered had it
+    // loaded second, so for one such pair the load order does not decide which of the two the
+    // boot keeps. Each arriving profile is asked against the profiles registered at that moment.
+    // Only the registration goes: no `apisDir`, so `unregister` touches neither the file nor the
+    // row. Placed after every refusal above, so a profile the boot refuses drops no one.
+    if (mode === 'load') {
+      for (let held = derivedPairCollision(profile, this.profiles.values()); held !== null; held = derivedPairCollision(profile, this.profiles.values())) {
+        if (!this.unregister(held.holder)) break;
+        process.stderr.write(`[lynox:api-store] Skipping profile "${held.holder}": ${clashOf(held)} ${notRegisteredAtBoot(held.holder)}\n`);
       }
-      return `${clash} Nothing was saved. Point "${holder}" at a name of its own, or set "${deriver}" up under a different id.`;
     }
 
     const hostname = hostOf(profile);
@@ -1948,6 +1964,8 @@ export class ApiStore {
       // Back in 'load' mode: the profile was just deleted, so a 'save' admit would count it as
       // joining its own host and refuse it whenever a conflict the boot kept leaves another
       // profile there — dropping it from memory and leaving the other one sole holder.
+      // It unregisters no one: a save refuses a derived-pair clash in both directions, so no
+      // registered profile signs in with a name from `prev`'s pair.
       if (prev) this._admit(prev, 'load');
       throw err;
     }
