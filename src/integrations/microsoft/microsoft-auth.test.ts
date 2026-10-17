@@ -255,7 +255,7 @@ describe("a refused refresh: Microsoft's body through the passthrough", () => {
     ['app not in the tenant', [700016], 'app-not-in-tenant'],
     // The deciding code is the one on the needs-admin list, not the first in the body.
     ['an unrelated code first', [90099, 50057], 'account-disabled'],
-  ])('needs-admin (%s) keeps the grant and shows %s', async (_label, codes, card) => {
+  ])('needs-admin (%s, codes %j) keeps the grant and shows %s', async (_label, codes, card) => {
     const vault = expiringGrant();
     const auth = new MicrosoftAuth({ vault });
     mockFetch.mockResolvedValueOnce(passthrough(400, microsoftErrorBody('invalid_grant', codes, 'Admin action needed.')));
@@ -291,10 +291,14 @@ describe("a refused refresh: Microsoft's body through the passthrough", () => {
     await expect(auth.getAccessToken()).rejects.toThrow(/suppressed.*Microsoft asks for a new sign-in.*50076/);
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
-    // A new grant ends the brake and the failure at once.
-    auth.acceptClaim(claim());
+    // A new grant ends the brake and the failure at once. Its token sits inside
+    // the refresh window, so the next call has to refresh: a brake that
+    // survived the claim would refuse it without reaching the CP.
+    auth.acceptClaim(claim({ expires_at: Date.now() + 60_000, refresh_handle: 'sealed-handle-new' }));
     expect(auth.getLastRefreshFailure()).toBeNull();
-    expect(await auth.getAccessToken()).toBe('ms-access-token-aaaaaaaa');
+    mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-regranted', Date.now() + 3_600_000));
+    expect(await auth.getAccessToken()).toBe('ms-access-token-regranted');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it('a 5xx is transient: grant kept, no brake, the next call tries again', async () => {
