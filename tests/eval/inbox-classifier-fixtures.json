@@ -4352,7 +4352,7 @@
       "id": "forwarded-thread-en-434",
       "category": "security_alert",
       "language": "en",
-      "expectedBucket": "auto_handled",
+      "expectedBucket": "requires_user",
       "fromAddress": "david.brown@example.com",
       "fromName": "David Brown",
       "subject": "Fwd: Security Alert: Suspicious Login Attempt",
