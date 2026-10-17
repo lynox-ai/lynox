@@ -539,7 +539,7 @@ describe('source: every authenticated Google call goes through the helper', () =
     expect(offenders).toEqual([]);
   });
 
-  it('all 16 Google sites and all 4 control-plane sites are accounted for', () => {
+  it('all 16 Google sites and all 5 control-plane sites are accounted for', () => {
     // The count is the PRD's, re-measured here rather than trusted: 12 in
     // `integrations/google/`, 3 Gmail-API fetches in `mail/`, 1 in
     // `core/backup-upload-gdrive.ts`. Plus the control-plane calls, which
@@ -552,10 +552,13 @@ describe('source: every authenticated Google call goes through the helper', () =
     // probe. A new CP call is exactly what this number exists to make visible.
     // 3 → 4 with the revoke POST: a brokered grant is revoked through the
     // control plane, under the same policy as the refresh.
+    // 4 → 5 with the Microsoft refresh POST (`integrations/microsoft/
+    // microsoft-auth.ts`): Microsoft is brokered only, so its refresh is a CP
+    // call like Google's, under the same policy.
     const count = (re: RegExp): number => callers
       .reduce((n, f) => n + (f.code.match(re)?.length ?? 0), 0);
     expect(count(/\bgoogleFetch\s*\(/g)).toBe(16);
-    expect(count(/\bcpFetch\s*\(/g)).toBe(4);
+    expect(count(/\bcpFetch\s*\(/g)).toBe(5);
   });
 
   it('every one of those sites passes a POLICY, not `undefined`', () => {
