@@ -203,6 +203,7 @@ export const BULK_HALT_REASONS = {
   expired: 'the approval expired',
   checksum: 'the run no longer matches what was approved',
   maxTargets: 'the approved maximum number of targets is reached',
+  probeRequired: 'more targets need a confirmed probe for this write form',
   atomicRolledBack: 'a target of an atomic run could not be written; the targets written before it were rolled back',
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
   atomicStoppedRolledBack: 'the owner stopped an atomic run; the targets written before the stop were rolled back',
@@ -1193,10 +1194,11 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
-    // An undo writes only to targets its source wrote, with the form the source already used
-    // past its own probe on an unmeasured target. A probe for the undo would only block it
-    // without measuring anything, and an undo cannot be a probe itself.
-    if (run.kind === 'undo' && this.writeFormOfRun(run) === 'unmeasured') return true;
+    // An undo writes only to targets its source wrote, with the form and the verb the source
+    // already used on them: whatever that verb does to unsent fields, the source did it first.
+    // A probe for the undo would only block it without measuring anything, and an undo cannot
+    // be a probe itself — also where the source's probe no longer holds.
+    if (run.kind === 'undo') return true;
     const paths = parseContractPaths(run.contract_json);
     const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
@@ -1217,16 +1219,17 @@ export class BulkLedger {
    * confirmed before the write forms were told apart was filed under the plain kind wherever
    * it landed, also on an unmeasured path, and must not widen a measured run. Read from the
    * target itself, not from the row's kind; a probe whose target is gone vouches for nothing.
+   * The probe target is the run's first applied one: {@link confirmProbe} takes a run with
+   * exactly one applied target, and the run usually goes on wide after that.
    */
   private probeWroteMeasuredForm(probeRunId: string, host: string, method: string, kind: string): boolean {
-    const written = this.engineDb.getDb().prepare(
-      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
-    ).all(probeRunId) as { target_key: string }[];
-    const only = written[0];
-    if (written.length !== 1 || !only) return false;
+    const first = this.engineDb.getDb().prepare(
+      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL ORDER BY applied_at, seq LIMIT 1',
+    ).get(probeRunId) as { target_key: string } | undefined;
+    if (!first) return false;
     let path: string;
     try {
-      path = new URL(this.engineDb.dec(only.target_key)).pathname;
+      path = new URL(this.engineDb.dec(first.target_key)).pathname;
     } catch {
       return false;
     }
