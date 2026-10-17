@@ -102,10 +102,12 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget(url)).toBe(true);
   });
 
-  // One witness per mailbox API host, each on the send path its provider documents.
+  // One witness per mailbox API host. Zoho and Nylas on the send path each documents; for
+  // Fastmail, whose session hands out the method URL at run time, on each host it may be.
   it.each([
     'https://api.fastmail.com/jmap/api/',
     'https://api.fastmail.com/jmap/session',
+    'https://jmap.fastmail.com/jmap/api/',
     'https://mail.zoho.com/api/accounts/1/messages',
     'https://mail.zoho.eu/api/accounts/1/messages',
     'https://mail.zoho.in/api/accounts/1/messages',
@@ -131,6 +133,25 @@ describe('isMailProviderTarget', () => {
     'https://api.fastmail.com.example.com/jmap/api/',
   ])('leaves %s alone, which is not a mailbox API host', (url) => {
     expect(isMailProviderTarget(url)).toBe(false);
+  });
+
+  // The whole host, not its mail paths: contacts and an organisation's users go with it.
+  it.each([
+    'https://api.us.nylas.com/v3/grants/g1/contacts',
+    'https://mail.zoho.eu/api/organization/1/accounts',
+  ])('refuses %s, which is on a mailbox API host', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
+  });
+
+  // A host with trailing dots names the same host; one dot or several.
+  it.each([
+    'https://api.fastmail.com./jmap/api/',
+    'https://api.fastmail.com../jmap/api/',
+    'https://api.sendgrid.com.../v3/mail/send',
+    'https://gmail.googleapis.com../gmail/v1/users/me/messages/send',
+    'https://graph.microsoft.com../v1.0/me/sendMail',
+  ])('refuses %s, spelled with trailing dots', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
   });
 
   it('refuses every path on a sending service, in any spelling of its host', () => {

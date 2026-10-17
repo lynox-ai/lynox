@@ -556,8 +556,9 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   } catch {
     return false;
   }
-  // No contract grants a mail API, whoever wrote it: the published promise is that mail
-  // leaves the instance only once it is confirmed in the chat.
+  // No contract grants a mail API on the list in `core/bulk-mail-targets.ts`, whoever wrote
+  // it, so no grant sends unattended through one; the mail tools ask in the chat before each
+  // email.
   if (isMailProviderTarget(obj.url)) return false;
   const listQuery = LIST_QUERIES.get(contract);
   if (listQuery === undefined) {
