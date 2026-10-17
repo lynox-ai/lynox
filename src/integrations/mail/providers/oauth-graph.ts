@@ -73,6 +73,8 @@ const DEFAULT_WATCH_MAX_PER_TICK = 50;
 const WATCH_MAX_PAGES_PER_TICK = 10;
 const WATCH_DEDUP_MAX = 1_000;
 const SNIPPET_CHARS = 500;
+/** Same bound as the IMAP provider's MAX_BODY_BYTES, counted in characters here. */
+const MAX_BODY_CHARS = 10 * 1024 * 1024;
 /** Graph throttling: at most 4 concurrent requests per app and mailbox. */
 export const GRAPH_MAX_CONCURRENT_REQUESTS = 4;
 /**
@@ -209,6 +211,18 @@ function folderSegment(folder: string): string {
     throw new MailError('not_found', `Unknown Microsoft 365 folder "${folder}"`);
   }
   return encodeURIComponent(folder);
+}
+
+/**
+ * The path segment for a Graph message id. Ids come from Graph, but the same
+ * character rule as for folder ids applies, for the same reason: `..` would
+ * climb out of `messages/` once the URL is normalised.
+ */
+function messageSegment(id: string): string {
+  if (!/^[A-Za-z0-9\-_=+/]+$/.test(id)) {
+    throw new MailError('not_found', 'Microsoft 365 message id has an unexpected shape');
+  }
+  return encodeURIComponent(id);
 }
 
 /**
@@ -358,6 +372,19 @@ function wrapGraphError(err: unknown, fallback: string): MailError {
   return new MailError('connection_failed', `${fallback}: ${msg}`, { cause: err });
 }
 
+/**
+ * The body as JSON. A body that is not JSON gets a fixed message: the parser's
+ * own error quotes the first characters of the body, which is foreign text.
+ */
+async function jsonOf<T>(res: Response, label: string): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new MailError('connection_failed', `Graph ${label}: response is not JSON`);
+  }
+}
+
 function isAbort(err: unknown): boolean {
   return err instanceof Error && err.name === 'AbortError';
 }
@@ -398,7 +425,10 @@ class Limiter {
 export type GraphMailboxProbe =
   | { readonly state: 'ok' }
   | { readonly state: 'no-mailbox' }
-  /** 429, 5xx or a network failure: try again, keep the grant. */
+  /**
+   * 429, 5xx or a network failure: try again, keep the grant. A refusal by the
+   * host policy is NOT transient; it throws.
+   */
   | { readonly state: 'transient' }
   /** Any other answer; the status says which. */
   | { readonly state: 'refused'; readonly status: number };
@@ -421,6 +451,8 @@ export class OAuthGraphProvider implements MailProvider {
   private readonly graphIdToUid = new Map<string, number>();
   private nextUid = 1;
   private readonly watchers = new Set<NodeJS.Timeout>();
+  /** Graph folders with a delta round in flight, across every watch of this provider. */
+  private readonly roundsRunning = new Set<string>();
   private closed = false;
   private readonly aborter = new AbortController();
 
@@ -511,8 +543,8 @@ export class OAuthGraphProvider implements MailProvider {
       throw new MailError('not_found', `Microsoft 365 uid=${String(opts.uid)} not in current session map. Re-run mail_triage or mail_search to refresh.`);
     }
     const folder = opts.folder ?? 'INBOX';
-    const id = encodeURIComponent(graphId);
     try {
+      const id = messageSegment(graphId);
       // No `Prefer: outlook.body-content-type="text"`: Graph's own HTML-to-text
       // would keep text hidden by CSS. The HTML comes here and goes through the
       // same stripper the IMAP provider uses.
@@ -522,11 +554,14 @@ export class OAuthGraphProvider implements MailProvider {
         this.getJson<GraphCollection<GraphAttachment>>(
           `${GRAPH_ME}/messages/${id}/attachments?${odataQuery([['$select', 'id,name,contentType,size,isInline']])}`, 'attachments'),
       ]);
-      const content = typeof msg.body?.content === 'string' ? msg.body.content : '';
+      const raw = typeof msg.body?.content === 'string' ? msg.body.content : '';
+      const truncated = raw.length > MAX_BODY_CHARS;
+      const content = truncated ? raw.slice(0, MAX_BODY_CHARS) : raw;
       const isHtml = (msg.body?.contentType ?? '').toLowerCase() === 'html';
+      const text = isHtml ? htmlToTextSnippet(content) : content;
       return {
         envelope: this.toEnvelope(msg, folder, opts.uid),
-        text: isHtml ? htmlToTextSnippet(content) : content,
+        text: truncated ? `${text}\n\n[… body truncated at ${String(MAX_BODY_CHARS)} characters for safety]` : text,
         html: opts.includeHtml && isHtml ? content : undefined,
         attachments: (attachments.value ?? []).flatMap((a): MailAttachmentMeta[] =>
           typeof a.id === 'string'
@@ -557,6 +592,11 @@ export class OAuthGraphProvider implements MailProvider {
     const info = this.auth.getAccountInfo();
     if (!info || !hasGraphScope(info.scopes, 'Mail.Send')) {
       throw new MailError('unsupported', 'Sending through Microsoft 365 requires the Mail.Send permission. Reconnect the mailbox and grant send access.');
+    }
+    if (input.attachments !== undefined && input.attachments.length > 0) {
+      // The shared MIME builder writes no attachment parts. Refused here rather
+      // than sent without them and reported as sent.
+      throw new MailError('unsupported', 'Attachments are not sent through Microsoft 365 yet. Nothing was sent.');
     }
     const fromAddress = await this.resolveFromAddress();
     const messageId = `<${randomUUID()}@${messageIdDomain(fromAddress)}>`;
@@ -593,9 +633,16 @@ export class OAuthGraphProvider implements MailProvider {
    * called (`$filter=receivedDateTime ge …`, `changeType=created`), so the
    * folder's history is not reported as new; *assumed* that Graph applies the
    * two options together on the first call. A lost cursor (410, or a 4xx whose
-   * code names the sync state) restarts the same way from the newest message
-   * seen — not from the `Location` Graph may offer, which would be a sync of
-   * the whole folder. A 429 pauses the ticks for `Retry-After`.
+   * code names the sync state) restarts the same way, from where the current
+   * round began — not from the `Location` Graph may offer, which would be a
+   * sync of the whole folder. A message moved into the folder with an older
+   * `receivedDateTime` is not seen by such a restart. A 429 pauses the ticks
+   * for `Retry-After`.
+   *
+   * A tick reports at most about `maxPerTick` messages: the round stops after
+   * the first page that reaches it and parks the nextLink. One round per folder
+   * at a time across all watches of this provider, and the cursor is keyed by
+   * the Graph folder, so `INBOX` and `inbox` share it.
    *
    * The cursor advances and ids count as reported only after the handler
    * returned: a handler that throws gets the same messages again next tick.
@@ -609,15 +656,14 @@ export class OAuthGraphProvider implements MailProvider {
     const startedAt = new Date().toISOString();
     const reported = new Set<string>();
     let stopped = false;
-    let running = false;
     let pausedUntil = 0;
 
     const tick = async (): Promise<void> => {
-      // One round at a time: two rounds would read the same cursor and both report.
-      if (stopped || this.closed || running || Date.now() < pausedUntil) return;
-      running = true;
+      // One round per folder at a time: two rounds would read the same cursor and both report.
+      if (stopped || this.closed || this.roundsRunning.has(segment) || Date.now() < pausedUntil) return;
+      this.roundsRunning.add(segment);
       try {
-        const round = await this.deltaRound(segment, folder, startedAt, maxPerTick);
+        const round = await this.deltaRound(segment, startedAt, maxPerTick);
         if (stopped || this.closed) return;
         const fresh = round.messages.filter((m) => !reported.has(m.id as string));
         const envelopes = fresh.map((m) => this.toEnvelope(m, folder, this.assignUid(m.id as string)));
@@ -634,9 +680,14 @@ export class OAuthGraphProvider implements MailProvider {
         if (err instanceof GraphHttpError && err.status === 429) {
           pausedUntil = Date.now() + (err.retryAfterMs ?? intervalMs);
         }
-        await handler({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) });
+        try {
+          await handler({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) });
+        } catch {
+          // A handler that throws on the error event has nowhere to report to;
+          // swallowed so the interval does not leave an unhandled rejection.
+        }
       } finally {
-        running = false;
+        this.roundsRunning.delete(segment);
       }
     };
 
@@ -681,6 +732,8 @@ export class OAuthGraphProvider implements MailProvider {
         `${GRAPH_ME}/mailFolders/inbox?${odataQuery([['$select', 'id']])}`, { method: 'GET' }, token));
     } catch (err) {
       if (this.closed) throw err;
+      // A host-policy refusal is permanent until the operator changes the policy.
+      if (err instanceof Error && err.message.startsWith('Blocked:')) throw err;
       return { state: 'transient' };
     }
     if (res.ok) return { state: 'ok' };
@@ -714,64 +767,74 @@ export class OAuthGraphProvider implements MailProvider {
 
   /**
    * One delta round: follow links until a deltaLink, at most
-   * WATCH_MAX_PAGES_PER_TICK pages. Returns the created messages and a
-   * `commit` that stores where the next round resumes.
+   * WATCH_MAX_PAGES_PER_TICK pages, and no further than the first page that
+   * brings the round to `pageSize` messages. Returns the created messages (each
+   * id once) and a `commit` that stores where the next round resumes.
+   *
+   * `since` moves only when a round reaches its deltaLink. A parked nextLink
+   * keeps the round's starting point: pages not yet read may hold older
+   * messages, and a restart from the newest one already seen would skip them.
    */
   private async deltaRound(
     segment: string,
-    folder: string,
     startedAt: string,
     pageSize: number,
   ): Promise<{ messages: GraphMessage[]; commit: () => void }> {
-    const stored = this.cursors.get(this.accountId, folder);
-    let since = stored?.since ?? startedAt;
+    const stored = this.cursors.get(this.accountId, segment);
+    const roundStart = stored?.since ?? startedAt;
+    let newest = roundStart;
     const restartUrl = (from: string): string => `${GRAPH_ME}/mailFolders/${segment}/messages/delta?${odataQuery([
       ['changeType', 'created'],
       ['$select', ENVELOPE_FIELDS],
       ['$filter', `receivedDateTime ge ${from}`],
     ])}`;
-    let url = stored?.link ?? restartUrl(since);
+    let url = stored?.link ?? restartUrl(roundStart);
     let restarted = false;
     const messages: GraphMessage[] = [];
+    const seen = new Set<string>();
     for (let page = 0; page < WATCH_MAX_PAGES_PER_TICK; page++) {
       const res = await this.request(url, { method: 'GET', headers: { Prefer: `odata.maxpagesize=${String(pageSize)}` } });
       if (!res.ok) {
         const err = await errorFrom(res, 'delta');
         if (!restarted && isLostCursor(err)) {
           restarted = true;
-          url = restartUrl(since);
+          url = restartUrl(roundStart);
           page = -1;
           continue;
         }
         throw err;
       }
-      const body = await res.json() as GraphCollection<GraphMessage>;
+      const body = await jsonOf<GraphCollection<GraphMessage>>(res, 'delta');
       for (const item of body.value ?? []) {
         if (item['@removed'] !== undefined || typeof item.id !== 'string') continue;
+        // A restart inside the round returns what the round already read.
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
         messages.push(item);
         // Compared as instants, not as strings: Graph writes `…00Z`, `toISOString` writes
         // `…00.000Z`, and `'Z' > '.'` would order the same instant as later.
-        if (typeof item.receivedDateTime === 'string' && Date.parse(item.receivedDateTime) > Date.parse(since)) {
-          since = item.receivedDateTime;
+        if (typeof item.receivedDateTime === 'string' && Date.parse(item.receivedDateTime) > Date.parse(newest)) {
+          newest = item.receivedDateTime;
         }
       }
       const next = body['@odata.nextLink'];
       const delta = body['@odata.deltaLink'];
-      if (typeof next === 'string') {
-        url = next;
-        continue;
-      }
       if (typeof delta === 'string') {
         assertGraphUrl(delta);
-        const cursor: DeltaCursor = { link: delta, since };
-        return { messages, commit: () => this.cursors.set(this.accountId, folder, cursor) };
+        const cursor: DeltaCursor = { link: delta, since: newest };
+        return { messages, commit: () => this.cursors.set(this.accountId, segment, cursor) };
       }
-      throw new MailError('connection_failed', 'Graph delta: a page with neither nextLink nor deltaLink');
+      if (typeof next !== 'string') {
+        throw new MailError('connection_failed', 'Graph delta: a page with neither nextLink nor deltaLink');
+      }
+      url = next;
+      if (messages.length >= pageSize) break;
     }
-    // Page cap reached mid-round: resume at the parked nextLink next tick.
+    // Stopped mid-round (tick budget or page cap): resume at the parked nextLink
+    // next tick, from the round's starting point if that link is lost.
     assertGraphUrl(url);
-    const cursor: DeltaCursor = { link: url, since };
-    return { messages, commit: () => this.cursors.set(this.accountId, folder, cursor) };
+    const cursor: DeltaCursor = { link: url, since: roundStart };
+    return { messages, commit: () => this.cursors.set(this.accountId, segment, cursor) };
   }
 
   private envelopesOf(list: ReadonlyArray<GraphMessage> | undefined, folder: string): MailEnvelope[] {
@@ -815,6 +878,8 @@ export class OAuthGraphProvider implements MailProvider {
       subject: typeof msg.subject === 'string' ? msg.subject : '',
       date: Number.isNaN(received.getTime()) ? new Date() : received,
       flags: flagsOf(msg),
+      // Graph's own `bodyPreview`, rendered on the server: unlike `fetch`, it does
+      // NOT pass through the hidden-text stripper. Same gap as the Gmail snippet.
       snippet: snippetOf(typeof msg.bodyPreview === 'string' ? msg.bodyPreview : ''),
       hasAttachments,
       // A collection carries only the boolean; the count needs one request per
@@ -830,12 +895,20 @@ export class OAuthGraphProvider implements MailProvider {
 
   private async fetchWithToken(url: string, init: { method: string; headers?: Record<string, string>; body?: string }, token: string): Promise<Response> {
     assertGraphUrl(url);
-    return await graphFetch(url, {
+    const res = await graphFetch(url, {
       method: init.method,
       headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
       ...(init.body !== undefined ? { body: init.body } : {}),
       signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
     }, this.auth.hostPolicy);
+    // The body is read HERE, inside the limiter's slot: the pinned transport
+    // streams it, and Graph counts a request as concurrent until its response is
+    // complete. Released at the headers, four slots could carry eight downloads.
+    const text = await res.text();
+    return new Response(text === '' || res.status === 204 || res.status === 205 ? null : text, {
+      status: res.status,
+      headers: res.headers,
+    });
   }
 
   private request(url: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<Response> {
@@ -845,6 +918,6 @@ export class OAuthGraphProvider implements MailProvider {
   private async getJson<T>(url: string, label: string): Promise<T> {
     const res = await this.request(url, { method: 'GET' });
     if (!res.ok) throw await errorFrom(res, label);
-    return await res.json() as T;
+    return await jsonOf<T>(res, label);
   }
 }
