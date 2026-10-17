@@ -43,7 +43,7 @@ import { taskCreateTool } from '../tools/builtin/task.js';
 import { getPipeline, _resetPipelineStore, forgetPipeline, storePipeline, runSavedWorkflow } from '../tools/builtin/pipeline.js';
 import { _resetTenantInvariantForTests, runGuardedSavedWorkflow } from './saved-workflow-runner.js';
 import { acceptWorkflowGrant, prepareWorkflowGrant } from './workflow-grant.js';
-import type { IAgent, PlannedPipeline, TriggerRecord } from '../types/index.js';
+import type { IAgent, PlannedPipeline, ToolEntry, TriggerRecord } from '../types/index.js';
 import type { Engine } from './engine.js';
 
 const endTurn = (text: string) => ({
@@ -91,11 +91,11 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function saveWorkflow(id = 'wf-post'): PlannedPipeline {
+  function saveWorkflow(id = 'wf-post', steps: PlannedPipeline['steps'] = [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }]): PlannedPipeline {
     history.insertPlannedPipeline({
       id, name: id, goal: 'post the weekly report', reasoning: 'r', estimatedCost: 0,
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
-      steps: [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }],
+      steps,
       ...{ mode: 'autonomous', parameters: [] },
     } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
     forgetPipeline(id);
@@ -111,9 +111,15 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     return r.task;
   }
 
+  // A stored memory the run can read: what a person approved earlier, not the run's own text.
+  const memoryRecallTool: ToolEntry = {
+    definition: { name: 'memory_recall', description: 'recall', input_schema: { type: 'object' as const, properties: {} } },
+    handler: async () => '- the weekly report goes to finance',
+  };
+
   function engine(): Engine {
     const ctx = createToolContext({});
-    ctx.tools = [httpRequestTool];
+    ctx.tools = [httpRequestTool, memoryRecallTool];
     return {
       getTaskManager: () => tm,
       getUserConfig: () => ({ api_key: 'test-key' }),
@@ -225,6 +231,37 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       readThenPost();
       await fire(trigger);
       expect(sent.map((s) => s.method)).toEqual(['GET', 'POST']);
+    });
+  });
+
+  describe('after a step has read stored memory', () => {
+    // Step one reads memory, step two writes. The read is foreign content for the grant, and
+    // the run carries that to the step that writes.
+    const steps: PlannedPipeline['steps'] = [
+      { id: 's1', task: 'look up who gets the weekly report', tools: ['memory_recall'] },
+      { id: 's2', task: 'post the weekly report', tools: ['http_request'], input_from: ['s1'] },
+    ];
+    function recallThenPost(): void {
+      mockProcess
+        .mockResolvedValueOnce(toolUse('memory_recall', {}, 'tu_recall'))
+        .mockResolvedValueOnce(endTurn('finance'))
+        .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' }, 'tu_post'))
+        .mockResolvedValueOnce(endTurn('done'));
+    }
+
+    it('a grant without afterUntrusted does not lift the write', async () => {
+      const trigger = accept(saveWorkflow('wf-mem', steps), false);
+      recallThenPost();
+      await fire(trigger);
+      expect(posts()).toEqual([]);
+      expect(lastRun(trigger.id)).toMatch(/read external content before this call/);
+    });
+
+    it('a grant with afterUntrusted does', async () => {
+      const trigger = accept(saveWorkflow('wf-mem', steps), true);
+      recallThenPost();
+      await fire(trigger);
+      expect(posts().map((p) => p.url)).toEqual([TARGET]);
     });
   });
 

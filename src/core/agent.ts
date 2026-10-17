@@ -1017,11 +1017,26 @@ export class Agent implements IAgent {
     // land attacker text active+pinned in the always-loaded focus block instead of pending_review.
     'archive_search',
   ]);
+  /**
+   * Reads of stored memory, counted as external content only while a capability contract
+   * governs this agent. A memory a person approved can still carry text that came from outside,
+   * and the person approving it does not read it as an instruction to a later unattended write.
+   * A run that needs memory before a granted write has the grant's own switch for that
+   * (`afterUntrusted`). Without a contract these reads keep their ordinary standing.
+   */
+  private static readonly CONTRACT_EXTERNAL_TOOLS: ReadonlySet<string> = new Set([
+    'memory_recall', 'memory_list', 'recall',
+  ]);
+  /** Whether a call to `name` brings external content into this agent (see the two lists). */
+  private isExternalContentTool(name: string): boolean {
+    return Agent.EXTERNAL_CONTENT_TOOLS.has(name)
+      || (this.capabilityContract !== undefined && Agent.CONTRACT_EXTERNAL_TOOLS.has(name));
+  }
   /** DK.1 (H4): true when any external-content tool ran this turn (the capability signal a
    *  `remember` write ORs with {@link sawUntrustedData} to derive `sourceUntrusted`). */
   get sawExternalContentTool(): boolean {
     for (const name of this._turnToolNames) {
-      if (Agent.EXTERNAL_CONTENT_TOOLS.has(name)) return true;
+      if (this.isExternalContentTool(name)) return true;
     }
     return false;
   }
@@ -1426,7 +1441,7 @@ export class Agent implements IAgent {
           // arms the taint by NAME during a live run — those results carry no wrap
           // marker — so the resume re-derivation must scan tool_use names too, or a
           // rehydrated thread that ran such a tool silently disarms its durable-write gate.
-          if (Agent.EXTERNAL_CONTENT_TOOLS.has(block.name)) return true;
+          if (this.isExternalContentTool(block.name)) return true;
         } else if (block.type === 'tool_result') {
           const rc = block.content;
           if (typeof rc === 'string') {
@@ -4153,7 +4168,7 @@ export class Agent implements IAgent {
     // DK.1 F5: a denylist tool's output persists in context across turns (many do not wrap,
     // so a later marker scan cannot see them) — arm the sticky conversation latch so a
     // deferred `remember` on a later clean turn is still routed to pending_review.
-    if (Agent.EXTERNAL_CONTENT_TOOLS.has(tc.name)) {
+    if (this.isExternalContentTool(tc.name)) {
       this._conversationSawUntrusted = true;
       // Several of these tools return what they read without wrapping it, so the marker
       // below never sees it. `http_request` always wraps and reports which host answered,
