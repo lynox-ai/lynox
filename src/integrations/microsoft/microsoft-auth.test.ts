@@ -136,12 +136,20 @@ describe('acceptClaim — the grant handed over by the control plane', () => {
     ['an expired token', { expires_at: Date.now() - 1 }, /plausible range/],
     ['a token for longer than a day', { expires_at: Date.now() + 25 * 3_600_000 }, /plausible range/],
     ['no scopes', { scopes: [] }, /non-empty array/],
+    ['a too-short access token', { access_token: 'short' }, /access_token missing or too short/],
+    ['a non-string email', { email: 42 as unknown as string }, /email is not a string/],
   ])('refuses a claim with %s and stores nothing', (_label, overrides, why) => {
     const vault = memoryVault();
     const auth = new MicrosoftAuth({ vault });
     expect(() => auth.acceptClaim(claim(overrides))).toThrow(why);
     expect(vault.raw()).toBeNull();
     expect(auth.isConnected()).toBe(false);
+  });
+
+  it('drops an over-long email instead of storing it', () => {
+    const vault = memoryVault();
+    new MicrosoftAuth({ vault }).acceptClaim(claim({ email: `${'a'.repeat(320)}@x.test` }));
+    expect((JSON.parse(vault.raw() ?? '{}') as Record<string, unknown>)['email']).toBeUndefined();
   });
 
   it('refuses to hold a grant without a vault', () => {
@@ -263,6 +271,9 @@ describe("a refused refresh: Microsoft's body through the passthrough", () => {
     expect(auth.isConnected()).toBe(true);
     expect(vault.delete).not.toHaveBeenCalled();
     expect(auth.getLastRefreshFailure()).toMatchObject({ kind: 'needs-admin', cardState: card });
+    // The quoted number is the one the card acted on, not merely the first in the body.
+    const deciding = codes.find((c) => [50057, 50105, 53003, 700016].includes(c));
+    expect(auth.getLastRefreshFailure()?.firstErrorCode).toBe(deciding);
   });
 
   it('invalid_grant without a revocation code asks for a sign-in and keeps the grant', async () => {
@@ -333,6 +344,126 @@ describe("a refused refresh: Microsoft's body through the passthrough", () => {
     await expect(auth.getAccessToken()).rejects.toThrow(/429/);
     mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-now', Date.now() + 3_600_000));
     expect(await auth.getAccessToken()).toBe('ms-access-token-now');
+  });
+});
+
+describe('an answer for a grant that changed while the refresh was out', () => {
+  /** A refresh whose answer the test releases by hand. */
+  function heldFetch(): { release: (r: Response) => void } {
+    let release!: (r: Response) => void;
+    mockFetch.mockImplementationOnce(() => new Promise<Response>((resolve) => { release = resolve; }));
+    return { release: (r) => release(r) };
+  }
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+  it('a reconnect during the refresh survives a revocation of the OLD handle', async () => {
+    const vault = expiringGrant();
+    const auth = new MicrosoftAuth({ vault });
+    const held = heldFetch();
+    const pending = auth.getAccessToken();
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+    auth.acceptClaim(claim({ access_token: 'ms-access-token-reconnected', refresh_handle: 'sealed-handle-new' }));
+    held.release(passthrough(400, microsoftErrorBody('invalid_grant', [70008], 'Refresh token expired.')));
+
+    // The caller gets the new grant's token; the old handle's verdict is dropped.
+    expect(await pending).toBe('ms-access-token-reconnected');
+    await tick();
+    expect(auth.isConnected()).toBe(true);
+    expect((JSON.parse(vault.raw() ?? '{}') as Record<string, unknown>)['refresh_handle']).toBe('sealed-handle-new');
+    expect(auth.getLastRefreshFailure()).toBeNull();
+  });
+
+  it('a reconnect during the refresh is not overwritten by the old grant\'s success', async () => {
+    const vault = expiringGrant();
+    const auth = new MicrosoftAuth({ vault });
+    const held = heldFetch();
+    const pending = auth.getAccessToken();
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+    auth.acceptClaim(claim({ access_token: 'ms-access-token-reconnected', refresh_handle: 'sealed-handle-new', tid: 'tenant-new' }));
+    held.release(refreshOk('ms-access-token-from-old', Date.now() + 3_600_000, 'sealed-handle-old-rotated'));
+
+    expect(await pending).toBe('ms-access-token-reconnected');
+    const stored = JSON.parse(vault.raw() ?? '{}') as Record<string, unknown>;
+    expect(stored['refresh_handle']).toBe('sealed-handle-new');
+    expect(stored['tid']).toBe('tenant-new');
+  });
+
+  it('a disconnect during the refresh is not undone by its success', async () => {
+    const vault = expiringGrant();
+    const auth = new MicrosoftAuth({ vault });
+    const held = heldFetch();
+    const pending = auth.getAccessToken();
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+    auth.disconnect();
+    held.release(refreshOk('ms-access-token-resurrected', Date.now() + 3_600_000, 'sealed-handle-2'));
+
+    await expect(pending).rejects.toThrow(/discarded/);
+    expect(auth.isConnected()).toBe(false);
+    expect(vault.raw()).toBeNull();
+  });
+});
+
+describe('the refresh margin and the write order', () => {
+  it('a grant dropped right after a successful refresh reads as not connected, not a crash', async () => {
+    // The drop lands between the refresh and the caller reading the token: the
+    // hook runs inside the refresh, so the caller resumes with no grant.
+    let auth!: MicrosoftAuth;
+    auth = new MicrosoftAuth({
+      vault: expiringGrant(),
+      onTokenChange: (e) => { if (e.reason === 'refresh') auth.disconnect(); },
+    });
+    mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-new', Date.now() + 3_600_000));
+    await expect(auth.getAccessToken()).rejects.toThrow(/^Not connected/);
+  });
+
+  it('a passing failure inside the margin still hands out the valid token', async () => {
+    const vault = memoryVault(JSON.stringify({ ...claim(), provider: undefined, expires_at: Date.now() + 120_000 }));
+    const auth = new MicrosoftAuth({ vault });
+    mockFetch.mockResolvedValueOnce(passthrough(503, 'upstream unavailable'));
+    expect(await auth.getAccessToken()).toBe('ms-access-token-aaaaaaaa');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // The verdict stays on record for the card.
+    expect(auth.getLastRefreshFailure()).toMatchObject({ kind: 'transient' });
+  });
+
+  it('a failed vault write keeps memory on the handle the vault holds', async () => {
+    const vault = expiringGrant();
+    const auth = new MicrosoftAuth({ vault });
+    (vault.set as ReturnType<typeof vi.fn>).mockImplementationOnce(() => { throw new Error('disk full'); });
+    mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-rotated', Date.now() + 3_600_000, 'sealed-handle-2'));
+    await expect(auth.getAccessToken()).rejects.toThrow(/disk full/);
+
+    // The next refresh presents the handle that is on disk, not the unsaved rotation.
+    mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-again', Date.now() + 3_600_000));
+    await auth.getAccessToken();
+    const [, init] = mockFetch.mock.calls[1] as [string, RequestInit];
+    expect((JSON.parse(String(init.body)) as Record<string, unknown>)['refresh_handle']).toBe('sealed-handle-1');
+  });
+});
+
+describe('Retry-After forms', () => {
+  it('honours an HTTP date', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const auth = new MicrosoftAuth({ vault: expiringGrant() });
+    const at = new Date(Date.now() + 90_000).toUTCString();
+    mockFetch.mockResolvedValueOnce(passthrough(429, '{}', { 'retry-after': at }));
+    await expect(auth.getAccessToken()).rejects.toThrow(/429/);
+    vi.setSystemTime(Date.now() + 60_000);
+    await expect(auth.getAccessToken()).rejects.toThrow(/suppressed/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps a huge value at an hour', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const auth = new MicrosoftAuth({ vault: expiringGrant() });
+    mockFetch.mockResolvedValueOnce(passthrough(429, '{}', { 'retry-after': '999999' }));
+    await expect(auth.getAccessToken()).rejects.toThrow(/429/);
+    vi.setSystemTime(Date.now() + 60 * 60 * 1000 + 1_000);
+    mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-later', Date.now() + 3_600_000));
+    expect(await auth.getAccessToken()).toBe('ms-access-token-later');
   });
 });
 

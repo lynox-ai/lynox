@@ -108,7 +108,7 @@ export function microsoftCardState(kind: MicrosoftRefreshFailureKind, codes: rea
     case 'needs-user':
       return 'sign-in';
     case 'needs-admin': {
-      const deciding = codes.find((c) => (MICROSOFT_REFRESH_CODES.needsAdmin as readonly number[]).includes(c));
+      const deciding = decidingErrorCode(kind, codes);
       if (deciding === 50057) return 'account-disabled';
       if (deciding === 700016) return 'app-not-in-tenant';
       return 'not-assigned';
@@ -122,6 +122,19 @@ export function microsoftCardState(kind: MicrosoftRefreshFailureKind, codes: rea
       return unhandled;
     }
   }
+}
+
+/**
+ * The error number to quote for a verdict: the one the verdict was decided on
+ * where a list decided it (`needs-admin`, `grant-revoked`), otherwise the first
+ * in the body. Quoting the first number blindly would name a code the card did
+ * not act on, next to a card state that came from another one.
+ */
+export function decidingErrorCode(kind: MicrosoftRefreshFailureKind, codes: readonly number[]): number | null {
+  const onList = (list: readonly number[]): number | undefined => codes.find((c) => list.includes(c));
+  if (kind === 'needs-admin') return onList(MICROSOFT_REFRESH_CODES.needsAdmin) ?? codes[0] ?? null;
+  if (kind === 'grant-revoked') return onList(MICROSOFT_REFRESH_CODES.grantRevoked) ?? codes[0] ?? null;
+  return codes[0] ?? null;
 }
 
 /**
@@ -163,7 +176,7 @@ const MAX_EMAIL_LENGTH = 320;
 /** The last refused refresh, as the card reads it. */
 export interface MicrosoftRefreshFailure {
   kind: MicrosoftRefreshFailureKind;
-  /** The first number in `error_codes`, for the card to quote; null when there was none. */
+  /** The `error_codes` number the verdict was decided on ({@link decidingErrorCode}); null when there was none. */
   firstErrorCode: number | null;
   cardState: MicrosoftCardState;
   /** Epoch milliseconds. */
@@ -288,15 +301,14 @@ export class MicrosoftAuth {
    * suppression and clears the last failure: a new grant is the remedy for
    * every verdict that keeps the old one.
    */
-  acceptClaim(claim: OAuthHandleClaimResponse | unknown): void {
+  acceptClaim(claim: unknown): void {
     const data = validateClaim(claim);
     if (!this.vault) {
       throw new Error('Cannot store the Microsoft grant without a vault. Set LYNOX_VAULT_KEY to enable the vault.');
     }
-    this.tokenData = data;
+    this.persist(data, 'grant');
     this.suppressed = null;
     this.lastFailure = null;
-    this.persist('grant');
   }
 
   /** A valid access token, refreshed through the control plane when it is about to expire. */
@@ -305,11 +317,23 @@ export class MicrosoftAuth {
       throw new Error('Not connected. Connect the Microsoft 365 mailbox in the mail settings.');
     }
     if (Date.now() >= this.tokenData.expires_at - TOKEN_REFRESH_BUFFER_MS) {
-      await this.refresh();
+      try {
+        await this.refresh();
+      } catch (err: unknown) {
+        // The refresh starts early. A refusal inside that margin does not make
+        // the token in hand invalid: while it is still valid it is used, and the
+        // verdict stays on record for the card. A revoked grant is gone by now
+        // and falls through to the throw.
+        const held = this.tokenData as TokenData | null;
+        if (held !== null && Date.now() < held.expires_at) return held.access_token;
+        throw err;
+      }
     }
-    // `refresh` may have dropped the grant (revoked) and thrown; reaching here
-    // means it succeeded or was not needed.
-    return (this.tokenData as TokenData).access_token;
+    // Re-read: the grant may have been dropped (a disconnect, or a revocation
+    // seen by another caller) while this one was waiting.
+    const current = this.tokenData as TokenData | null;
+    if (current === null) throw new Error('Not connected. Connect the Microsoft 365 mailbox in the mail settings.');
+    return current.access_token;
   }
 
   /**
@@ -358,8 +382,9 @@ export class MicrosoftAuth {
       // The control plane passes Microsoft's status and body through unchanged
       // (contract `OAuthRefreshRequest`), which is what lets this read them.
       const text = await response.text();
+      this.assertStillCurrent(grant);
       const { kind, codes } = readMicrosoftRefreshFailure(response.status, text);
-      const firstErrorCode = codes[0] ?? null;
+      const firstErrorCode = decidingErrorCode(kind, codes);
       const now = Date.now();
       this.lastFailure = { kind, firstErrorCode, cardState: microsoftCardState(kind, codes), at: now };
       // Status and the error number only. The body is Microsoft's, open-ended,
@@ -377,25 +402,45 @@ export class MicrosoftAuth {
       throw new Error(`Token refresh failed: ${response.status}.${message}`);
     }
 
-    const body = validateControlPlaneRefresh(await response.json(), MICROSOFT_REFRESH_REMEDY.transient);
+    const json: unknown = await response.json();
+    this.assertStillCurrent(grant);
+    const body = validateControlPlaneRefresh(json, MICROSOFT_REFRESH_REMEDY.transient);
     // Microsoft rotates the refresh token on every refresh. A handle that is
     // not replaced keeps working until the old token's lifetime ends, then fails
     // without warning; so a rotated one always replaces the stored one.
-    this.tokenData = {
+    this.persist({
       ...grant,
       access_token: body.access_token,
       expires_at: body.expires_at,
       ...(body.refresh_handle ? { refresh_handle: body.refresh_handle } : {}),
-    };
+    }, 'refresh');
     this.lastFailure = null;
-    this.persist('refresh');
   }
 
-  /** Persist the current grant AND announce it: the only way this class writes one. */
-  private persist(reason: 'grant' | 'refresh'): void {
-    if (!this.tokenData) throw new Error('persist called with no token data');
+  /**
+   * Refuse to act on an answer for a grant that is no longer the stored one.
+   *
+   * The refresh is out for up to 30 s. A reconnect (`acceptClaim`) or a
+   * `disconnect` in that window replaces or removes the grant it was sent for;
+   * writing its answer back would undo the reconnect, resurrect the
+   * disconnected grant, or — on a revocation of the OLD handle — delete the new
+   * one. So the answer is dropped, nothing is written, braked or recorded.
+   */
+  private assertStillCurrent(sentFor: TokenData): void {
+    if (this.tokenData !== sentFor) {
+      throw new Error('Token refresh discarded: the Microsoft connection changed while the refresh was out. Retry.');
+    }
+  }
+
+  /**
+   * Persist a grant AND announce it: the only way this class writes one. The
+   * vault is written first, so a failed write leaves memory and vault on the
+   * same grant instead of memory holding a handle the vault never saw.
+   */
+  private persist(data: TokenData, reason: 'grant' | 'refresh'): void {
     if (!this.vault) throw new Error('Cannot store the Microsoft grant without a vault.');
-    this.vault.set(MICROSOFT_OAUTH_TOKENS_KEY, JSON.stringify(this.tokenData), 'any');
+    this.vault.set(MICROSOFT_OAUTH_TOKENS_KEY, JSON.stringify(data), 'any');
+    this.tokenData = data;
     this.announce(reason);
   }
 
