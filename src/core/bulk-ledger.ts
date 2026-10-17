@@ -1198,14 +1198,46 @@ export class BulkLedger {
     // without measuring anything, and an undo cannot be a probe itself.
     if (run.kind === 'undo' && this.writeFormOfRun(run) === 'unmeasured') return true;
     const paths = parseContractPaths(run.contract_json);
-    const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
+    const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
     // Every kind of resource the run writes needs its own probe. Where the run writes an
     // unmeasured form of that kind, nobody knows whether a second run acts like the first:
     // the probe must be this run's, and it must have been written to an unmeasured target.
-    return kinds.every((kind) => (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))
-      ? own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined
-      : probed.get(host, method, kind) !== undefined));
+    return kinds.every((kind) => {
+      if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
+        return own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined;
+      }
+      const row = probed.get(host, method, kind) as { run_id: string } | undefined;
+      return row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind);
+    });
+  }
+
+  /**
+   * Whether the probe run wrote its one target in a measured form of this kind. A probe
+   * confirmed before the write forms were told apart was filed under the plain kind wherever
+   * it landed, also on an unmeasured path, and must not widen a measured run. Read from the
+   * target itself, not from the row's kind; a probe whose target is gone vouches for nothing.
+   */
+  private probeWroteMeasuredForm(probeRunId: string, host: string, method: string, kind: string): boolean {
+    const written = this.engineDb.getDb().prepare(
+      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+    ).all(probeRunId) as { target_key: string }[];
+    const only = written[0];
+    if (written.length !== 1 || !only) return false;
+    let path: string;
+    try {
+      path = new URL(this.engineDb.dec(only.target_key)).pathname;
+    } catch {
+      return false;
+    }
+    return resourceKindOf(path) === kind && isMeasuredWriteForm(host, path, method);
+  }
+
+  /** {@link probeHolds} for the effect loop: an external run without a probe that holds writes
+   *  one target at most, whatever cap it was approved or resumed with. */
+  probeHoldsFor(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.probeHolds(run);
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -1354,8 +1386,10 @@ export class BulkLedger {
       maxTargets = params.maxTargets;
       if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
       if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
-      if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     }
+    // Also when the cap stays: a run approved for more than one target under an earlier rule,
+    // or before its probe stopped holding, must not go on wide.
+    if ((maxTargets ?? this.countWriting(runId)) > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';

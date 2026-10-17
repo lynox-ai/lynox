@@ -142,9 +142,17 @@ const writerFor = (c: ExternalClient) => (run: BulkRunForApply) => bulkWriterFor
 /** Plan, preview and approve an external run: what an owner does before the first write. */
 /** A probe the owner confirmed for the host and verb — the fixture for tests that are not
  *  about the probe itself. */
-function seedProbe(method: BulkWriteMethod = 'PATCH', kind = '/products/'): void {
-  engineDb.getDb().prepare('INSERT OR REPLACE INTO bulk_host_probes (host, method, kind, run_id, confirmed_at) VALUES (?, ?, ?, ?, ?)')
-    .run(HOST, method, kind, 'fixture', '2026-09-30T00:00:00.000Z');
+function seedProbe(method: BulkWriteMethod = 'PATCH', kind = '/products/', probePath = `${kind}900`): void {
+  // A probe vouches only through the one target its run wrote (`probeWroteMeasuredForm`), so
+  // the fixture carries that run and that target too.
+  const runId = `fixture-probe-${method}-${kind}-${probePath}`;
+  const db = engineDb.getDb();
+  db.prepare(`INSERT OR IGNORE INTO bulk_runs (id, rule_hash, target_system, undo, phase, targets_total, targets_applied)
+    VALUES (?, 'fixture', ?, 'restorable', 'done', 1, 1)`).run(runId, `http:${HOST}`);
+  db.prepare(`INSERT OR IGNORE INTO bulk_targets (run_id, seq, target_key, change, applied_at, result)
+    VALUES (?, 0, ?, 'update', '2026-09-30T00:00:00.000Z', ?)`).run(runId, engineDb.enc(`https://${HOST}${probePath}`), engineDb.enc('written'));
+  db.prepare('INSERT OR REPLACE INTO bulk_host_probes (host, method, kind, run_id, confirmed_at) VALUES (?, ?, ?, ?, ?)')
+    .run(HOST, method, kind, runId, '2026-09-30T00:00:00.000Z');
 }
 
 async function previewedRun(
@@ -1346,6 +1354,84 @@ describe('an unmeasured write form', () => {
       const measured = await previewedRun([2, 3].map((i) => ({ target: url(i), after: { price: '16' } })), c);
       expect(ledger.getStatus(measured)).toMatchObject({ writeForm: 'measured', probeConfirmed: false });
       expect(ledger.approve(measured, { checksum: ledger.computeChecksum(measured)!, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+    } finally {
+      restore();
+    }
+  });
+
+  // Probes confirmed before the write forms were told apart sit under the plain kind wherever
+  // they landed. What a probe vouches for is read from the one target its run wrote.
+  const WOO_KIND = '/wp-json/wc/v3/products/';
+  const woo = (id: string): string => `https://${HOST}${WOO_KIND}${id}`;
+  async function measuredWooRun(s: ReturnType<typeof shop>, c: ExternalClient): Promise<string> {
+    for (const id of ['1', '2']) s.items.set(`${WOO_KIND}${id}`, { id: Number(id), price: '12.00' });
+    const runId = await previewedRun(['1', '2'].map((id) => ({ target: woo(id), after: { price: '15' } })), c);
+    expect(ledger.getStatus(runId)!.writeForm).toBe('measured');
+    return runId;
+  }
+
+  it('a probe under the plain kind widens a measured run only if its own target was a measured form', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [woo('1'), woo('2')]) });
+      const runId = await measuredWooRun(s, c);
+      const checksum = ledger.computeChecksum(runId)!;
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
+      expect(ledger.getStatus(runId)!.probeConfirmed).toBe(false);
+      expect(ledger.approve(runId, { checksum, maxTargets: 2 })).toEqual({ ok: false, reason: 'probe_required' });
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
+      expect(ledger.getStatus(runId)!.probeConfirmed).toBe(true);
+      expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a resume checks the probe also when it keeps the cap a run was approved wide with', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [woo('1'), woo('2')]) });
+      const runId = await measuredWooRun(s, c);
+      const checksum = ledger.computeChecksum(runId)!;
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
+      expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
+      ledger.halt(runId, BULK_HALT_REASONS.expired);
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      // The probe stops holding (here: the one on record turns out to be on an unmeasured path).
+      ledger.halt(runId, BULK_HALT_REASONS.expired);
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
+      expect(ledger.resume(runId, { checksum })).toEqual({ ok: false, reason: 'probe_required' });
+      expect(ledger.resume(runId, { checksum, maxTargets: 1 }).ok).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+
+  it('the effect writes one target at most when the probe a wide approval rested on no longer holds', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [woo('1'), woo('2')]) });
+      const control = await measuredWooRun(s, c);
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
+      expect(ledger.approve(control, { checksum: ledger.computeChecksum(control)!, maxTargets: 2 }).ok).toBe(true);
+      expect((await runBulkEffect(control, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      expect(s.items.get(`${WOO_KIND}2`)!['price']).toBe('15.00');
+
+      engineDb.getDb().prepare(`DELETE FROM bulk_host_probes`).run();
+      const wide = await previewedRun(['3', '4'].map((id) => {
+        s.items.set(`${WOO_KIND}${id}`, { id: Number(id), price: '12.00' });
+        return { target: woo(id), after: { price: '15' } };
+      }), client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) }));
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
+      expect(ledger.approve(wide, { checksum: ledger.computeChecksum(wide)!, maxTargets: 2 }).ok).toBe(true);
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}batch`);
+      const out = await runBulkEffect(wide, 'bulk_apply', { ledger, writerFor: writerFor(client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) })) });
+      expect(out.status).toBe('halted');
+      expect(ledger.getStatus(wide)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
+      expect([s.items.get(`${WOO_KIND}3`)!['price'], s.items.get(`${WOO_KIND}4`)!['price']].sort()).toEqual(['12.00', '15.00']);
     } finally {
       restore();
     }
