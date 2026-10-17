@@ -212,6 +212,20 @@ describe('runInboxEval', () => {
     expect(formatReport(none)).toContain('draft_ready filed as auto_handled: 0');
   });
 
+  it('counts what the user sees, not what the model said: a forward the check moved is not filed away', async () => {
+    const corpus = loadCorpus();
+    // The corpus has no draft_ready forward, so one is labelled so here, in memory only.
+    const forward = corpus.fixtures.find((f) => f.id.startsWith('forwarded-thread-'));
+    expect(forward).toBeDefined();
+    const relabelled: InboxEvalCorpus = {
+      ...corpus,
+      fixtures: corpus.fixtures.map((f) => f.id === forward!.id ? { ...f, expectedBucket: 'draft_ready' as const } : f),
+    };
+    const report = await runInboxEval(relabelled, bucketStub(() => 'auto_handled'));
+    expect(report.forwardOverrideIds).toContain(forward!.id);
+    expect(report.draftReadyAutoHandledIds).not.toContain(forward!.id);
+  });
+
   it('formats a one-screen ASCII report', async () => {
     const corpus = loadCorpus();
     const llm = bucketStub((key) => corpus.fixtures.find((f) => fixtureKey(f) === key)?.expectedBucket ?? 'requires_user');
