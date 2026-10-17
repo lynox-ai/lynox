@@ -7,6 +7,7 @@ vi.mock('./observability.js', () => ({
 }));
 
 import { SecretStore, SECRET_REF_PATTERN, SECRET_SHAPES, isInfraSecret, isProtectedSecretWrite, maskSecretPatterns, matchesSecretPattern, maskCredentialInput, withoutTypedCredentials } from './secret-store.js';
+import { MICROSOFT_OAUTH_TOKENS_KEY } from '../integrations/microsoft/vault-keys.js';
 import { LLM_CATALOG } from './llm/catalog.js';
 import { VAULT_SLOT_BY_PROVIDER } from './llm/provider-keys.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
@@ -330,6 +331,9 @@ describe('SecretStore', () => {
     it('isInfraSecret matches infra prefixes, not integration secrets', () => {
       expect(isInfraSecret('MAIL_ACCOUNT_RAFAEL_GMAIL')).toBe(true);
       expect(isInfraSecret('GOOGLE_OAUTH_TOKENS')).toBe(true);
+      // The Microsoft grant's slot, by the constant that names it, not a copy
+      // of the string: a rename of the key must still land under the pattern.
+      expect(isInfraSecret(MICROSOFT_OAUTH_TOKENS_KEY)).toBe(true);
       // OAuth *app* credentials are CP-provisioned infra (repointing them =
       // OAuth hijacking), same class as the OAuth tokens above.
       expect(isInfraSecret('GOOGLE_CLIENT_ID')).toBe(true);
