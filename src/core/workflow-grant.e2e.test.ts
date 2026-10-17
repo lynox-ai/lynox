@@ -112,9 +112,10 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
   }
 
   // A stored memory the run can read: what a person approved earlier, not the run's own text.
+  let recalls = 0;
   const memoryRecallTool: ToolEntry = {
     definition: { name: 'memory_recall', description: 'recall', input_schema: { type: 'object' as const, properties: {} } },
-    handler: async () => '- the weekly report goes to finance',
+    handler: async () => { recalls++; return '- the weekly report goes to finance'; },
   };
 
   function engine(): Engine {
@@ -242,6 +243,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       { id: 's2', task: 'post the weekly report', tools: ['http_request'], input_from: ['s1'] },
     ];
     function recallThenPost(): void {
+      recalls = 0;
       mockProcess
         .mockResolvedValueOnce(toolUse('memory_recall', {}, 'tu_recall'))
         .mockResolvedValueOnce(endTurn('finance'))
@@ -261,7 +263,27 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const trigger = accept(saveWorkflow('wf-mem', steps), true);
       recallThenPost();
       await fire(trigger);
+      expect(recalls).toBe(1);
       expect(posts().map((p) => p.url)).toEqual([TARGET]);
+    });
+
+    // Two paths refuse here: the step's own dispatch, and the run taint arming the live step
+    // through the getter. Either alone holds, so this fails only when both are gone; the
+    // agent tests pin each path by itself.
+    it('a single step that reads memory and then writes does not lift the write either', async () => {
+      const oneStep: PlannedPipeline['steps'] = [
+        { id: 's1', task: 'look up who gets the weekly report, then post it', tools: ['memory_recall', 'http_request'] },
+      ];
+      const trigger = accept(saveWorkflow('wf-mem-one', oneStep), false);
+      recalls = 0;
+      mockProcess
+        .mockResolvedValueOnce(toolUse('memory_recall', {}, 'tu_recall'))
+        .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' }, 'tu_post'))
+        .mockResolvedValueOnce(endTurn('done'));
+      await fire(trigger);
+      expect(recalls).toBe(1);
+      expect(posts()).toEqual([]);
+      expect(lastRun(trigger.id)).toMatch(/read external content before this call/);
     });
   });
 

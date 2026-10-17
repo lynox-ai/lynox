@@ -5420,6 +5420,7 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
 
     it('a grant that allows writes after foreign content still lifts it', async () => {
       const agent = await readMemory('memory_recall', withAfterUntrusted(grant, true));
+      expect(agent.conversationSawUntrusted).toBe(true);
       expect(agent.governingContract().withheld).toBeNull();
     });
 
@@ -5429,6 +5430,8 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
       expect(agent.conversationSawUntrusted).toBe(false);
     });
 
+    // Only a Session loads messages today, and a Session's agent carries no contract; this
+    // keeps the loaded-context reading in step with the other two should that change.
     it('a loaded context that read memory is tainted under a contract, and only then', () => {
       const earlier = [
         { role: 'assistant' as const, content: [{ type: 'tool_use' as const, id: 't1', name: 'memory_recall', input: {} }] },
