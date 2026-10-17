@@ -1073,8 +1073,8 @@ describe('httpRequestTool', () => {
 
         // After a mandate ends, its own connection hands out no token to anyone (§3.13 B9, the
         // guard the engine installs at boot), whoever runs: a schedule the mandate set up and the
-        // owner stamped fires as the owner (worker-loop.test.ts, "fired by the schedule after the
-        // grant ended"), so the mandate lock is not what holds it, and the owner's Allow does not
+        // owner stamped fires as the owner (worker-loop.test.ts, "a stamped schedule the mandate set
+        // up"), so the mandate lock is not what holds it, and the owner's Allow does not
         // open it. Only `live` changes between the first two rows. The owner's own connection is
         // untouched by a mandate's end.
         it.each([

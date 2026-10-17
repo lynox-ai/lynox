@@ -3879,9 +3879,10 @@ describe('mandates and stored credentials', () => {
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
-  // The profile map keys the host as the profile names it, so a trailing root dot finds no profile
-  // and no credential is attached; the consent gate reads the host without the dot and asks. That
-  // is the owner's path too, and a mandate gets nothing the owner would not.
+  // The profile map keys the host as the profile names it, so for the credential a trailing root
+  // dot finds no profile and none is attached (the connected-account check strips the dot); the
+  // consent gate reads the host without the dot and asks. That is the owner's path too, and a
+  // mandate gets nothing the owner would not.
   it('a mandate\'s write to the host with a trailing root dot goes out as the owner\'s does: no credential', async () => {
     const req = { url: 'https://api.crm.example./v1/contacts', method: 'POST', body: '{}' };
     const asMandate = await send([presetProfile()], vault(SEED), req, mandate);
