@@ -1,10 +1,11 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import type { OAuthRefreshRequest, OAuthRefreshResponse, OAuthRevokeRequest, OAuthRevokeResponse } from '../../contract/http.js';
+import type { OAuthRefreshRequest, OAuthRevokeRequest, OAuthRevokeResponse } from '../../contract/http.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
 import { googleFetch, cpFetch } from '../../core/connector-egress.js';
+import { readControlPlaneIdentity, validateControlPlaneRefresh } from '../../core/control-plane-client.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
 import { classifyRefreshFailure, reclassifyForeignGrant, type RefreshFailureKind } from '../../core/oauth-refresh-failure.js';
 import { GOOGLE_OAUTH_TOKENS_KEY } from './vault-keys.js';
@@ -53,62 +54,6 @@ interface TokenData {
    * carry nothing, and must keep behaving exactly as they did.
    */
   client_id?: string;
-}
-
-/**
- * The three values a managed instance needs to reach its control plane, or null
- * when any is missing.
- *
- * All three or none, deliberately: a partially configured instance must take
- * the direct path rather than build a half-formed request. Two are checked for
- * presence; the URL is checked for usability, which subsumes presence. The same
- * env names `managed-hook.ts` uses — the engine has exactly one identity toward
- * the control plane.
- */
-function readControlPlaneIdentity(): { url: string; instanceId: string; secret: string } | null {
-  const rawUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
-  const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
-  const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
-  // No `!rawUrl` here: `controlPlaneBase` refuses the empty string already
-  // (`new URL('')` throws), so a presence check would be a line no test could
-  // distinguish from its absence.
-  if (!instanceId || !secret) return null;
-  const url = controlPlaneBase(rawUrl);
-  if (url === null) return null;
-  return { url, instanceId, secret };
-}
-
-/**
- * Normalise the CP base URL, or null if it cannot carry a secret safely.
- *
- * The value is operator-set, so this is not a trust boundary — it is a
- * concatenation guard. `${base}/internal/...` on a base that carries a query or
- * a fragment does not append a path, it extends the query, and the request
- * would go somewhere else with the instance secret attached. A path PREFIX is
- * kept, because a CP behind one is a legitimate deployment.
- */
-function controlPlaneBase(raw: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-  // Refuse on the RAW string, not on `parsed.search`/`parsed.hash`: an empty
-  // query parses to `search === ''` while `href` keeps the `?`, so reading the
-  // parsed fields let exactly the value through that this guard exists for.
-  // Refusing beats silently dropping — an operator's mistake should be loud.
-  if (raw.includes('?') || raw.includes('#')) return null;
-  // Credentials would authenticate the request somewhere the operator did not
-  // mean. Refuse rather than strip: `origin` would drop them silently while the
-  // operator still believed the request was authenticated.
-  if (parsed.username !== '' || parsed.password !== '') return null;
-  // ONE mechanism, deliberately. Building from `origin + pathname` would make
-  // the same guarantee structurally — and that is exactly the problem: with the
-  // refusals above it can never behave differently, so no test could tell the
-  // two apart and the second line would be uncovered by construction.
-  return parsed.href.replace(/\/+$/, '');
 }
 
 interface ServiceAccountKey {
@@ -401,50 +346,6 @@ function parseTokenData(raw: string): TokenData | null {
 }
 
 /**
- * Validate a refresh response from the control plane.
- *
- * The direct path runs every Google response through `validateTokenResponse`.
- * This is the equivalent for the other one, and deliberately stricter: the
- * direct path derives `expires_at` from a `expires_in` it has already bounded
- * to be positive, while this value arrives absolute and unchecked. A `typeof`
- * check alone is not enough — `NaN` is a number, and an `expires_at` of `NaN` makes the staleness
- * comparison in `getAccessToken` false forever, so the engine would serve a
- * dead access token and never refresh again. An out-of-range value fails the
- * other way: an always-past expiry turns the CP into a dependency of every
- * Google call rather than of the hourly refresh.
- */
-function validateControlPlaneRefresh(json: unknown): OAuthRefreshResponse {
-  const bad = (why: string): never => {
-    throw new Error(`Token refresh failed: ${why}.` + REFRESH_FAILURE_REMEDY.transient);
-  };
-  if (typeof json !== 'object' || json === null) {
-    return bad('the control plane returned no usable token');
-  }
-  const data = json as Record<string, unknown>;
-  const token = data['access_token'];
-  if (typeof token !== 'string' || token === '') {
-    return bad('the control plane returned no usable token');
-  }
-  const expiresAt = data['expires_at'];
-  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
-    return bad('the control plane returned no usable expiry');
-  }
-  const now = Date.now();
-  if (expiresAt <= now || expiresAt > now + MAX_CP_TOKEN_LIFETIME_MS) {
-    return bad('the control plane returned an expiry outside the plausible range');
-  }
-  const handle = data['refresh_handle'];
-  if (handle !== undefined && (typeof handle !== 'string' || handle === '')) {
-    return bad('the control plane returned an unusable refresh handle');
-  }
-  return {
-    access_token: token,
-    expires_at: expiresAt,
-    ...(typeof handle === 'string' ? { refresh_handle: handle } : {}),
-  };
-}
-
-/**
  * The control plane's revoke answer, or null for anything that is not exactly
  * the confirmation the contract defines — the caller then reports the grant as
  * not confirmed at Google.
@@ -453,13 +354,6 @@ function readControlPlaneRevoke(json: unknown): OAuthRevokeResponse | null {
   if (typeof json !== 'object' || json === null) return null;
   return (json as Record<string, unknown>)['revoked'] === true ? { revoked: true } : null;
 }
-
-/**
- * The widest access-token lifetime we accept from the control plane. Google's
- * are an hour; a day is slack for any future change without letting an absurd
- * value pin a stale token for a year.
- */
-const MAX_CP_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Validate a token response from Google and convert to TokenData.
@@ -1492,7 +1386,7 @@ export class GoogleAuth {
     }
 
     if (cp && handle) {
-      const body = validateControlPlaneRefresh(await response.json());
+      const body = validateControlPlaneRefresh(await response.json(), REFRESH_FAILURE_REMEDY.transient);
       this.tokenData = {
         ...this.tokenData,
         access_token: body.access_token,
