@@ -335,12 +335,56 @@ describe('isOutboundEffectWrite', () => {
     ['https://api.bexio.com/2.0/kb_invoice/1%5Csend', 'POST', true],
     ['https://api.bexio.com/2.0/kb_invoice/1/%C4%B1ssue', 'POST', true],
     ['https://api.bexio.com/2.0/kb_invoice/1/send', 'GET', false],
+    ['https://api.bexio.com/2.0/kb_invoice/1/send:x', 'POST', true],
+    ['https://api.bexio.com/2.0/kb_invoice/1/send-', 'POST', true],
+    ['https://api.bexio.com/2.0/kb_invoice/1/send,', 'POST', true],
+    ['https://api.bexio.com/2.0/kb_invoice/1/send_', 'POST', true],
+    ['https://api.bexio.com/2.0/kb_invoice/1/issue~1', 'POST', true],
     ['https://api.bexio.com/2.0/kb_invoice/1/sender', 'POST', false],
+    ['https://api.bexio.com/2.0/kb_invoice/1/send2', 'POST', false],
+    ['https://api.bexio.com/2.0/kb_invoice/1/cancellation', 'POST', false],
     ['https://api.bexio.com/2.0/contact', 'POST', false],
     ['https://other.example/2.0/kb_invoice/1/send', 'POST', false],
     ['https://other.example/%2573end', 'POST', false],
   ])('%s %s → %s', (url, method, want) => {
     expect(isOutboundEffectWrite(url, method)).toBe(want);
+  });
+
+  // bexio's action paths with an effect, as its OpenAPI specification 3.0.0 names them, and the
+  // writes it names that create or copy a draft, record a payment received, or archive.
+  it.each([
+    ['POST', '/2.0/kb_invoice/1/kb_reminder/2/send', true],
+    ['POST', '/2.0/kb_offer/1/send', true],
+    ['POST', '/2.0/kb_delivery/1/issue', true],
+    ['POST', '/2.0/kb_offer/1/reissue', true],
+    ['POST', '/2.0/kb_invoice/1/revert_issue', true],
+    ['POST', '/2.0/kb_offer/1/revertIssue', true],
+    ['POST', '/2.0/kb_invoice/1/cancel', true],
+    ['POST', '/4.0/banking/payments/0b3e/cancel', true],
+    ['PUT', '/4.0/purchase/bills/0b3e/bookings/BOOKED', true],
+    ['PUT', '/4.0/expenses/0b3e/bookings/DRAFT', true],
+    ['POST', '/2.0/kb_offer/1/accept', true],
+    ['POST', '/2.0/kb_offer/1/reject', true],
+    ['POST', '/2.0/kb_invoice/1/mark_as_sent', true],
+    ['POST', '/2.0/kb_invoice/1/kb_reminder/2/mark_as_unsent', true],
+    ['POST', '/4.0/banking/payments', true],
+    ['PUT', '/4.0/purchase/outgoing-payments', true],
+    ['POST', '/4.0/purchase/outgoing-payments', true],
+    ['POST', '/2.0/kb_invoice/1/copy', false],
+    ['POST', '/2.0/kb_offer/1/invoice', false],
+    ['POST', '/2.0/kb_order/1/delivery', false],
+    ['POST', '/2.0/kb_invoice/1/payment', false],
+    ['POST', '/2.0/pr_project/1/archive', false],
+    ['POST', '/4.0/purchase/bills/0b3e/actions', false],
+    // Ordinary resources whose names share letters with an action at its length (`contact_group`
+    // has `_` where `reissue` ends): only a segment that STARTS with an action counts.
+    ['POST', '/2.0/contact_group', false],
+    ['POST', '/2.0/kb_invoice/1/kb_position_text', false],
+    ['POST', '/2.0/client_service', false],
+    ['POST', '/3.0/purchase_orders', false],
+    ['POST', '/2.0/kb_invoice/1/pre_send.json', false],
+  ] as const)('bexio %s %s → %s', (method, path, want) => {
+    expect(isOutboundEffectWrite(`https://api.bexio.com${path}`, method)).toBe(want);
   });
 });
 
@@ -586,8 +630,12 @@ describe('outboundEffectField', () => {
     [`${SHOP}/wp-json/wc/v3/customers/9`, { email: 'a@example.test' }, 'email', 'credential'],
     [`${SHOP}/wp-json/wc/v3/webhooks/3`, { name: 'x' }, null, 'data_to_third_party'],
     ['https://api.bexio.com/4.0/banking/payments/4', { message: 'x' }, null, 'money'],
+    // bexio's payment ids are uuids.
+    ['https://api.bexio.com/4.0/banking/payments/0b3e5f2a-1c4d-4e8f-9a7b-2c6d8e0f1a3b', { message: 'x' }, null, 'money'],
     ['https://api.bexio.com/2.0/kb_order/4/repetition', { end: '' }, null, 'money'],
     ['https://api.bexio.com/4.0/banking/payments/%2534', { message: 'x' }, null, 'money'],
+    // Ambiguous, and no entry's path matches it as written: only the ambiguity rule can claim it.
+    ['https://api.bexio.com/4.0/banking/payments/4/%2573', { message: 'x' }, null, 'money'],
   ] as const)('%s with %j sets off %s (%s)', (url, body, field, effect) => {
     expect(outboundEffectField(url, body)).toMatchObject({ field, effect });
   });
@@ -600,6 +648,9 @@ describe('outboundEffectField', () => {
     [`${SHOP}/wp-json/wc/v3/customers/9`, { first_name: 'x' }],
     ['https://api.bexio.com/2.0/contact/4', { name_1: 'x' }],
     ['https://example.com/4.0/banking/payments/4', { message: 'x' }],
+    ['https://api.bexio.com/4.0/banking/payments/4/cancel', { message: 'x' }],
+    ['https://api.bexio.com/x/4.0/banking/payments/4', { message: 'x' }],
+    ['https://api.bexio.com/x/2.0/kb_order/4/repetition', { end: '' }],
     ['https://api.example.com/v1/orders/5', { status: 'completed' }],
     [`${SHOP}/wp-json/wcx/v3/orders/5`, { status: 'completed' }],
   ] as const)('%s with %j sets off nothing', (url, body) => {

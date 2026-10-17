@@ -392,11 +392,30 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * token profile or with none, and the table holds for each of them. Matched per segment, for
  * every write method.
  *
- * bexio: `…/send` mails a document to its recipient, `…/issue` issues an invoice. Only these
- * two are named; bexio's full path catalogue was not checked against this list.
+ * bexio, read from its OpenAPI specification 3.0.0 (every documented write, each judged by what
+ * it sets off): `send` mails an invoice, reminder or quote to its recipient; `issue`, `reissue`,
+ * `revert_issue` / `revertIssue` and `cancel` issue, re-issue, withdraw or cancel a binding
+ * document; `bookings/{status}` books a bill or an expense or sets it back to draft; `accept`
+ * and `reject` decide a quote; `mark_as_sent` marks an invoice, reminder or quote as sent and
+ * `mark_as_unsent` a reminder as not sent, neither sending anything; `payments` and
+ * `outgoing-payments` create, edit, cancel or delete a payment out to a recipient. Not named:
+ * the writes that create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or
+ * order), record an incoming payment (`kb_invoice/{id}/payment`), archive, reactivate or restore,
+ * and the `actions` of bills and expenses, whose only action in the specification is
+ * `DUPLICATE`. An order's `repetition` is held by {@link OUTBOUND_EFFECT_FIELDS}. NOT held by
+ * either table: a payment in the body of a bill (`purchase/bills`, field `payment`) and an
+ * employee's `iban` (`payroll/employees`, on create and on edit). On this host a connected
+ * account asks for every write anyway, and a bulk run reaches only its measured forms (a
+ * contact), so neither reaches them unasked; a write note still treats them as ordinary writes.
  */
 export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly segments: readonly string[] }[] = [
-  { host: 'api.bexio.com', segments: ['send', 'issue'] },
+  {
+    host: 'api.bexio.com',
+    segments: [
+      'send', 'issue', 'reissue', 'revert_issue', 'revertissue', 'cancel', 'accept', 'reject',
+      'bookings', 'mark_as_sent', 'mark_as_unsent', 'payments', 'outgoing-payments',
+    ],
+  },
 ];
 
 /** Whether a write to `url` with `method` is one the table names. A read never is. */
@@ -409,8 +428,10 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   if (!entry) return false;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   if (ambiguous) return true;
-  // A segment matches as itself or with a format suffix (`send.json`).
-  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || segment.startsWith(`${s}.`)));
+  // A segment matches as itself or followed by anything but a letter or digit (`send.json`,
+  // `send:x`, `send-`, `send,`): which of these a provider's router still reads as the action is
+  // not documented, so every such form counts. `sender` does not.
+  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || (segment.startsWith(s) && /[^a-z0-9]/u.test(segment.charAt(s.length)))));
 }
 
 /** What a field of {@link OUTBOUND_EFFECT_FIELDS} sets off at the provider. */
@@ -449,7 +470,7 @@ export const OUTBOUND_EFFECT_FIELDS: readonly OutboundEffectField[] = [
   { path: WOO('orders'), fields: ['customer_id'], effect: 'data_to_third_party', says: 'WooCommerce moves the order, with its addresses, into another customer\'s account' },
   { path: WOO('customers'), fields: ['password', 'email'], effect: 'credential', says: 'WooCommerce changes how the customer signs in; a changed email address also receives the password reset' },
   { path: WOO('webhooks'), fields: 'any', effect: 'data_to_third_party', says: 'a WooCommerce webhook decides where the shop sends its order and customer data' },
-  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/\d+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
+  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/[^/]+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
   { host: 'api.bexio.com', path: /^\/2\.0\/kb_order\/\d+\/repetition$/, fields: 'any', effect: 'money', says: 'bexio invoices this order again on this schedule' },
 ];
 
