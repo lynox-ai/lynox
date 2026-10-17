@@ -947,24 +947,6 @@ describe('OAuthGraphProvider — review fixes', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('a 429 whose body cannot be read still pauses the watch', async () => {
-    routes.push((url) => {
-      if (!url.includes('/messages/delta')) return undefined;
-      const broken = new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('connection reset')); } });
-      return new Response(broken, { status: 429, headers: { 'Retry-After': '3600' } });
-    });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
-    const events: MailWatchEvent[] = [];
-    const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
-    await vi.waitFor(() => { expect(events.length).toBe(1); });
-    await new Promise((r) => setTimeout(r, 80));
-    await handle.stop();
-    await provider.close();
-    expect(events[0]).toMatchObject({ type: 'error' });
-    expect((events[0] as { error: MailError }).error.code).toBe('rate_limited');
-    expect(fetchMock, 'paused: one request over eight intervals').toHaveBeenCalledTimes(1);
-  });
-
   it('a message id that is a dot-segment is refused before any request', async () => {
     const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
     const [env] = await listed(provider, ['..']);

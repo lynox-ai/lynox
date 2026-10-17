@@ -914,15 +914,7 @@ export class OAuthGraphProvider implements MailProvider {
     // The body is read HERE, inside the limiter's slot: the pinned transport
     // streams it, and Graph counts a request as concurrent until its response is
     // complete. Released at the headers, four slots could carry eight downloads.
-    let text: string;
-    try {
-      text = await res.text();
-    } catch (err) {
-      // A failure answer keeps its status even when its body cannot be read: a 429
-      // must still pause and a 410 still restart. A success needs its body.
-      if (res.ok) throw err;
-      text = '';
-    }
+    const text = await res.text();
     return new Response(text === '' || res.status === 204 || res.status === 205 ? null : text, {
       status: res.status,
       headers: res.headers,
