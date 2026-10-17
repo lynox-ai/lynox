@@ -102,6 +102,7 @@ import { computeComposition, type CompositionSnapshot } from './context-composit
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys } from './api-store.js';
+import { slotMayReach } from './profile-secret-view.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
@@ -3760,6 +3761,13 @@ export class Agent implements IAgent {
         resolvedHost = new URL(String(resolved.url)).host;
       } catch { resolvedHost = undefined; }
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
+      // A token slot goes only to where its grant points, whoever approved what before: asked
+      // before the profile's names and the session's approvals, and refused, never asked.
+      const apiStore = this.toolContext.apiStore;
+      const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl)) : [];
+      if (offGrant.length > 0) {
+        return refuse(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`);
+      }
       const host = parsed.hostname;
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const accepted = profile !== undefined && isEndpointAcked(profile.custom_endpoint_ack, rawUrl);
@@ -3792,6 +3800,13 @@ export class Agent implements IAgent {
       });
     }
 
+    // A token slot is never handed to a tool whose destination cannot be read, asked or not:
+    // the question would name the token, not the host it reaches.
+    const toolStore = this.toolContext.apiStore;
+    const tokens = toolStore ? secretNames.filter((n) => !slotMayReach(toolStore, n, 'other', undefined)) : [];
+    if (tokens.length > 0) {
+      return refuse(`Blocked: tool "${tc.name}" would receive ${tokens.join(', ')}, ${tokens.length === 1 ? 'a vault name that holds' : 'vault names that hold'} an OAuth token. A token is used only in an http_request to its own connection, where the engine attaches it; no other tool receives one.`);
+    }
     if (!this.promptUser) {
       if (taintedBeforeThisCall) {
         return refuse(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} after this conversation took in untrusted content, and there is no one to approve it.`);
