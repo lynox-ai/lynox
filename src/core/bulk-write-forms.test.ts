@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE, MEASURED_WRITE_FORMS, isMeasuredWriteForm, writeFormOf } from './bulk-write-forms.js';
-import { OUTBOUND_EFFECT_FIELDS } from './outbound-write.js';
+import { OUTBOUND_EFFECT_FIELDS, OUTBOUND_EFFECT_PATHS, isOutboundEffectWrite, normalizeWritePath } from './outbound-write.js';
 
 describe('measured write forms', () => {
   it('knows WooCommerce products on any host, with each verb that was measured', () => {
@@ -42,15 +42,26 @@ describe('measured write forms', () => {
   // lies on the table today. This keeps it so until one is written.
   it('lists no form that also lies on the field-effect table', () => {
     for (const form of MEASURED_WRITE_FORMS) {
-      // One concrete target of the form, built from its own pattern; it must match that pattern,
-      // or the sample says nothing about the form.
+      // One concrete target of the form, built from its own pattern. The pattern may hold only
+      // literal characters and `[0-9]+`, or a sample would not stand for the paths it matches.
+      const literal = form.path.source.replace(/^\^|\$$/g, '').replace(/\\[/.]/g, '').replace(/\[0-9\]\+/g, '');
+      expect(/[.*+?()[\]{}|\\^$]/.test(literal), `cannot build a sample target for ${form.path.source}`).toBe(false);
       const sample = form.path.source.replace(/^\^|\$$/g, '').replace(/\\([/.])/g, '$1').replace(/\[0-9\]\+/g, '7');
       expect(form.path.test(sample), `cannot build a sample target for ${form.path.source}`).toBe(true);
+      const advice = 'write a test that drives this form through approval into that block, then allow this overlap here';
+      // As the client reads it: `normalizeWritePath` lower-cases and splits as the block does.
+      const seen = normalizeWritePath(sample).path;
       for (const entry of OUTBOUND_EFFECT_FIELDS) {
         const sameHost = form.host === null || entry.host === undefined || form.host === entry.host;
-        expect(sameHost && entry.path.test(sample),
-          `measured form ${form.host ?? 'any host'} ${sample} carries a field of the field-effect table (${entry.says}): `
-          + 'write a test that drives this form through approval into that block, then allow this overlap here').toBe(false);
+        expect(sameHost && entry.path.test(seen),
+          `measured form ${form.host ?? 'any host'} ${sample} carries a field of the field-effect table (${entry.says}): ${advice}`).toBe(false);
+      }
+      for (const entry of OUTBOUND_EFFECT_PATHS) {
+        if (form.host !== null && form.host !== entry.host) continue;
+        for (const method of form.methods) {
+          expect(isOutboundEffectWrite(`https://${entry.host}${sample}`, method),
+            `measured form ${form.host ?? 'any host'} ${sample} is a path of the outbound-effect table: ${advice}`).toBe(false);
+        }
       }
     }
   });
