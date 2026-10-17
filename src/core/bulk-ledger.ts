@@ -203,6 +203,7 @@ export const BULK_HALT_REASONS = {
   expired: 'the approval expired',
   checksum: 'the run no longer matches what was approved',
   maxTargets: 'the approved maximum number of targets is reached',
+  probeRequired: 'more targets need a confirmed probe for this write form',
   atomicRolledBack: 'a target of an atomic run could not be written; the targets written before it were rolled back',
   atomicRollbackIncomplete: 'a target of an atomic run could not be written, and rolling back the ones written before it did not complete',
   atomicStoppedRolledBack: 'the owner stopped an atomic run; the targets written before the stop were rolled back',
@@ -435,6 +436,19 @@ export function resourceKindOf(path: string): string {
 /** Marks a probe written to an unmeasured target in `bulk_host_probes.kind`. A kind is a path
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
+
+/** The before-image an external undo writes, cut to the fields its source sent to that target.
+ *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
+ *  where an image was stored wider. */
+function onlySentFields(before: BeforeImage, sent: BeforeImage): BeforeImage {
+  if (before.absent || sent.absent || !isPlainRecord(before.value) || !isPlainRecord(sent.value)) return before;
+  const keep = new Set(Object.keys(sent.value));
+  return { absent: false, value: Object.fromEntries(Object.entries(before.value).filter(([k]) => keep.has(k))) };
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
 /** The target paths an external run's stored contract grants. */
 function parseContractPaths(json: string | null): string[] {
@@ -1193,19 +1207,53 @@ export class BulkLedger {
     const method = parseContractMethods(run.contract_json);
     const kinds = [...new Set(parseContractPaths(run.contract_json).map(resourceKindOf))];
     if (method === null || kinds.length === 0) return false;
-    // An undo writes only to targets its source wrote, with the form the source already used
-    // past its own probe on an unmeasured target. A probe for the undo would only block it
-    // without measuring anything, and an undo cannot be a probe itself.
-    if (run.kind === 'undo' && this.writeFormOfRun(run) === 'unmeasured') return true;
+    // An undo writes only to targets its source wrote, with the form and the verb the source
+    // already used on them: whatever that verb does to unsent fields, the source did it first.
+    // A probe for the undo would only block it without measuring anything, and an undo cannot
+    // be a probe itself — also where the source's probe no longer holds.
+    if (run.kind === 'undo') return true;
     const paths = parseContractPaths(run.contract_json);
-    const probed = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
+    const probed = this.engineDb.getDb().prepare('SELECT run_id FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ?');
     const own = this.engineDb.getDb().prepare('SELECT 1 FROM bulk_host_probes WHERE host = ? AND method = ? AND kind = ? AND run_id = ?');
     // Every kind of resource the run writes needs its own probe. Where the run writes an
     // unmeasured form of that kind, nobody knows whether a second run acts like the first:
     // the probe must be this run's, and it must have been written to an unmeasured target.
-    return kinds.every((kind) => (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))
-      ? own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined
-      : probed.get(host, method, kind) !== undefined));
+    return kinds.every((kind) => {
+      if (paths.some((p) => resourceKindOf(p) === kind && !isMeasuredWriteForm(host, p, method))) {
+        return own.get(host, method, `${UNMEASURED_PROBE}${kind}`, run.id) !== undefined;
+      }
+      const row = probed.get(host, method, kind) as { run_id: string } | undefined;
+      return row !== undefined && this.probeWroteMeasuredForm(row.run_id, host, method, kind);
+    });
+  }
+
+  /**
+   * Whether the probe run wrote its one target in a measured form of this kind. A probe
+   * confirmed before the write forms were told apart was filed under the plain kind wherever
+   * it landed, also on an unmeasured path, and must not widen a measured run. Read from the
+   * target itself, not from the row's kind; a probe whose target is gone vouches for nothing.
+   * The probe target is the run's first applied one: {@link confirmProbe} takes a run with
+   * exactly one applied target, and the run usually goes on wide after that.
+   */
+  private probeWroteMeasuredForm(probeRunId: string, host: string, method: string, kind: string): boolean {
+    const first = this.engineDb.getDb().prepare(
+      'SELECT target_key FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL ORDER BY applied_at, seq LIMIT 1',
+    ).get(probeRunId) as { target_key: string } | undefined;
+    if (!first) return false;
+    let path: string;
+    try {
+      path = new URL(this.engineDb.dec(first.target_key)).pathname;
+    } catch {
+      return false;
+    }
+    return resourceKindOf(path) === kind && isMeasuredWriteForm(host, path, method);
+  }
+
+  /** {@link probeHolds} for the effect loop: an external run without a probe that holds writes
+   *  one target at most, whatever cap it was approved or resumed with. */
+  probeHoldsFor(runId: string): boolean {
+    const run = this.runRow(runId);
+    return run !== undefined && this.probeHolds(run);
   }
 
   /** {@link writeFormOf} over the run's stored contract; null for a local run, and for a list
@@ -1354,8 +1402,10 @@ export class BulkLedger {
       maxTargets = params.maxTargets;
       if (!Number.isInteger(maxTargets) || maxTargets < 1 || maxTargets > writing) return { ok: false, reason: 'bad_max_targets' };
       if (run.atomic === 1 && maxTargets !== writing) return { ok: false, reason: 'bad_max_targets' };
-      if (maxTargets > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     }
+    // Also when the cap stays: a run approved for more than one target under an earlier rule,
+    // or before its probe stopped holding, must not go on wide.
+    if ((maxTargets ?? this.countWriting(runId)) > 1 && !this.probeHolds(run)) return { ok: false, reason: 'probe_required' };
     const now = params.now ?? Date.now();
     const db = this.engineDb.getDb();
     let triggerId = '';
@@ -1472,9 +1522,10 @@ export class BulkLedger {
       ).get(sourceRunId) as { n: number };
       if (src.phase !== 'done' || partial.n > 0) return { ok: false, reason: 'atomic_partial' };
     }
+    const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
       `SELECT seq, target_key, change, before, after_planned, after_actual FROM bulk_targets
-       WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
+       WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
     ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null }[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
@@ -1485,7 +1536,10 @@ export class BulkLedger {
       // after it — not what was sent (build plan B §2.4). Local targets hold what was sent.
       const actual = r.after_actual === null ? null : JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage;
       const expected: BeforeImage = actual === null ? t.after : { absent: false, value: actual.value };
-      const after = t.expected;
+      // An external undo sends, per target, only fields its source sent there: the probe its
+      // source wrote under (or, for an undo, none at all — `probeHolds`) tells what the verb does
+      // to fields a write leaves out, and that carries over only to the same set of fields.
+      const after = external ? onlySentFields(t.expected, t.after) : t.expected;
       const change: ApplyTarget['change'] = after.absent ? 'delete' : expected.absent ? 'create' : 'update';
       return { key: t.key, sourceSeq: r.seq, expected, after, change };
     });

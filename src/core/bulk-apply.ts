@@ -175,6 +175,12 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   let consecutive = 0;
   // A target passed over because the maximum is reached: the run then ends halted on it.
   let cappedOut = false;
+  // …and the cap was the probe's, not the approval's: the halt names the probe.
+  let cappedByProbe = false;
+  // The approval and every resume check the probe, but a run approved wide under an earlier
+  // rule, or whose probe stopped holding since, would still be written wide: the effect checks
+  // it again and writes one target at most without a probe that holds.
+  const probeCap = ledger.probeHoldsFor(runId) ? null : 1;
 
   for (const seq of pending) {
     // Let other work (and another loop on the same ledger) in between targets.
@@ -194,8 +200,10 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
     // to is passed over rather than stopped in front of, so a later retry still runs.
-    if (current.maxTargets !== null && ledger.sentCount(runId) >= current.maxTargets && !ledger.wasSent(runId, seq)) {
+    const cap = probeCap === null ? current.maxTargets : Math.min(current.maxTargets ?? probeCap, probeCap);
+    if (cap !== null && ledger.sentCount(runId) >= cap && !ledger.wasSent(runId, seq)) {
       cappedOut = true;
+      if (probeCap !== null && (current.maxTargets === null || current.maxTargets > probeCap)) cappedByProbe = true;
       continue;
     }
     if (now() > deadline) {
@@ -243,8 +251,9 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     // Another loop may have written or failed the rest: with no target left to write, the
     // run is finished, not stopped at its maximum.
     if (cappedOut) {
-      ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
+      const reason = cappedByProbe ? BULK_HALT_REASONS.probeRequired : BULK_HALT_REASONS.maxTargets;
+      ledger.halt(runId, reason);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
     }
     // The stop that came during the loop's last write, with the rest held by another loop:
     // no pass between targets is left to read it, and `pending` would re-arm the trigger and
