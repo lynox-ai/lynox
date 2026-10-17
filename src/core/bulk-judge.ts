@@ -31,7 +31,7 @@ import {
 } from './bulk-ledger.js';
 import type { BulkPreviewOutcome } from './bulk-preview.js';
 import type { MeteredGateResult } from './metered-request.js';
-import { isBlockedModelId, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
+import { getProviderDescriptor, isMistralHost, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { clientForTierSnapshot } from './llm-client.js';
 
@@ -81,16 +81,60 @@ export interface BulkJudgeDeps {
 }
 
 /**
- * The run's tier to the model the judge calls, and its client (PRD bulk-loop §3.1). The tier goes
- * through `resolveRunModel` — the operator's blocklist on the
- * tier's effective model (hybrid slot included), `fast` checked again as the fallback, the tenant's
- * `max_tier` as the ceiling. Model id and client then come from one `resolveTierModel` snapshot,
- * so what is called is what was checked; the id is checked against the blocklist once more, which
- * only matters if the tier set was reloaded in between. Null when no allowed model is left.
+ * The model that judges, per provider that serves the call — decided, not the provider's tier
+ * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
+ * hold the rule or resist an injection in a target, and a hybrid preset's `fast` slot can name a
+ * model this product does not send customer records to. A provider not listed here gets no judge.
+ */
+export const JUDGE_MODELS = {
+  anthropic: 'claude-haiku-4-5-20251001',
+  vertex: 'claude-haiku-4-5',
+  mistral: 'mistral-medium-2604',
+  fireworks: 'accounts/fireworks/models/gpt-oss-120b',
+} as const;
+
+export type JudgeAxis = keyof typeof JUDGE_MODELS;
+
+type JudgeUserConfig = Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids' | 'api_base_url'>;
+
+function hostOf(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which decided model a call goes to: the provider that serves it — the tier's hybrid slot when
+ * there is one, else the base. Mistral and Fireworks both speak the OpenAI wire, so there the
+ * endpoint decides. Anything else — a custom proxy, another OpenAI-compatible host — is null.
+ */
+export function judgeAxisOf(
+  snap: Pick<ReturnType<typeof resolveTierModel>, 'provider' | 'apiBaseURL'>,
+  baseApiBaseURL: string | undefined,
+): JudgeAxis | null {
+  if (snap.provider === 'anthropic') return 'anthropic';
+  if (snap.provider === 'vertex') return 'vertex';
+  if (snap.provider === 'mistral') return 'mistral';
+  if (getProviderDescriptor(snap.provider)?.wireClient !== 'openai') return null;
+  const url = snap.apiBaseURL ?? baseApiBaseURL;
+  if (isMistralHost(url)) return 'mistral';
+  return hostOf(url) === 'api.fireworks.ai' ? 'fireworks' : null;
+}
+
+/**
+ * The run's tier to the model the judge calls, and its client (PRD bulk-loop §3.1). The tier
+ * picks the provider that serves the call (`resolveTierModel`, hybrid slot included, clamped to
+ * the tenant's `max_tier`); the model is that provider's judge model ({@link JUDGE_MODELS}), with
+ * the snapshot's credentials and endpoint. The judge model then goes through `resolveRunModel` as
+ * a specific id: over `max_tier` or on the operator's blocklist it is refused, never swapped for
+ * a cheaper one. Null when no allowed model is left.
  * Not the helper's own fallback: that is an Anthropic id whatever the provider, unchecked.
  */
 export function resolveJudgeModel(
-  uc: Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids'>,
+  uc: JudgeUserConfig,
   tier: ModelTier,
   ambient: Anthropic,
   provider: LLMProvider,
@@ -103,7 +147,7 @@ export function resolveJudgeModel(
 /** The model a judged run would run on now, without building its client: what the owner's view
  *  shows as `judgeModel`, or null when no model the operator allows can judge it. */
 export function judgeModelId(
-  uc: Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids'>,
+  uc: JudgeUserConfig,
   tier: ModelTier,
   provider: LLMProvider,
 ): string | null {
@@ -111,22 +155,34 @@ export function judgeModelId(
 }
 
 function judgeModelPick(
-  uc: Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids'>,
+  uc: JudgeUserConfig,
   tier: ModelTier,
   provider: LLMProvider,
 ): { tier: ModelTier; snap: ReturnType<typeof resolveTierModel> } | null {
   let resolved: ModelTier;
   try {
+    // The tier only places the call — no blocklist here, whose fallback to `fast` would move it
+    // to another slot; the blocklist applies to the judge model below.
     resolved = resolveRunModel({
       requested: tier, defaultTier: tier, accountTier: uc.account_tier, maxTier: uc.max_tier,
-      blockedModelIds: uc.blocked_model_ids, provider,
+      blockedModelIds: undefined, provider,
     }).tier;
   } catch {
     return null;
   }
-  const snap = resolveTierModel(resolved, provider);
-  if (isBlockedModelId(snap.modelId, uc.blocked_model_ids)) return null;
-  return { tier: resolved, snap };
+  const slot = resolveTierModel(resolved, provider);
+  const axis = judgeAxisOf(slot, uc.api_base_url);
+  if (axis === null) return null;
+  const modelId = JUDGE_MODELS[axis];
+  try {
+    resolveRunModel({
+      requested: modelId, defaultTier: resolved, accountTier: uc.account_tier, maxTier: uc.max_tier,
+      blockedModelIds: uc.blocked_model_ids, provider,
+    });
+  } catch {
+    return null;
+  }
+  return { tier: resolved, snap: { ...slot, modelId } };
 }
 
 /** A judge claim older than this belongs to a loop that died: the provider's request timeout
