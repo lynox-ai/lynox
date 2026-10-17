@@ -3849,6 +3849,11 @@ describe('mandates and stored credentials', () => {
     // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
     // so the log only has to accept the rows. Without one the renewal is skipped by design.
     agent.toolContext['auditLog'] = { record: (): void => {} };
+    // A write reaches the consent gate, which reads the governing contract: none here.
+    (agent as unknown as Record<string, unknown>)['governingContract'] = () => ({ contract: undefined, withheld: 'none' });
+    // …and shows the body masked, through the vault's own masking: nothing to mask here.
+    const sec = (agent as unknown as { secretStore?: Record<string, unknown> }).secretStore;
+    if (sec && typeof sec['maskSecrets'] !== 'function') sec['maskSecrets'] = (t: string): string => t;
     const out = await httpRequestTool.handler(
       { method: 'GET', ...req } as never,
       agent as never,
@@ -3867,31 +3872,28 @@ describe('mandates and stored credentials', () => {
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
-  it.each([
-    ['the host as the profile names it', 'https://api.crm.example/v1/contacts'],
-    ['the host with a trailing root dot', 'https://api.crm.example./v1/contacts'],
-    ['the host with two trailing dots', 'https://api.crm.example../v1/contacts'],
-  ])('a mandate\'s write to a preset account (%s) is refused before the credential is attached: no renewal, nothing sent', async (_label, url) => {
-    const { calls, out } = await send([presetProfile()], vault(SEED), { url, method: 'POST', body: '{}' }, mandate);
-    expect(out).toContain('writes to an account the owner connected');
-    expect(calls).toEqual([]);
+  // PRD §3.13 (H2i-3): a mandate writes to a connected account like the owner, after the approval
+  // of that one write (asked by the http tool's consent gate; this block answers it with Allow).
+  it('a mandate\'s allowed write to a preset account goes out with the account\'s credential', async () => {
+    const { calls } = await send([presetProfile()], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
-  // PRD §3.13 (H2i): on the account this session connected itself, a task would run on a
-  // connection that stops working when the mandate ends, so the refusal does not offer one.
-  it('a mandate\'s write to the account it connected itself is refused without proposing a task', async () => {
+  // The profile map keys the host as the profile names it, so a trailing root dot finds no profile
+  // and no credential is attached; the consent gate reads the host without the dot and asks. That
+  // is the owner's path too, and a mandate gets nothing the owner would not.
+  it('a mandate\'s write to the host with a trailing root dot goes out as the owner\'s does: no credential', async () => {
+    const req = { url: 'https://api.crm.example./v1/contacts', method: 'POST', body: '{}' };
+    const asMandate = await send([presetProfile()], vault(SEED), req, mandate);
+    const asOwner = await send([presetProfile()], vault(SEED), req, OWNER_PRINCIPAL);
+    expect(asMandate.calls).toEqual(asOwner.calls);
+    expect(asMandate.calls.find((c) => c.url.startsWith('https://api.crm.example'))?.auth).toBeUndefined();
+  });
+
+  it('a mandate\'s allowed write to the account it connected itself goes out with that account\'s credential', async () => {
     const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M } };
-    const { calls, out } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
-    expect(out).toContain('writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.');
-    expect(out).not.toContain('task_create');
-    expect(calls).toEqual([]);
-  });
-
-  it('a mandate\'s write is refused on a host a preset profile shares with another profile', async () => {
-    const second: ApiProfile = { ...crmProfile({ id: 'crm-two', auth: { type: 'none' } }) };
-    const { calls, out } = await send([presetProfile(), second], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
-    expect(out).toContain('writes to an account the owner connected');
-    expect(calls).toEqual([]);
+    const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
   const bearer = (vaultKey: string, created_by?: string): ApiProfile => ({
