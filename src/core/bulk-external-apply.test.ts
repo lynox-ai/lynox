@@ -1469,6 +1469,11 @@ describe('an unmeasured write form', () => {
       seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
       expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 2 }).ok).toBe(true);
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      // The host holds the field too. Without the cut the undo would not send it either: it reads
+      // the target over its own fields, finds them unlike what the source left (over the sent
+      // field), and books every target as a conflict, so nothing is restored. The cut is what lets
+      // the undo through with exactly the field the source sent.
+      for (const id of ['1', '2']) s.items.get(`${WOO_KIND}${id}`)!['title'] = 'kept by the host';
       // A before-image stored wider than what the source sent: a field no probe has seen.
       engineDb.getDb().prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ?')
         .run(engineDb.enc(JSON.stringify({ absent: false, value: { price: '12.00', title: 'never sent' } })), runId);
@@ -1479,7 +1484,7 @@ describe('an unmeasured write form', () => {
       expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) })).status).toBe('done');
       const sent = s.requests.filter((r) => r.method === 'PATCH').map((r) => r.body);
       expect(sent).toEqual([{ price: '12.00' }, { price: '12.00' }]);
-      expect(s.items.get(`${WOO_KIND}1`)!['title']).toBeUndefined();
+      expect(s.items.get(`${WOO_KIND}1`)!['title']).toBe('kept by the host');
     } finally {
       restore();
     }
