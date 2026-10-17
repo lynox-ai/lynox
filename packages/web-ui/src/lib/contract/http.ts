@@ -490,12 +490,13 @@ export interface OAuthClaimResponse {
    * same mailbox can differ in case and dots; nothing may key on this. The one
    * thing that identifies a connection is the connection row itself (§3.10).
    *
-   * ⚠ DELIBERATELY ABSENT FROM `fixtures/oauth-claim-response.json` until the
-   * control plane emits it (wave W6). The fixture's serializer IS the control
-   * plane (`fixtures/README.md`), so a fixture carrying a field the CP does not
-   * yet produce is hand-written — the one thing that file forbids. It also
-   * breaks the CP's own pair test, which asserts the key set whole: an added
-   * key is drift, and the engine's parser would not know to expect it.
+   * ⚠ NOT YET IN `fixtures/oauth-claim-response.json`, although the control
+   * plane has emitted it since wave W6 — whenever the grant's id_token carries
+   * an address. The fixture's serializer IS the control plane
+   * (`fixtures/README.md`), so the field belongs in the fixture by regenerating
+   * it from the CP, not by a hand edit. Until then the golden fixture does not
+   * cover this field, and the CP's pair test asserts the claim's key set
+   * without it.
    */
   email?: string;
 }
