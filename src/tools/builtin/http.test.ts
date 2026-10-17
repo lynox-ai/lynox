@@ -970,6 +970,8 @@ describe('httpRequestTool', () => {
       // prompts, so the consent prompt is no bar to a write on an account the owner connected.
       describe('a mandate and an account connected through a preset', () => {
         const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+        const MANDATE_TAG = 'mandate:setup@example.org';
+        const MANDATE_GRANT = { connected_by: MANDATE_TAG, connected_mandate_id: 'M-1' };
         async function withProfile(presetId: string | undefined): Promise<void> {
           const { ApiStore } = await import('../../core/api-store.js');
           const store = new ApiStore();
@@ -987,22 +989,44 @@ describe('httpRequestTool', () => {
           testCtx.apiStore = store;
         }
 
-        it.each([
-          ['an interactive turn that would allow it', { promptUser: vi.fn().mockResolvedValue('Allow') }],
-          ['a contract that grants it', { capabilityContract: contract }],
-        ])('refuses the write in %s, and nothing is sent', async (_label, extras) => {
+        // A mandate's write to a connected account, the tool half: a mandate writes to a connected
+        // account (§3.13 "Schreiben") only with an approval of that one write. The trail half (each
+        // write that goes out is recorded with the actor and `mandate_id`) is in agent.test.ts.
+        it('a mandate\'s write goes out only after its own Allow, and the next write is asked again', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Allow');
+          const agent = makeAgent({ promptUser, principal: mandate });
+          await handler({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, agent);
+          await handler({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, agent);
+          expect(promptUser).toHaveBeenCalledTimes(2);
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+        });
+
+        it('a mandate\'s write it does not allow is not sent', async () => {
+          await withProfile('example-shop');
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const promptUser = vi.fn().mockResolvedValue('Deny');
+          await visible({ url: 'https://example.com/v1/report', method: 'POST', body: '{}' }, makeAgent({ promptUser, principal: mandate }));
+          expect(promptUser).toHaveBeenCalledTimes(1);
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+
+        it('a contract does not open a mandate\'s write to a connected account, and nothing is sent', async () => {
           await withProfile('example-shop');
           mockDnsPublic();
           const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
           vi.stubGlobal('fetch', fetchMock);
           const res = await visible(
             { url: 'https://example.com/v1/report', method: 'POST', body: '{}' },
-            makeAgent({ ...extras, principal: mandate }),
+            makeAgent({ capabilityContract: contract, principal: mandate }),
           );
-          expect(res).toContain('writes to an account the owner connected');
-          expect(res).toContain('task_create');
+          expect(res).toContain('requires user consent but no interactive prompt is available');
           expect(fetchMock).not.toHaveBeenCalled();
-          expect(extras.promptUser ?? vi.fn()).not.toHaveBeenCalled();
         });
 
         // The check parses the address before the host policy does; an address that does not
@@ -1045,6 +1069,59 @@ describe('httpRequestTool', () => {
             makeAgent({ capabilityContract: contract, principal: mandate }),
           );
           expect(fetchMock).toHaveBeenCalled();
+        });
+
+        // After a mandate ends, its own connection hands out no token to anyone (§3.13 B9, the
+        // guard the engine installs at boot), whoever runs: a schedule the mandate set up and the
+        // owner stamped fires as the owner (worker-loop.test.ts, "a stamped schedule the mandate set
+        // up"), so the mandate lock is not what holds it, and the owner's Allow does not
+        // open it. Only `live` changes between the first two rows. The owner's own connection is
+        // untouched by a mandate's end.
+        it.each([
+          ['an owner run on the mandate\'s own connection after the mandate ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'POST', 'owner', false],
+          ['control: an owner run on the mandate\'s own connection while the mandate is live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'POST', 'owner', true],
+          ['control: an owner run on the owner\'s own connection is untouched by a mandate\'s end', { connected_by: 'owner' }, undefined, false, 'POST', 'owner', true],
+          ['control: the mandate\'s read of its own connection while live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'GET', 'mandate', true],
+          ['the mandate\'s read of its own connection after it ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'GET', 'mandate', false],
+        ] as const)('%s', async (_label, grant, author, live, method, who, sent) => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const { connectionTokenAllowed } = await import('../../core/profile-secret-view.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            ...(author ? { created_by: author } : {}),
+            custom_endpoint_ack: { accepted: true, hosts: ['example.com'], accepted_at: '2026-10-01T00:00:00.000Z' },
+            auth: {
+              type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: { grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' } },
+            },
+            oauth_grant: { origin: 'callback', state: 'connected', ...grant } as never,
+          } as never);
+          const values: Record<string, string> = { SHOP_API_ACCESS_TOKEN: 'tok-value', SHOP_API_REFRESH_TOKEN: 'ref-value', SHOP_CLIENT_ID: 'cid', SHOP_CLIENT_SECRET: 'csec' };
+          const ends = { isLive: () => live };
+          testCtx.apiStore = store;
+          (testCtx as { mandateEnds?: unknown }).mandateEnds = ends;
+          // The vault as the engine builds it: the B9 guard in front of every resolve.
+          const vault = {
+            resolve: (n: string) => (connectionTokenAllowed(store, ends as never, n) ? (values[n] ?? null) : null),
+            getSecretNames: () => Object.keys(values),
+            maskSecrets: (t: string) => t,
+            isEnvironmentSecret: () => false,
+          };
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const principal: RequestPrincipal | undefined = who === 'mandate' ? { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } : undefined;
+          await visible(
+            { url: 'https://example.com/v1/report', method, ...(method === 'POST' ? { body: '{}' } : {}) },
+            { ...(makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), ...(principal ? { principal } : {}) }) as object), secretStore: vault } as never,
+          );
+          const authSent = fetchMock.mock.calls.map((c) => new Headers((c[1] as { headers?: HeadersInit })?.headers).get('authorization'));
+          if (sent) {
+            expect(authSent).toEqual(['Bearer tok-value']);
+          } else {
+            expect(fetchMock).not.toHaveBeenCalled();
+          }
         });
       });
 
@@ -1278,15 +1355,13 @@ describe('httpRequestTool', () => {
         });
 
         // The provider's API host is a connected account by its host: a write there with no
-        // profile on the host is refused before the mandate check, the contract and the approval.
+        // profile on the host is refused before the contract and the approval, for anyone.
         describe('a write to the bexio API with no profile on the host', () => {
           const REFUSED = 'writes to bexio, which goes through this engine\'s built-in "bexio" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent.';
-          // The way out, by who asks: the owner sets up the profile, a run with no store cannot, a
-          // mandate has the owner connect the provider first (it does not write to a connected
-          // account even with a profile, and a task it proposed would be refused when run until then).
+          // The way out: set up the profile (the owner, or a mandate on a profile it writes itself,
+          // §3.13 N10a), unless the run has no store to keep one in. A mandate is told the same.
           const SET_UP = ' To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "bexio", then connect it with api_setup action "connect".';
           const NO_STORE = ' This run has no api_profile store, so it cannot write there.';
-          const AS_TASK = ' This session does not write there. Tell the owner which change you would make: the owner first connects bexio through that provider, and the change can then be proposed as a task (task_create) the owner approves.';
           const bexioWrites: CapabilityContract = { ...withDelete, hostPatterns: ['api.bexio.com'], pathPatterns: ['/2.0/*'] };
           async function withEmptyStore(): Promise<void> {
             const { ApiStore } = await import('../../core/api-store.js');
@@ -1306,9 +1381,8 @@ describe('httpRequestTool', () => {
             ['an empty store, the host with a root dot', withEmptyStore, 'https://api.bexio.com./2.0/contact', 'POST', {}, {}, SET_UP],
             ['an empty store, a GET with _method in the query', withEmptyStore, 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', {}, {}, SET_UP],
             ['an empty store, a contract that grants the write', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { capabilityContract: bexioWrites }, SET_UP],
-            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
-            // Who asks decides before the store: a mandate in a run with no store is told what a mandate is.
-            ['no store, a mandate', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, AS_TASK],
+            ['an empty store, a mandate', withEmptyStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, SET_UP],
+            ['no store, a mandate', withNoStore, 'https://api.bexio.com/2.0/contact', 'POST', {}, { principal: { kind: 'mandate', email: 'setup@example.org' } as RequestPrincipal }, NO_STORE],
           ] as const)('refuses %s, with its way out, and the tool asks and sends nothing', async (_label, setUp, url, method, headers, extras, wayOut) => {
             await setUp();
             mockDnsPublic();

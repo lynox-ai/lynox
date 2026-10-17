@@ -6646,6 +6646,9 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     expect(recs.map(r => [r.action, r.target])).toEqual([
       ['http_request:POST', 'POST api.example.invalid/v1/items'], ['http_request:POST', 'POST api.example.invalid/v1/items'],
     ]);
+    // A mandate's write, the trail half: the write is recorded with who made it, the
+    // mandate's id included (a write to a connected account goes out since H2i-3).
+    for (const r of recs) expect(r.principal).toEqual(MANDATE);
   });
 
   it('records nothing for a call that writes nothing outside, and nothing for the owner', async () => {

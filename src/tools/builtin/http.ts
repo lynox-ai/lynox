@@ -10,7 +10,7 @@ import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
-import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
+import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
@@ -2390,14 +2390,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
     }
 
-    // A mandate's turn does not write to an account connected through a provider preset
-    // (PRD customer-granted-operator-access §3.13). The consent prompt is no bar here: a
-    // mandate answers its own session's prompts (each write there is asked on its own, see the
-    // consent gate below). The write goes to the owner as a proposal instead. Checked before
-    // the credential is attached (so a refused write renews no token) and before the
-    // contract (so no grant opens it). Every profile on the host counts, a host two profiles
-    // share included, and the host is read without trailing root dots, which name the same
-    // host to DNS and a different key to the profile map.
+    // A write to an account connected through a provider preset, by anyone: the owner and a
+    // mandate alike (PRD customer-granted-operator-access §3.13, "Schreiben": a mandate writes in
+    // every connected account with the owner's scopes). What holds such a write is the consent
+    // gate below, which asks each one with what it sends and remembers no answer, and grants none
+    // by contract; a mandate's write is recorded in the actor trail (`ToolEntry.outwardWrite`).
+    // Every profile on the host counts, a host two profiles share included, and the host is read
+    // without trailing root dots, which name the same host to DNS and a different key to the
+    // profile map.
     const presetOnHost = isWriteMethod(gatedMethod) ? presetProfilesOnHost(input.url, toolContext) : [];
     // A provider's API host (`apiHosts`) is a connected account by its host, not by a stored
     // profile: a write there goes through a profile on the host, which `attachEngineManagedAuth`
@@ -2406,32 +2406,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // anything else is decided. Reads are not held.
     const claimant = isWriteMethod(gatedMethod) ? hostClaimant(input.url) : undefined;
     if (claimant !== undefined && (!toolContext?.apiStore || profilesOnHost(input.url, toolContext.apiStore).length === 0)) {
-      // The way out depends on who asks: a mandate does not write to a connected account at all
-      // (below), and with no profile on the host a task it proposed would be refused for the
-      // owner too until the owner connects the provider; a run without a profile store has
+      // The way out is the same for the owner and a mandate: a mandate connects an account through
+      // a preset on a profile it wrote itself (§3.13, N10a). A run without a profile store has
       // nowhere to keep a profile.
-      const wayOut = !isOwnerPrincipal(agent.principal)
-        ? `This session does not write there. Tell the owner which change you would make: the owner first connects ${claimant.label} through that provider, and the change can then be proposed as a task (task_create) the owner approves.`
-        : !toolContext?.apiStore
-          ? 'This run has no api_profile store, so it cannot write there.'
-          : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+      const wayOut = !toolContext?.apiStore
+        ? 'This run has no api_profile store, so it cannot write there.'
+        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
       blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
-    if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
-      const host = new URL(input.url).hostname.replace(/\.+$/, '');
-      if (presetOnHost.length > 0) {
-        // Whose connection it is decides the way forward. The owner's account: a task the owner
-        // approves runs with the owner's connection. This session's own: a task would run on a
-        // connection that stops working when the mandate ends, so the change goes to the owner.
-        const tag = principalTag(agent.principal);
-        const ownConnection = presetOnHost.every((p) => p?.created_by === tag && p?.oauth_grant?.connected_by === tag);
-        blockedVerbatim(ownConnection
-          ? `Blocked: ${gatedMethod} to ${host} writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.`
-          : `Blocked: ${gatedMethod} to ${host} writes to an account the owner connected, which this session may not do. ` +
-            'Propose the change as a task instead (task_create); it runs once the owner approves it.');
-      }
-    }
-
     // A write to a connected account is shown with everything the request puts on the wire, as
     // the customer text says: the path and the query as sent (the query's values on the
     // instance, `queryBlock` below), the body, and no header of the request's own. So refused,
@@ -2765,8 +2747,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
     // session — there the person who set the mandate up gives each approval, and the approval
     // is what protects the account against an injected instruction (PRD
-    // customer-granted-operator-access 4.11). A grant covers neither a table path nor, for a
-    // mandate, anything H2b refused above.
+    // customer-granted-operator-access 4.11). A grant covers neither a table path nor a write
+    // to a connected account, for the owner and a mandate alike (`contractGrantsWrite` below).
     //
     // An override of the same rank as the method (a POST that says PATCH) is gated as the
     // override, but a server that ignores it runs the method that is sent, and one that reads an
