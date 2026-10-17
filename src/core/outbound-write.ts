@@ -392,11 +392,24 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * token profile or with none, and the table holds for each of them. Matched per segment, for
  * every write method.
  *
- * bexio: `…/send` mails a document to its recipient, `…/issue` issues an invoice. Only these
- * two are named; bexio's full path catalogue was not checked against this list.
+ * bexio, read from its OpenAPI specification 3.0.0 (every write whose last segment is not an
+ * id): `send` mails an invoice, reminder or quote to its recipient; `issue`, `reissue`,
+ * `revert_issue` / `revertIssue` and `cancel` issue, re-issue, withdraw or cancel a binding
+ * document (`cancel` also cancels a bank payment); `accept` and `reject` decide a quote;
+ * `mark_as_sent` / `mark_as_unsent` set what dunning reads as sent; `payments` and
+ * `outgoing-payments` create or edit a payment out to a recipient. Not named: the writes that
+ * create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or order), record
+ * an incoming payment (`kb_invoice/{id}/payment`), or archive and restore, and the `actions` of
+ * bills and expenses, whose only action in the specification is `DUPLICATE`.
  */
 export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly segments: readonly string[] }[] = [
-  { host: 'api.bexio.com', segments: ['send', 'issue'] },
+  {
+    host: 'api.bexio.com',
+    segments: [
+      'send', 'issue', 'reissue', 'revert_issue', 'revertissue', 'cancel', 'accept', 'reject',
+      'mark_as_sent', 'mark_as_unsent', 'payments', 'outgoing-payments',
+    ],
+  },
 ];
 
 /** Whether a write to `url` with `method` is one the table names. A read never is. */
@@ -409,8 +422,10 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   if (!entry) return false;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   if (ambiguous) return true;
-  // A segment matches as itself or with a format suffix (`send.json`).
-  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || segment.startsWith(`${s}.`)));
+  // A segment matches as itself or followed by anything but a letter or digit (`send.json`,
+  // `send:x`, `send-`, `send,`): which of these a provider's router still reads as the action is
+  // not documented, so every such form counts. `sender` does not.
+  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || (segment.startsWith(s) && /[^a-z0-9]/u.test(segment.charAt(s.length)))));
 }
 
 /** What a field of {@link OUTBOUND_EFFECT_FIELDS} sets off at the provider. */
