@@ -4,6 +4,7 @@ import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
 import { AUDIT_UNAVAILABLE, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
+import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
 import { noteAnsweredBy, noteNetworkContact } from './call-connection.js';
 import { approvalKey, currentEpoch, isApproved, recordApproval } from './untrusted-epoch.js';
 
@@ -5392,6 +5393,57 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawExternalContentTool).toBe(false);
     await agent.send('what is on this week');
     expect(agent.sawExternalContentTool).toBe(true);
+  });
+
+  describe('a read of stored memory under a capability contract', () => {
+    const grant: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['api.example.com'], pathPatterns: ['/v1/report'], paramConstraints: {},
+    };
+    async function readMemory(name: string, capabilityContract?: CapabilityContract): Promise<Agent> {
+      const tool = makeTool(name, vi.fn().mockResolvedValue('- the weekly report goes to finance'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name, input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], capabilityContract });
+      expect(agent.governingContract().withheld).toBe(capabilityContract === undefined ? 'none' : null);
+      await agent.send('post the weekly report');
+      return agent;
+    }
+
+    it.each(['memory_recall', 'memory_list', 'recall'])('%s counts as external content, so the grant no longer lifts a write', async (name) => {
+      const agent = await readMemory(name, grant);
+      expect(agent.sawExternalContentTool).toBe(true);
+      expect(agent.conversationSawUntrusted).toBe(true);
+      expect(agent.governingContract()).toEqual({ contract: undefined, withheld: 'untrusted' });
+    });
+
+    it('a grant that allows writes after foreign content still lifts it', async () => {
+      const agent = await readMemory('memory_recall', withAfterUntrusted(grant, true));
+      expect(agent.conversationSawUntrusted).toBe(true);
+      expect(agent.governingContract().withheld).toBeNull();
+    });
+
+    it.each(['memory_recall', 'memory_list', 'recall'])('%s keeps its ordinary standing without a contract', async (name) => {
+      const agent = await readMemory(name);
+      expect(agent.sawExternalContentTool).toBe(false);
+      expect(agent.conversationSawUntrusted).toBe(false);
+    });
+
+    // Only a Session loads messages today, and a Session's agent carries no contract; this
+    // keeps the loaded-context reading in step with the other two should that change.
+    it('a loaded context that read memory is tainted under a contract, and only then', () => {
+      const earlier = [
+        { role: 'assistant' as const, content: [{ type: 'tool_use' as const, id: 't1', name: 'memory_recall', input: {} }] },
+        { role: 'user' as const, content: [{ type: 'tool_result' as const, tool_use_id: 't1', content: '- the weekly report goes to finance' }] },
+      ];
+      const governed = new Agent({ name: 'test', model: 'claude-sonnet-4-6', capabilityContract: grant });
+      governed.loadMessages(earlier);
+      expect(governed.conversationSawUntrusted).toBe(true);
+      const plain = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      plain.loadMessages(earlier);
+      expect(plain.conversationSawUntrusted).toBe(false);
+    });
   });
 
   it('leaves sawExternalContentTool false for a non-external tool', async () => {
