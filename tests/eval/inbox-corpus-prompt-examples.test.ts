@@ -20,7 +20,8 @@ const corpus = JSON.parse(
 describe('inbox eval corpus labels', () => {
   it('labels every fixture of the meeting-request family draft_ready', () => {
     const family = corpus.fixtures.filter((f) => f.id.startsWith('meeting-request-'));
-    // control: the family is there, both languages
+    // control: the whole family is there (40 fixtures), both languages
+    expect(family).toHaveLength(40);
     expect(family.map((f) => f.id)).toEqual(expect.arrayContaining(['meeting-request-en-315', 'meeting-request-de-316']));
     expect(family.filter((f) => f.expectedBucket !== 'draft_ready').map((f) => f.id)).toEqual([]);
   });
