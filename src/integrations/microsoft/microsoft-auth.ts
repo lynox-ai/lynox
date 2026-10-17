@@ -1,4 +1,4 @@
-import type { OAuthHandleClaimResponse, OAuthRefreshRequest } from '../../contract/http.js';
+import type { OAuthRefreshRequest } from '../../contract/http.js';
 import type { SecretVault } from '../../core/secret-vault.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
 import { cpFetch } from '../../core/connector-egress.js';
@@ -16,7 +16,7 @@ import { MICROSOFT_OAUTH_TOKENS_KEY } from './vault-keys.js';
  *
  * Narrower than `GoogleAuth` on purpose. Microsoft is brokered only: the control
  * plane keeps lynox's client secret AND the refresh token, and hands this
- * process a sealed `refresh_handle` (contract {@link OAuthHandleClaimResponse}).
+ * process a sealed `refresh_handle` (contract `OAuthHandleClaimResponse`).
  * There is no direct path to Microsoft's token endpoint and no raw refresh token
  * anywhere in this file — so an instance without a control plane cannot refresh
  * at all, and says so instead of guessing.
