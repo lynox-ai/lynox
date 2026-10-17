@@ -437,6 +437,19 @@ export function resourceKindOf(path: string): string {
  *  and starts with `/`, so a marked one never equals a plain one. */
 const UNMEASURED_PROBE = 'unmeasured:';
 
+/** The before-image an external undo writes, cut to the fields its source sent to that target.
+ *  A before-image is read over exactly those fields today (`beforeOverFields`); this holds it so
+ *  where an image was stored wider. */
+function onlySentFields(before: BeforeImage, sent: BeforeImage): BeforeImage {
+  if (before.absent || sent.absent || !isPlainRecord(before.value) || !isPlainRecord(sent.value)) return before;
+  const keep = new Set(Object.keys(sent.value));
+  return { absent: false, value: Object.fromEntries(Object.entries(before.value).filter(([k]) => keep.has(k))) };
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 /** The target paths an external run's stored contract grants. */
 function parseContractPaths(json: string | null): string[] {
   if (json === null) return [];
@@ -1509,9 +1522,10 @@ export class BulkLedger {
       ).get(sourceRunId) as { n: number };
       if (src.phase !== 'done' || partial.n > 0) return { ok: false, reason: 'atomic_partial' };
     }
+    const external = externalHostOf(src.target_system) !== null;
     const rows = db.prepare(
       `SELECT seq, target_key, change, before, after_planned, after_actual FROM bulk_targets
-       WHERE run_id = ? AND ${undoEligible(externalHostOf(src.target_system) !== null)}
+       WHERE run_id = ? AND ${undoEligible(external)}
        ORDER BY seq DESC`,
     ).all(sourceRunId) as { seq: number; target_key: string; change: BulkChange; before: string | null; after_planned: string | null; after_actual: string | null }[];
     if (rows.length === 0) return { ok: false, reason: 'nothing_to_undo' };
@@ -1522,7 +1536,10 @@ export class BulkLedger {
       // after it — not what was sent (build plan B §2.4). Local targets hold what was sent.
       const actual = r.after_actual === null ? null : JSON.parse(this.engineDb.dec(r.after_actual)) as ActualImage;
       const expected: BeforeImage = actual === null ? t.after : { absent: false, value: actual.value };
-      const after = t.expected;
+      // An external undo sends, per target, only fields its source sent there: the probe its
+      // source wrote under (or, for an undo, none at all — `probeHolds`) tells what the verb does
+      // to fields a write leaves out, and that carries over only to the same set of fields.
+      const after = external ? onlySentFields(t.expected, t.after) : t.expected;
       const change: ApplyTarget['change'] = after.absent ? 'delete' : expected.absent ? 'create' : 'update';
       return { key: t.key, sourceSeq: r.seq, expected, after, change };
     });

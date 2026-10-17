@@ -1460,6 +1460,31 @@ describe('an unmeasured write form', () => {
     }
   });
 
+  it('an undo sends each target only the fields its source sent there, even from a wider before-image', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, [woo('1'), woo('2')]) });
+      const runId = await measuredWooRun(s, c);
+      seedProbe('PATCH', WOO_KIND, `${WOO_KIND}900`);
+      expect(ledger.approve(runId, { checksum: ledger.computeChecksum(runId)!, maxTargets: 2 }).ok).toBe(true);
+      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      // A before-image stored wider than what the source sent: a field no probe has seen.
+      engineDb.getDb().prepare('UPDATE bulk_targets SET before = ? WHERE run_id = ?')
+        .run(engineDb.enc(JSON.stringify({ absent: false, value: { price: '12.00', title: 'never sent' } })), runId);
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      s.requests.length = 0;
+      expect((await runBulkEffect(undo.status.id, 'bulk_undo', { ledger, writerFor: writerFor(c) })).status).toBe('done');
+      const sent = s.requests.filter((r) => r.method === 'PATCH').map((r) => r.body);
+      expect(sent).toEqual([{ price: '12.00' }, { price: '12.00' }]);
+      expect(s.items.get(`${WOO_KIND}1`)!['title']).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
   it('a resume checks the probe also when it keeps the cap a run was approved wide with', async () => {
     const s = shop();
     const restore = serve(s);
