@@ -634,6 +634,8 @@ describe('outboundEffectField', () => {
     ['https://api.bexio.com/4.0/banking/payments/0b3e5f2a-1c4d-4e8f-9a7b-2c6d8e0f1a3b', { message: 'x' }, null, 'money'],
     ['https://api.bexio.com/2.0/kb_order/4/repetition', { end: '' }, null, 'money'],
     ['https://api.bexio.com/4.0/banking/payments/%2534', { message: 'x' }, null, 'money'],
+    // Ambiguous, and no entry's path matches it as written: only the ambiguity rule can claim it.
+    ['https://api.bexio.com/4.0/banking/payments/4/%2573', { message: 'x' }, null, 'money'],
   ] as const)('%s with %j sets off %s (%s)', (url, body, field, effect) => {
     expect(outboundEffectField(url, body)).toMatchObject({ field, effect });
   });
@@ -646,6 +648,9 @@ describe('outboundEffectField', () => {
     [`${SHOP}/wp-json/wc/v3/customers/9`, { first_name: 'x' }],
     ['https://api.bexio.com/2.0/contact/4', { name_1: 'x' }],
     ['https://example.com/4.0/banking/payments/4', { message: 'x' }],
+    ['https://api.bexio.com/4.0/banking/payments/4/cancel', { message: 'x' }],
+    ['https://api.bexio.com/x/4.0/banking/payments/4', { message: 'x' }],
+    ['https://api.bexio.com/x/2.0/kb_order/4/repetition', { end: '' }],
     ['https://api.example.com/v1/orders/5', { status: 'completed' }],
     [`${SHOP}/wp-json/wcx/v3/orders/5`, { status: 'completed' }],
   ] as const)('%s with %j sets off nothing', (url, body) => {

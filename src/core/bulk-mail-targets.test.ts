@@ -202,20 +202,21 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
   });
 
   // 016: on an ordinary resource path the VALUE of a field sets off the effect (an order's status
-  // mails its customer, a payment's amount is paid out); the request is never sent, whichever
+  // mails its customer, an order's repetition invoices it again); the request is never sent, whichever
   // source planned it, and an undo writing such a field back is refused the same way.
   it('(016) sends nothing that sets a field of the outbound-effect field table, even under a contract that grants it', async () => {
     const order = 'https://shop.example.com/wp-json/wc/v3/orders/5';
-    const payment = 'https://api.bexio.com/4.0/banking/payments/4';
+    // An ordinary resource path: the path table does not name it, only the field table holds it.
+    const repetition = 'https://api.bexio.com/2.0/kb_order/4/repetition';
     const woo = client('shop.example.com', [order], 'PUT');
     expect(await woo.write(order, 'PUT', { status: 'completed' })).toEqual({ kind: 'not_granted' });
-    const bexio = client('api.bexio.com', [payment], 'PUT');
-    expect(await bexio.write(payment, 'PUT', { amount: '10.00' })).toEqual({ kind: 'not_granted' });
+    const bexio = client('api.bexio.com', [repetition], 'POST');
+    expect(await bexio.write(repetition, 'POST', { interval: 'monthly' })).toEqual({ kind: 'not_granted' });
     expect(requests).toEqual([]);
     // The controls: a field off the table reaches the transport, and so does reading the target.
     expect(await woo.write(order, 'PUT', { transaction_id: 'x' })).toEqual({ kind: 'ok', value: undefined });
     expect(await woo.get(order)).toMatchObject({ kind: 'ok' });
-    expect(await bexio.get(payment), 'reading a payment sets nothing off').toMatchObject({ kind: 'ok' });
+    expect(await bexio.get(repetition), 'reading a repetition sets nothing off').toMatchObject({ kind: 'ok' });
     expect(requests.map((r) => r.method)).toEqual(['PUT', 'GET', 'GET']);
   });
 

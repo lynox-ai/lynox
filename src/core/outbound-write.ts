@@ -392,18 +392,21 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * token profile or with none, and the table holds for each of them. Matched per segment, for
  * every write method.
  *
- * bexio, read from its OpenAPI specification 3.0.0 (every write whose path ends in an action
- * word rather than a resource or an id): `send` mails an invoice, reminder or quote to its
- * recipient; `issue`, `reissue`, `revert_issue` / `revertIssue` and `cancel` issue, re-issue,
- * withdraw or cancel a binding document; `bookings/{status}` books a bill or an expense or sets
- * it back to draft; `accept` and `reject` decide a quote; `mark_as_sent` / `mark_as_unsent` mark
- * an invoice, reminder or quote as sent or not without sending it; `payments` and
+ * bexio, read from its OpenAPI specification 3.0.0 (every documented write, each judged by what
+ * it sets off): `send` mails an invoice, reminder or quote to its recipient; `issue`, `reissue`,
+ * `revert_issue` / `revertIssue` and `cancel` issue, re-issue, withdraw or cancel a binding
+ * document; `bookings/{status}` books a bill or an expense or sets it back to draft; `accept`
+ * and `reject` decide a quote; `mark_as_sent` marks an invoice, reminder or quote as sent and
+ * `mark_as_unsent` a reminder as not sent, neither sending anything; `payments` and
  * `outgoing-payments` create, edit, cancel or delete a payment out to a recipient. Not named:
  * the writes that create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or
- * order), record an incoming payment (`kb_invoice/{id}/payment`), or archive and restore, and
- * the `actions` of bills and expenses, whose only action in the specification is `DUPLICATE`.
- * A payment carried in the body of an ordinary resource is a matter for
- * {@link OUTBOUND_EFFECT_FIELDS}, not for this table.
+ * order), record an incoming payment (`kb_invoice/{id}/payment`), archive, reactivate or restore,
+ * and the `actions` of bills and expenses, whose only action in the specification is
+ * `DUPLICATE`. An order's `repetition` is held by {@link OUTBOUND_EFFECT_FIELDS}. NOT held by
+ * either table: a payment in the body of a bill (`purchase/bills`, field `payment`) and an
+ * employee's `iban` (`payroll/employees`, on create and on edit). On this host a connected
+ * account asks for every write anyway, and a bulk run reaches only its measured forms (a
+ * contact), so neither reaches them unasked; a write note still treats them as ordinary writes.
  */
 export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly segments: readonly string[] }[] = [
   {
