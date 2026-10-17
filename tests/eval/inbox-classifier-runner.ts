@@ -74,6 +74,12 @@ export interface InboxEvalReport {
   /** Fixtures the forward check moved out of `auto_handled`, in corpus order. */
   forwardOverrideIds: ReadonlyArray<string>;
   /**
+   * `draft_ready` fixtures the classifier put in `auto_handled`, in corpus order. Such a mail
+   * is filed away unseen although it wanted a short reply. Named by id, not counted, so a run
+   * where one heals and another is lost reads as a change rather than as the same number.
+   */
+  draftReadyAutoHandledIds: ReadonlyArray<string>;
+  /**
    * Count of `auto_handled` fixtures the classifier surfaced in
    * `requires_user` or `draft_ready` — the inverse asymmetric direction
    * ("noisy" rather than "dangerous"). Surfaced for diagnosis but does
@@ -222,6 +228,9 @@ export async function runInboxEval(
   const forwardOverrideIds = samples
     .filter((s) => s.modelPredicted !== s.predicted)
     .map((s) => s.fixture.id);
+  const draftReadyAutoHandledIds = samples
+    .filter((s) => s.fixture.expectedBucket === 'draft_ready' && s.predicted === 'auto_handled')
+    .map((s) => s.fixture.id);
   const autoHandledNoise = confusion.auto_handled.requires_user
     + confusion.auto_handled.draft_ready;
   return {
@@ -232,6 +241,7 @@ export async function runInboxEval(
     missedRequiresUserIds,
     modelMissedRequiresUserIds,
     forwardOverrideIds,
+    draftReadyAutoHandledIds,
     autoHandledNoise,
     confusion,
     perCategory,
@@ -249,6 +259,7 @@ export function formatReport(r: InboxEvalReport): string {
   lines.push(`  bucket match: ${r.bucketMatch}/${r.total} (${(r.bucketMatchPct * 100).toFixed(1)}%)`);
   lines.push(`  missed requires_user (silently auto-archived): ${r.missedRequiresUser}  ← MUST be 0`);
   if (r.missedRequiresUserIds.length > 0) lines.push(`    missed ids: ${r.missedRequiresUserIds.join(', ')}`);
+  lines.push(`  draft_ready filed as auto_handled: ${r.draftReadyAutoHandledIds.length}${r.draftReadyAutoHandledIds.length > 0 ? ` (${r.draftReadyAutoHandledIds.join(', ')})` : ''}`);
   lines.push(`  auto_handled noise (in requires_user/draft_ready): ${r.autoHandledNoise}`);
   lines.push(`  model alone archived requires_user: ${r.modelMissedRequiresUserIds.length}${r.modelMissedRequiresUserIds.length > 0 ? ` (${r.modelMissedRequiresUserIds.join(', ')})` : ''}`);
   lines.push(`  moved by the forward check: ${r.forwardOverrideIds.length}${r.forwardOverrideIds.length > 0 ? ` (${r.forwardOverrideIds.join(', ')})` : ''}`);
