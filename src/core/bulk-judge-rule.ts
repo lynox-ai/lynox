@@ -37,7 +37,8 @@ export interface JudgeRule {
   rule: string;
   /** The verdict's shape over F, normalised by {@link normalizeJudgeRule}. */
   schema: ExtractSchema;
-  /** The model tier the judge runs on. Default `fast`. */
+  /** The tier that places the judge's call: which provider serves it, and the gate and booking.
+   *  The model is set per provider (`JUDGE_MODELS`), not by the tier. Default `fast`. */
   tier: ModelTier;
 }
 

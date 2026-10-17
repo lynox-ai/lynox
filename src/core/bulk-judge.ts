@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, callForStructuredJson, extractionSpendOf,
+  type ExtractSchema,
 } from './llm-helper.js';
 import { getPricing } from './pricing.js';
 import { refuseExternalAfter } from './bulk-external.js';
@@ -31,7 +32,7 @@ import {
 } from './bulk-ledger.js';
 import type { BulkPreviewOutcome } from './bulk-preview.js';
 import type { MeteredGateResult } from './metered-request.js';
-import { getProviderDescriptor, isMistralHost, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
+import { getProviderDescriptor, isMistralHost, modelCapability, type LLMProvider, type LynoxUserConfig, type ModelTier } from '../types/index.js';
 import { resolveRunModel, resolveTierModel } from './tier-resolver.js';
 import { clientForTierSnapshot } from './llm-client.js';
 
@@ -83,8 +84,7 @@ export interface BulkJudgeDeps {
 /**
  * The model that judges, per provider that serves the call — decided, not the provider's tier
  * model. The tier models are chosen for chat; measured as a judge, Mistral's `fast` model did not
- * hold the rule or resist an injection in a target, and a hybrid preset's `fast` slot can name a
- * model this product does not send customer records to. A provider not listed here gets no judge.
+ * hold the rule or resist an injection in a target. A provider not listed here gets no judge.
  */
 export const JUDGE_MODELS = {
   anthropic: 'claude-haiku-4-5-20251001',
@@ -95,12 +95,29 @@ export const JUDGE_MODELS = {
 
 export type JudgeAxis = keyof typeof JUDGE_MODELS;
 
+/** A thinking-only judge gets this many times its silent bound (see {@link judgeOutputBudget}). */
+export const THINKING_JUDGE_HEADROOM = 4;
+
+/**
+ * Output tokens a verdict call on `modelId` may take: the schema's bound, raised for a model
+ * that only answers after thinking. Such a model comes back empty at or below its measured bound
+ * and the adapter refuses that request, so a small schema's bound would halt the run at its first
+ * target. Four times the bound is 1024 for `gpt-oss-120b`, a budget it was never empty at.
+ */
+export function judgeOutputBudget(modelId: string, schema: ExtractSchema): number {
+  const base = judgeMaxOutputTokens(schema);
+  const silent = modelCapability(modelId)?.thinkingOnly?.emptyAtOrBelow;
+  return silent === undefined ? base : Math.max(base, silent * THINKING_JUDGE_HEADROOM);
+}
+
 type JudgeUserConfig = Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids' | 'api_base_url'>;
 
-function hostOf(url: string | undefined): string | null {
+/** The host of an `https:` endpoint; null for anything else, so a plain-text endpoint gets no judge. */
+function httpsHostOf(url: string | undefined): string | null {
   if (!url) return null;
   try {
-    return new URL(url).hostname.toLowerCase();
+    const u = new URL(url);
+    return u.protocol === 'https:' ? u.hostname.toLowerCase() : null;
   } catch {
     return null;
   }
@@ -120,8 +137,10 @@ export function judgeAxisOf(
   if (snap.provider === 'mistral') return 'mistral';
   if (getProviderDescriptor(snap.provider)?.wireClient !== 'openai') return null;
   const url = snap.apiBaseURL ?? baseApiBaseURL;
+  const host = httpsHostOf(url);
+  if (host === null) return null;
   if (isMistralHost(url)) return 'mistral';
-  return hostOf(url) === 'api.fireworks.ai' ? 'fireworks' : null;
+  return host === 'api.fireworks.ai' ? 'fireworks' : null;
 }
 
 /**
@@ -343,7 +362,7 @@ export async function runBulkJudge(runId: string, deps: BulkJudgeDeps): Promise<
   if (model === null) return halt(BULK_HALT_REASONS.judgeModel);
   const fields = judgeFields(run.rule);
   const system = judgeSystemPrompt(run.rule);
-  const maxOutputTokens = judgeMaxOutputTokens(run.rule.schema);
+  const maxOutputTokens = judgeOutputBudget(model.modelId, run.rule.schema);
   const external = externalHostOf(run.targetSystem) !== null;
   const cols = external ? null : deps.columns?.(run.targetCollection ?? '') ?? null;
   if (!external && cols === null) return halt(BULK_HALT_REASONS.unavailable);

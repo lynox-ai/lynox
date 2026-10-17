@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type Anthropic from '@anthropic-ai/sdk';
-import { JUDGE_MODELS, judgeAxisOf, judgeModelId, resolveJudgeModel } from './bulk-judge.js';
+import { JUDGE_MODELS, judgeAxisOf, judgeModelId, judgeOutputBudget, resolveJudgeModel } from './bulk-judge.js';
+import { judgeMaxOutputTokens } from './bulk-judge-rule.js';
+import type { ExtractSchema } from './llm-helper.js';
 import { setTierSetResolver } from './tier-resolver.js';
 import { FIREWORKS_API_BASE, TIER_PRESETS } from './tier-presets.js';
 import { MISTRAL_MODEL_MAP, MODEL_MAP, modelCapability, type TierSet } from '../types/index.js';
 
-// The judge's model per provider is decided (2026-10-15), not the provider's tier model: these
-// tests pin that for every way a call can be served — standard per provider, and each hybrid preset.
+// The judge's model is set per provider, not taken from the provider's tier model: these tests pin
+// that for every way a call can be served — standard per provider, and each hybrid preset.
 
 const MISTRAL_BASE = 'https://api.mistral.ai/v1';
 const ambient = { marker: 'ambient' } as unknown as Anthropic;
@@ -24,7 +26,7 @@ afterEach(() => { setTierSetResolver({ routingMode: 'standard', tierSet: null })
 
 describe('the judge model per provider', () => {
   it('names models the catalog knows', () => {
-    for (const id of Object.values(JUDGE_MODELS)) expect(modelCapability(id), id).not.toBeNull();
+    for (const id of Object.values(JUDGE_MODELS)) expect(modelCapability(id), id).toBeDefined();
   });
 
   it('judges on Haiku on Anthropic and Vertex, with the ambient client', () => {
@@ -96,5 +98,34 @@ describe('judgeAxisOf', () => {
     expect(judgeAxisOf({ provider: 'mistral', apiBaseURL: undefined }, undefined)).toBe('mistral');
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'https://api.fireworks.ai.example.invalid/v1' }, undefined)).toBeNull();
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'not a url' }, undefined)).toBeNull();
+  });
+
+  it('gives no judge to a plain-text endpoint', () => {
+    expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'https://api.fireworks.ai/inference/v1' }, undefined)).toBe('fireworks');
+    expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'http://api.fireworks.ai/inference/v1' }, undefined)).toBeNull();
+    expect(judgeAxisOf({ provider: 'openai', apiBaseURL: undefined }, 'http://api.mistral.ai/v1')).toBeNull();
+  });
+});
+
+describe('judgeOutputBudget', () => {
+  const small: ExtractSchema = { type: 'object', properties: { label: { type: 'string', enum: ['a', 'b'] } } };
+
+  it('lifts a thinking-only judge above the budget it comes back empty at', () => {
+    const silent = modelCapability(JUDGE_MODELS.fireworks)!.thinkingOnly!.emptyAtOrBelow;
+    expect(judgeMaxOutputTokens(small)).toBeLessThanOrEqual(silent);
+    expect(judgeOutputBudget(JUDGE_MODELS.fireworks, small)).toBe(1024);
+  });
+
+  it('leaves every other judge on the schema bound', () => {
+    for (const id of [JUDGE_MODELS.anthropic, JUDGE_MODELS.vertex, JUDGE_MODELS.mistral]) {
+      expect(modelCapability(id)?.thinkingOnly, id).toBeUndefined();
+      expect(judgeOutputBudget(id, small), id).toBe(judgeMaxOutputTokens(small));
+    }
+  });
+
+  it('keeps a large schema bound above the floor', () => {
+    const large: ExtractSchema = { type: 'object', properties: { body: { type: 'string', maxLength: 4000 } } };
+    expect(judgeOutputBudget(JUDGE_MODELS.fireworks, large)).toBe(judgeMaxOutputTokens(large));
+    expect(judgeMaxOutputTokens(large)).toBeGreaterThan(1024);
   });
 });
