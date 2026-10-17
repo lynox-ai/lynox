@@ -361,6 +361,8 @@ describe('isOutboundEffectWrite', () => {
     ['POST', '/2.0/kb_offer/1/revertIssue', true],
     ['POST', '/2.0/kb_invoice/1/cancel', true],
     ['POST', '/4.0/banking/payments/0b3e/cancel', true],
+    ['PUT', '/4.0/purchase/bills/0b3e/bookings/BOOKED', true],
+    ['PUT', '/4.0/expenses/0b3e/bookings/DRAFT', true],
     ['POST', '/2.0/kb_offer/1/accept', true],
     ['POST', '/2.0/kb_offer/1/reject', true],
     ['POST', '/2.0/kb_invoice/1/mark_as_sent', true],
@@ -374,6 +376,13 @@ describe('isOutboundEffectWrite', () => {
     ['POST', '/2.0/kb_invoice/1/payment', false],
     ['POST', '/2.0/pr_project/1/archive', false],
     ['POST', '/4.0/purchase/bills/0b3e/actions', false],
+    // Ordinary resources whose names share letters with an action at its length (`contact_group`
+    // has `_` where `reissue` ends): only a segment that STARTS with an action counts.
+    ['POST', '/2.0/contact_group', false],
+    ['POST', '/2.0/kb_invoice/1/kb_position_text', false],
+    ['POST', '/2.0/client_service', false],
+    ['POST', '/3.0/purchase_orders', false],
+    ['POST', '/2.0/kb_invoice/1/pre_send.json', false],
   ] as const)('bexio %s %s → %s', (method, path, want) => {
     expect(isOutboundEffectWrite(`https://api.bexio.com${path}`, method)).toBe(want);
   });
@@ -621,6 +630,8 @@ describe('outboundEffectField', () => {
     [`${SHOP}/wp-json/wc/v3/customers/9`, { email: 'a@example.test' }, 'email', 'credential'],
     [`${SHOP}/wp-json/wc/v3/webhooks/3`, { name: 'x' }, null, 'data_to_third_party'],
     ['https://api.bexio.com/4.0/banking/payments/4', { message: 'x' }, null, 'money'],
+    // bexio's payment ids are uuids.
+    ['https://api.bexio.com/4.0/banking/payments/0b3e5f2a-1c4d-4e8f-9a7b-2c6d8e0f1a3b', { message: 'x' }, null, 'money'],
     ['https://api.bexio.com/2.0/kb_order/4/repetition', { end: '' }, null, 'money'],
     ['https://api.bexio.com/4.0/banking/payments/%2534', { message: 'x' }, null, 'money'],
   ] as const)('%s with %j sets off %s (%s)', (url, body, field, effect) => {

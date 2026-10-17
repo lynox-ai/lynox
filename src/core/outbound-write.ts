@@ -392,22 +392,25 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
  * token profile or with none, and the table holds for each of them. Matched per segment, for
  * every write method.
  *
- * bexio, read from its OpenAPI specification 3.0.0 (every write whose last segment is not an
- * id): `send` mails an invoice, reminder or quote to its recipient; `issue`, `reissue`,
- * `revert_issue` / `revertIssue` and `cancel` issue, re-issue, withdraw or cancel a binding
- * document (`cancel` also cancels a bank payment); `accept` and `reject` decide a quote;
- * `mark_as_sent` / `mark_as_unsent` set what dunning reads as sent; `payments` and
- * `outgoing-payments` create or edit a payment out to a recipient. Not named: the writes that
- * create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or order), record
- * an incoming payment (`kb_invoice/{id}/payment`), or archive and restore, and the `actions` of
- * bills and expenses, whose only action in the specification is `DUPLICATE`.
+ * bexio, read from its OpenAPI specification 3.0.0 (every write whose path ends in an action
+ * word rather than a resource or an id): `send` mails an invoice, reminder or quote to its
+ * recipient; `issue`, `reissue`, `revert_issue` / `revertIssue` and `cancel` issue, re-issue,
+ * withdraw or cancel a binding document; `bookings/{status}` books a bill or an expense or sets
+ * it back to draft; `accept` and `reject` decide a quote; `mark_as_sent` / `mark_as_unsent` mark
+ * an invoice, reminder or quote as sent or not without sending it; `payments` and
+ * `outgoing-payments` create, edit, cancel or delete a payment out to a recipient. Not named:
+ * the writes that create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or
+ * order), record an incoming payment (`kb_invoice/{id}/payment`), or archive and restore, and
+ * the `actions` of bills and expenses, whose only action in the specification is `DUPLICATE`.
+ * A payment carried in the body of an ordinary resource is a matter for
+ * {@link OUTBOUND_EFFECT_FIELDS}, not for this table.
  */
 export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly segments: readonly string[] }[] = [
   {
     host: 'api.bexio.com',
     segments: [
       'send', 'issue', 'reissue', 'revert_issue', 'revertissue', 'cancel', 'accept', 'reject',
-      'mark_as_sent', 'mark_as_unsent', 'payments', 'outgoing-payments',
+      'bookings', 'mark_as_sent', 'mark_as_unsent', 'payments', 'outgoing-payments',
     ],
   },
 ];
@@ -464,7 +467,7 @@ export const OUTBOUND_EFFECT_FIELDS: readonly OutboundEffectField[] = [
   { path: WOO('orders'), fields: ['customer_id'], effect: 'data_to_third_party', says: 'WooCommerce moves the order, with its addresses, into another customer\'s account' },
   { path: WOO('customers'), fields: ['password', 'email'], effect: 'credential', says: 'WooCommerce changes how the customer signs in; a changed email address also receives the password reset' },
   { path: WOO('webhooks'), fields: 'any', effect: 'data_to_third_party', says: 'a WooCommerce webhook decides where the shop sends its order and customer data' },
-  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/\d+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
+  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/[^/]+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
   { host: 'api.bexio.com', path: /^\/2\.0\/kb_order\/\d+\/repetition$/, fields: 'any', effect: 'money', says: 'bexio invoices this order again on this schedule' },
 ];
 
