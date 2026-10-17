@@ -15,8 +15,8 @@ vi.mock('node:dns/promises', () => ({
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
 
 // The refresh is a connector call (`cpFetch`), so it rides the pinned
-// transport; the bridge hands it back to the stub above. The policy gate is not
-// bypassed — see the helper.
+// transport; the bridge hands it back to the stub above. The policy gate still
+// runs — see the helper.
 let restorePinnedFetchBridge: (() => void) | undefined;
 beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
 afterAll(() => { restorePinnedFetchBridge?.(); });
