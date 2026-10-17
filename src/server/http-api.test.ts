@@ -4263,7 +4263,7 @@ describe('LynoxHTTPApi', () => {
 
     it('GET of the api profiles leaves out the grant\'s credential record — fingerprints, foreign tokens, key check — and keeps the rest', async () => {
       const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', oauth_grant: { grant_id: 'g-1', fingerprints: { SHOP_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' } };
-      mockGetApiStore.mockReturnValue({ getAll: () => [profile], get: () => profile });
+      mockGetApiStore.mockReturnValue({ getAll: () => [profile], knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
         expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
@@ -16615,7 +16615,7 @@ describe('mandate stance of every user route', () => {
     });
     const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
     const readsWith = (p: ApiProfile): boolean =>
-      secretsForProfile(vault, p, { getAll: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
+      secretsForProfile(vault, p, { knownProfiles: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
         .resolve('OWNER_KEY') === 'owner-value';
     // The probe can say no: a profile the mandate wrote does not read the owner's name unreleased.
     expect(readsWith(profile('mandate:setup@example.org')), 'control: a mandate profile reads nothing unreleased').toBe(false);

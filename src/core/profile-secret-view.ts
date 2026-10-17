@@ -279,7 +279,7 @@ function isPresetProfile(p: ApiProfile): boolean {
  */
 export function releaseObstacle(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   via: ApiProfile,
   name: string,
 ): ReleaseObstacle | null {
@@ -288,7 +288,7 @@ export function releaseObstacle(
   if (hasTokenSlotShape(name)) return 'token';
   if (sendRole(via, name) === null) return 'not-sent';
   if (credentialEndpoints(via).some((e) => new URL(e).protocol !== 'https:')) return 'not-https';
-  for (const p of apiStore.getAll()) {
+  for (const p of apiStore.knownProfiles()) {
     if (grantTokenNames(p).has(name)) return 'token';
     if (p.id === via.id || !collectVaultKeys(p).includes(name)) continue;
     if (isPresetProfile(p)) return 'preset';
@@ -309,7 +309,7 @@ export type ReleaseState = 'released' | 'lapsed' | 'not-released' | 'not-releasa
 
 export function releaseState(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   via: ApiProfile,
   name: string,
   ctx: ReadCtx,
@@ -351,7 +351,7 @@ export function releaseState(
  */
 export function mandateMayRead(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   tag: string,
   name: string,
   via: ApiProfile | undefined,
@@ -362,7 +362,7 @@ export function mandateMayRead(
   let ownToken = false;
   let released: boolean | undefined;
   const isReleased = (): boolean => (released ??= via !== undefined && releaseState(store, apiStore, via, name, ctx) === 'released');
-  for (const p of apiStore.getAll()) {
+  for (const p of apiStore.knownProfiles()) {
     if (p.created_by !== tag) {
       if (!collectVaultKeys(p).includes(name)) continue;
       if (!isMandateAuthored(p) && isReleased()) continue;
@@ -397,9 +397,9 @@ function credentialNames(p: ApiProfile): Set<string> {
  * the browser of whoever opens it, and from there to the provider: a name any profile reads as a
  * credential, or a key the engine guards, would put a secret there.
  */
-export function mayServeAsClientId(apiStore: Pick<ApiStore, 'getAll'>, name: string): boolean {
+export function mayServeAsClientId(apiStore: Pick<ApiStore, 'knownProfiles'>, name: string): boolean {
   if (isProtectedSecretWrite(name)) return false;
-  return !apiStore.getAll().some((p) => credentialNames(p).has(name));
+  return !apiStore.knownProfiles().some((p) => credentialNames(p).has(name));
 }
 
 /**
@@ -409,7 +409,7 @@ export function mayServeAsClientId(apiStore: Pick<ApiStore, 'getAll'>, name: str
  */
 export function mandateMayConnect(
   store: SecretStoreLike,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   tag: string,
   profile: ApiProfile,
   ctx: ReadCtx,
@@ -448,12 +448,12 @@ export function occupiedTokenSlots(store: SecretStoreLike, id: string): string[]
  * Saving over the profile alone keeps the mandate's grant.
  */
 export function connectionTokenAllowed(
-  apiStore: Pick<ApiStore, 'getAll'> | null,
+  apiStore: Pick<ApiStore, 'knownProfiles'> | null,
   ends: Pick<MandateEnds, 'isLive'> | null,
   name: string,
 ): boolean {
   if (apiStore === null) return true;
-  return !apiStore.getAll().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
+  return !apiStore.knownProfiles().some((p) => connectionWaits(p, ends) && grantTokenNames(p).has(name));
 }
 
 /**
@@ -471,7 +471,7 @@ export function connectionWaits(profile: ApiProfile, ends: Pick<MandateEnds, 'is
 export function hiddenFromProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   name: string,
   ctx: ReadCtx,
   writing = false,
@@ -484,7 +484,7 @@ export function hiddenFromProfile(
 export function withheldFrom(
   store: SecretStoreLike,
   profile: ApiProfile,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   names: readonly string[],
   ctx: ReadCtx,
 ): string[] {
@@ -515,7 +515,7 @@ export function withheldText(names: readonly string[], offBase = false): string 
 export function secretsForProfile(
   store: SecretStoreLike,
   profile: ApiProfile,
-  apiStore: Pick<ApiStore, 'getAll'>,
+  apiStore: Pick<ApiStore, 'knownProfiles'>,
   ctx: ReadCtx,
 ): SecretStoreLike {
   if (!isMandateAuthored(profile)) return store;

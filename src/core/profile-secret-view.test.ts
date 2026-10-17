@@ -33,7 +33,7 @@ const own = (created_by?: string): ApiProfile => ({
   auth: { type: 'bearer', vault_keys: ['SETUP_KEY'] },
   ...(created_by === undefined ? {} : { created_by }),
 });
-const apiStore = { getAll: () => [preset] };
+const apiStore = { knownProfiles: () => [preset] };
 const M = 'mandate:setup@example.org';
 
 /** A fake of the owner's releases: `profileId|author|name` → what was released. */
@@ -88,7 +88,7 @@ describe('secretsForProfile', () => {
   it('reads the profiles at each lookup, so an account connected later counts, a release notwithstanding', () => {
     const profiles: ApiProfile[] = [];
     const named: ApiProfile = { ...own(M), auth: { type: 'bearer', vault_keys: ['SHOP_CLIENT_ID'] } };
-    const view = secretsForProfile(store(), named, { getAll: () => profiles }, releasedFor(named, 'SHOP_CLIENT_ID'));
+    const view = secretsForProfile(store(), named, { knownProfiles: () => profiles }, releasedFor(named, 'SHOP_CLIENT_ID'));
     expect(view.resolve('SHOP_CLIENT_ID')).toBe('shop-client');
     profiles.push(preset);
     expect(view.resolve('SHOP_CLIENT_ID')).toBeNull();
@@ -117,7 +117,7 @@ describe('mandateMayRead', () => {
     ...(connected_by === undefined ? {} : { oauth_grant: { connected_by, written: [{ name: 'MY_OUTPUT', fp: 'x' }] } }),
   });
   const may = (profiles: ApiProfile[], name: string, via?: ApiProfile, writing = false, ctx: ReadCtx = NO_RELEASES): boolean =>
-    mandateMayRead(vault, { getAll: () => profiles }, M, name, via, ctx, writing);
+    mandateMayRead(vault, { knownProfiles: () => profiles }, M, name, via, ctx, writing);
 
   it('gives a mandate\'s preset profile the tokens of its own consent, and its client pair once released', () => {
     const p = books(M);
@@ -203,7 +203,7 @@ describe('connectionTokenAllowed', () => {
   });
   const ends = (live: string[]): { isLive: (id: string) => boolean } => ({ isLive: (id) => live.includes(id) });
   const allowed = (p: ApiProfile, live: string[] | null, name: string): boolean =>
-    connectionTokenAllowed({ getAll: () => [p] }, live === null ? null : ends(live), name);
+    connectionTokenAllowed({ knownProfiles: () => [p] }, live === null ? null : ends(live), name);
 
   it('hands out a live mandate\'s tokens, and none once it has ended', () => {
     const p = grantOf(M, 'M-1');
@@ -243,16 +243,16 @@ describe('mandateMayConnect — where a connection stores its tokens', () => {
   };
 
   it('lets a mandate connect its own profile when no one else reads the slots', () => {
-    expect(mandateMayConnect(store(), { getAll: () => [mine] }, M, mine, NO_RELEASES)).toBe(true);
+    expect(mandateMayConnect(store(), { knownProfiles: () => [mine] }, M, mine, NO_RELEASES)).toBe(true);
   });
 
   it('refuses when a profile of the owner reads a slot the connection would write', () => {
-    expect(mandateMayConnect(store(), { getAll: () => [mine, ownersPat] }, M, mine, NO_RELEASES)).toBe(false);
+    expect(mandateMayConnect(store(), { knownProfiles: () => [mine, ownersPat] }, M, mine, NO_RELEASES)).toBe(false);
   });
 
   it('refuses when the refresh slot is read by another author, the access slot alone being free', () => {
     const readsRefresh: ApiProfile = { ...ownersPat, id: 'crm-refresh', auth: { type: 'bearer', vault_keys: ['CRM_REFRESH_TOKEN'] } };
-    expect(mandateMayConnect(store(), { getAll: () => [mine, readsRefresh] }, M, mine, NO_RELEASES)).toBe(false);
+    expect(mandateMayConnect(store(), { knownProfiles: () => [mine, readsRefresh] }, M, mine, NO_RELEASES)).toBe(false);
   });
 });
 
@@ -264,20 +264,20 @@ describe('mayServeAsClientId — what may go into a sign-in link', () => {
 
   it('allows a client id, also one a second profile uses as its client id', () => {
     const twin: ApiProfile = { ...app({}), id: 'books-2' };
-    expect(mayServeAsClientId({ getAll: () => [app({}), twin] }, 'BOOKS_CLIENT_ID')).toBe(true);
+    expect(mayServeAsClientId({ knownProfiles: () => [app({}), twin] }, 'BOOKS_CLIENT_ID')).toBe(true);
   });
 
   it('refuses the name a profile reads as its client secret, even its own', () => {
-    expect(mayServeAsClientId({ getAll: () => [app({ client_id_key: 'BOOKS_CLIENT_SECRET' })] }, 'BOOKS_CLIENT_SECRET')).toBe(false);
+    expect(mayServeAsClientId({ knownProfiles: () => [app({ client_id_key: 'BOOKS_CLIENT_SECRET' })] }, 'BOOKS_CLIENT_SECRET')).toBe(false);
   });
 
   it('refuses a token slot and a bearer key', () => {
-    expect(mayServeAsClientId({ getAll: () => [app({})] }, 'BOOKS_ACCESS_TOKEN')).toBe(false);
-    expect(mayServeAsClientId({ getAll: () => [own()] }, 'SETUP_KEY')).toBe(false);
+    expect(mayServeAsClientId({ knownProfiles: () => [app({})] }, 'BOOKS_ACCESS_TOKEN')).toBe(false);
+    expect(mayServeAsClientId({ knownProfiles: () => [own()] }, 'SETUP_KEY')).toBe(false);
   });
 
   it('refuses a key the engine guards, named by no profile', () => {
-    expect(mayServeAsClientId({ getAll: () => [] }, 'ANTHROPIC_API_KEY')).toBe(false);
+    expect(mayServeAsClientId({ knownProfiles: () => [] }, 'ANTHROPIC_API_KEY')).toBe(false);
   });
 });
 
@@ -295,16 +295,16 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
   const ownerCrm: ApiProfile = { id: 'owner-crm', name: 'O', base_url: 'https://o.example', description: 'd', auth: { type: 'bearer', vault_keys: ['OWNER_KEY'] } };
   const mandateP = (mandateId?: string): RequestPrincipal => ({ kind: 'mandate', email: 'setup@example.org', ...(mandateId === undefined ? {} : { mandateId }) });
   const read = (profiles: ApiProfile[], via: ApiProfile, name: string, ctx: ReadCtx): boolean =>
-    mandateMayRead(vault, { getAll: () => profiles }, via.created_by!, name, via, ctx);
+    mandateMayRead(vault, { knownProfiles: () => profiles }, via.created_by!, name, via, ctx);
 
   it('withholds the owner\'s name until it is released, and gives it once it is', () => {
     const p = mb();
     expect(read([p], p, 'OWNER_KEY', NO_RELEASES)).toBe(false);
-    expect(secretsForProfile(vault, p, { getAll: () => [p] }, NO_RELEASES).resolve('OWNER_KEY')).toBeNull();
-    expect(withheldFrom(vault, p, { getAll: () => [p] }, ['OWNER_KEY'], NO_RELEASES)).toEqual(['OWNER_KEY']);
+    expect(secretsForProfile(vault, p, { knownProfiles: () => [p] }, NO_RELEASES).resolve('OWNER_KEY')).toBeNull();
+    expect(withheldFrom(vault, p, { knownProfiles: () => [p] }, ['OWNER_KEY'], NO_RELEASES)).toEqual(['OWNER_KEY']);
     const ctx = releasedFor(p, 'OWNER_KEY');
     expect(read([p], p, 'OWNER_KEY', ctx)).toBe(true);
-    expect(secretsForProfile(vault, p, { getAll: () => [p] }, ctx).resolve('OWNER_KEY')).toBe('owner-value');
+    expect(secretsForProfile(vault, p, { knownProfiles: () => [p] }, ctx).resolve('OWNER_KEY')).toBe('owner-value');
   });
 
   it('a release opens a name a profile of the owner reads as well, and nothing opens it without one', () => {
@@ -318,7 +318,7 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
     const ctx: ReadCtx = { principal: OWNER_PRINCIPAL, ends: endsOf(['M-1']), releases: releasesOf([{ profile: given, name: 'OWNER_KEY', mandateId: 'M-1' }]) };
     const moved = mb({ base_url: 'https://elsewhere.example/v1' });
     expect(read([moved], moved, 'OWNER_KEY', ctx)).toBe(false);
-    expect(releaseState(vault, { getAll: () => [moved] }, moved, 'OWNER_KEY', ctx)).toBe('lapsed');
+    expect(releaseState(vault, { knownProfiles: () => [moved] }, moved, 'OWNER_KEY', ctx)).toBe('lapsed');
     // A path on the same host is not another destination.
     const samehost = mb({ base_url: 'https://mb.example/v2' });
     expect(read([samehost], samehost, 'OWNER_KEY', ctx)).toBe(true);
@@ -396,8 +396,8 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
   it('holds for the profile\'s author only: another mandate reading through that profile gets nothing', () => {
     const given = mb();
     const ctx = releasedFor(given, 'OWNER_KEY');
-    expect(mandateMayRead(vault, { getAll: () => [given] }, OTHER, 'OWNER_KEY', given, ctx)).toBe(false);
-    expect(mandateMayRead(vault, { getAll: () => [given] }, M, 'OWNER_KEY', given, ctx)).toBe(true);
+    expect(mandateMayRead(vault, { knownProfiles: () => [given] }, OTHER, 'OWNER_KEY', given, ctx)).toBe(false);
+    expect(mandateMayRead(vault, { knownProfiles: () => [given] }, M, 'OWNER_KEY', given, ctx)).toBe(true);
   });
 
   it('holds for one author: another mandate under the same id gets nothing', () => {
@@ -429,23 +429,23 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
     ['a provider key', 'ANTHROPIC_API_KEY', 'protected'],
   ] as const)('never releases %s, whatever a release row says', (_label, name, why) => {
     const p = mb({ auth: { type: 'bearer', vault_keys: [name] } });
-    expect(releaseObstacle(vault, { getAll: () => [p] }, p, name)).toBe(why);
+    expect(releaseObstacle(vault, { knownProfiles: () => [p] }, p, name)).toBe(why);
     expect(read([p], p, name, releasedFor(p, name))).toBe(false);
   });
 
   it('never releases a name a connection\'s exchange wrote to, whatever its shape', () => {
     const p = mb({ auth: { type: 'bearer', vault_keys: ['CRM_TOKEN'] } });
     const connected: ApiProfile = { ...ownerCrm, oauth_grant: { state: 'connected', written: [{ name: 'CRM_TOKEN', fp: 'f' }] } as unknown as ApiProfile['oauth_grant'] };
-    expect(releaseObstacle(vault, { getAll: () => [p, connected] }, p, 'CRM_TOKEN')).toBe('token');
-    expect(releaseObstacle(vault, { getAll: () => [p] }, p, 'CRM_TOKEN')).toBeNull();
+    expect(releaseObstacle(vault, { knownProfiles: () => [p, connected] }, p, 'CRM_TOKEN')).toBe('token');
+    expect(releaseObstacle(vault, { knownProfiles: () => [p] }, p, 'CRM_TOKEN')).toBeNull();
   });
 
   it('never releases a name a profile of another mandate, or a preset profile of the owner, reads', () => {
     const p = mb();
     const other = { ...ownerCrm, id: 'other-crm', created_by: OTHER };
-    expect(releaseObstacle(vault, { getAll: () => [p, other] }, p, 'OWNER_KEY')).toBe('other-mandate');
+    expect(releaseObstacle(vault, { knownProfiles: () => [p, other] }, p, 'OWNER_KEY')).toBe('other-mandate');
     const ownersPreset: ApiProfile = { ...preset, auth: { type: 'oauth2', vault_keys: ['OWNER_KEY'], oauth: { preset_id: 'example-shop', client_id_key: 'OWNER_KEY' } } };
-    expect(releaseObstacle(vault, { getAll: () => [p, ownersPreset] }, p, 'OWNER_KEY')).toBe('preset');
+    expect(releaseObstacle(vault, { knownProfiles: () => [p, ownersPreset] }, p, 'OWNER_KEY')).toBe('preset');
     expect(read([p, ownersPreset], p, 'OWNER_KEY', releasedFor(p, 'OWNER_KEY'))).toBe(false);
   });
 
@@ -455,7 +455,7 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
     ['a second key of a bearer profile', { type: 'bearer', vault_keys: ['FIRST_KEY', 'OWNER_KEY'] }],
   ] as const)('never releases a name the engine does not send itself: %s', (_label, auth) => {
     const p = mb({ auth: { ...auth, vault_keys: [...auth.vault_keys] } });
-    expect(releaseObstacle(vault, { getAll: () => [p] }, p, 'OWNER_KEY')).toBe('not-sent');
+    expect(releaseObstacle(vault, { knownProfiles: () => [p] }, p, 'OWNER_KEY')).toBe('not-sent');
     expect(releaseBinding(p, 'OWNER_KEY')).toBeNull();
   });
 
@@ -467,14 +467,14 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
     ['an OAuth profile whose base is plain http', () => oauthP({}, { base_url: 'http://oa.example' }), 'OWNER_SECRET'],
   ] as const)('never releases a name it would send to an address that is not https: %s', (_label, make, name) => {
     const p = make();
-    expect(releaseObstacle(vault, { getAll: () => [p] }, p, name)).toBe('not-https');
-    expect(releaseState(vault, { getAll: () => [p] }, p, name, releasedFor(p, name))).toBe('not-releasable');
+    expect(releaseObstacle(vault, { knownProfiles: () => [p] }, p, name)).toBe('not-https');
+    expect(releaseState(vault, { knownProfiles: () => [p] }, p, name, releasedFor(p, name))).toBe('not-releasable');
     expect(read([p], p, name, releasedFor(p, name))).toBe(false);
   });
 
   it('control: the same profiles on https are releasable', () => {
     for (const [p, name] of [[mb(), 'OWNER_KEY'], [oauthP(), 'OWNER_SECRET']] as const) {
-      expect(releaseObstacle(vault, { getAll: () => [p] }, p, name)).toBeNull();
+      expect(releaseObstacle(vault, { knownProfiles: () => [p] }, p, name)).toBeNull();
       expect(read([p], p, name, releasedFor(p, name))).toBe(true);
     }
   });
@@ -498,7 +498,7 @@ describe('releases of the owner\'s names to a profile a mandate wrote', () => {
   });
 
   it('control: a profile the owner wrote reads its name with no release at all', () => {
-    expect(secretsForProfile(vault, ownerCrm, { getAll: () => [ownerCrm] }, NO_RELEASES).resolve('OWNER_KEY')).toBe('owner-value');
-    expect(withheldFrom(vault, ownerCrm, { getAll: () => [ownerCrm] }, ['OWNER_KEY'], NO_RELEASES)).toEqual([]);
+    expect(secretsForProfile(vault, ownerCrm, { knownProfiles: () => [ownerCrm] }, NO_RELEASES).resolve('OWNER_KEY')).toBe('owner-value');
+    expect(withheldFrom(vault, ownerCrm, { knownProfiles: () => [ownerCrm] }, ['OWNER_KEY'], NO_RELEASES)).toEqual([]);
   });
 });
