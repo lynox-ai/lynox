@@ -428,7 +428,7 @@ export class MicrosoftAuth {
    */
   private assertStillCurrent(sentFor: TokenData): void {
     if (this.tokenData !== sentFor) {
-      throw new Error('Token refresh discarded: the Microsoft connection changed while the refresh was out. Retry.');
+      throw new Error('Token refresh discarded: the Microsoft connection was replaced or removed while the refresh was out. Ask for the token again; it reports the current state.');
     }
   }
 

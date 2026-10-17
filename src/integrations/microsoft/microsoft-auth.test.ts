@@ -256,6 +256,13 @@ describe("a refused refresh: Microsoft's body through the passthrough", () => {
     expect(auth.getLastRefreshFailure()).toMatchObject({ kind: 'grant-revoked', firstErrorCode: 70008, cardState: 'revoked' });
   });
 
+  it('a revocation quotes the revocation code, not an unrelated first number', async () => {
+    const auth = new MicrosoftAuth({ vault: expiringGrant() });
+    mockFetch.mockResolvedValueOnce(passthrough(400, microsoftErrorBody('invalid_grant', [90099, 70008], 'Refresh token expired.')));
+    await expect(auth.getAccessToken()).rejects.toThrow('(Microsoft error 70008)');
+    expect(auth.getLastRefreshFailure()).toMatchObject({ kind: 'grant-revoked', firstErrorCode: 70008 });
+  });
+
   it.each([
     ['UserDisabled', [50057], 'account-disabled'],
     ['not assigned to the app', [50105], 'not-assigned'],
@@ -439,6 +446,8 @@ describe('the refresh margin and the write order', () => {
     // The next refresh presents the handle that is on disk, not the unsaved rotation.
     mockFetch.mockResolvedValueOnce(refreshOk('ms-access-token-again', Date.now() + 3_600_000));
     await auth.getAccessToken();
+    // A second refresh at all: memory still holds the expired grant the vault holds.
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     const [, init] = mockFetch.mock.calls[1] as [string, RequestInit];
     expect((JSON.parse(String(init.body)) as Record<string, unknown>)['refresh_handle']).toBe('sealed-handle-1');
   });
