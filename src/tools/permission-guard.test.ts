@@ -2875,6 +2875,21 @@ describe('isDangerous — capability-contract grant', () => {
     expect(r).toContain('[BLOCKED');
   });
 
+  // A contract grants http_request and nothing else, even when it lists another tool and that
+  // tool's call carries the very url and method the contract grants.
+  it.each(['bash', 'write_file', 'edit_file', 'spawn_agent', 'mail_send', 'run_pipeline'])('never grants %s, whatever the contract lists', (tool) => {
+    const listed: CapabilityContract = { ...contract, grantedTools: ['http_request', tool] };
+    const input = { command: 'curl -sS -X POST https://api.acme.test/v1/reports/monthly -d x', url: 'https://api.acme.test/v1/reports/monthly', method: 'POST' };
+    expect(contractGrants(tool, input, listed)).toBe(false);
+    expect(contractGrants('http_request', input, listed)).toBe(true);
+  });
+
+  it('leaves a bash command that sends data refused unattended, under a contract that lists bash', () => {
+    const bashContract: CapabilityContract = { ...contract, grantedTools: ['http_request', 'bash'] };
+    const input = { command: 'curl -sS -X POST https://api.acme.test/v1/reports/monthly -d x', url: 'https://api.acme.test/v1/reports/monthly', method: 'POST' };
+    expect(isDangerous('bash', input, 'autonomous', undefined, undefined, bashContract)).not.toBeNull();
+  });
+
   it('a denied contract-governed call stamps the contract version onto the audit channel', () => {
     const events: Array<{ contractVersion?: number | undefined }> = [];
     const handler = (m: unknown): void => { events.push(m as { contractVersion?: number | undefined }); };
