@@ -65,8 +65,10 @@ const CORE_FEATURE_DEFAULTS: Record<FeatureFlag, boolean> = {
   'proactive-deep-anthropic': false,
   // A person may grant a saved workflow a `reviewed` contract in the scheduling dialog
   // (`core/workflow-grant.ts`). With it on, a granted workflow may POST unattended to the
-  // one host and paths the person typed; no grant reaches a mail API. Default OFF: a
-  // self-hosted instance turns it on itself, a control plane per instance. A core flag rather than a
+  // one host and paths the person typed. No grant reaches a mail API on the list in
+  // `core/bulk-mail-targets.ts`; a mail service outside it is a host like any other, granted
+  // by the person who types it. Default OFF: a self-hosted instance turns it on itself, a
+  // control plane per instance. A core flag rather than a
   // `registerFeature` one: it must exist from module load, whoever registers what, and
   // `clearDynamicFeatures` must not be able to drop it.
   'workflow-reviewed-grant': false,
