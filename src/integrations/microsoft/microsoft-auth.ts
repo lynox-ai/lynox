@@ -241,7 +241,7 @@ function validateClaim(claim: unknown): TokenData {
 }
 
 /** `Retry-After` in milliseconds, from seconds or an HTTP date; null when absent or unreadable. */
-function retryAfterMs(header: string | null, now: number): number | null {
+export function retryAfterMs(header: string | null, now: number): number | null {
   if (header === null || header.trim() === '') return null;
   const seconds = Number(header);
   if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
@@ -252,7 +252,8 @@ function retryAfterMs(header: string | null, now: number): number | null {
 
 export class MicrosoftAuth {
   private readonly vault: SecretVault | undefined;
-  private readonly hostPolicy: HostPolicyContext | undefined;
+  /** Read-only, like `GoogleAuth.hostPolicy`: the mail provider's Graph calls obey the same view. */
+  readonly hostPolicy: HostPolicyContext | undefined;
   private readonly onTokenChange: ((event: MicrosoftTokenChange) => void) | undefined;
   private tokenData: TokenData | null;
   private refreshInFlight: Promise<void> | null = null;
