@@ -85,12 +85,33 @@ describe('the shape of a reviewed grant on a saved workflow', () => {
 
   it('refuses a mail API in the entry', () => {
     const built = buildReviewedContract({ method: 'PUT', host: 'gmail.googleapis.com', paths: ['/gmail/v1/users/me/settings/vacation'] }, [], {});
-    expect(built).toEqual({ error: expect.stringContaining('mail API') });
+    expect(built).toEqual({ error: expect.stringContaining("mail provider's API") });
+  });
+
+  it('refuses a mailbox API in the entry', () => {
+    const built = buildReviewedContract({ method: 'POST', host: 'api.fastmail.com', paths: ['/jmap/api/'] }, [], {});
+    expect(built).toEqual({ error: expect.stringContaining("mail provider's API") });
+  });
+
+  it('refuses a mailbox API spelled with trailing dots in the entry', () => {
+    const built = buildReviewedContract({ method: 'POST', host: 'api.fastmail.com..', paths: ['/jmap/api/'] }, [], {});
+    expect(built).toEqual({ error: expect.stringContaining("mail provider's API") });
+  });
+
+  it('grants a host typed with a trailing dot that host and no other', () => {
+    const built = buildReviewedContract({ method: 'POST', host: 'api.example.com.', paths: ['/a'] }, [], {});
+    if (!('contract' in built)) throw new Error(built.error);
+    const grants = (url: string) => contractGrants('http_request', { url, method: 'POST' }, built.contract);
+    expect(grants('https://api.example.com./a')).toBe(true);
+    expect(grants('https://api.example.com/a')).toBe(false);
+    expect(grants('https://api.example.com../a')).toBe(false);
+    expect(grants('https://api.example.com.evil.test./a')).toBe(false);
+    expect(grants('https://evil.test./a')).toBe(false);
   });
 
   it('refuses a sending service in the entry', () => {
     const built = buildReviewedContract({ method: 'POST', host: 'api.sendgrid.com', paths: ['/v3/mail/send'] }, [], {});
-    expect(built).toEqual({ error: expect.stringContaining('mail API') });
+    expect(built).toEqual({ error: expect.stringContaining("mail provider's API") });
   });
 
   it('accepts the bulk form it is modelled on: a stored bulk contract passes the same shape', () => {
@@ -283,6 +304,14 @@ describe('what a reviewed grant admits at dispatch', () => {
       hostPatterns: ['api.resend.com'], pathPatterns: ['/emails'], paramConstraints: {},
     };
     expect(contractGrants('http_request', { url: 'https://api.resend.com/emails', method: 'POST' }, sender)).toBe(false);
+  });
+
+  it('never grants a mailbox API, though the contract names it exactly', () => {
+    const mailbox: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+      hostPatterns: ['mail.zoho.eu'], pathPatterns: ['/api/accounts/1/messages'], paramConstraints: {},
+    };
+    expect(contractGrants('http_request', { url: 'https://mail.zoho.eu/api/accounts/1/messages', method: 'POST' }, mailbox)).toBe(false);
   });
 });
 

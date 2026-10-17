@@ -8,12 +8,12 @@ import { buildReviewedContract, validateContractAgainstSteps } from '../orchestr
 
 /**
  * The feature that lets a person grant a saved workflow a `reviewed` contract. Off by
- * default: until the remaining mail-API question is decided, no product path issues such
- * a grant. It closes BOTH requests of the dialog — the preview and the acceptance in the
- * scheduling route — because the acceptance is where the contract is written, and anyone
- * who can call the preview gets the checksum back from it: closing only the preview would
- * leave the acceptance open to the same caller. The checksum binds what was shown; it
- * says nothing about WHO accepted, and no hash key changes that.
+ * default, so no product path issues such a grant until an instance turns it on. It closes
+ * BOTH requests of the dialog — the preview and the acceptance in the scheduling route —
+ * because the acceptance is where the contract is written, and anyone who can call the
+ * preview gets the checksum back from it: closing only the preview would leave the
+ * acceptance open to the same caller. The checksum binds what was shown; it says nothing
+ * about WHO accepted, and no hash key changes that.
  */
 export function workflowGrantEnabled(): boolean {
   // The literal, not a constant: the env-ABI drift test reads this call site.
