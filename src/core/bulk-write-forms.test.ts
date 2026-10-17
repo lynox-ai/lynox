@@ -41,16 +41,22 @@ describe('measured write forms', () => {
   // No test drives a measured form through approval into that block, because no measured form
   // lies on the table today. This keeps it so until one is written.
   it('lists no form that also lies on the field-effect table', () => {
+    expect(MEASURED_WRITE_FORMS.length * OUTBOUND_EFFECT_FIELDS.length * OUTBOUND_EFFECT_PATHS.length).toBeGreaterThan(0);
     for (const form of MEASURED_WRITE_FORMS) {
-      // One concrete target of the form, built from its own pattern. The pattern may hold only
-      // literal characters and `[0-9]+`, or a sample would not stand for the paths it matches.
-      const literal = form.path.source.replace(/^\^|\$$/g, '').replace(/\\[/.]/g, '').replace(/\[0-9\]\+/g, '');
-      expect(/[.*+?()[\]{}|\\^$]/.test(literal), `cannot build a sample target for ${form.path.source}`).toBe(false);
-      const sample = form.path.source.replace(/^\^|\$$/g, '').replace(/\\([/.])/g, '$1').replace(/\[0-9\]\+/g, '7');
-      expect(form.path.test(sample), `cannot build a sample target for ${form.path.source}`).toBe(true);
+      // One concrete target of the form, built from its own pattern. The pattern must match the
+      // whole path and hold only plain path characters and `[0-9]+`, or a sample would not stand
+      // for the paths it matches.
+      const source = form.path.source;
+      const literal = source.replace(/^\^|\$$/g, '').replace(/\\[/.]/g, '').replace(/\[0-9\]\+/g, '');
+      expect(source.startsWith('^') && source.endsWith('$') && /^[A-Za-z0-9_-]*$/.test(literal),
+        `cannot build a sample target for ${source}`).toBe(true);
+      const sample = source.replace(/^\^|\$$/g, '').replace(/\\([/.])/g, '$1').replace(/\[0-9\]\+/g, '7');
+      expect(form.path.test(sample), `cannot build a sample target for ${source}`).toBe(true);
       const advice = 'write a test that drives this form through approval into that block, then allow this overlap here';
       // As the client reads it: `normalizeWritePath` lower-cases and splits as the block does.
-      const seen = normalizeWritePath(sample).path;
+      const normalized = normalizeWritePath(sample);
+      expect(normalized.ambiguous, `cannot build a sample target for ${source}`).toBe(false);
+      const seen = normalized.path;
       for (const entry of OUTBOUND_EFFECT_FIELDS) {
         const sameHost = form.host === null || entry.host === undefined || form.host === entry.host;
         expect(sameHost && entry.path.test(seen),
