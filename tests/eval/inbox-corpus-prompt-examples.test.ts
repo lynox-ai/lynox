@@ -25,4 +25,25 @@ describe('inbox eval corpus labels', () => {
     expect(family.map((f) => f.id)).toEqual(expect.arrayContaining(['meeting-request-en-315', 'meeting-request-de-316']));
     expect(family.filter((f) => f.expectedBucket !== 'draft_ready').map((f) => f.id)).toEqual([]);
   });
+
+  // Outside the meeting-request family the shape is not uniform, so the corpus was read against
+  // one written rule (the first `operatorRelabels` entry dated 2026-10-17 that starts "Rule for
+  // draft_ready vs requires_user"): a short answer the recipient knows without looking anything up
+  // is draft_ready. These fixtures changed label under it; reverting one must be a decision in a
+  // diff, not a silent edit.
+  it('keeps the fixtures relabelled under the short-answer rule at draft_ready', () => {
+    const byId = new Map(corpus.fixtures.map((f) => [f.id, f.expectedBucket]));
+    // control: every id is in the corpus
+    expect(SHORT_ANSWER_RULE_RELABELS.filter((id) => !byId.has(id))).toEqual([]);
+    expect(SHORT_ANSWER_RULE_RELABELS.filter((id) => byId.get(id) !== 'draft_ready')).toEqual([]);
+  });
 });
+
+const SHORT_ANSWER_RULE_RELABELS: ReadonlyArray<string> = [
+  'colleague-question-de-276',
+  'colleague-question-de-278',
+  'colleague-question-de-280',
+  'colleague-question-de-284',
+  'info-share-en-402',
+  'urgent-deadline-en-464',
+];
