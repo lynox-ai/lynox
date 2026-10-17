@@ -102,6 +102,37 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget(url)).toBe(true);
   });
 
+  // One witness per mailbox API host, each on the send path its provider documents.
+  it.each([
+    'https://api.fastmail.com/jmap/api/',
+    'https://api.fastmail.com/jmap/session',
+    'https://mail.zoho.com/api/accounts/1/messages',
+    'https://mail.zoho.eu/api/accounts/1/messages',
+    'https://mail.zoho.in/api/accounts/1/messages',
+    'https://mail.zoho.com.au/api/accounts/1/messages',
+    'https://mail.zoho.jp/api/accounts/1/messages',
+    'https://mail.zoho.com.cn/api/accounts/1/messages',
+    'https://mail.zoho.ae/api/accounts/1/messages',
+    'https://mail.zoho.sa/api/accounts/1/messages',
+    'https://mail.zohocloud.ca/api/accounts/1/messages',
+    'https://api.us.nylas.com/v3/grants/g1/messages/send',
+    'https://api.eu.nylas.com/v3/grants/g1/messages/send',
+    'https://api.nylas.com/send',
+    'https://ireland.api.nylas.com/send',
+  ])('refuses the mailbox API at %s', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
+  });
+
+  it.each([
+    'https://www.fastmail.com/dev/',
+    'https://accounts.zoho.com/oauth/v2/token',
+    'https://www.zohoapis.com/crm/v2/Leads',
+    'https://developer.nylas.com/docs/',
+    'https://api.fastmail.com.example.com/jmap/api/',
+  ])('leaves %s alone, which is not a mailbox API host', (url) => {
+    expect(isMailProviderTarget(url)).toBe(false);
+  });
+
   it('refuses every path on a sending service, in any spelling of its host', () => {
     expect(isMailProviderTarget('https://api.sendgrid.com/v3/marketing/singlesends/1/schedule')).toBe(true);
     expect(isMailProviderTarget('https://API.Resend.com./emails/batch')).toBe(true);

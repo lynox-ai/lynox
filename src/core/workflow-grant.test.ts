@@ -88,6 +88,11 @@ describe('the shape of a reviewed grant on a saved workflow', () => {
     expect(built).toEqual({ error: expect.stringContaining('mail API') });
   });
 
+  it('refuses a mailbox API in the entry', () => {
+    const built = buildReviewedContract({ method: 'POST', host: 'api.fastmail.com', paths: ['/jmap/api/'] }, [], {});
+    expect(built).toEqual({ error: expect.stringContaining('mail API') });
+  });
+
   it('refuses a sending service in the entry', () => {
     const built = buildReviewedContract({ method: 'POST', host: 'api.sendgrid.com', paths: ['/v3/mail/send'] }, [], {});
     expect(built).toEqual({ error: expect.stringContaining('mail API') });
@@ -283,6 +288,14 @@ describe('what a reviewed grant admits at dispatch', () => {
       hostPatterns: ['api.resend.com'], pathPatterns: ['/emails'], paramConstraints: {},
     };
     expect(contractGrants('http_request', { url: 'https://api.resend.com/emails', method: 'POST' }, sender)).toBe(false);
+  });
+
+  it('never grants a mailbox API, though the contract names it exactly', () => {
+    const mailbox: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+      hostPatterns: ['mail.zoho.eu'], pathPatterns: ['/api/accounts/1/messages'], paramConstraints: {},
+    };
+    expect(contractGrants('http_request', { url: 'https://mail.zoho.eu/api/accounts/1/messages', method: 'POST' }, mailbox)).toBe(false);
   });
 });
 
