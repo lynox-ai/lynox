@@ -2719,8 +2719,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
     // session — there the person who set the mandate up gives each approval, and the approval
     // is what protects the account against an injected instruction (PRD
-    // customer-granted-operator-access 4.11). A grant covers neither a table path nor, for a
-    // mandate, anything H2b refused above.
+    // customer-granted-operator-access 4.11). A grant covers neither a table path nor a write
+    // to a connected account, for the owner and a mandate alike (`contractGrantsWrite` below).
     //
     // An override of the same rank as the method (a POST that says PATCH) is gated as the
     // override, but a server that ignores it runs the method that is sent, and one that reads an

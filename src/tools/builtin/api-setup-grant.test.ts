@@ -3886,6 +3886,7 @@ describe('mandates and stored credentials', () => {
     const req = { url: 'https://api.crm.example./v1/contacts', method: 'POST', body: '{}' };
     const asMandate = await send([presetProfile()], vault(SEED), req, mandate);
     const asOwner = await send([presetProfile()], vault(SEED), req, OWNER_PRINCIPAL);
+    expect(asOwner.calls.some((c) => c.url.startsWith('https://api.crm.example./'))).toBe(true);
     expect(asMandate.calls).toEqual(asOwner.calls);
     expect(asMandate.calls.find((c) => c.url.startsWith('https://api.crm.example'))?.auth).toBeUndefined();
   });

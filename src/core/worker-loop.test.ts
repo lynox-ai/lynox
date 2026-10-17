@@ -3908,11 +3908,15 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(session.run).toHaveBeenCalledTimes(1);
   });
 
-  it('a stamped schedule the mandate set up, fired by the schedule after the grant ended, runs as the owner (its writes then meet B9, not the mandate lock)', async () => {
+  // The run's principal does not depend on whether the grant is live: a schedule fire has no
+  // hand starter, so it is the owner's either way. After the end, its writes to the mandate's own
+  // connection meet B9 (http.test.ts); its writes elsewhere are the owner's, asked of the owner.
+  it.each([['after the grant ended', false], ['while the grant is live', true]] as const)(
+    'a stamped schedule the mandate set up, fired by the schedule %s, runs as the owner', async (_when, live) => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
     const { loop, engine, session } = setup(task);
-    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => live });
     await (loop as unknown as Exec).executeTask(task, null);
     expect(session.run).toHaveBeenCalledTimes(1);
     expect(sessionOptsOf(engine)?.['principal']).toBeUndefined();
