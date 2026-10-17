@@ -366,7 +366,7 @@ export function reviewedContractShapeError(contract: CapabilityContract, steps: 
   for (const path of paths) {
     if (!isLiteralReviewedPath(path)) return `path "${path}" is not a literal absolute path.`;
     if (isMailProviderTarget(`https://${host}${path}`)) {
-      return `https://${host}${path} is a mail API, and mail leaves the instance only once it is confirmed in the chat.`;
+      return `https://${host}${path} is a mail provider's API, and a grant does not cover it. To send from this mailbox, send from the chat, where lynox asks before each email.`;
     }
   }
   const referenced = new Set<string>();

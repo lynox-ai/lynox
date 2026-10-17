@@ -12,19 +12,42 @@
  *
  * The list names the mail APIs a bulk run refuses: Gmail on every Google host that
  * serves it, the legacy Outlook REST hosts, the mailbox and calendar resources of
- * Microsoft Graph, and the API hosts of the sending services SendGrid, Mailgun, Postmark,
- * Resend and Brevo. Graph also serves files, chats and directories: a name that only means
- * a mailbox is refused wherever it stands, a name that also means something else only
- * right after its owner (`me`, `users/{id}`, `groups/{id}`). Other services' calendars,
- * shares and invitations are not in this list. Hosts and paths are
+ * Microsoft Graph, the mailbox APIs of Fastmail, Zoho Mail and Nylas, and the API hosts of
+ * the sending services SendGrid, Mailgun, Postmark, Resend and Brevo. Graph also serves
+ * files, chats and directories: a name that only means a mailbox is refused wherever it
+ * stands, a name that also means something else only right after its owner (`me`,
+ * `users/{id}`, `groups/{id}`). Fastmail, Zoho Mail and Nylas are refused as a whole host,
+ * so their contacts, calendars and organisation endpoints go with their mail. Other
+ * services' calendars, shares and invitations are not in this list. Hosts and paths are
  * compared lower-cased and percent-decoded, so a spelling of a resource is that resource.
  */
 
-/** Hosts whose whole API is mail and calendar, or a service that sends mail. */
+/** Hosts refused as a whole: a mail API whose other endpoints go with it, or a service
+ *  that sends mail. */
 const MAIL_HOSTS: ReadonlySet<string> = new Set([
   // The legacy Outlook REST API: mail, and calendars whose changes send invitations.
   'outlook.office.com',
   'outlook.office365.com',
+  // Mailbox APIs: each sends from a person's own mailbox. Zoho Mail answers on one host per
+  // data centre, and Nylas v3 has a US and an EU host and its retired v2 two more, each as
+  // the provider documents it. Fastmail's JMAP session hands out the URL every method is
+  // sent to, and no Fastmail page names its host, so its API host and its JMAP host are
+  // both refused; with one URL for every method, no path there is anything but mail.
+  'api.fastmail.com',
+  'jmap.fastmail.com',
+  'mail.zoho.com',
+  'mail.zoho.eu',
+  'mail.zoho.in',
+  'mail.zoho.com.au',
+  'mail.zoho.jp',
+  'mail.zoho.com.cn',
+  'mail.zoho.ae',
+  'mail.zoho.sa',
+  'mail.zohocloud.ca',
+  'api.us.nylas.com',
+  'api.eu.nylas.com',
+  'api.nylas.com',
+  'ireland.api.nylas.com',
   // Sending services, each host as its provider documents it. Every write on these can make
   // the service send mail (a message, a campaign, a scheduled batch), so the whole host is
   // refused; their account and contact endpoints go with it.
@@ -139,7 +162,7 @@ export function isMailProviderTarget(url: string): boolean {
   } catch {
     return false;
   }
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  const host = parsed.hostname.toLowerCase().replace(/\.+$/, '');
   if (MAIL_HOSTS.has(host)) return true;
   const segments = segmentsOf(parsed.pathname);
   if (host === 'googleapis.com' || host.endsWith('.googleapis.com')) {
