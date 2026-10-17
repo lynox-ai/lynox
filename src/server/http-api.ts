@@ -35,7 +35,7 @@ import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
-import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
+import { stripUntrustedSeparators, attachmentDisposition, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { ambientCrossSiteRefusal, crossSiteWriteRefusal, droppedAllowedOrigins, droppedAllowedOriginWarning, hostRefusal, isOwnOriginByAddress, normalizeAllowedOrigins } from './cross-site-write.js';
@@ -12544,6 +12544,20 @@ export class LynoxHTTPApi {
       return resolveFileAreaPath(filePath);
     }
 
+    /** Sends `stream` as an answer whose Content-Length is `size`. A file that shrank after its
+     *  size was read would end the answer short, and the client would wait for bytes that never
+     *  come: the answer is broken off instead. pipeline also destroys the stream, and so closes
+     *  the fd, when the client goes away. */
+    async function sendExactly(stream: NodeJS.ReadableStream, res: ServerResponse, size: number): Promise<void> {
+      const { pipeline, Transform } = await import('node:stream');
+      let seen = 0;
+      const count = new Transform({
+        transform(chunk: Buffer, _enc, done) { seen += chunk.length; done(null, chunk); },
+        flush(done) { done(seen < size ? new Error('The file shrank during the download') : null); },
+      });
+      pipeline(stream, count, res, () => {});
+    }
+
     this.addStatic('user', 'GET /api/files/download', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
@@ -12563,13 +12577,13 @@ export class LynoxHTTPApi {
             try {
               res.writeHead(200, {
                 'Content-Type': 'application/octet-stream',
-                'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(basename(target.shown))}"`,
+                'Content-Disposition': attachmentDisposition(basename(target.shown)),
                 'Content-Length': size,
               });
               // Bounded by the size answered in Content-Length, also when the file grows.
               if (size > 0) stream = createReadStream('', { fd, start: 0, end: size - 1, autoClose: true });
             } catch (err) {
-              // Nothing owns the fd yet (a header Node refuses, e.g. a name it cannot carry).
+              // Nothing owns the fd yet (a header Node refuses).
               closeSync(fd);
               throw err;
             }
@@ -12577,9 +12591,7 @@ export class LynoxHTTPApi {
               closeSync(fd);
               res.end();
             } else {
-              // pipeline destroys the stream, and so closes the fd, when the client goes away.
-              const { pipeline } = await import('node:stream');
-              pipeline(stream, res, () => {});
+              await sendExactly(stream, res, size);
             }
             return;
           }
@@ -12595,10 +12607,12 @@ export class LynoxHTTPApi {
         const name = basename(resolved);
         res.writeHead(200, {
           'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(name)}"`,
+          'Content-Disposition': attachmentDisposition(name),
           'Content-Length': st.size,
         });
-        createReadStream(resolved).pipe(res);
+        // Bounded by the size answered in Content-Length, also when the file grows.
+        if (st.size === 0) { res.end(); return; }
+        await sendExactly(createReadStream(resolved, { start: 0, end: st.size - 1 }), res, st.size);
       } catch {
         errorResponse(res, 404, 'File not found');
       }

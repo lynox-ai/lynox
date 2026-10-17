@@ -2,11 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, o
 import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
-import { request as httpRequest, ServerResponse, type Server } from 'node:http';
+import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -546,6 +546,45 @@ function repayRateWindow(): void {
   const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   const before = new Map([...window].map(([k, v]) => [k, v.count]));
   onTestFinished(() => { for (const [k, e] of window) e.count = before.get(k) ?? 0; });
+}
+
+/**
+ * A download whose file is changed on disk once the first bytes have arrived. Says how the
+ * client saw the answer end: `complete` (the body as announced), `broken` (cut off or not
+ * parseable), or `waiting` (still open after `waitMs`: a client left hanging). The connection is
+ * kept alive, as a browser keeps it: a closing connection would end a short answer by itself.
+ */
+function downloadWhileChanging(path: string, change: () => void, waitMs = 3000): Promise<{ outcome: 'complete' | 'broken' | 'waiting'; announced: number; received: number }> {
+  return new Promise((settle) => {
+    let received = 0;
+    let announced = -1;
+    let changed = false;
+    const agent = new HttpAgent({ keepAlive: true });
+    const done = (outcome: 'complete' | 'broken' | 'waiting'): void => { clearTimeout(timer); agent.destroy(); settle({ outcome, announced, received }); };
+    const req = httpRequest(`${baseUrl}${path}`, { headers: authHeaders(), agent }, (r) => {
+      announced = Number(r.headers['content-length']);
+      r.on('data', (c: Buffer) => { received += c.length; if (!changed) { changed = true; change(); } });
+      // A response that completes and is then followed by bytes the parser refuses is broken too.
+      r.on('end', () => { if (!r.complete) done('broken'); else setTimeout(() => done('complete'), 200); });
+      r.on('error', () => done('broken'));
+    });
+    req.on('error', () => done('broken'));
+    const timer = setTimeout(() => { req.destroy(); agent.destroy(); settle({ outcome: 'waiting', announced, received }); }, waitMs);
+    req.end();
+  });
+}
+
+/** Counts the body bytes the server writes into responses, until `restore`. A client stops
+ *  reading at Content-Length, so what a server sends beyond it shows only here. */
+function countResponseBytes(): { bytes: () => number; restore: () => void } {
+  let bytes = 0;
+  const original = ServerResponse.prototype.write;
+  const spy = vi.spyOn(ServerResponse.prototype, 'write').mockImplementation(function (this: ServerResponse, ...args: Parameters<typeof original>) {
+    const chunk: unknown = args[0];
+    if (typeof chunk === 'string' || chunk instanceof Uint8Array) bytes += Buffer.byteLength(chunk);
+    return original.apply(this, args);
+  });
+  return { bytes: () => bytes, restore: () => spy.mockRestore() };
 }
 
 /**
@@ -13079,6 +13118,63 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    it('downloads a file whose name is outside Latin-1, under that name', async () => {
+      repayRateWindow();
+      writeFileSync(join(base, 'safe', '日本語.txt'), 'x');
+      try {
+        const dl = await jsonFetch(`/api/files/download?path=${encodeURIComponent('safe/日本語.txt')}`);
+        expect([dl.status, dl.headers.get('content-disposition'), await dl.text()])
+          .toEqual([200, `attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`, 'x']);
+      } finally { rmSync(join(base, 'safe', '日本語.txt'), { force: true }); }
+    });
+
+    it('downloads an empty file as an empty answer', async () => {
+      repayRateWindow();
+      writeFileSync(join(base, 'safe', 'empty.txt'), '');
+      try {
+        const dl = await jsonFetch('/api/files/download?path=safe/empty.txt');
+        expect([dl.status, dl.headers.get('content-length'), await dl.text()]).toEqual([200, '0', '']);
+      } finally { rmSync(join(base, 'safe', 'empty.txt'), { force: true }); }
+    });
+
+    it('closes the file when the client goes away during a download', async () => {
+      repayRateWindow();
+      const big = join(base, 'safe', 'big-plain.bin');
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), big]);
+      const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+      try {
+        for (let i = 0; i < 5; i++) {
+          await new Promise<void>((done) => {
+            const req = httpRequest(`${baseUrl}/api/files/download?path=safe/big-plain.bin`, { headers: authHeaders() }, (r) => {
+              r.once('data', () => { r.destroy(); req.destroy(); done(); });
+            });
+            req.on('error', () => done());
+            req.end();
+          });
+        }
+        await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big-plain.bin'))).toEqual([]), { timeout: 5000 });
+      } finally { rmSync(big, { force: true }); }
+    });
+
+    it('breaks off a download whose file shrinks, and sends no more than announced when it grows', async () => {
+      repayRateWindow();
+      const file = join(base, 'safe', 'changing.bin');
+      try {
+        execFileSync('truncate', ['-s', String(64 * 1024 * 1024), file]);
+        const shrunk = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => truncateSync(file, 1));
+        expect([shrunk.outcome, shrunk.announced]).toEqual(['broken', 64 * 1024 * 1024]);
+        expect(shrunk.received).toBeLessThan(shrunk.announced);
+        execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
+        const counted = countResponseBytes();
+        let grown;
+        try {
+          grown = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => appendFileSync(file, Buffer.alloc(1024 * 1024)));
+        } finally { counted.restore(); }
+        expect(counted.bytes()).toBe(20 * 1024 * 1024);
+        expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
+      } finally { rmSync(file, { force: true }); }
+    });
+
     // Root reads through mode bits, so the fixture cannot fail there: skipped, visibly.
     it.skipIf(process.getuid?.() === 0)('answers an unreadable directory with 500, not an empty listing', async () => {
       const locked = join(base, 'locked');
@@ -13195,12 +13291,29 @@ describe('LynoxHTTPApi', () => {
 
     const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
-    it('closes the open file when the answer cannot be sent, e.g. a name a header cannot carry', async () => {
+    it('downloads a file whose name is outside Latin-1, under that name', async () => {
       repayRateWindow();
       writeFileSync(join(ws, '日本語.txt'), 'x');
-      const before = openFds().filter((l) => l.endsWith('日本語.txt')).length;
-      for (let i = 0; i < 10; i++) expect(await status(`/api/files/download?path=${q('日本語.txt')}`)).toBe(404);
-      expect(openFds().filter((l) => l.endsWith('日本語.txt')).length).toBe(before);
+      const dl = await jsonFetch(`/api/files/download?path=${q('日本語.txt')}`);
+      expect([dl.status, dl.headers.get('content-disposition'), await dl.text()])
+        .toEqual([200, `attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`, 'x']);
+    });
+
+    it('closes the open file when the answer cannot be sent', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, 'once.txt'), 'x');
+      const before = openFds().filter((l) => l.endsWith('once.txt')).length;
+      // The header write is what fails, as Node does for a header value it refuses.
+      const writeHead = vi.spyOn(ServerResponse.prototype, 'writeHead');
+      try {
+        for (let i = 0; i < 10; i++) {
+          writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
+          expect(await status('/api/files/download?path=once.txt')).toBe(404);
+        }
+      } finally {
+        writeHead.mockRestore();
+      }
+      expect(openFds().filter((l) => l.endsWith('once.txt')).length).toBe(before);
     });
 
     it('closes the open file when the client goes away during a download', async () => {
@@ -13216,6 +13329,23 @@ describe('LynoxHTTPApi', () => {
         });
       }
       await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big.bin'))).toEqual([]), { timeout: 5000 });
+    });
+
+    it('breaks off a download whose file shrinks, and sends no more than announced when it grows', async () => {
+      repayRateWindow();
+      const file = join(ws, 'changing.bin');
+      execFileSync('truncate', ['-s', String(64 * 1024 * 1024), file]);
+      const shrunk = await downloadWhileChanging('/api/files/download?path=changing.bin', () => truncateSync(file, 1));
+      expect([shrunk.outcome, shrunk.announced]).toEqual(['broken', 64 * 1024 * 1024]);
+      expect(shrunk.received).toBeLessThan(shrunk.announced);
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
+      const counted = countResponseBytes();
+      let grown;
+      try {
+        grown = await downloadWhileChanging('/api/files/download?path=changing.bin', () => appendFileSync(file, Buffer.alloc(1024 * 1024)));
+      } finally { counted.restore(); }
+      expect(counted.bytes()).toBe(20 * 1024 * 1024);
+      expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
     });
 
     it('counts an unaddressable name only when it is shown, and makes a missing workspace', async () => {
