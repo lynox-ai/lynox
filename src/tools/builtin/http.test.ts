@@ -970,6 +970,8 @@ describe('httpRequestTool', () => {
       // prompts, so the consent prompt is no bar to a write on an account the owner connected.
       describe('a mandate and an account connected through a preset', () => {
         const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org' };
+        const MANDATE_TAG = 'mandate:setup@example.org';
+        const MANDATE_GRANT = { connected_by: MANDATE_TAG, connected_mandate_id: 'M-1' };
         async function withProfile(presetId: string | undefined): Promise<void> {
           const { ApiStore } = await import('../../core/api-store.js');
           const store = new ApiStore();
@@ -1045,6 +1047,59 @@ describe('httpRequestTool', () => {
             makeAgent({ capabilityContract: contract, principal: mandate }),
           );
           expect(fetchMock).toHaveBeenCalled();
+        });
+
+        // After a mandate ends, its own connection hands out no token to anyone (§3.13 B9, the
+        // guard the engine installs at boot), whoever runs: a schedule the mandate set up and the
+        // owner stamped fires as the owner (worker-loop.test.ts, "fired by the schedule after the
+        // grant ended"), so the mandate lock is not what holds it, and the owner's Allow does not
+        // open it. Only `live` changes between the first two rows. The owner's own connection is
+        // untouched by a mandate's end.
+        it.each([
+          ['an owner run on the mandate\'s own connection after the mandate ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'POST', 'owner', false],
+          ['control: an owner run on the mandate\'s own connection while the mandate is live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'POST', 'owner', true],
+          ['control: an owner run on the owner\'s own connection is untouched by a mandate\'s end', { connected_by: 'owner' }, undefined, false, 'POST', 'owner', true],
+          ['control: the mandate\'s read of its own connection while live sends its token', MANDATE_GRANT, MANDATE_TAG, true, 'GET', 'mandate', true],
+          ['the mandate\'s read of its own connection after it ended sends no token', MANDATE_GRANT, MANDATE_TAG, false, 'GET', 'mandate', false],
+        ] as const)('%s', async (_label, grant, author, live, method, who, sent) => {
+          const { ApiStore } = await import('../../core/api-store.js');
+          const { connectionTokenAllowed } = await import('../../core/profile-secret-view.js');
+          const store = new ApiStore();
+          store.register({
+            id: 'shop-api', name: 'Shop', base_url: 'https://example.com/v1', description: 'Shop API',
+            ...(author ? { created_by: author } : {}),
+            custom_endpoint_ack: { accepted: true, hosts: ['example.com'], accepted_at: '2026-10-01T00:00:00.000Z' },
+            auth: {
+              type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID', 'SHOP_CLIENT_SECRET'],
+              oauth: { grant_type: 'refresh_token', client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', preset_id: 'example-shop', preset_params: { shop: 'acme' } },
+            },
+            oauth_grant: { origin: 'callback', state: 'connected', ...grant } as never,
+          } as never);
+          const values: Record<string, string> = { SHOP_API_ACCESS_TOKEN: 'tok-value', SHOP_API_REFRESH_TOKEN: 'ref-value', SHOP_CLIENT_ID: 'cid', SHOP_CLIENT_SECRET: 'csec' };
+          const ends = { isLive: () => live };
+          testCtx.apiStore = store;
+          (testCtx as { mandateEnds?: unknown }).mandateEnds = ends;
+          // The vault as the engine builds it: the B9 guard in front of every resolve.
+          const vault = {
+            resolve: (n: string) => (connectionTokenAllowed(store, ends as never, n) ? (values[n] ?? null) : null),
+            getSecretNames: () => Object.keys(values),
+            maskSecrets: (t: string) => t,
+            isEnvironmentSecret: () => false,
+          };
+          mockDnsPublic();
+          const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+          vi.stubGlobal('fetch', fetchMock);
+          const principal: RequestPrincipal | undefined = who === 'mandate' ? { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' } : undefined;
+          await visible(
+            { url: 'https://example.com/v1/report', method, ...(method === 'POST' ? { body: '{}' } : {}) },
+            { ...(makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), ...(principal ? { principal } : {}) }) as object), secretStore: vault } as never,
+          );
+          const authSent = fetchMock.mock.calls.map((c) => new Headers((c[1] as { headers?: HeadersInit })?.headers).get('authorization'));
+          if (sent) {
+            expect(authSent).toEqual(['Bearer tok-value']);
+          } else {
+            expect(fetchMock).not.toHaveBeenCalled();
+          }
         });
       });
 

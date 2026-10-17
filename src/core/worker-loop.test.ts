@@ -3908,6 +3908,17 @@ describe('hand runs carry the starter\'s principal', () => {
     expect(session.run).toHaveBeenCalledTimes(1);
   });
 
+  it('a stamped schedule the mandate set up, fired by the schedule after the grant ended, runs as the owner (its writes then meet B9, not the mandate lock)', async () => {
+    vi.useRealTimers();
+    const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner' });
+    const { loop, engine, session } = setup(task);
+    (engine as unknown as { getMandateEnds: () => unknown }).getMandateEnds = () => ({ isLive: () => false });
+    await (loop as unknown as Exec).executeTask(task, null);
+    expect(session.run).toHaveBeenCalledTimes(1);
+    expect(sessionOptsOf(engine)?.['principal']).toBeUndefined();
+    expect(runOptsOf(session)?.['principal']).toBeUndefined();
+  });
+
   it('a run the mandate started is not retried when it fails, and is the mandate\'s while it runs', async () => {
     vi.useRealTimers();
     const task = runAgentRow({ confirmed_at: '2026-10-01T00:00:00.000Z', confirmed_by: 'owner', max_retries: 2, retry_count: 0 });
