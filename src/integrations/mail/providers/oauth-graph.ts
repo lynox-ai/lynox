@@ -57,7 +57,8 @@ import {
   type MailWatchHandler,
   type MailWatchOptions,
 } from '../provider.js';
-import { graphFetch } from '../../../core/connector-egress.js';
+import { GRAPH_API_HOSTS, graphFetch } from '../../../core/connector-egress.js';
+import { assertHostPolicy } from '../../../core/network-guard.js';
 import { buildRfc2822 } from '../mime-compose.js';
 import { htmlToTextSnippet, isAutoSubmittedHeader } from './imap-smtp.js';
 
@@ -73,7 +74,11 @@ const DEFAULT_WATCH_MAX_PER_TICK = 50;
 const WATCH_MAX_PAGES_PER_TICK = 10;
 const WATCH_DEDUP_MAX = 1_000;
 const SNIPPET_CHARS = 500;
-/** Same bound as the IMAP provider's MAX_BODY_BYTES, counted in characters here. */
+/**
+ * The same 10 MB as the IMAP provider's MAX_BODY_BYTES, counted in characters. It bounds what
+ * `fetch` RETURNS, not what is downloaded: Graph sends the whole body and it is read in full
+ * first, where IMAP stops the download itself.
+ */
 const MAX_BODY_CHARS = 10 * 1024 * 1024;
 /** Graph throttling: at most 4 concurrent requests per app and mailbox. */
 export const GRAPH_MAX_CONCURRENT_REQUESTS = 4;
@@ -726,14 +731,19 @@ export class OAuthGraphProvider implements MailProvider {
   async probeMailbox(): Promise<GraphMailboxProbe> {
     this.assertOpen();
     const token = await this.auth.getAccessToken();
+    const url = `${GRAPH_ME}/mailFolders/inbox?${odataQuery([['$select', 'id']])}`;
+    // The host policy is asked HERE, on its own, before the request: a refusal is
+    // permanent until the operator changes the policy, so it throws. Everything
+    // the request itself throws — DNS, a broken redirect, the network — stays
+    // `transient`, whatever its wording. Matching the error text instead would
+    // tie this to `network-guard.ts`'s strings, and DNS failures there begin with
+    // the same `Blocked:` as a policy refusal.
+    assertHostPolicy(url, { surface: 'connector', hosts: GRAPH_API_HOSTS }, this.auth.hostPolicy);
     let res: Response;
     try {
-      res = await this.limiter.run(() => this.fetchWithToken(
-        `${GRAPH_ME}/mailFolders/inbox?${odataQuery([['$select', 'id']])}`, { method: 'GET' }, token));
+      res = await this.limiter.run(() => this.fetchWithToken(url, { method: 'GET' }, token));
     } catch (err) {
       if (this.closed) throw err;
-      // A host-policy refusal is permanent until the operator changes the policy.
-      if (err instanceof Error && err.message.startsWith('Blocked:')) throw err;
       return { state: 'transient' };
     }
     if (res.ok) return { state: 'ok' };
@@ -904,7 +914,15 @@ export class OAuthGraphProvider implements MailProvider {
     // The body is read HERE, inside the limiter's slot: the pinned transport
     // streams it, and Graph counts a request as concurrent until its response is
     // complete. Released at the headers, four slots could carry eight downloads.
-    const text = await res.text();
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      // A failure answer keeps its status even when its body cannot be read: a 429
+      // must still pause and a 410 still restart. A success needs its body.
+      if (res.ok) throw err;
+      text = '';
+    }
     return new Response(text === '' || res.status === 204 || res.status === 205 ? null : text, {
       status: res.status,
       headers: res.headers,

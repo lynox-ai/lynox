@@ -15,6 +15,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import { installPinnedFetchBridge, dnsLookupStub } from '../../../../tests/helpers/pinned-fetch-bridge.js';
+import dns from 'node:dns/promises';
 import { describeMimeSend } from '../../../../tests/helpers/mime-send-suite.js';
 
 // The provider reaches Graph through `graphFetch` → the pinned transport; the bridge hands
@@ -912,11 +913,56 @@ describe('OAuthGraphProvider — review fixes', () => {
     await provider.close();
   });
 
-  it('the probe throws a host-policy refusal instead of calling it transient', async () => {
-    const denyAll: HostPolicyContext = { networkPolicy: 'deny-all', allowedHosts: undefined, allowedWildcards: [], enforceHttps: false };
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: denyAll }));
-    await expect(provider.probeMailbox()).rejects.toThrow(/^Blocked:/);
-    expect(fetchMock).not.toHaveBeenCalled();
+  const policy = (p: string, hosts?: string[]): HostPolicyContext => ({
+    networkPolicy: p as HostPolicyContext['networkPolicy'],
+    allowedHosts: hosts ? new Set(hosts) : undefined,
+    allowedWildcards: [],
+    enforceHttps: false,
+  });
+
+  for (const [label, ctx, message] of [
+    ['deny-all', policy('deny-all'), /network_policy=deny-all/],
+    ['an allow-list without Graph', policy('allow-list', ['example.org']), /not in network allow-list/],
+    ['an unknown policy value', policy('no-such-policy'), /unrecognised egress policy/],
+  ] as const) {
+    it(`the probe throws a host-policy refusal (${label}) instead of calling it transient`, async () => {
+      const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: ctx }));
+      await expect(provider.probeMailbox()).rejects.toThrow(message);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it('…while a DNS failure, whose message also begins with "Blocked:", stays transient', async () => {
+    vi.mocked(dns.lookup).mockResolvedValueOnce([] as never);
+    routes.push(() => json({ id: 'inbox-id' }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: policy('guarded') }));
+    expect(await provider.probeMailbox()).toEqual({ state: 'transient' });
+    expect(fetchMock, 'the request never left: DNS refused it').not.toHaveBeenCalled();
+  });
+
+  it('…and so does a broken redirect from Graph', async () => {
+    routes.push(() => new Response(null, { status: 302 }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: policy('guarded') }));
+    expect(await provider.probeMailbox()).toEqual({ state: 'transient' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 429 whose body cannot be read still pauses the watch', async () => {
+    routes.push((url) => {
+      if (!url.includes('/messages/delta')) return undefined;
+      const broken = new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('connection reset')); } });
+      return new Response(broken, { status: 429, headers: { 'Retry-After': '3600' } });
+    });
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const events: MailWatchEvent[] = [];
+    const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
+    await vi.waitFor(() => { expect(events.length).toBe(1); });
+    await new Promise((r) => setTimeout(r, 80));
+    await handle.stop();
+    await provider.close();
+    expect(events[0]).toMatchObject({ type: 'error' });
+    expect((events[0] as { error: MailError }).error.code).toBe('rate_limited');
+    expect(fetchMock, 'paused: one request over eight intervals').toHaveBeenCalledTimes(1);
   });
 
   it('a message id that is a dot-segment is refused before any request', async () => {
