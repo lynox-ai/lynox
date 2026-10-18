@@ -55,10 +55,21 @@ export function readRunStop(msg: BetaMessageParam): RunStop | undefined {
   return (msg as WithStop)[RUN_STOP];
 }
 
+/**
+ * The text the model reads. It names neither the repeated tool nor its input:
+ * both are model-authored (a web page or mail can steer them), and this text goes
+ * out in the user's role. The repeated calls are right above it in the kept
+ * `tool_use` blocks, where they stay the model's own words. `detail` stays on the
+ * display note for the person reading the chat.
+ *
+ * `run_interrupted` covers a user stop, the wall-clock backstop and a stale-run
+ * takeover alike, so the text does not say who stopped it.
+ */
 export function runStopText(stop: RunStop): string {
-  return stop.code === 'tool_loop_break'
-    ? `[This run was stopped by lynox because the same tool call kept repeating (${stop.detail ?? 'repeated call'}). Do not repeat that call; the steps above are kept.]`
-    : '[This run was stopped by the user before it finished. The steps above are kept.]';
+  if (stop.code === 'tool_loop_break') {
+    return '[This run was stopped because the same tool call above kept repeating without progress. Do not repeat that call; the steps above are kept.]';
+  }
+  return '[This run was interrupted before it finished. The steps above are kept.]';
 }
 
 /**
@@ -135,8 +146,9 @@ export function runStopFromNoteRow(row: Pick<ThreadMessageRecord, 'role' | 'cont
  * The model's history from stored rows: the API rows, in order, with each stop
  * note attached to the API row right before it (by seq). `apiRows` are the
  * thread's API rows, `noteRows` its display-only rows (either may be a superset;
- * each row is judged by its own `display_only`). A note whose preceding API row
- * is not a user message attaches nowhere (the prefix it names is not there).
+ * each row is judged by its own `display_only`). The engine writes the note right
+ * after the kept prefix, which ends on a user message; were it ever to follow an
+ * assistant row, `applyRunStops` adds nothing there (it only extends user messages).
  */
 export function hydrateApiMessages(
   apiRows: readonly ThreadMessageRecord[],
@@ -149,7 +161,7 @@ export function hydrateApiMessages(
     if (r.display_only === 1) {
       const stop = runStopFromNoteRow(r);
       const prev = out[out.length - 1];
-      if (stop !== null && prev !== undefined && prev.role === 'user') out[out.length - 1] = withRunStop(prev, stop);
+      if (stop !== null && prev !== undefined) out[out.length - 1] = withRunStop(prev, stop);
       continue;
     }
     out.push({

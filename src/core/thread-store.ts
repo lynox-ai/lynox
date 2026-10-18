@@ -404,17 +404,24 @@ export class ThreadStore {
    * The disk side of a stop that keeps its completed prefix (run-stop.ts): of the
    * API rows from `fromSeq` on, the first `keep` stay in the model's context and
    * the rest (the unfinished step) turn display-only. Returns how many flipped.
+   *
+   * The count starts at the run's QUESTION row, found by its content, not at
+   * `fromSeq`: when the durable write of the question failed, rows an earlier
+   * failed persist left unwritten land first, from `fromSeq` on. Without the
+   * question row on disk the count starts at `fromSeq`.
    */
-  markDisplayOnlyAfterApiRows(threadId: string, fromSeq: number, keep: number): { marked: number } {
+  markDisplayOnlyAfterApiRows(threadId: string, fromSeq: number, keep: number, questionJson?: string): { marked: number } {
     const rows = this.db.prepare(
-      'SELECT seq FROM thread_messages WHERE thread_id = ? AND seq >= ? AND display_only = 0 ORDER BY seq ASC',
-    ).all(threadId, fromSeq) as Array<{ seq: number }>;
-    const first = rows[Math.max(0, keep)];
+      'SELECT seq, role, content_json FROM thread_messages WHERE thread_id = ? AND seq >= ? AND display_only = 0 ORDER BY seq ASC',
+    ).all(threadId, fromSeq) as Array<{ seq: number; role: string; content_json: string }>;
+    const q = questionJson === undefined ? -1 : rows.findIndex((r) => r.role === 'user' && r.content_json === questionJson);
+    const cut = Math.max(0, q) + Math.max(0, keep);
+    const first = rows[cut];
     if (first === undefined) return { marked: 0 };
     this.db.prepare(
       'UPDATE thread_messages SET display_only = 1 WHERE thread_id = ? AND seq >= ? AND display_only = 0',
     ).run(threadId, first.seq);
-    return { marked: rows.length - Math.max(0, keep) };
+    return { marked: rows.length - cut };
   }
 
   /** Display-only assistant rows that are notes — the rows `hydrateApiMessages`

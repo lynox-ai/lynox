@@ -1532,6 +1532,9 @@ export class Agent implements IAgent {
    * message with the stop. False when the question is no longer in the array.
    */
   private _keepCompletedPrefix(userTurn: BetaMessageParam, stop: RunStop): boolean {
+    // An internal run (the compaction summary) is not a turn of the chat: its prompt
+    // must not stay in the context with a stop on it. Its callers roll back as before.
+    if (this.isInternalRun) return false;
     const qIdx = this.messages.lastIndexOf(userTurn);
     if (qIdx < 0) return false;
     const end = completedPrefixEnd(this.messages, qIdx);

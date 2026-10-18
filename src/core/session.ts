@@ -1629,6 +1629,7 @@ export class Session {
       persistFailedTurnDisplay({
         kept: keepCount === null || !runAgent ? undefined : {
           count: keepCount,
+          questionJson: JSON.stringify(userContent),
           unpersisted: runAgent.getUnpersistedTail(),
           onPersisted: (n) => runAgent.markPersisted(n),
         },
