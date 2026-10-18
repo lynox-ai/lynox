@@ -2408,7 +2408,7 @@ ${draftJson}
       // owner, asked like any other delete.
       const unreadableSource = existing ? null : apiStore.unreadableSourceOf(id);
       if (unreadableSource !== null && !isOwnerPrincipal(agent.principal)) {
-        return `Error: "${id}" is a stored API profile that could not be read (${unreadableSource}). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. Ask the owner to delete it.`;
+        return `Error: "${id}" is a stored API profile that could not be read (${unreadableSource}). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. ${apiStore.unreadableClearedByHand(id) ? `Ask the owner to remove the ${unreadableSource} from the API profile directory by hand (its name is no id api_setup delete takes).` : 'Ask the owner to delete it.'}`;
       }
       // ASKED, every time, before anything is removed. A delete takes a working connection and
       // the tokens its sign-in stored, and the person notices only when the connection is gone;

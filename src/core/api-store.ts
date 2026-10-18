@@ -2332,6 +2332,12 @@ export class ApiStore {
     return null;
   }
 
+  /** Whether the unreadable entry under `id` can only be removed by hand: a file whose name is no id. */
+  unreadableClearedByHand(id: string): boolean {
+    for (const e of this.unreadable.values()) if (e.deleteId === id) return clearedByHand(e);
+    return false;
+  }
+
   /** Whether a stored entry the boot could not read or register names `name` ({@link unreadable}). */
   unreadableHolds(name: string): boolean {
     for (const e of this.unreadable.values()) if (e.all || e.names.has(name)) return true;

@@ -321,6 +321,12 @@ describe('deleting an entry the boot could not read', () => {
     expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
   });
 
+  it('tells a mandate to ask the owner to remove by hand a file whose name is no id', async () => {
+    const { store, dir } = boot([placeholder('bad id.json')]);
+    expect(await del(store, vaultOf({}), 'bad id', { principal: mandate('a@example.org') })).toBe('Error: "bad id" is a stored API profile that could not be read (file "bad id.json"). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. Ask the owner to remove the file "bad id.json" from the API profile directory by hand (its name is no id api_setup delete takes).');
+    expect(existsSync(join(dir, 'bad id.json'))).toBe(true);
+  });
+
   it('control: an id with neither a stored profile nor such an entry is answered unasked', async () => {
     const { store } = boot([placeholder('owner.json')]);
     const asked = vi.fn(allow);
