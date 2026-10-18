@@ -7154,33 +7154,44 @@ describe('write approvals per method and host (270)', () => {
     expect(plain).toContain('HTTP 200');
   });
 
-  // A reviewed grant checks only writes, so a GET goes out unchecked unless its override is read:
-  // the header allowlist is no backstop here.
-  const reviewedGetPost: CapabilityContract = {
-    version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
-    hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+  // The handler checks a contract only for writes, so a GET goes out unchecked unless its override
+  // is read: in the handler the reviewed header allowlist is no backstop. Two reviewed grants: one
+  // without DELETE (refused for the method) and one with it, where only the reviewed checks refuse
+  // (the header allowlist, no query on a reviewed write).
+  const reviewedGets: Record<string, CapabilityContract> = {
+    'GET and POST': {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    },
+    'GET, POST and DELETE': {
+      version: 7, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST', 'DELETE'],
+      hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
+    },
   };
+  const raisedRefusal = 'Blocked: outbound DELETE to h.example requires user consent';
 
-  it('a reviewed grant for GET does not cover a GET whose override header raises it to DELETE; the plain GET goes out', async () => {
+  it.each(Object.keys(reviewedGets))('a reviewed grant for %s does not cover a GET whose override header raises it to DELETE; the plain GET goes out', async (grant) => {
+    const contract = reviewedGets[grant]!;
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
-    const raised = await visible({ url: 'https://h.example/v1/a', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, makeAgent({ capabilityContract: reviewedGetPost }));
+    const raised = await visible({ url: 'https://h.example/v1/a', method: 'GET', headers: { 'X-HTTP-Method-Override': 'DELETE' } }, makeAgent({ capabilityContract: contract }));
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(raised).not.toContain('HTTP 200');
-    const plain = await visible({ url: 'https://h.example/v1/a', method: 'GET' }, makeAgent({ capabilityContract: reviewedGetPost }));
+    expect(raised).toContain(raisedRefusal);
+    const plain = await visible({ url: 'https://h.example/v1/a', method: 'GET' }, makeAgent({ capabilityContract: contract }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(plain).toContain('HTTP 200');
   });
 
-  it('a reviewed grant for GET does not cover a GET whose query names _method the way a parser rewrites it; a dotted name goes out', async () => {
+  it.each(Object.keys(reviewedGets))('a reviewed grant for %s does not cover a GET whose query names _method the way a parser rewrites it; ?x.y=1 goes out', async (grant) => {
+    const contract = reviewedGets[grant]!;
     const fetchMock = vi.fn().mockImplementation(async () => ok());
     vi.stubGlobal('fetch', fetchMock);
-    const names = ['.method', '%2Emethod', '+_method', '_method%00x', '_method[x]y', '[_method]'];
-    for (const name of names) {
-      await visible({ url: `https://h.example/v1/a?${name}=DELETE`, method: 'GET' }, makeAgent({ capabilityContract: reviewedGetPost }));
+    for (const name of ['.method', '%2Emethod', '+_method', '_method%00x', '_method[x]y', '[_method]']) {
+      const raised = await visible({ url: `https://h.example/v1/a?${name}=DELETE`, method: 'GET' }, makeAgent({ capabilityContract: contract }));
+      expect(raised, name).toContain(raisedRefusal);
     }
     expect(fetchMock).not.toHaveBeenCalled();
-    const plain = await visible({ url: 'https://h.example/v1/a?x.y=1', method: 'GET' }, makeAgent({ capabilityContract: reviewedGetPost }));
+    const plain = await visible({ url: 'https://h.example/v1/a?x.y=1', method: 'GET' }, makeAgent({ capabilityContract: contract }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(plain).toContain('HTTP 200');
   });
