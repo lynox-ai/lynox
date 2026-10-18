@@ -557,10 +557,11 @@ const MIGRATIONS: string[] = [
   // `DeltaCursor` of `providers/oauth-graph.ts`): the next Graph link and the newest
   // `receivedDateTime` seen. In memory it was lost on every restart, and the watch began again
   // at "now", past everything that arrived while the process was down. It goes with its
-  // account: deleting the account row deletes its cursors. One transaction, as v17.
+  // account: deleting the account row deletes its cursors. One transaction, as v17, and
+  // `IF NOT EXISTS`, as v15: a table already there does not leave the file unopenable.
   `BEGIN;
    INSERT OR IGNORE INTO schema_version (version) VALUES (18);
-   CREATE TABLE mail_delta_cursors (
+   CREATE TABLE IF NOT EXISTS mail_delta_cursors (
      account_id TEXT NOT NULL,
      folder TEXT NOT NULL,
      link TEXT NOT NULL,
@@ -1126,6 +1127,8 @@ export class MailStateDb {
    * accommodate non-mail pseudo-account channels; cascade is now an
    * application invariant we enforce here. Dedup state (processed_mail_messages,
    * mail_followups) is left intact — caller decides whether to forget it.
+   * Rows that still carry an FK onto mail_accounts go through its ON DELETE
+   * CASCADE, the Graph delta cursors (`mail_delta_cursors`) among them.
    */
   deleteAccount(id: string): boolean {
     const txn = this.db.transaction(() => {

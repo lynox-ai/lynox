@@ -995,6 +995,26 @@ describe('MailStateDb — delta cursors (v18)', () => {
     expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
   });
 
+  it('a database at v17 that already has the table still opens and reaches v18', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mail-cursor-pre-'));
+    try {
+      const path = join(dir, 'mail-state.db');
+      new MailStateDb({ path }).close();
+      const raw = new BetterSqlite3(path);
+      raw.exec('DELETE FROM schema_version WHERE version = 18;');
+      raw.close();
+      const reopened = new MailStateDb({ path });
+      try {
+        const conn = (reopened as unknown as { db: BetterSqlite3.Database }).db;
+        expect((conn.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(18);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a database at v17 gains the table on open, and its rows stay', () => {
     const dir = mkdtempSync(join(tmpdir(), 'mail-cursor-v17-'));
     try {
