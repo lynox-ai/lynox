@@ -115,6 +115,7 @@ import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js'
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
+import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** A helper request that is out and has not answered yet — what an abort would leave unbooked. */
 interface AbortableHelperCall { modelId: string; maxTokens: number; request: unknown; stream: unknown }
@@ -3761,6 +3762,9 @@ export class Agent implements IAgent {
         resolvedHost = new URL(String(resolved.url)).host;
       } catch { resolvedHost = undefined; }
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
+      // A Shopify store gets no secret for now (`shopify-host.ts`), approved or not: refused
+      // before any question, since the request tool would refuse the request itself anyway.
+      if (isShopifyAdminHost(parsed.hostname)) return refuse(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
       // A token slot goes only to where its grant points, whoever approved what before: asked
       // before the profile's names and the session's approvals, and refused, never asked.
       const apiStore = this.toolContext.apiStore;

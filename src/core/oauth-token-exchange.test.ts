@@ -261,3 +261,26 @@ describe('a non-2xx is handed back, not interpreted', () => {
     expect(result).toEqual({ ok: true, status: 400, responseOk: false, text: '{"error":"invalid_grant"}' });
   });
 });
+
+// A Shopify store gets no client secret and no grant for now (`shopify-host.ts`), even from an
+// endpoint the profile's acceptance covers. The control posts to another accepted host.
+describe('a token exchange with a Shopify store is refused', () => {
+  it('posts nothing to the store, says why, and posts to another accepted host', async () => {
+    const { SHOPIFY_UNAVAILABLE } = await import('./shopify-host.js');
+    fetchWithValidatedRedirects.mockResolvedValue({ response: { status: 200, ok: true } });
+    readBodyLimited.mockResolvedValue({ text: '{}', truncated: false });
+    const accepted = (url: string) => {
+      const v = vetTokenEndpoint(url, { accepted: true, hosts: [new URL(url).hostname] });
+      if (isTokenEndpointRefused(v)) throw new Error(`fixture is not vetted: ${url}`);
+      return v;
+    };
+    const store = await exchangeToken({ endpoint: accepted('https://shop.myshopify.com./admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
+    expect(store.ok).toBe(false);
+    if (!store.ok) expect(store.message).toBe(`token exchange refused: ${SHOPIFY_UNAVAILABLE}`);
+    expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
+
+    const other = await exchangeToken({ endpoint: accepted('https://shop.example-commerce.com/admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
+    expect(other.ok).toBe(true);
+    expect(fetchWithValidatedRedirects).toHaveBeenCalledTimes(1);
+  });
+});

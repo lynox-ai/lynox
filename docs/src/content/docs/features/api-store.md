@@ -18,11 +18,13 @@ This page documents what's supported today and the curated catalog of free publi
 | API key in query parameter | ✓ | many news / data APIs |
 | Bearer token in `Authorization` header | ✓ | OpenAI, Anthropic, GitHub PAT |
 | Basic auth (user/pass or pre-encoded base64) | ✓ | DataForSEO |
-| OAuth2 `client_credentials` grant (server-to-server) | ✓ | Shopify private apps, Auth0 M2M |
+| OAuth2 `client_credentials` grant (server-to-server) | ✓ | Auth0 M2M |
 | OAuth2 `refresh_token` grant (token already in vault) | ✓ | Google Workspace once token is held |
 | OAuth2 `authorization_code` with browser-redirect / callback URL | **In progress** | "Sign in with Google" / "Connect Slack" buttons — not yet supported |
 
-If an API requires the browser-redirect OAuth flow (the user clicks a button, gets redirected to the provider, and the provider POSTs a code back to your app's callback URL), lynox can't bootstrap it today. This includes most consumer-grade SaaS auth (Google Workspace user-context, Microsoft 365, Slack user-context, Twitter/X, Reddit). Server-to-server OAuth flows like Shopify private apps work fine because they don't involve a user redirect.
+If an API requires the browser-redirect OAuth flow (the user clicks a button, gets redirected to the provider, and the provider POSTs a code back to your app's callback URL), lynox can't bootstrap it today. This includes most consumer-grade SaaS auth (Google Workspace user-context, Microsoft 365, Slack user-context, Twitter/X, Reddit). Server-to-server OAuth flows like Auth0 machine-to-machine work fine because they don't involve a user redirect.
+
+Shopify cannot be connected at the moment: lynox sends no requests and no credentials to Shopify stores (`*.myshopify.com`) while it reworks how Shopify connections are set up.
 
 ## Curated suggestions
 
