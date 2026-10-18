@@ -841,6 +841,29 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
 }
 
 /**
+ * Did a USER give this grant, so that an app-level token would replace their consent?
+ *
+ * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
+ * writes it; an incoming value is discarded on update) and a preset (`auth.oauth.preset_id`):
+ * presets exist for the authorization-code flow, and the preset also marks a profile that
+ * re-entered the store without its grant record (a JSON in the apis directory).
+ *
+ * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
+ * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
+ * same handler — so that test would refuse an app-only profile's second token. A profile
+ * with neither mark is an app-only profile and is not told apart from one.
+ *
+ * The one place this question is answered: the unattended gate, the 401 reminder and
+ * `fetch_token` itself (`api-setup.ts`) all ask it here.
+ */
+export function oauthGrantIsUserDelegated(profile: {
+  auth?: { oauth?: { preset_id?: string | undefined } | undefined } | undefined;
+  oauth_grant?: { origin?: 'callback' | undefined } | undefined;
+}): boolean {
+  return profile.oauth_grant?.origin === 'callback' || profile.auth?.oauth?.preset_id !== undefined;
+}
+
+/**
  * Whether this PROFILE may be renewed unattended — a different question from
  * whether the CALLER may trigger one, which is why it is a second predicate and
  * not another condition in the first.
@@ -873,12 +896,15 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * was whether a human had been sent to a consent screen, which only
  * `oauth_grant.origin` records.
  *
- * A model calling `fetch_token` by hand can still do all of this. What is
- * refused here is doing it BY ITSELF, on expiry, with nobody choosing it.
+ * A model calling `fetch_token` by hand could do all of this until `fetch_token`
+ * asked `oauthGrantIsUserDelegated` itself: a client-credentials exchange for a
+ * user-delegated grant is now refused there too, by hand or not. What stays open by
+ * hand is the hand-configured shape below (a stored refresh token, no grant type),
+ * which only the 401 reminder discourages.
  */
 export function oauthProfileMayBeRenewedUnattended(
   profile: {
-    auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined;
+    auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
     oauth_grant?: { origin?: 'callback' | undefined } | undefined;
   },
   hasStoredRefreshToken: boolean,
@@ -892,10 +918,13 @@ export function oauthProfileMayBeRenewedUnattended(
   // grant type makes `fetch_token` post CLIENT-CREDENTIALS, and a named one that
   // is neither of the two it supports is simply posted and rejected. So the
   // question is no longer "which grant type" but "whose token would that
-  // replace", and `oauth_grant.origin` is the one field that answers it: the
-  // engine writes it, a value arriving in a create or update is discarded
-  // (`api-setup.ts`, the update path reads the stored record back over it), and
-  // `callback` means a human sat at the provider's consent screen for this.
+  // replace", and `oauthGrantIsUserDelegated` answers it. Its load-bearing half
+  // is `oauth_grant.origin`: the engine writes it, a value arriving in a create
+  // or update is discarded (`api-setup.ts`, the update path reads the stored
+  // record back over it), and `callback` means a human sat at the provider's
+  // consent screen for this. Its other half, the preset, lives in model-authorable
+  // `auth.oauth`; it can only ADD refusals, so an edit that removes it falls back
+  // to the origin check, never past it.
   //
   // ⚠ What this does NOT claim, because an earlier version of this comment did:
   // that the engine-owned half is asked FIRST. It is asked second. An injected
@@ -907,7 +936,7 @@ export function oauthProfileMayBeRenewedUnattended(
   // profile's own slot and `fetch_token` refuses when that slot is empty, so the
   // worst an inside edit buys is an exchange the caller could have run by hand —
   // which `mayRenewOAuthUnattended` already established it may.
-  if (profile.oauth_grant?.origin === 'callback') return false;
+  if (oauthGrantIsUserDelegated(profile)) return false;
   if (grantType === 'client_credentials') return true;
   return !hasStoredRefreshToken;
 }
@@ -939,7 +968,7 @@ export function oauthProfileMayBeRenewedUnattended(
  */
 export function oauthFetchTokenWouldSwapDelegatedAccess(
   profile: {
-    auth?: { oauth?: { grant_type?: string | undefined } | undefined } | undefined;
+    auth?: { oauth?: { grant_type?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
     oauth_grant?: { origin?: 'callback' | undefined } | undefined;
   },
   hasStoredRefreshToken: boolean,
@@ -950,8 +979,8 @@ export function oauthFetchTokenWouldSwapDelegatedAccess(
   // destructive — and silencing the reminder for it would withhold the one
   // action that at least reports the real problem.
   if (grantType !== undefined && grantType !== 'client_credentials') return false;
-  // A human was sent to a consent screen for this.
-  if (profile.oauth_grant?.origin === 'callback') return true;
+  // A human was sent to a consent screen for this (or the profile is a preset's).
+  if (oauthGrantIsUserDelegated(profile)) return true;
   // And the OTHER half of the gate's refused set, which the first version of
   // this predicate missed: a hand-configured profile holding a refresh token it
   // never declared. Its access token is a user's too — somebody pasted it — and
