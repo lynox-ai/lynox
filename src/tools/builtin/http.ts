@@ -2704,7 +2704,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
       graphqlMutates = reading.mutates;
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
-      blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+      // Not a write (the branch above takes those), so no override names one: the method as gated.
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a
