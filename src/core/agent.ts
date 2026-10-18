@@ -4351,10 +4351,15 @@ export class Agent implements IAgent {
     // (validation abort) leaves nothing stale behind.
     let downgradeDecision: import('../types/models.js').ModelTier | undefined;
     // The tool's check sees what a child of this agent would inherit (spawn: a profile's pinned
-    // model), without the key: no check needs it, and every destructive tool's check gets this.
+    // model). Named fields only, never the key or the endpoint: every destructive tool's check gets
+    // this, and a field added to the snapshot later must not reach them by default.
+    const inherits = this.getProviderConfig();
     const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, { ...this.getProviderConfig(), apiKey: undefined });
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, {
+        provider: inherits.provider, apiKey: undefined, apiBaseURL: undefined,
+        openaiModelId: inherits.openaiModelId, openaiAuth: undefined, modelPinnedByProfile: inherits.modelPinnedByProfile,
+      });
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     if (effectiveSignal) {

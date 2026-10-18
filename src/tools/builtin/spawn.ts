@@ -2157,8 +2157,8 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
             `Spawn "${spec.name}" would run on ${inherited}, the model this run is pinned to by its model ` +
             `profile, whose tier cannot run autonomously without explicit consent — a child without a ` +
             `profile of its own inherits that model, and asking for a lower tier does not change it. Run ` +
-            `this delegation interactively (where you can approve it), or give the child a \`profile\` ` +
-            `whose model is fast or balanced.`,
+            `this delegation interactively (where you can approve it), or give the child a \`profile\` of ` +
+            `its own whose model has a registered fast or balanced band.`,
           );
         }
         return { ...spec, model: 'balanced' as const };

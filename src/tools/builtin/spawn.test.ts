@@ -6093,6 +6093,38 @@ describe('spawn_agent tool', () => {
         expect(vi.mocked(MockAgent)).not.toHaveBeenCalled();
       });
 
+      it('headless, the refusal names the way out: a profile of the child\'s own with a registered band', async () => {
+        await expect(
+          spawnAgentTool.handler(
+            { agents: [{ name: 'r', task: 'x' }] },
+            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('custom-expensive-byok-model') } as Partial<IAgent>),
+          ),
+        ).rejects.toThrow('give the child a `profile` of its own whose model has a registered fast or balanced band.');
+      });
+
+      it('an unknown-band pin asks for a fast-role child too: the pin, not the role, sets the model', () => {
+        const p = ask({ agents: [{ name: 'r', task: 'x', role: 'collector' }] }, 'custom-expensive-byok-model') as WarningPayload;
+        expect(p).not.toBeNull();
+        expect(p.message).toContain('unregistered');
+      });
+
+      it('one inherited deep pin in a batch takes "Run on balanced" away from the whole batch', () => {
+        const p = ask({ agents: [{ name: 'a', task: 'x', model: 'deep' }, { name: 'b', task: 'y' }] }, 'claude-opus-4-6') as WarningPayload;
+        expect(p.tier).toBe('deep');
+        expect(p.downgradeTo).toBeUndefined();
+        expect(p.message).toMatch(/2 children would run/);
+      });
+
+      it('in hybrid routing nothing is inherited, so the pin is not judged', async () => {
+        const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+        setTierSetResolver({ routingMode: 'hybrid', tierSet: {} });
+        try {
+          expect(ask({ agents: [{ name: 'r', task: 'x' }] }, 'claude-opus-4-6')).toBeNull();
+        } finally {
+          setTierSetResolver({ routingMode: 'standard', tierSet: null });
+        }
+      });
+
       it('headless, a balanced pin runs on it', async () => {
         const { Agent: MockAgent } = await import('../../core/agent.js');
         vi.mocked(MockAgent).mockClear();
