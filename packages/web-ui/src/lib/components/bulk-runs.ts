@@ -76,10 +76,12 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
 }
 
 /** Characters that show nothing or reorder what is shown: invisible format characters, the bidi
- *  controls, the tag block, and the control characters but tab and newline. The ones a language
- *  needs to spell its words (ZWJ, ZWNJ, LRM, RLM, variation selectors) are not here. */
+ *  overrides and isolates, the tag block, the supplementary variation selectors (a run of them
+ *  carries arbitrary bytes a model can decode), and the control characters but tab, newline and
+ *  carriage return. The ones a language needs are not here: ZWJ and ZWNJ, the direction marks
+ *  (LRM, RLM, ALM), the soft hyphen, and the variation selectors U+FE00–FE0F an emoji is drawn by. */
 // eslint-disable-next-line no-control-regex -- finding them is the point
-const HIDDEN_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/gu;
+const HIDDEN_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u180E\u200B\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
 /** Text the owner reads before a run acts on it, with every hidden character shown as its code
  *  point. Not removed: the run reads the text as it is, so what the owner reads must be that

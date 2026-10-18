@@ -184,8 +184,12 @@
 				return '';
 			}
 			// A refused start may have changed the run (an ended mandate ends it): show it as it is now.
+			// If that reload fails, the page shows the refusal, not only that loading failed.
 			const refusal = refusalOf(r);
-			if (refusal !== null) await load();
+			if (refusal !== null) {
+				await load();
+				if (error) error = refusal;
+			}
 			return refusal;
 		});
 	}
@@ -284,22 +288,22 @@
 							<tbody>
 								{#each targets as target (target.seq)}
 									<tr class="border-b border-border align-top">
-										<td class="py-1.5 pr-3"><code class="text-xs break-all">{target.key}</code></td>
+										<td class="py-1.5 pr-3"><code class="text-xs break-all">{bulkVisibleText(target.key)}</code></td>
 										<td class="py-1.5">
 											{#if target.diff.kind === 'fields'}
 												{#each target.diff.fields as f (f.field)}
 													<div>
-														<span class="text-text-subtle">{f.field}:</span>
+														<span class="text-text-subtle">{bulkVisibleText(f.field)}:</span>
 														{#if bulkValueText(f.before) === ''}<span class="text-text-subtle">{t('bulk.preview.empty_value')}</span>{:else}<del class="text-danger">{bulkValueText(f.before)}</del>{/if}
 														→ <ins class="text-success no-underline">{bulkValueText(f.after)}</ins>
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
-												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {line}</del>
-{/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {line}</ins>
+												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {bulkVisibleText(line)}</del>
+{/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {bulkVisibleText(line)}</ins>
 {/each}</pre>
 											{:else if target.error}
-												<span class="text-text-subtle">{target.error}</span>
+												<span class="text-text-subtle">{bulkVisibleText(target.error)}</span>
 											{/if}
 											{#if target.sentUnchanged && target.sentUnchanged.length > 0}
 												<div class="text-xs text-text-subtle">{tf('bulk.preview.sent_unchanged', { fields: target.sentUnchanged.join(', ') })}</div>

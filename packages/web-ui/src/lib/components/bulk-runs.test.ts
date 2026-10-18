@@ -110,10 +110,16 @@ describe('bulk run helpers', () => {
 		const tag = String.fromCodePoint(0xe0041);
 		expect(bulkVisibleText(`Kürze den Titel${tag}`)).toBe('Kürze den Titel⟨U+E0041⟩');
 		expect(bulkVisibleText('a\u202Eb\u200Bc\u0007d')).toBe('a⟨U+202E⟩b⟨U+200B⟩c⟨U+0007⟩d');
-		// Line breaks, tabs, ZWJ in an emoji, ZWNJ in Persian and RTL marks are content.
-		for (const kept of ['zwei\nZeilen\tmit Tab', '👨\u200D👩\u200D👧', 'می\u200Cروم', 'abc\u200Fdef']) expect(bulkVisibleText(kept)).toBe(kept);
-		// A preview value carries them visibly too.
+		// Every class in the set, one witness each.
+		for (const [hidden, code] of [['\u0085', '0085'], ['\uFEFF', 'FEFF'], ['\u2066', '2066'], ['\u2069', '2069'], ['\u2060', '2060'], ['\uFFF9', 'FFF9'], ['\u180E', '180E'], ['\u2028', '2028'], [String.fromCodePoint(0xe0100), 'E0100'], [String.fromCodePoint(0xe01ef), 'E01EF'], [String.fromCodePoint(0xe007f), 'E007F']] as const) {
+			expect(bulkVisibleText(`x${hidden}y`), code).toBe(`x⟨U+${code}⟩y`);
+		}
+		// Line breaks (also CRLF), tabs, ZWJ in an emoji, ZWNJ in Persian, the direction marks, a soft
+		// hyphen and an emoji's variation selector are content.
+		for (const kept of ['zwei\nZeilen\tmit Tab', 'Zeile\r\nZeile', '👨\u200D👩\u200D👧', 'می\u200Cروم', 'abc\u200Fdef', 'عربي\u061Cنص', 'Massen\u00ADlauf', '❤\uFE0F']) expect(bulkVisibleText(kept)).toBe(kept);
+		// A preview value carries them visibly too, a structured one included.
 		expect(bulkValueText(`neu${tag}`)).toBe('neu⟨U+E0041⟩');
+		expect(bulkValueText({ status: `aktiv${tag}` })).toBe('{"status":"aktiv⟨U+E0041⟩"}');
 	});
 
 	it('names the provider that serves a judge call', () => {
