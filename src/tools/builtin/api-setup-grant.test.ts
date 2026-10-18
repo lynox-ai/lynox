@@ -1275,10 +1275,11 @@ describe('fetch_token — what a successful exchange records', () => {
     ])('does not store the access token under a name another profile took while the POST ran, %s', async (_label, rotatedRefresh) => {
       const store = new ApiStore();
       store.register(crmProfile());
-      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
-      // The profile arrives while the exchange is on the wire.
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' });
+      // The profile and its key arrive while the exchange is on the wire.
       vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
         store.register(feedProfile());
+        vault.set('CRM_OWN_TOKEN', 'feed-key');
         return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
       });
       const feedProfile = (): ApiProfile => ({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
@@ -1307,9 +1308,10 @@ describe('fetch_token — what a successful exchange records', () => {
     it('takes the refresh token out again when the profile was also deleted while the POST ran', async () => {
       const store = new ApiStore();
       store.register(crmProfile());
-      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' });
       vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
         store.register({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
+        vault.set('CRM_OWN_TOKEN', 'feed-key');
         store.unregister('crm-api');
         return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
       });
@@ -1319,6 +1321,96 @@ describe('fetch_token — what a successful exchange records', () => {
       expect(result).toContain(`was deleted while it ran. Removed the tokens its exchanges wrote: ${REFRESH}.`);
       expect(vault.peek(REFRESH)).toBeUndefined();
       expect(vault.peek('CRM_OWN_TOKEN')).toBe('feed-key');
+    });
+
+    describe('a value no profile uses', () => {
+      const vaultWith = (extra: Record<string, string>): MockVault => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', ...extra });
+
+      it('refuses a name that holds a value the user stored, before posting anything', async () => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        store.register(shopProfile());
+        const vault = vaultWith({ STRIPE_KEY: 'sk-by-hand' });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "STRIPE_KEY" already holds a value in the vault that no API profile uses');
+        expect(result).toContain(`Leave output_secret_name out, so the token goes to "${ACCESS}"`);
+        expect(result).toContain('they can delete it in Settings → API Keys');
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(vault.peek('STRIPE_KEY')).toBe('sk-by-hand');
+      });
+
+      it('refuses a name that has a row only in the vault file', async () => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        // Not in the store's map: a row written past it, as the mail credentials are.
+        const vault = Object.assign(vaultWith({}), { listVaultNames: () => ['OLD_SHOP_TOKEN'] });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'OLD_SHOP_TOKEN' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "OLD_SHOP_TOKEN" already holds a value in the vault that no API profile uses');
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(vault.peek('OLD_SHOP_TOKEN')).toBeUndefined();
+      });
+
+      it.each([
+        ['left out', undefined],
+        ['named', ACCESS],
+      ])('control: its own derived access slot takes the token over a value no record names, output name %s', async (_label, outputName) => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({ [ACCESS]: 'at-by-hand' });
+        tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', ...(outputName ? { output_secret_name: outputName } : {}) }, makeAgent(store, vault)) as string;
+
+        expect(result).not.toContain('Error');
+        expect(vault.peek(ACCESS)).toBe('at-1');
+      });
+
+      it.each([
+        ['without a new refresh token', undefined],
+        ['and keeps the new refresh token the provider sent', 'rt-2'],
+      ])('does not store the access token under a name that came to hold a value while the POST ran, %s', async (_label, rotatedRefresh) => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({});
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          vault.set('CRM_OWN_TOKEN', 'by-hand');
+          return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
+        });
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" came to hold a value no API profile uses while the token was being fetched, so the access token was not stored.');
+        expect(vault.peek('CRM_OWN_TOKEN')).toBe('by-hand');
+        expect(vault.peek(REFRESH)).toBe(rotatedRefresh ?? 'rt-1');
+        const grant = store.get('crm-api')?.oauth_grant;
+        expect(grant?.written ?? []).toEqual(rotatedRefresh ? wrote({ [REFRESH]: rotatedRefresh }) : []);
+        expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeUndefined();
+        if (rotatedRefresh) expect(result).toContain(`The provider's new refresh token was stored as "${REFRESH}".`);
+        else expect(result).not.toContain('new refresh token');
+      });
+
+      it('control: a name its own record came to name while the POST ran takes the token', async () => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({});
+        // Another exchange of this profile wrote the name and recorded it meanwhile.
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_OWN_TOKEN: 'at-0' }) } }));
+          vault.set('CRM_OWN_TOKEN', 'at-0');
+          return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+        });
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+        expect(result).not.toContain('Error');
+        expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+      });
     });
 
     it('control: a name its own earlier exchange wrote takes the token again', async () => {

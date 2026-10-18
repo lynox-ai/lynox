@@ -23,6 +23,9 @@ export interface SecretStoreLike {
   getMasked(name: string): string | null;
   resolve(name: string): string | null;
   listNames(): string[];
+  /** Every name with a row in the vault file, including rows written past the store's map
+   *  (`SecretStore.listVaultNames`). Optional: a store without a vault has none. */
+  listVaultNames?(): string[];
   /** Agent-visible names only (infra secrets excluded) — for discovery + reconciliation. */
   listAgentVisibleNames?(): string[];
   /** Agent-visible stored names that normalize-collide with `requested` (near-identical name reconciliation). */

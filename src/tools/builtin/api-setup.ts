@@ -2674,6 +2674,21 @@ ${draftJson}
       if (heldBefore !== undefined) {
         return `Error: output_secret_name "${outputName}" is a name API profile "${heldBefore.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
+      // Nor a name that already holds a value no profile uses: one the user stored by hand, or
+      // one a deleted profile left behind. The write below would replace it without asking, and
+      // nothing brings it back. Two names stay this profile's to write over: its derived access
+      // slot, which every renewal writes, and a name one of its own exchanges wrote before (on its
+      // record, which `collectVaultKeys` reads). Asked on the vault itself, not on this profile's
+      // view of it: a value the view hides is still a value the write would destroy. Both lists,
+      // because code that holds the vault writes rows past the store's map. Asked again right
+      // before the write, with the profile as stored then.
+      const vaultStore = agent.secretStore;
+      const unclaimedValueAt = (): boolean => outputName !== ownAccessName && vaultStore !== undefined
+        && !collectVaultKeys(apiStore?.get(profile.id) ?? profile).includes(outputName)
+        && (vaultStore.listNames().includes(outputName) || (vaultStore.listVaultNames?.() ?? []).includes(outputName));
+      if (unclaimedValueAt()) {
+        return `Error: output_secret_name "${outputName}" already holds a value in the vault that no API profile uses (one the user stored, or one a deleted profile left behind), and the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}". Do not remove the stored value to make room: if the user no longer needs it, they can delete it in Settings → API Keys.`;
+      }
       // The same question for the refresh slot: a provider that rotates the refresh token on
       // this exchange has it written there below, whatever grant was asked for.
       if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, refreshTokenKey(input.id), readCtxOf(agent), true)) {
@@ -2903,7 +2918,9 @@ ${draftJson}
       // was written. A rotated refresh token still goes to this profile's own derived slot and onto
       // the record, because the provider has already spent the one sent.
       const heldNow = outputHolder();
-      if (heldNow === undefined) {
+      const unclaimedNow = heldNow === undefined && unclaimedValueAt();
+      const storesAccess = heldNow === undefined && !unclaimedNow;
+      if (storesAccess) {
         secretStore.set(outputName, accessToken);
         exchangedTokenExpiry.set(input.id, tokenExpiresAt);
       }
@@ -2933,7 +2950,7 @@ ${draftJson}
       // revoked. Every value this exchange wrote joins the record with its
       // fingerprint when the save goes through (see `persistGrant`), and that is
       // what a later delete removes — and all it removes.
-      const writes: WrittenSecret[] = heldNow === undefined ? [{ name: outputName, fp: tokenFingerprint(accessToken) }] : [];
+      const writes: WrittenSecret[] = storesAccess ? [{ name: outputName, fp: tokenFingerprint(accessToken) }] : [];
       if (rotated !== null) writes.push({ name: refreshName, fp: tokenFingerprint(rotated) });
       // The refresh token now in play: a new one if the answer carried it,
       // otherwise the one that just worked — which is also what an answer that
@@ -2952,7 +2969,7 @@ ${draftJson}
         next.written = mergeWrites(current, writes);
         if (next.connected_by === undefined) Object.assign(next, consentOf(agent, profile));
         return next;
-      }, heldNow === undefined ? tokenExpiresAt : undefined, {
+      }, storesAccess ? tokenExpiresAt : undefined, {
         // What this exchange ran on and wrote. The save mints when either the refresh token it
         // presented or the access value it replaced is not one this epoch recorded; otherwise it
         // records the values written here as the epoch's own.
@@ -2967,6 +2984,9 @@ ${draftJson}
       if (outcome === 'gone' && apiStore) return deletedMeanwhile(apiStore, profile, writes, secretStore);
       if (heldNow !== undefined) {
         return `Error: output_secret_name "${outputName}" became a name API profile "${heldNow.id}" uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
+      }
+      if (unclaimedNow) {
+        return `Error: output_secret_name "${outputName}" came to hold a value no API profile uses while the token was being fetched, so the access token was not stored.${rotated !== null ? ` The provider's new refresh token was stored as "${refreshName}".` : ''} Call fetch_token again without output_secret_name, so the token goes to "${accessTokenKey(input.id)}".`;
       }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       // The header http.ts attaches it under: the profile's own `header_name`, raw,
