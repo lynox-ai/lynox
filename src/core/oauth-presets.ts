@@ -79,6 +79,13 @@ export interface OAuthPreset {
    * gets the closed text, not a pointer to this preset.
    */
   readonly apiOnDerivedHost?: true;
+  /**
+   * The path every request carrying the token has to start with, on the store host
+   * ({@link apiOnDerivedHost}). Shopify serves more than its Admin API there: `/apps/…` is passed on
+   * to a third party's app server, so the token goes to `/admin/` only. Read for a provider on
+   * its derived host.
+   */
+  readonly apiPathPrefix?: string;
   /** Path on the derived host, leading slash included. */
   readonly authorizePath: string;
   readonly tokenPath: string;
@@ -245,6 +252,7 @@ const REGISTER_ENTRIES: readonly OAuthPreset[] = Object.freeze([
     host: { kind: 'template', param: 'shop', template: '{shop}.myshopify.com' },
     apiHosts: [],
     apiOnDerivedHost: true,
+    apiPathPrefix: '/admin/',
     authorizePath: '/admin/oauth/authorize',
     tokenPath: '/admin/oauth/access_token',
     // The store's subdomain, as Shopify names it: lower-case letters, digits and hyphens, not

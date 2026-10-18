@@ -24,16 +24,17 @@ function shopProfile(base: string, shop: string, over: Record<string, unknown> =
   } as ApiProfile;
 }
 
-async function attach(url: string, profile: ApiProfile): Promise<{ attached: boolean | { refusal: string }; headers: Record<string, string> }> {
+async function attach(url: string, profile: ApiProfile): Promise<{ attached: boolean; headers: Record<string, string>; read: string[] }> {
   const store = new ApiStore();
   expect(store.register(profile)).toBe(true);
   const headers: Record<string, string> = {};
+  const read: string[] = [];
   const attached = await attachStoredCredential(url, headers, false, {
     apiStore: store,
-    secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? TOKEN : null) } as never,
+    secretStore: { resolve: (n: string) => { read.push(n); return n === accessTokenKey(profile.id) ? TOKEN : null; } } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
   });
-  return { attached: attached as never, headers };
+  return { attached, headers, read };
 }
 
 describe('a Shopify preset profile behind the store check', () => {
@@ -48,8 +49,25 @@ describe('a Shopify preset profile behind the store check', () => {
     expect(headers).toEqual({});
   });
 
-  it('attaches nothing when the base is re-pointed off the store', async () => {
-    const { headers } = await attach('https://evil.example.com/admin/api/2025-10/shop.json', shopProfile('https://evil.example.com', 'acme'));
+  it('reads no vault value, and attaches nothing, when the base is re-pointed off the store', async () => {
+    const { headers, read } = await attach('https://evil.example.com/admin/api/2025-10/shop.json', shopProfile('https://evil.example.com', 'acme'));
+    expect(read).toEqual([]);
+    expect(headers).toEqual({});
+  });
+
+  it('reads the token when the base is on the store (control for the case above)', async () => {
+    const { read } = await attach('https://acme.myshopify.com/admin/api/2025-10/shop.json', shopProfile('https://acme.myshopify.com', 'acme'));
+    expect(read).toContain(accessTokenKey('shop-acme'));
+  });
+
+  it.each([
+    ['an app proxy path', 'https://acme.myshopify.com/apps/some-app/x'],
+    ['the storefront', 'https://acme.myshopify.com/products/x'],
+    ['admin without its slash', 'https://acme.myshopify.com/admin'],
+    ['a path that climbs out of admin', 'https://acme.myshopify.com/admin/../apps/x'],
+    ['admin in other case', 'https://acme.myshopify.com/ADMIN/api/2025-10/shop.json'],
+  ])('attaches nothing to %s of the store', async (_label, url) => {
+    const { headers } = await attach(url, shopProfile('https://acme.myshopify.com', 'acme'));
     expect(headers).toEqual({});
   });
 

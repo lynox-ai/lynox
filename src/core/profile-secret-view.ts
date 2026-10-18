@@ -383,9 +383,10 @@ function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
  * token slot and may go anywhere this predicate is concerned with. A token slot goes only to a
  * target of the grant it belongs to:
  * - `request`: an access token, never a refresh token, of an owner that is registered, to the
- *   origin (scheme, host and port) of the owner's `base_url` — or, when the owner shares its grant through a built-in provider, to
- *   `https://<host>` for a host of that provider's `apiHosts` (for a provider on the host it
- *   derives, the owner's own store host only);
+ *   origin (scheme, host and port) of the owner's `base_url` — or, when the owner shares its
+ *   grant through a built-in provider, to `https://<host>` for a host of that provider's
+ *   `apiHosts`. An owner of a provider on the host it derives, shared or not, reaches its own
+ *   store host only, and there only paths under the provider's `apiPathPrefix`;
  * - `exchange`: a refresh token, asked by the owner or by a profile sharing the grant, to the
  *   owner's token endpoint (the preset's, else `token_url`), compared whole;
  * - `client` and `other`: never.
@@ -417,11 +418,12 @@ export function slotMayReach(
       if (apiStore.get(owner.id) === undefined) return false;
       const destination = destinationOf(new URL(target));
       // A store profile's token, shared or not, reaches its store's host only, never a base
-      // re-pointed elsewhere.
+      // re-pointed elsewhere, and there only the provider's API path.
       const ownPreset = owner.auth?.type === 'oauth2' && owner.auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(owner.auth.oauth.preset_id) : undefined;
       if (ownPreset?.apiOnDerivedHost === true) {
         const store = presetStoreHost(owner);
-        return store !== null && destination === `https://${store}`;
+        return store !== null && destination === `https://${store}`
+          && (ownPreset.apiPathPrefix === undefined || new URL(target).pathname.startsWith(ownPreset.apiPathPrefix));
       }
       // The owner's own refresh slot says whether it shares its grant, and through which provider;
       // only when the owner is one of that grant's members.
