@@ -153,16 +153,18 @@ COPY --from=whisper-build /usr/share/whisper/ggml-base.bin /usr/share/whisper/gg
 RUN ldconfig
 
 # Harden: remove package managers, shells, SUID binaries.
-# npm + corepack are the base image's bundled Node package managers; the runtime
-# runs `node /app/dist/index.js` with pre-installed /app/node_modules and never
-# invokes either, so they are dead weight — and their bundled node-tar carries
+# npm, corepack and yarn are the base image's bundled Node package managers; the
+# runtime runs `node /app/dist/index.js` with pre-installed /app/node_modules and
+# never invokes them, so they are dead weight — and their bundled node-tar carries
 # fixed-but-unreachable CVEs (e.g. CVE-2026-59873) that fail the image scan.
 #
 # The dpkg STATUS stays (/var/lib/dpkg): an image scanner reads the installed OS
 # packages from it. Without it a scan reports zero OS packages, which reads like a
-# clean image and is a blind one. Only the tools that could change the image go.
-# Perl is removed through dpkg first, so the database says what the image holds; it
-# has its own RUN because the chain below ends in `|| true`.
+# clean image and is a blind one. The tools go; the record of what is installed stays.
+# Perl is removed through dpkg first, so the database no longer lists it. (It still
+# lists apt, dpkg and bash, whose files the chain below deletes: a scan then reports
+# packages that are gone, which fails a release, not passes it.) Its own RUN, because
+# the chain below ends in `|| true`.
 RUN dpkg --purge --force-remove-essential --force-depends perl-base
 RUN \
     rm -rf /usr/bin/apt-get /usr/bin/apt /usr/bin/dpkg /usr/bin/dpkg-* \
@@ -170,6 +172,7 @@ RUN \
     && rm -rf /usr/bin/perl* /usr/share/perl* /usr/lib/*/perl* \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
               /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+              /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
     && rm -f /usr/bin/bash /bin/bash /usr/bin/rbash /bin/rbash \
     && find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true \
     && sed -i 's|root:/bin/bash|root:/usr/sbin/nologin|' /etc/passwd
