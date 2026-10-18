@@ -458,7 +458,7 @@ export class MigrationImporter {
     // key and their tokens reach no store here, so each is dropped and the customer connects the
     // store again. Every destination, managed or not; after the secrets, so the vault holds what
     // is removed. A token slot of a store profile goes; the client pair stays.
-    const written: { written: WrittenSecret[]; inUse: string[]; force: string[] } = { written: [], inUse: [], force: [] };
+    const written: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] } = { written: [], inUse: [] };
     const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey, written);
     if (reconnect.length > 0) {
       const vaultPath = join(this.lynoxDir, 'vault.db');
@@ -473,11 +473,10 @@ export class MigrationImporter {
           }
           // Of a recorded slot only the value the exchange wrote, and never a protected name: what
           // sits there now may be the customer's own. A kept profile naming the slot holds it,
-          // except against a store a mandate connected (`force`), as in `purgeRecordedTokens`.
+          // except against a store a mandate connected (`forced`), as in `purgeRecordedTokens`.
           // Unlike there, a slot only an unreadable row names is not held: such a row is skipped.
-          const force = new Set(written.force);
           for (const w of written.written) {
-            if (isProtectedSecretWrite(w.name) || (inUse.has(w.name) && !force.has(w.name))) continue;
+            if (isProtectedSecretWrite(w.name) || (inUse.has(w.name) && !w.forced)) continue;
             const value = vault.get(w.name);
             if (value !== null && tokenFingerprint(value) === w.fp) vault.delete(w.name);
           }

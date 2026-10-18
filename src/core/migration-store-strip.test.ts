@@ -209,6 +209,25 @@ describe('a migration import drops store connections', () => {
     expect(names).not.toContain(accessTokenKey('shop-acme'));
   });
 
+  it('against a mandate store, a slot whose value was replaced since stays, and so does one another store recorded', () => {
+    const src = tmp(); const dst = tmp();
+    const mandate = { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1` };
+    const a = storeProfile('shop-acme', { oauth_grant: { ...mandate, written: [{ name: 'REPLACED', fp: tokenFingerprint('what-the-exchange-wrote') }, { name: 'SHARED_X', fp: tokenFingerprint('a-value') }] } } as Partial<ApiProfile>);
+    const b = storeProfile('shop-beta', { base_url: 'https://beta.myshopify.com', auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'beta' }, client_id_key: 'S_CID', client_secret_key: 'S_CSECRET' } },
+      custom_endpoint_ack: { accepted: true, hosts: ['beta.myshopify.com'], accepted_at: '2026-10-18T00:00:00.000Z' },
+      oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'e'.repeat(64), written: [{ name: 'SHARED_X', fp: tokenFingerprint('b-value') }] } } as Partial<ApiProfile>);
+    const user: ApiProfile = { id: 'crm', name: 'CRM', base_url: 'https://api.crm.example.com', description: 'names both',
+      auth: { type: 'bearer', vault_keys: ['REPLACED', 'SHARED_X'] } } as ApiProfile;
+    seedEngine(src, SRC_KEY, [a, b, user], true);
+    seedVault(src, SRC_KEY, { ...SECRETS, REPLACED: 'the-customers-own', SHARED_X: 'b-value' });
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme', 'shop-beta']);
+    const names = vaultNames(dst);
+    // Forced, but not the value the exchange wrote.
+    expect(names).toContain('REPLACED');
+    // The value is B's, and B is no mandate store: the kept profile holds it.
+    expect(names).toContain('SHARED_X');
+  });
+
   it('a `-`/`_` partner keeps its derived pair even against a store a mandate connected', () => {
     const src = tmp(); const dst = tmp();
     const store = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`,

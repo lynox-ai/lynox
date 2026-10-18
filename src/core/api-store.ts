@@ -1771,29 +1771,26 @@ export class ApiStore {
    * or recorded, so a `-`/`_` partner or a profile that names the same slot keeps its credential.
    * As in `purgeRecordedTokens`, a store a mandate connected is the exception for what its
    * exchanges wrote: a kept profile that names such a slot does not hold it (naming another
-   * profile's slot is how a mandate's token would outlive its connection), so `out.force` lists
-   * those recorded names. A kept `-`/`_` partner still holds its own derived pair.
+   * profile's slot is how a mandate's token would outlive its connection), so such entries come
+   * back with `forced`. A kept `-`/`_` partner still holds its own derived pair.
    * A row or flat file that does not parse is skipped: the boot parses it the same way and does
    * not load it either.
    */
-  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: WrittenSecret[]; inUse: string[]; force: string[] }): string[] {
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] }): string[] {
     const ids = new Set<string>();
-    const written: WrittenSecret[] = [];
+    const written: (WrittenSecret & { forced: boolean })[] = [];
     const inUse = new Set<string>();
-    const force = new Set<string>();
     const partnerPairs = new Set<string>();
     const noteKept = (p: ApiProfile): void => {
       for (const k of collectVaultKeys(p)) inUse.add(k);
       partnerPairs.add(accessTokenKey(p.id)); partnerPairs.add(refreshTokenKey(p.id));
     };
-    const noteMandate = (p: ApiProfile): void => {
-      if (!isMandateConnection(p)) return;
-      for (const w of Array.isArray(p.oauth_grant?.written) ? p.oauth_grant.written : []) if (typeof w.name === 'string') force.add(w.name);
-    };
-    const noteWritten = (grant: OAuthGrantRecord | undefined): void => {
+    const noteWritten = (p: ApiProfile): void => {
+      const grant = p.oauth_grant;
+      const forced = isMandateConnection(p);
       for (const w of Array.isArray(grant?.written) ? grant.written : []) {
         const { name, fp } = w as { name?: unknown; fp?: unknown };
-        if (typeof name === 'string' && typeof fp === 'string') written.push({ name, fp });
+        if (typeof name === 'string' && typeof fp === 'string') written.push({ name, fp, forced });
       }
     };
     const isStore = (p: { base_url?: unknown; auth?: unknown }): boolean => {
@@ -1815,8 +1812,7 @@ export class ApiStore {
           try { profile = connectionRowToProfile(row); } catch { continue; }
           if (!isStore(profile)) { noteKept(profile); continue; }
           ids.add(profile.id);
-          noteWritten(profile.oauth_grant);
-          noteMandate(profile);
+          noteWritten(profile);
           const grant = stripGrant(profile.oauth_grant);
           store.upsert(profileToConnectionRow(grant === undefined ? profile : { ...profile, oauth_grant: grant }));
         }
@@ -1836,15 +1832,14 @@ export class ApiStore {
           continue;
         }
         ids.add(profile.id);
-        noteWritten(profile.oauth_grant);
-        noteMandate(profile as unknown as ApiProfile);
+        noteWritten(profile as unknown as ApiProfile);
         if (profile.oauth_grant !== undefined) {
           profile.oauth_grant = stripGrant(profile.oauth_grant);
           writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
         }
       }
     }
-    if (out !== undefined) { out.written = written; out.inUse = [...inUse].sort(); out.force = [...force].filter((n) => !partnerPairs.has(n)).sort(); }
+    if (out !== undefined) { out.written = written.map((w) => ({ ...w, forced: w.forced && !partnerPairs.has(w.name) })); out.inUse = [...inUse].sort(); }
     return [...ids].sort();
   }
 
