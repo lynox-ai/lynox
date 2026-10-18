@@ -59,7 +59,8 @@ function deletesDpkgStatus(segment: string): boolean {
   const removes = rm || recursive || ['mv', 'truncate', 'shred', 'unlink'].some((c) => commands.includes(c));
   const bare = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
   const isTarget = (p: string) => ['/var/lib/dpkg', '/var/lib/dpkg/status'].some((t) => globMatches(bare(p), t));
-  // A recursive delete of a parent takes the status with it; any other form acts on its own path.
+  // A recursive delete of a parent takes the status with it. Moving a parent (`mv /var/lib /x`)
+  // does too, and this check does not know that form.
   const isParent = (p: string) => ['/', '/var', '/var/lib'].some((a) => globMatches(bare(p), a));
   // Any redirect onto the status empties it, whichever stream (`>`, `>>`, `2>`).
   const redirected = [...text.matchAll(/>{1,2}\s*(\/\S+)/g)].flatMap((m) => expandBraces(m[1]!));
@@ -97,8 +98,12 @@ describe('the image Dockerfile', () => {
     expect(segments.some((r) => /^\s*RUN dpkg --purge\b.*\bperl-base\b/.test(r))).toBe(true);
   });
 
-  it('removes the package managers bundled with the base image (npm, corepack, yarn)', () => {
-    const removed = segments.filter((r) => /\brm\b/.test(r)).join(' ').split(/\s+/);
+  // What this proves is the TEXT: each path is an argument of an `rm` in the last stage. Whether
+  // the rm ran (core's sits in a chain that ends in `|| true`) is for the image scan to show.
+  it('names the bundled package managers (npm, corepack, yarn) in an rm of the production stage', () => {
+    const text = shellText(dockerfile);
+    const production = text.slice(text.lastIndexOf('\nFROM ')).split(/&&|\|\||;|\n/);
+    const removed = production.filter((r) => /^\s*rm\s/.test(r.replace(/^\s*RUN\s+(--\S+\s+)*/, ''))).join(' ').split(/\s+/);
     for (const p of ['/usr/local/lib/node_modules/npm', '/usr/local/lib/node_modules/corepack', '/usr/local/bin/npm', '/usr/local/bin/npx',
       '/usr/local/bin/corepack', '/opt/yarn-v*', '/usr/local/bin/yarn', '/usr/local/bin/yarnpkg']) {
       expect({ p, removed: removed.includes(p) }).toEqual({ p, removed: true });
