@@ -20,7 +20,7 @@ import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
-import { ApiStore } from './api-store.js';
+import { ApiStore, accessTokenKey, refreshTokenKey } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
@@ -77,6 +77,8 @@ export interface ImportVerification {
    */
   portableDirSkipped?: string[] | undefined;
   configApplied: boolean;
+  /** Store connections (Shopify) whose tokens the import removed: each has to be connected again. Absent when none. */
+  reconnectStores?: string[] | undefined;
 }
 
 /** `name` or `name:partN` → the part index; `0` when the payload was not split. */
@@ -448,6 +450,27 @@ export class MigrationImporter {
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
       verification.secretsImported = this.restoreSecrets(data);
+    }
+
+    // 5b. Store connections (Appendix B, B10): their binding was made under the source's vault
+    // key and their tokens reach no store here, so each is dropped and the customer connects the
+    // store again. Every destination, managed or not; after the secrets, so the vault holds what
+    // is removed. A token slot of a store profile goes; the client pair stays.
+    const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey);
+    if (reconnect.length > 0) {
+      const vaultPath = join(this.lynoxDir, 'vault.db');
+      if (existsSync(vaultPath)) {
+        const vault = new SecretVault({ path: vaultPath, masterKey: this.vaultKey });
+        try {
+          for (const id of reconnect) {
+            vault.delete(accessTokenKey(id));
+            vault.delete(refreshTokenKey(id));
+          }
+        } finally {
+          vault.close();
+        }
+      }
+      verification.reconnectStores = reconnect;
     }
 
     // 6. Re-gate (MANAGED destination only): a migrated api connection's
