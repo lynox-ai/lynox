@@ -526,8 +526,9 @@ export function graphqlAnswer(read: ExternalRead, retryAfter: string | null, at:
 }
 
 /**
- * Whether an answer to a request shows the host did not act on it: a 4xx (a 429 included),
- * or an address refused before it was reached. Not a 5xx, a timeout or a broken connection,
+ * Whether an answer to a request shows the host did not act on it: a 4xx (a 429 included, a
+ * 408 or 499 to a write not, see `readResponse`), or an address refused before it was
+ * reached. Not a 5xx, a timeout or a broken connection,
  * after which the host may have acted, and not a redirect: a host may apply a write and
  * answer with a redirect to the result.
  */
@@ -547,6 +548,10 @@ async function readResponse(res: Response, now: number, parse: boolean, maxBytes
     if (status === 401 || status === 403) return { kind: 'unauthorized' };
     if (status === 404 || status === 410) return { kind: 'not_found' };
     if (status === 429) return { kind: 'retry_after', ms: retryAfterMs(res.headers.get('retry-after'), now) };
+    // A write that timed out at a proxy (408) or whose client went away there (499) may have
+    // been passed on already: not a refusal, so it stays without a clear answer. A read is
+    // unaffected, and fails either way.
+    if (!parse && (status === 408 || status === 499)) return { kind: 'failed' };
     if (status >= 400 && status < 500) return { kind: 'refused' };
     if (status < 200 || status >= 300) return { kind: 'failed' };
     return null;

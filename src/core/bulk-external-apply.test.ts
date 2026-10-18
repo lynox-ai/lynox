@@ -2229,7 +2229,9 @@ describe('a send without a clear answer is not sent again', () => {
     s.special.set('PATCH /products/0', { status: 502 });
     const runId = await approvedRun(rows(), c);
     expect((await run(runId, c)).status).toBe('halted');
-    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.failureRate);
+    // Unclear from the halt on, when the owner decides whether to resume: failed, and not
+    // among the targets the resume sends to.
+    expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 1, sentUnknown: 1 });
     s.special.delete('PATCH /products/0');
     resume(runId);
     return runId;
@@ -2241,7 +2243,9 @@ describe('a send without a clear answer is not sent again', () => {
     try {
       const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
       const runId = await unknownFirst(s, c);
-      expect((await run(runId, c)).status).toBe('done');
+      const second = await run(runId, c);
+      expect(second.status).toBe('done');
+      expect(second.summary).toContain('Unclear 1: sent without a clear answer, not sent again.');
       expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
       expect(s.items.get('/products/0')!['price']).toBe('12.00');
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });
@@ -2288,6 +2292,25 @@ describe('a send without a clear answer is not sent again', () => {
       expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
     } finally {
       restore();
+    }
+  });
+
+  it('a 408 to a write is not a refusal: the resume does not send it again, while a 404 is', async () => {
+    for (const status of [408, 404]) {
+      const s = fiveShop();
+      s.special.set('PATCH /products/0', { status });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+        const runId = await approvedRun(rows(), c);
+        expect((await run(runId, c)).status).toBe('halted');
+        s.special.delete('PATCH /products/0');
+        resume(runId);
+        expect((await run(runId, c)).status).toBe('done');
+        expect(patches(s).filter((p) => p === '/products/0').length, String(status)).toBe(status === 408 ? 1 : 2);
+      } finally {
+        restore();
+      }
     }
   });
 

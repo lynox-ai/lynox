@@ -131,7 +131,8 @@ function summarize(ledger: BulkLedger, runId: string, lead: string): string {
   const s = ledger.getStatus(runId);
   if (!s) return lead;
   return `${lead} Applied ${String(s.applied)}${bulkFoundAsPlannedNote(s.foundAsPlanned)}, failed ${String(s.failed)}, conflicts ${String(s.conflicts)}, ` +
-    `undone ${String(s.undone)} of ${String(s.total)} targets.`;
+    `undone ${String(s.undone)} of ${String(s.total)} targets.` +
+    (s.sentUnknown > 0 ? ` Unclear ${String(s.sentUnknown)}: sent without a clear answer, not sent again.` : '');
 }
 
 export interface BulkEffectDeps {
@@ -306,9 +307,10 @@ async function applyRunEffect(
       continue;
     }
     ledger.recordFailed(runId, seq, outcome.kind, via);
-    // Counted when its send failed, or that send halted the run: not counted again, so it
-    // neither extends nor breaks a run of failures. Only an external writer gives it, and an
-    // external run is never atomic.
+    // No new attempt, so no failure: the send that left it unclear was counted, halted the
+    // run, or belonged to a loop that died. Counting it on every pass would halt a small run
+    // at the same target on every resume. It neither extends nor breaks a run of failures.
+    // Only an external writer gives it, and an external run is never atomic.
     if (outcome.kind === 'sent_unknown') continue;
     if (run.atomic) return rollBack(ledger, writer, run, now);
     if (outcome.kind === 'conflict') {
