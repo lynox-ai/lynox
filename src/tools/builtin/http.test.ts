@@ -3795,13 +3795,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
           oauth: {
-            token_url: 'https://shop.example-commerce.com/admin/oauth/access_token',
+            token_url: 'https://shop.commerce.example/admin/oauth/access_token',
             grant_type: 'client_credentials',
             client_id_key: 'SHOPIFY_CLIENT_ID',
             client_secret_key: 'SHOPIFY_CLIENT_SECRET',
@@ -3818,7 +3818,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
-      const result = await handler({ url: 'https://shop.example-commerce.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       // Hint must be OUTSIDE the untrusted_data wrap so the agent treats
       // it as system guidance, not response content.
@@ -3908,12 +3908,12 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
-          oauth: { token_url: 'https://shop.example-commerce.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
       });
       mockDnsPublic();
@@ -3925,10 +3925,10 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       } as never;
 
-      const result = await visible({ url: 'https://shop.example-commerce.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).toMatch(/non-vetted sub-processor/i);
-      expect(result).toContain('shop.example-commerce.com');
+      expect(result).toContain('shop.commerce.example');
       expect(fetchMock).not.toHaveBeenCalled();      // token never reaches the wire
       expect(lastPinnedInputs.length).toBe(0);
     });
@@ -3939,14 +3939,14 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
-          oauth: { token_url: 'https://shop.example-commerce.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.example-commerce.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
@@ -3957,7 +3957,7 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       } as never;
 
-      const result = await handler({ url: 'https://shop.example-commerce.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).not.toMatch(/non-vetted sub-processor/i);
       expect(fetchMock).toHaveBeenCalled();
@@ -5540,16 +5540,16 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_SEO_ACCESS_TOKEN'],
-          oauth: { token_url: 'https://shop.example-commerce.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
         // Accepted custom endpoint — these tests exercise the attach mechanics,
         // not the Wave-5d allowlist gate (that has its own coverage below).
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.example-commerce.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5558,7 +5558,7 @@ describe('httpRequestTool', () => {
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      await handler({ url: 'https://shop.example-commerce.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       const callArgs = fetchMock.mock.calls[0][1];
       expect(callArgs.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer fresh-token-xyz' }));
@@ -5570,13 +5570,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.example-commerce.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.example-commerce.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5586,7 +5586,7 @@ describe('httpRequestTool', () => {
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
-        url: 'https://shop.example-commerce.com/admin/api/2026-04/graphql.json',
+        url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json',
         method: 'GET',
         headers: { Authorization: 'Bearer stale-old-token-from-previous-profile' },
       }, agent);
@@ -5602,13 +5602,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.example-commerce.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.example-commerce.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5618,7 +5618,7 @@ describe('httpRequestTool', () => {
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh' });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
-        url: 'https://shop.example-commerce.com/admin/api/2026-04/x',
+        url: 'https://shop.commerce.example/admin/api/2026-04/x',
         headers: { authorization: 'Bearer stale-lowercase' },
       }, agent);
 
@@ -5634,13 +5634,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.example-commerce.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.example-commerce.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.example-commerce.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5649,7 +5649,7 @@ describe('httpRequestTool', () => {
 
       const secretStore = makeSecretStore({});
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      const result = await visible({ url: 'https://shop.example-commerce.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
       expect(result).toContain('fetch_token');
@@ -7468,7 +7468,7 @@ describe('write approvals per method and host (270)', () => {
 // has a control on another host through the same setup, so a refusal of everything cannot pass.
 describe('requests to a Shopify store are refused', () => {
   const STORE = 'https://Shop.MyShopify.com./admin/api/2026-10/graphql.json';
-  const OTHER = 'https://shop.example-commerce.com/admin/api/2026-10/graphql.json';
+  const OTHER = 'https://shop.commerce.example/admin/api/2026-10/graphql.json';
 
   async function sent(url: string, extra: { headers?: Record<string, string>; profile?: boolean } = {}): Promise<{ out: string; fetchMock: ReturnType<typeof vi.fn> }> {
     if (extra.profile) {
@@ -7498,6 +7498,48 @@ describe('requests to a Shopify store are refused', () => {
     const control = await sent(OTHER, extra);
     expect(control.out).not.toContain('Shopify cannot be connected');
     expect(control.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Under the attach: `fetchPinned` refuses every hop whose URL or Host header names a store, so
+  // a redirect into one and a Host header that names one send nothing there either.
+  it('refuses a redirect into a store and does not follow it, and follows one to another host', async () => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const run = async (location: string) => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 301, headers: { location } }))
+        .mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      lastPinnedInputs.length = 0;
+      const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { 'X-Shopify-Access-Token': 'store-value' } }, makeAgent());
+      return { out, fetchMock };
+    };
+    const refused = await run('https://shop.myshopify.com./admin/api/2026-10/products.json');
+    await expect(refused.out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+    expect(refused.fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastPinnedInputs.map((i) => new URL(i.url).hostname)).toEqual(['shop.commerce.example']);
+    const control = await run('https://other.commerce.example/products.json');
+    expect(await control.out).not.toContain('Shopify cannot be connected');
+    expect(control.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['shop.myshopify.com', true],
+    ['SHOP.myshopify.com.:443', true],
+    ['other.commerce.example', false],
+  ] as const)('a Host header of %s on a read: refused %s', async (host, refused) => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { Host: host } }, makeAgent());
+    if (refused) {
+      await expect(out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } else {
+      expect(await out).not.toContain('Shopify cannot be connected');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('records the refusal as a failed call, not a quiet one', async () => {

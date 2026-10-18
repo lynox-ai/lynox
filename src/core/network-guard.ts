@@ -6,6 +6,7 @@ import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
 import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
+import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -742,10 +743,17 @@ export async function fetchPinned(url: string, init: RequestInit = {}): Promise<
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
   }
+  const headers = flattenHeaders(init.headers);
+  // A Shopify store gets no request from this engine for now (`shopify-host.ts`). Here, where every
+  // pinned request and every redirect hop is sent, by the URL and by a Host header a caller set,
+  // which names the server that answers whatever the URL says.
+  const hostHeader = Object.entries(headers).find(([h]) => h.toLowerCase() === 'host')?.[1];
+  if (isShopifyAdminHost(parsed.hostname) || (hostHeader !== undefined && isShopifyAdminHost(hostHeader.trim().replace(/:\d*$/, '')))) {
+    throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+  }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
   const { address: pinnedIp, family } = await resolveAndValidate(hostname);
 
-  const headers = flattenHeaders(init.headers);
   // Ensure Host header is the original vhost — required for correct vhost
   // routing AND for the SNI fallback (http.request uses options.host for SNI
   // when servername is unset).

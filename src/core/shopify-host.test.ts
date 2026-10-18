@@ -48,7 +48,7 @@ describe('isShopifyAdminUrl', () => {
 describe('SHOPIFY_UNAVAILABLE', () => {
   it('says Shopify is unavailable for now, that the profile is not at fault, and what to tell the user', () => {
     expect(SHOPIFY_UNAVAILABLE).toBe(
-      'Shopify cannot be connected in lynox at the moment: lynox sends no API requests and no credentials to Shopify stores (*.myshopify.com) while it reworks how Shopify connections are set up. This is not a problem with the api_profile or the credential, so do not change either and do not retry; tell the user that Shopify is temporarily unavailable in lynox.',
+      'Shopify cannot be connected in lynox at the moment: lynox refuses requests to Shopify stores (*.myshopify.com) while it reworks how Shopify connections are set up. This is not a problem with the api_profile or a credential, so do not change either, do not retry, and do not try to reach the store another way; tell the user that Shopify is temporarily unavailable in lynox.',
     );
   });
 });

@@ -279,7 +279,7 @@ describe('a token exchange with a Shopify store is refused', () => {
     if (!store.ok) expect(store.message).toBe(`token exchange refused: ${SHOPIFY_UNAVAILABLE}`);
     expect(fetchWithValidatedRedirects).not.toHaveBeenCalled();
 
-    const other = await exchangeToken({ endpoint: accepted('https://shop.example-commerce.com/admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
+    const other = await exchangeToken({ endpoint: accepted('https://shop.commerce.example/admin/oauth/access_token'), params: { client_secret: 's' }, bodyFormat: 'json' }, undefined);
     expect(other.ok).toBe(true);
     expect(fetchWithValidatedRedirects).toHaveBeenCalledTimes(1);
   });
