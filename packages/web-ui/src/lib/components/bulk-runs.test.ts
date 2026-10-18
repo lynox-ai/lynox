@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
+import { BULK_HALT_REASONS } from '../../../../../src/core/bulk-ledger.js';
 
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
@@ -213,5 +214,151 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 		expect(unwrapped(raw)).toEqual(['run.probe.key', "tf('k', { dup: merge.dupName })"]);
 		// A placeholder named like a supplied value is not one.
 		expect(unwrapped("<script></script><p>{tf('k', { field: bulkVisibleText(f.field) })}</p>")).toEqual([]);
+	});
+});
+
+// A planned run that halted on a failure goes on from its page, with its own sentence for each
+// halt. Read from the i18n source, both languages, so a key
+// the page asks for and the table lacks fails here instead of showing no sentence.
+describe('restarting a run that halted on a failure', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from({ ...de, 'bulk.system.data_store': 'Datenspeicher' });
+	const EN = from(en);
+
+	const AS_IS = ['unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized', 'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'unrecorded'];
+	const NONE = ['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress'];
+	const base = { phase: 'planned' as const, listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
+	const judged = { judge: { tier: 'fast', unjudged: 3 }, judgeServedBy: { provider: 'mistral', label: 'Mistral Medium' } } as unknown as Pick<BulkRunDetailData, 'judge' | 'judgeServedBy'>;
+
+	it('moves a run on by what it does next, and refuses where a restart would halt again', () => {
+		for (const haltKey of AS_IS) expect(bulkRestartKind({ ...base, haltKey }), haltKey).toBe('read');
+		for (const haltKey of NONE) expect(bulkRestartKind({ ...base, haltKey }), haltKey).toBe('none');
+		expect(bulkRestartKind({ ...base, haltKey: 'listUnreadable', listFirstPage: 'https://shop.example.invalid/items?page=1' })).toBe('list');
+		expect(bulkRestartKind({ ...base, ...judged, haltKey: 'unavailable' })).toBe('judge');
+		expect(bulkRestartKind({ ...base, ...judged, haltKey: 'costCap' })).toBe('judge_cap');
+		// A judged run whose list is still read reads its list on first.
+		expect(bulkRestartKind({ ...base, ...judged, haltKey: 'costCap', listFirstPage: 'https://shop.example.invalid/items?page=1' })).toBe('list');
+		expect(bulkRestartKind({ ...base, ...judged, haltKey: 'unavailable', judgeServedBy: null })).toBe('no_judge');
+		expect(bulkRestartKind({ ...base, ...judged, haltKey: 'unavailable', judgeOwnKey: true })).toBe('judge_own_key');
+		// A judged run that cannot be judged does not read its list on either.
+		const list = { listFirstPage: 'https://shop.example.invalid/items?page=1' };
+		expect(bulkRestartKind({ ...base, ...judged, ...list, haltKey: 'unavailable', judgeOwnKey: true })).toBe('judge_own_key');
+		expect(bulkRestartKind({ ...base, ...judged, ...list, haltKey: 'unavailable', judgeServedBy: null })).toBe('no_judge');
+		// Not a restart: the waiting halts are starts, a halt with no sentence here offers nothing,
+		// and a run past its plan resumes elsewhere.
+		expect(bulkRestartKind({ ...base, haltKey: 'awaitingStart' })).toBeNull();
+		expect(bulkRestartKind({ ...base, haltKey: 'listed' })).toBeNull();
+		expect(bulkRestartKind({ ...base, haltKey: 'expired' })).toBeNull();
+		expect(bulkRestartKind({ ...base, haltKey: null })).toBeNull();
+		expect(bulkRestartKind({ ...base, phase: 'approved', haltKey: 'unavailable' })).toBeNull();
+		expect(bulkRestartKind({ ...base, phase: 'aborted', haltKey: 'contract' })).toBeNull();
+	});
+
+	// Every halt the engine can name is placed: restarted, refused, or left to the engine's reason
+	// for a stated cause. A new halt reason fails here until it is placed.
+	it('places every halt the engine names', () => {
+		const STARTS = ['awaitingStart', 'listed'];
+		const ENDS_THE_RUN = ['superseded', 'mandateEnded'];
+		const WRITE_RUNS_ONLY = ['failureRate', 'expired', 'checksum', 'maxTargets', 'probeRequired', 'atomicRolledBack', 'atomicRollbackIncomplete', 'atomicStoppedRolledBack', 'atomicStoppedRollbackIncomplete'];
+		const left = [...STARTS, ...ENDS_THE_RUN, ...WRITE_RUNS_ONLY];
+		for (const haltKey of Object.keys(BULK_HALT_REASONS)) {
+			const kind = bulkRestartKind({ ...base, haltKey });
+			expect(kind === null ? left.includes(haltKey) : !left.includes(haltKey), haltKey).toBe(true);
+		}
+		expect(left.every((k) => k in BULK_HALT_REASONS)).toBe(true);
+	});
+
+	const at = (haltKey: string, o: Partial<Pick<BulkRunDetailData, 'phase' | 'targetSystem' | 'costUsd' | 'costCapUsd' | 'judge'>> = {}) =>
+		({ phase: 'planned' as BulkRunDetailData['phase'], haltKey, targetSystem: 'http:shop.example.invalid', costUsd: 0, costCapUsd: null, judge: null, ...o });
+
+	it('has a sentence in both languages for every halt it restarts or refuses', () => {
+		for (const key of [...AS_IS.filter((k) => k !== 'judgeModel'), 'costCap', ...NONE]) {
+			for (const [lang, table] of [['de', de], ['en', en]] as const) expect(table[`bulk.halt.${key}`], `${lang} ${key}`).toBeTruthy();
+		}
+		for (const key of ['read', 'list', 'judge', 'kept', 'kept_list', 'cap_low', 'cap_whole', 'none']) {
+			expect(de[`bulk.restart.${key}`], key).toBeTruthy();
+			expect(en[`bulk.restart.${key}`], key).toBeTruthy();
+		}
+		for (const key of [...AS_IS, 'costCap', ...NONE]) {
+			expect(bulkHaltText(at(key), true, DE)?.cause, key).not.toMatch(/^bulk\./);
+			expect(bulkHaltText(at(key), false, EN)?.cause, key).not.toMatch(/^bulk\./);
+		}
+	});
+
+	it('words the halt with the run\'s provider, host and amounts', () => {
+		expect(bulkHaltText(at('unavailable'), true, DE)).toEqual({ cause: 'Der Lauf kam nicht weiter. shop.example.invalid hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.', before: null });
+		// A judged run may also have stopped on its model.
+		expect(bulkHaltText(at('unavailable', { judge: judged.judge }), true, DE)?.cause)
+			.toBe('Der Lauf kam nicht weiter. shop.example.invalid oder das KI-Modell hat nicht geantwortet, oder in lynox ist ein Fehler aufgetreten.');
+		expect(bulkHaltText(at('unrecorded'), true, EN)).toEqual({ cause: 'lynox could not record a read in your instance\'s log. So lynox stopped reading at that point.', before: null });
+		expect(bulkHaltText(at('costCap', { costUsd: 0.0034, costCapUsd: 2 }), true, DE)?.cause)
+			.toBe('Der Lauf hat die KI-Kostengrenze erreicht, die du beim Start gesetzt hast: 2.00 USD, verbraucht 0.0034 USD.');
+		expect(bulkHaltText(at('blocked'), true, DE)).toEqual({
+			cause: 'Deine Instanz darf shop.example.invalid nicht erreichen.',
+			before: 'Soll lynox shop.example.invalid erreichen, schreib an support@lynox.ai. Danach kannst du fortsetzen.',
+		});
+		expect(bulkHaltText(at('consecutiveFailures', { targetSystem: 'data_store' }), true, DE)?.cause)
+			.toBe('Dreimal hintereinander liess sich ein Ziel oder eine Seite der Liste nicht lesen.');
+	});
+
+	it('keeps the engine\'s reason on a run past its plan, which halts on the same keys for writes', () => {
+		for (const phase of ['writing', 'aborted', 'approved'] as const) {
+			expect(bulkHaltText(at('consecutiveFailures', { phase }), true, DE), phase).toBeNull();
+		}
+	});
+
+	it('reads the instance as managed only from a config, unknown otherwise', () => {
+		expect(bulkManagedOf(true, { provider: 'anthropic', managed: 'managed_pro' })).toBe(true);
+		// A self-hosted instance's config has no `managed` field at all (GET /api/config sets it
+		// only when a billing tier is set).
+		expect(bulkManagedOf(true, { provider: 'anthropic' })).toBe(false);
+		// A refused or failed request carries an error body: no tier in it, and none to read.
+		expect(bulkManagedOf(false, { error: 'Unauthorized' })).toBeNull();
+		expect(bulkManagedOf(false, { error: 'Service unavailable', managed: null })).toBeNull();
+		expect(bulkManagedOf(true, null)).toBeNull();
+	});
+
+	it('names the next step by where the instance runs, managed when unknown', () => {
+		expect(bulkHaltText(at('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkHaltText(at('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
+		expect(bulkHaltText(at('spendLimit'), true, DE)?.before).not.toMatch(/Limits/);
+		expect(bulkHaltText(at('spendLimit'), false, DE)?.before).toMatch(/oder wenn du es unter Einstellungen → Limits anhebst\.$/);
+		expect(bulkHaltText(at('spendLimit'), false, EN)?.before).toMatch(/or once you raise it under Settings → Limits\.$/);
+	});
+
+	it('gives a refused access the step to reconnect it, and a missing model the start\'s own sentence', () => {
+		const reconnect = 'Öffne Einstellungen → APIs und tippe beim Profil für shop.example.invalid auf das Chat-Symbol, um den Zugang neu zu verbinden. Gibt es dort kein Profil, bitte lynox im Chat, den Zugang einzurichten.';
+		expect(bulkHaltText(at('credential'), true, DE)?.before).toBe(reconnect);
+		expect(bulkHaltText(at('unauthorized'), true, DE)?.before).toBe(reconnect);
+		expect(bulkHaltText(at('judgeModel'), true, DE)).toEqual({ cause: de['bulk.start.no_judge_model'], before: null });
+		expect(bulkHaltText(at('expired'), true, DE)).toBeNull();
+		expect(bulkHaltText(at('awaitingStart'), true, DE)).toBeNull();
+	});
+
+	it('shows a small spend, not nothing', () => {
+		expect(bulkUsd(0)).toBe('0.00');
+		expect(bulkUsd(0.0034)).toBe('0.0034');
+		expect(bulkUsd(0.01)).toBe('0.01');
+		expect(bulkUsd(1.5)).toBe('1.50');
+	});
+
+	it('restarts at the spend limit only with a higher limit', () => {
+		expect(bulkRestartCap('3', 2)).toBe(3);
+		expect(bulkRestartCap('2,01', 2)).toBe(2.01);
+		expect(bulkRestartCap('2', 2)).toBeNull();
+		expect(bulkRestartCap('1.50', 2)).toBeNull();
+		expect(bulkRestartCap('abc', 2)).toBeNull();
+		expect(bulkRestartCap('5', null)).toBe(5);
 	});
 });
