@@ -13,9 +13,8 @@ import { MAX_BUFFER_BYTES } from '../../core/constants.js';
 // file tools, which both refuse the engine's eviction placeholder. A file that holds the
 // placeholder must not land in the artifacts directory by move or rename, and transform must not
 // write it there. The reach is by path (no workspace, the CLI layout, where an absolute path in the
-// artifacts directory is honoured). Through the workspace it cannot happen: no workspace holds the
-// artifacts directory, and the last test shows the one that would is refused before batch_files
-// touches a file.
+// artifacts directory is honoured). The last test shows one way the workspace branch is kept
+// clear of the artifacts directory: a workspace holding the data directory is refused.
 
 // The two forms a model can copy, as in fs.test.ts: the note the real eviction transform appends,
 // built rather than typed, and the in-field form older threads still carry.

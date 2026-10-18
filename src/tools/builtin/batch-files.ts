@@ -101,10 +101,9 @@ function landsInWorkspace(path: string, ws: string): boolean {
  * the content is read, and only when it does land there. A file too large to read is refused
  * rather than moved in unchecked.
  *
- * Only the by-path branch below needs it. The workspace branch (`batchAnchored`) never leaves the
- * workspace, and no workspace holds the artifacts directory: the root is `<data>/workspace` or a
- * directory outside the data directory, and one inside or holding it is refused
- * (`workspaceBase`, `unsafeRoot`).
+ * Made in the by-path branch below. The workspace branch (`batchAnchored`) stays inside the
+ * workspace, which is `<data>/workspace` or below it, or a directory that `unsafeRoot` keeps clear
+ * of the data directory (`workspaceBase`); by path, the artifacts directory is beside it, not in it.
  */
 function refusePlaceholderLanding(landing: string, file: string): void {
   if (!isInArtifactsRoot(landing)) return;
