@@ -2361,6 +2361,23 @@ describe('a send without a clear answer is not sent again', () => {
     }
   });
 
+  it('a target another loop wrote is not counted unclear, whatever a loop that lost its claim recorded on it', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await unknownFirst(s, c);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+      // The loop that took the target over writes it after the first recorded it unclear.
+      const forApply = ledger.getRunForApply(runId)!;
+      ledger.recordApplied(forApply, 0, 'written');
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
   it('an unclear target takes nothing from the failure limit of the pass', async () => {
     const s = shop();
     for (let i = 4; i < 40; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
