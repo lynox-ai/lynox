@@ -444,14 +444,19 @@ export function resolveChatContext(
   // Only point at the editable workflow if it still exists — a run can outlive a
   // deleted workflow, and naming a gone id would dead-end the fix.
   const wfExists = !!run.workflow_id && runHistory.getPlannedPipeline(run.workflow_id) !== undefined;
+  // A contained chat may not call diagnose_workflow_run or update_workflow_steps: pointing at
+  // them would send the model into two refusals.
+  const readerContained = reader?.threadId !== undefined && reader.threadId !== '' && threadIsContained(reader.containment, reader.threadId);
   return (
     `[Loaded workflow run — id: ${run.id}]\n` +
     `Workflow: "${oneLine(run.manifest_name, MAX_NAME_CHARS)}"${run.workflow_id ? ` (id: ${run.workflow_id})` : ''}\n` +
     `Status: ${run.status}${run.error ? `\nError: ${oneLine(run.error, MAX_ERR_CHARS)}` : ''}\n` +
     (trace ? `Steps:\n${trace}\n` : '') +
     (hasFailure
-      ? `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
-        (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
+      ? readerContained
+        ? `\nThis chat has read data through a store connection, so it can only read and explain this run here; changing the workflow is not available in it.`
+        : `\nDiagnose with diagnose_workflow_run (run_id "${run.id}")` +
+          (wfExists ? `, fix with update_workflow_steps (workflow_id "${run.workflow_id}"), then re-run with run_workflow.` : '.')
       : '')
   );
 }

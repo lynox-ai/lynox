@@ -3275,7 +3275,9 @@ export class Agent implements IAgent {
         });
     // The tool-search tool (module-level LAZY_TOOL_SEARCH_TOOL) heads the array
     // when lazy, then the sorted tenant tools, then the web_search builtin — a
-    // stable, deterministic layout.
+    // deterministic layout, which loses web_search once a chat is contained. The
+    // tool-search tool also runs at the provider, but it only searches this
+    // request's own tool definitions and fetches nothing, so a contained chat keeps it.
     const toolsDef = [
       ...(lazyToolsActive ? [LAZY_TOOL_SEARCH_TOOL] : []),
       ...strippedTenantTools,
@@ -4283,8 +4285,9 @@ export class Agent implements IAgent {
     // A chat that read data through a store connection keeps it (`containment.ts`): only the
     // calls on its list run, read from the record on every call, since a child agent or a
     // workflow step of this chat may have contained it a moment ago. Before any prompt, so the
-    // user is never asked about a call that would not run; the advertised tool list stays as
-    // it is, so the cached prefix does not change when a chat becomes contained.
+    // user is never asked about a call that would not run. The tenant tools stay advertised;
+    // only the provider-side web_search drops out of the list (`_callAPI`), so the cached prefix
+    // changes once, on the first call after the chat becomes contained.
     if (chatIsContained(this) && !containedCallAllowed(tc.name, tc.input)) {
       return {
         type: 'tool_result',

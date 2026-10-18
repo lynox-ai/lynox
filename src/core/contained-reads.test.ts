@@ -193,6 +193,10 @@ describe('the "Fixen" chat context on a run a contained chat started', () => {
     expect(out).toContain('secret store detail');
     expect(containment.isContained({ threadId: 'session-1' })).toBe(true);
     expect(t.flags.get('session-1')).toBe(1);
+    // It points at no tool the contained chat may not call.
+    expect(out).toContain('it can only read and explain this run here');
+    expect(out).not.toContain('diagnose_workflow_run');
+    expect(out).not.toContain('update_workflow_steps');
   });
 
   it('loads only the refusal when the chat cannot be contained, or no reader is given', () => {
@@ -210,7 +214,10 @@ describe('the "Fixen" chat context on a run a contained chat started', () => {
   it('a run from an uncontained chat contains nothing (control)', () => {
     seedRun('run-free', 'chat-other');
     const t = fakeThreads(['session-1']);
-    expect(resolveChatContext(history, { kind: 'run', id: 'run-free' }, null, { threadId: 'session-1', containment, threadStore: t.store })).toContain('secret store detail');
+    const out = resolveChatContext(history, { kind: 'run', id: 'run-free' }, null, { threadId: 'session-1', containment, threadStore: t.store })!;
+    expect(out).toContain('secret store detail');
+    expect(out).toContain('Diagnose with diagnose_workflow_run (run_id "run-free")');
+    expect(out).not.toContain('only read and explain');
     expect(containment.isContained({ threadId: 'session-1' })).toBe(false);
   });
 });

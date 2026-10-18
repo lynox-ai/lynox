@@ -15,7 +15,10 @@ import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
  * credential funnel (`tools/builtin/http.ts`) mints the request pass for that connection on its
  * behalf, after every refusal and before the pass exists; a refused request contains nothing,
  * and no request leaves without its row. A bulk run planned in a contained thread, and an undo
- * of a contained run, are contained in the transaction that inserts the run.
+ * of a contained run, are contained in the transaction that inserts the run. A chat that reads
+ * what a contained chat produced — a workflow run that chat started, through a diagnosis, the
+ * chat context of a run, or a retry — is contained for the same connections before it reads
+ * ({@link containThreadFrom}).
  *
  * Containment is never undone for the life of the container: this module has no way to delete
  * or change a row, and the table refuses every UPDATE. Only the owner's erasure empties it.
@@ -85,7 +88,8 @@ export class Containment {
   /**
    * Contain a thread for every connection another thread is contained for, and answer how many
    * that were. A second call keeps the rows already there. Throws when the rows cannot be read
-   * or written.
+   * or written. Copies rows only; the reading thread's private flag is
+   * {@link containThreadFrom}'s, which every reader goes through.
    */
   containFromThread(sourceThreadId: string, threadId: string): number {
     if (sourceThreadId === '' || threadId === '') throw new Error('a container needs an id');
@@ -170,8 +174,9 @@ export function containedRefusal(agent: Pick<IAgent, 'currentThreadId' | 'origin
 
 /**
  * Contain the thread that reads what a contained thread produced — a workflow run that chat
- * started — before anything of it is shown there: the reading thread gets every connection of
- * the source and its `skip_extraction`, read back as the credential funnel does.
+ * started — before anything of it is shown or run there: the reading thread gets every
+ * connection of the source, and its own `skip_extraction` set and read back, as the credential
+ * funnel does.
  *
  * Throws when that cannot be established: no store, no thread store, no reading thread, a
  * source with no row to copy (its containment was only a read that could not answer), or a
@@ -206,12 +211,15 @@ export const CONTAINED_READ_REFUSAL =
   'Not shown: this run was started from a chat that read data through a store connection, and this engine could not record that this chat now reads that data too.';
 
 /**
- * The tools a contained chat may call. What such a chat holds may only go back to the store it
- * came from or stay in the chat, so the set is what reads, asks, or works inside the chat:
- * `http_request` only to a store host ({@link containedCallAllowed}), the reads of memory and
- * history, the follow-up chips, a question to the user, the child agents and workflow steps
- * (which are held by the same check, since they run for this chat), and the bulk tools for a
- * run that writes to a store. Everything else — a tool registered later included — is refused.
+ * The tools a contained chat may call. What such a chat holds may go to a store or stay in the
+ * chat, so the set is what reads, asks, or works inside the chat: `http_request` only to a store
+ * host ({@link containedCallAllowed}), the reads of memory and history, the follow-up chips, a
+ * question to the user, the child agents and workflow steps (which are held by the same check,
+ * since they run for this chat), and the bulk tools for a run that writes to a store.
+ * Everything else — a tool registered later included — is refused.
+ *
+ * "A store" is any store host, not only the connections this chat is contained for: on an
+ * engine with two stores connected, what a chat read from one may be written to the other.
  */
 export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string>([
   'http_request',

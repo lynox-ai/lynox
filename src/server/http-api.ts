@@ -870,12 +870,12 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
   return failed ? { ...block, error: failed } : block;
 }
 
-/** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
 /**
- * A memory or artifact write the UI makes from a chat names it (`source_thread_id`). From a
+ * A memory or artifact write may name the chat it comes from (`source_thread_id`). From a
  * contained chat it is refused before anything is written, read from the record, fail-closed:
  * what such a chat holds stays in it (`core/containment.ts`). A write that names no chat is
- * unchanged. Answers `true` when it has answered the request.
+ * unchanged, and the web UI names none yet: the check holds a client that says where its write
+ * comes from, it does not find that out. Answers `true` when it has answered the request.
  */
 function refuseContainedSource(res: ServerResponse, body: unknown, containment: Containment | null): boolean {
   const id = body && typeof body === 'object' ? (body as Record<string, unknown>)['source_thread_id'] : undefined;
@@ -891,6 +891,7 @@ function refuseContainedSource(res: ServerResponse, body: unknown, containment: 
   return false;
 }
 
+/** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
 function noStoreJson(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
   res.writeHead(status, {

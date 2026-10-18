@@ -12,7 +12,7 @@ import type { ArtifactStore } from '../core/artifact-store.js';
 import type { RunHistory } from '../core/run-history.js';
 
 /**
- * A memory or artifact write the UI makes from a chat names it (`source_thread_id`), and from a
+ * A memory or artifact write may name the chat it comes from (`source_thread_id`), and from a
  * contained chat it is refused with 409 before anything is written. Without the field, or from
  * another chat, it goes through. On a booted engine, because the record has to be wired where
  * the routes look for it.
