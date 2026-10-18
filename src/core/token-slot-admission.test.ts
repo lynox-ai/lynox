@@ -598,14 +598,23 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     const ctx = createToolContext({});
     (ctx as { apiStore: unknown }).apiStore = store;
     const { SecretStore } = await import('./secret-store.js');
-    const left = vault.entries();
+    // bexio-b has connected on its own since: an access token of its own lets the request through
+    // the attach, so only the emptied name can keep the reference from going out.
+    const OWN = value('b', 'own', 'access');
+    const left = { ...vault.entries(), BEXIO_B_ACCESS_TOKEN: OWN };
     const agentStore = new SecretStore(undefined, { getAll: () => new Map(Object.entries(left).map(([k, v]) => [k, { value: v, scope: 'any', ttlMs: 0 }])) } as unknown as import('./secret-vault.js').SecretVault);
-    mockProcess.mockReset();
-    mockProcess
-      .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url: 'https://bexio-b.example/v1/x', method: 'GET', headers: { 'X-Data': 'secret:B_OUT' } } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
-      .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
-    await new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentStore, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') }).send('go');
-    expect(sent).toHaveLength(0);
+    const run = async (headers: Record<string, string>): Promise<void> => {
+      mockProcess.mockReset();
+      mockProcess
+        .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url: 'https://bexio-b.example/v1/x', method: 'GET', headers } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
+        .mockResolvedValueOnce({ content: [{ type: 'text' as const, text: 'Done' }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 5 } });
+      await new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [httpRequestTool], secretStore: agentStore, toolContext: ctx, promptUser: vi.fn().mockResolvedValue('Allow') }).send('go');
+    };
+    await run({ 'X-Data': 'secret:B_OUT' });
+    expect(sent.some((s) => JSON.stringify(s.headers).includes(VAULT()['B_OUT']!))).toBe(false);
+    // Control: the same request without the reference goes out with the profile's own token.
+    await run({ 'X-Data': 'nothing secret' });
+    expect(sent.some((s) => s.headers['Authorization'] === `Bearer ${OWN}`)).toBe(true);
   });
 
   it.each([
