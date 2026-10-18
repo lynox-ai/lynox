@@ -7625,7 +7625,7 @@ describe('requests to a Shopify store are refused', () => {
         id: 'store', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] },
         custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-10-18T00:00:00.000Z' },
       };
-      const store = { getByHostname: () => profile, getHostConflict: () => undefined, knownProfiles: () => [profile], get: () => profile };
+      const store = { getByHostname: () => profile, getHostConflict: () => undefined, unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile };
       const headers: Record<string, string> = {};
       const attached = await attachStoredCredential(url, headers, false, {
         apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
