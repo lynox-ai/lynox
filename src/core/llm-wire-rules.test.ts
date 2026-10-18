@@ -270,9 +270,14 @@ describe('every Claude-wire client is built shaped', () => {
 // the RESOLVED host: a name that merely looks like one of these is not enough.
 const NON_LLM_HOSTS = new Set(['graph.microsoft.com']);
 
-/** The value of `const NAME = '…'` / `…` in `source`, with `${OTHER}` resolved the same way; null when anything is unresolvable. */
+/**
+ * The value of `const NAME = '…'` / `…` in `source`, with `${OTHER}` resolved the same way; null
+ * when anything is unresolvable. A name declared more than once in the file (any `const`/`let`/
+ * `var`, e.g. shadowed in two functions) is unresolvable: which one a line sees is not decided here.
+ */
 function resolveConst(name: string, source: string, depth = 0): string | null {
   if (depth > 4) return null;
+  if ((source.match(new RegExp(`\\b(?:const|let|var)\\s+${name}\\b`, 'g')) ?? []).length !== 1) return null;
   const def = new RegExp(`\\bconst ${name}\\s*=\\s*(['"\`])([^'"\`]*)\\1\\s*;`).exec(source);
   if (def === null) return null;
   let unresolved = false;
@@ -281,11 +286,11 @@ function resolveConst(name: string, source: string, depth = 0): string | null {
 }
 
 /**
- * The host of the Messages-looking URL on `line`, resolved through the file's constants, or
- * null when it cannot be resolved. Only the literal's head counts: `${BASE}…` or `https://host…`.
+ * The host of the Messages-looking URL that ends at `at` on `line`, resolved through the file's
+ * constants, or null when it cannot be resolved. Only the literal's head counts: `${BASE}…` or
+ * `https://host…`.
  */
-function messagesUrlHost(line: string, source: string): string | null {
-  const at = line.indexOf('/messages');
+function messagesUrlHost(line: string, at: number, source: string): string | null {
   const open = Math.max(line.lastIndexOf('`', at), line.lastIndexOf("'", at), line.lastIndexOf('"', at));
   if (open < 0) return null;
   const head = line.slice(open + 1, at);
@@ -302,9 +307,13 @@ function messagesUrlHost(line: string, source: string): string | null {
   try { return new URL(base).hostname; } catch { return null; }
 }
 
+/** True only when EVERY `/messages` on the line resolves onto NON_LLM_HOSTS. */
 const skipsAsNonLlmHost = (line: string, source: string): boolean => {
-  const host = messagesUrlHost(line, source);
-  return host !== null && NON_LLM_HOSTS.has(host);
+  const ats = [...line.matchAll(/\/messages/g)].map(m => m.index);
+  return ats.length > 0 && ats.every((at) => {
+    const host = messagesUrlHost(line, at, source);
+    return host !== null && NON_LLM_HOSTS.has(host);
+  });
 };
 
 describe('a /messages URL on a non-LLM host is skipped only when its host resolves onto the list', () => {
@@ -321,6 +330,13 @@ describe('a /messages URL on a non-LLM host is skipped only when its host resolv
     // Partly unresolvable: dropping the unknown piece would land on a listed host, so it must not be dropped.
     expect(skipsAsNonLlmHost('fetch(`${ME}/messages`, {', 'const ME = `https://${SUB}graph.microsoft.com/v1.0/me`;\n')).toBe(false);
     expect(skipsAsNonLlmHost('fetch(`https://${SUB}graph.microsoft.com/v1/messages`, {', '')).toBe(false);
+  });
+  it('still catches a name declared twice, whichever declaration comes first', () => {
+    const twice = "const B = 'https://graph.microsoft.com/v1.0';\nfunction f() {\n  const B = 'https://api.anthropic.com/v1';\n}\n";
+    expect(skipsAsNonLlmHost('fetch(`${B}/messages`, {', twice)).toBe(false);
+  });
+  it('still catches a line with a Graph URL and a second, non-Graph one', () => {
+    expect(skipsAsNonLlmHost('a(`${ME}/messages`); b(`${baseUrl}/messages`, {', `${graph}const baseUrl = 'https://api.anthropic.com/v1';\n`)).toBe(false);
   });
   it('still catches a host that only starts like a listed one', () => {
     expect(skipsAsNonLlmHost('fetch(`https://graph.microsoft.com.example.net/v1/messages`, {', '')).toBe(false);
