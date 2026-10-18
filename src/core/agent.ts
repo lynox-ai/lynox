@@ -4350,9 +4350,11 @@ export class Agent implements IAgent {
     // each other's decision via the shared field, and a handler that never runs
     // (validation abort) leaves nothing stale behind.
     let downgradeDecision: import('../types/models.js').ModelTier | undefined;
+    // The tool's check sees what a child of this agent would inherit (spawn: a profile's pinned
+    // model), without the key: no check needs it, and every destructive tool's check gets this.
     const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract);
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, tool, this.currentRunId, this.governingContract().contract, { ...this.getProviderConfig(), apiKey: undefined });
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
     const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
     if (effectiveSignal) {

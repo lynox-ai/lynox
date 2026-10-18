@@ -159,6 +159,7 @@ import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, reso
 import { MAX_SPAWN_BUDGET_USD } from '../../core/limits.js';
 import { CostGuard } from '../../core/cost-guard.js';
 import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
+import { providerFamilyLabel } from '../../core/prompts.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 import type { WarningPayload } from '../../types/tools.js';
@@ -6033,6 +6034,86 @@ describe('spawn_agent tool', () => {
         vi.unstubAllEnvs();
         reloadConfig();
       }
+    });
+
+    describe('a child without a profile under a profiled parent runs on the parent\'s pinned model', () => {
+      const pinnedTo = (model: string) => ({
+        provider: 'openai' as const, apiKey: undefined, apiBaseURL: 'https://api.example.com/v1',
+        openaiModelId: model, openaiAuth: undefined, modelPinnedByProfile: true,
+      });
+      const ask = (input: Parameters<NonNullable<NonNullable<typeof spawnAgentTool.destructive>['check']>>[0], model: string) =>
+        spawnAgentTool.destructive!.check!(input, { autonomy: 'guided', parentProvider: pinnedTo(model) });
+
+      it('a deep pin asks, cannot be offered on balanced, and names the parent\'s provider', () => {
+        const p = ask({ agents: [{ name: 'r', task: 'x' }] }, 'claude-opus-4-6') as WarningPayload;
+        expect(p).not.toBeNull();
+        expect(p.tier).toBe('deep');
+        expect(p.downgradeTo).toBeUndefined();
+        expect(p.message).not.toContain('Run on balanced');
+        expect(p.provider).toBe(providerFamilyLabel('openai'));
+        expect(p.provider).not.toBe(providerFamilyLabel('anthropic'));
+        // Asking for a lower tier changes nothing: the pin wins.
+        expect(ask({ agents: [{ name: 'r', task: 'x', model: 'fast' }] }, 'claude-opus-4-6')).not.toBeNull();
+      });
+
+      it('an unknown-band pin asks, as an unregistered model', () => {
+        const p = ask({ agents: [{ name: 'r', task: 'x' }] }, 'custom-expensive-byok-model') as WarningPayload;
+        expect(p).not.toBeNull();
+        expect(p.message).toContain('unregistered');
+      });
+
+      it('a balanced pin does not ask, even for a deep request the pin overrides', () => {
+        expect(ask({ agents: [{ name: 'r', task: 'x' }] }, 'claude-sonnet-4-6')).toBeNull();
+        expect(ask({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'claude-sonnet-4-6')).toBeNull();
+      });
+
+      it('a child with a profile of its own is judged by its profile, not the parent\'s pin', async () => {
+        const { reloadConfig } = await import('../../core/config.js');
+        vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+          light: { provider: 'openai', api_base_url: 'https://api.example.com/v1', api_key: 'k', model_id: 'claude-sonnet-4-6' },
+        }));
+        reloadConfig();
+        try {
+          expect(ask({ agents: [{ name: 'r', task: 'x', profile: 'light' }] }, 'claude-opus-4-6')).toBeNull();
+        } finally {
+          vi.unstubAllEnvs();
+          reloadConfig();
+        }
+      });
+
+      it.each(['claude-opus-4-6', 'custom-expensive-byok-model'])('headless, a %s pin is refused, not run', async (model) => {
+        const { Agent: MockAgent } = await import('../../core/agent.js');
+        vi.mocked(MockAgent).mockClear();
+        await expect(
+          spawnAgentTool.handler(
+            { agents: [{ name: 'r', task: 'x', model: 'balanced' }] },
+            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo(model) } as Partial<IAgent>),
+          ),
+        ).rejects.toThrow(/the model this run is pinned to by its model profile/);
+        expect(vi.mocked(MockAgent)).not.toHaveBeenCalled();
+      });
+
+      it('headless, a balanced pin runs on it', async () => {
+        const { Agent: MockAgent } = await import('../../core/agent.js');
+        vi.mocked(MockAgent).mockClear();
+        await spawnAgentTool.handler(
+          { agents: [{ name: 'r', task: 'x' }] },
+          makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('claude-sonnet-4-6') } as Partial<IAgent>),
+        );
+        const child = vi.mocked(MockAgent).mock.calls[0]![0] as { model?: string };
+        expect(child.model).toBe('claude-sonnet-4-6');
+      });
+
+      it('through the real guard: the parent\'s config reaches the check', () => {
+        const input = { agents: [{ name: 'r', task: 'x' }] };
+        expect(isDangerous('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'))).toContain('DEEP');
+        // The payload the GO is built from is read on its own path, and must see it too.
+        const detailed = isDangerousDetailed('spawn_agent', input, 'guided', spawnAgentTool, undefined, undefined, pinnedTo('claude-opus-4-6'));
+        expect(detailed?.payload?.tier).toBe('deep');
+        expect(detailed?.payload?.downgradeTo).toBeUndefined();
+        // Without a parent's config nothing is inherited to judge, and a plain spawn does not ask.
+        expect(isDangerous('spawn_agent', input, 'guided', spawnAgentTool)).toBeNull();
+      });
     });
 
     it('does NOT over-trigger: a deep spec under a balanced max_tier ceiling is already clamped → null', async () => {

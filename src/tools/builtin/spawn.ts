@@ -841,14 +841,30 @@ interface SpawnAgentInput {
  * not a consistency fix; it is a different decision.
  */
 function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
-  const band = modelCapability(profile.model_id)?.tier;
+  return modelBandIsDeepOrUnknown(profile.model_id);
+}
+
+/** The same test for a model id a child is pinned to without a profile of its own (an inherited pin). */
+function modelBandIsDeepOrUnknown(modelId: string): boolean {
+  const band = modelCapability(modelId)?.tier;
   return band === 'deep' || band === undefined;
+}
+
+/**
+ * The model a child without a profile of its own takes from a profiled parent, when that model's
+ * band is deep or unknown; otherwise undefined. Such a child runs on the parent's pinned model
+ * whatever tier it asks for (`resolveSpawnChildRouting`), so the tier says nothing about its cost,
+ * and a clamp to balanced does not reach it.
+ */
+function inheritedDeepPin(routing: { model: string; pinnedByProfile: boolean }, profile: ModelProfile | undefined): string | undefined {
+  return !profile && routing.pinnedByProfile && modelBandIsDeepOrUnknown(routing.model) ? routing.model : undefined;
 }
 
 /**
  * Does a spawn spec route a child onto a tier that needs consent? The consent
  * `check` (permission guard) + the headless clamp (handler) MUST agree, so they
- * share this one predicate. Two paths:
+ * share this one predicate, and both pass the spawning agent's provider config as
+ * `parent` (without it an inherited pin is invisible here). Three paths:
  *  1. a profile whose band is deep OR unknown — A2: `resolveSpawnChildRouting.tier`
  *     reflects the CLAMPED tier, not the profile's band, so a profile pinning a
  *     deep model returns `.tier='balanced'` while `.model=<deep id>`. Read the
@@ -858,13 +874,26 @@ function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
  *     necessary and sufficient — a bare `spec.model === 'deep'` shortcut would
  *     OVER-trigger when a ceiling clamps deep→balanced (warning about a deep
  *     cost the run demonstrably does not incur), so it is deliberately NOT used.
+ *  3. no profile of its own under a profiled parent: the child runs on the
+ *     parent's pinned model, so that model's band decides, as in path 1.
  */
-function specResolvesDeep(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider): boolean {
+function specResolvesDeep(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider, parent?: ProviderConfigSnapshot | null): boolean {
   const profile = spec.profile ? profileNamed(userConfig.model_profiles, spec.profile) : undefined;
   if (profile && profileBandIsDeepOrUnknown(profile)) return true;
   const role = spec.role ? getRole(spec.role) : undefined;
-  const { tier } = resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider });
-  return tier === 'deep';
+  const routing = resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider, parent });
+  // 3. a pin inherited from a profiled parent: the child runs on that model, so its band
+  // decides, not the tier (deep or unknown asks; a pinned balanced model does not).
+  if (!profile && routing.pinnedByProfile) return inheritedDeepPin(routing, profile) !== undefined;
+  return routing.tier === 'deep';
+}
+
+/** Path 3 of {@link specResolvesDeep} on its own: the deep- or unknown-band model `spec` inherits, or undefined. */
+function specInheritedDeepPin(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider, parent: ProviderConfigSnapshot | null | undefined): string | undefined {
+  const profile = spec.profile ? profileNamed(userConfig.model_profiles, spec.profile) : undefined;
+  if (profile) return undefined;
+  const role = spec.role ? getRole(spec.role) : undefined;
+  return inheritedDeepPin(resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider, parent }), profile);
 }
 
 /**
@@ -2100,9 +2129,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // tier, the budget estimate, and the labelled result all agree the child
     // ran on the cheaper tier (predicate 5).
     const downgradedIdx = new Set<number>();
+    // What a child without a profile of its own inherits, read the same way the routing below reads it.
+    const parentSnapshot = readParentProviderConfig(agent);
     const specs: SpawnSpec[] = input.agents.map((spec, i) => {
       assertSpawnRoutingPermitted(spec, cfg);
-      if (isHeadless && specResolvesDeep(spec, cfg, provider)) {
+      if (isHeadless && specResolvesDeep(spec, cfg, provider, parentSnapshot)) {
         const deepProfile = spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined;
         // A deep-band OR unknown-band profile pins a specific endpoint and cannot be
         // substituted down to balanced, so it is REFUSED headless (not clamped). This
@@ -2118,15 +2149,27 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
             `autonomous child.`,
           );
         }
+        // The same for a pin inherited from this run's own model profile: the child runs on that
+        // model whatever tier it asks for, so a clamp to balanced would not reach it.
+        const inherited = specInheritedDeepPin(spec, cfg, provider, parentSnapshot);
+        if (inherited !== undefined) {
+          throw new Error(
+            `Spawn "${spec.name}" would run on ${inherited}, the model this run is pinned to by its model ` +
+            `profile, whose tier cannot run autonomously without explicit consent — a child without a ` +
+            `profile of its own inherits that model, and asking for a lower tier does not change it. Run ` +
+            `this delegation interactively (where you can approve it), or give the child a \`profile\` ` +
+            `whose model is fast or balanced.`,
+          );
+        }
         return { ...spec, model: 'balanced' as const };
       }
       // Interactive "Run on balanced": clamp substitutable deep specs down. A
-      // deep-band profile is UNREACHABLE here — the check offers downgrade only
-      // when canDowngrade (no deep-band profile in the batch), so every deep spec
+      // deep-band profile, or an inherited deep pin, is UNREACHABLE here — the check offers
+      // downgrade only when canDowngrade (neither in the batch), so every deep spec
       // is substitutable. Clamping before the announce loop means totalEstimate,
       // the session budget reservation, and the announced tier all reflect the
       // cheaper run (predicate 7 — no separate reconcile needed).
-      if (downgradeTier === 'balanced' && specResolvesDeep(spec, cfg, provider)) {
+      if (downgradeTier === 'balanced' && specResolvesDeep(spec, cfg, provider, parentSnapshot)) {
         downgradedIdx.add(i);
         return { ...spec, model: 'balanced' };
       }
@@ -2781,7 +2824,10 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       if (ctx?.autonomy === 'autonomous') return null;
       const cfg = loadConfig();
       const baseProvider = getActiveProvider();
-      const deepSpecs = input.agents.filter((spec) => specResolvesDeep(spec, cfg, baseProvider));
+      // The spawning agent's provider config, so a pin a child inherits is judged here too. Only the
+      // agent's own guard call has one; without it, nothing is inherited to judge.
+      const parent = ctx?.parentProvider;
+      const deepSpecs = input.agents.filter((spec) => specResolvesDeep(spec, cfg, baseProvider, parent));
       if (deepSpecs.length === 0) return null;
 
       let costUsd = 0;
@@ -2796,14 +2842,16 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       for (const spec of deepSpecs) {
         const role = spec.role ? getRole(spec.role) : undefined;
         const profile = spec.profile ? profileNamed(cfg.model_profiles, spec.profile) : undefined;
-        const r = resolveSpawnChildRouting({ spec, role, profile, userConfig: cfg, baseProvider });
+        const r = resolveSpawnChildRouting({ spec, role, profile, userConfig: cfg, baseProvider, parent });
         // A profile's band hides behind the clamp-resolved tier. The payload names
         // the ACTUAL classification — deep for a known-deep profile, deep
         // (conservatively) for an unknown-band profile whose cost can't be proven.
-        if (profile && profileBandIsDeepOrUnknown(profile)) {
+        // An inherited pin is the same case: the child runs on it whatever its tier.
+        const inherited = inheritedDeepPin(r, profile);
+        if ((profile && profileBandIsDeepOrUnknown(profile)) || inherited !== undefined) {
           resolvedTier = 'deep';
           canDowngrade = false;
-          if (modelCapability(profile.model_id)?.tier === undefined) hasUnknownBand = true;
+          if (modelCapability(profile?.model_id ?? inherited!)?.tier === undefined) hasUnknownBand = true;
         } else {
           resolvedTier = r.tier;
         }
@@ -2813,7 +2861,9 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // a profile forces hybridSlot to {crossProviderSlot:false} but routes via its
         // OWN provider, so read profile.provider — naming the base provider in either
         // case would be a transparency lie. Predicate 6 is load-bearing.
-        providers.add(profile?.provider ?? (r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider));
+        // A child with an inherited pin talks to the parent's endpoint, so the parent's provider.
+        const inheritedProvider = !profile && r.pinnedByProfile ? parent?.provider : undefined;
+        providers.add(profile?.provider ?? inheritedProvider ?? (r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider));
       }
       const providerList = [...providers].map((p) => providerFamilyLabel(p)).join(', ');
       const childWord = deepSpecs.length === 1 ? 'One child would run' : `${deepSpecs.length} children would run`;

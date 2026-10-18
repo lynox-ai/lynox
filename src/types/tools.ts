@@ -2,7 +2,7 @@
 
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
-import type { IAgent } from './agent.js';
+import type { IAgent, ProviderConfigSnapshot } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
@@ -79,7 +79,10 @@ export interface ToolEntry<TInput = unknown> {
    * consent gate names tier + cost + provider). The guard renders the payload's
    * `message` verbatim. The optional second argument `ctx` carries the run's
    * `autonomy`, so a check can opt OUT of gating in autonomous mode (spawn does:
-   * the handler clamps deep→balanced headlessly instead of refusing).
+   * the handler clamps deep→balanced headlessly instead of refusing), and the
+   * calling agent's `parentProvider` config, so a check can see what a child it
+   * would build inherits (spawn: the model a profiled parent is pinned to).
+   * Only the agent's own guard call has one.
    *
    * Colocating this with the tool registration keeps the write-action
    * set next to the input schema — adding a new write action no longer
@@ -87,7 +90,7 @@ export interface ToolEntry<TInput = unknown> {
    */
   destructive?: {
     mode: 'data' | 'external';
-    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined }) => string | WarningPayload | null;
+    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined; parentProvider?: ProviderConfigSnapshot | null | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
    * What a call writes OUTSIDE the instance — sends, creates or changes something at a

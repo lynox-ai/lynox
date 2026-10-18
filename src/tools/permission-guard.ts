@@ -2,7 +2,7 @@ import { realpathSync, existsSync } from 'node:fs';
 import { effectiveWriteMethod, isGraphqlEndpoint } from '../core/outbound-write.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
-import type { AutonomyLevel, ToolEntry, WarningPayload } from '../types/index.js';
+import type { AutonomyLevel, ProviderConfigSnapshot, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive, getWorkspaceCwd, READ_ONLY_ROOTS, isPathWithin } from '../core/workspace.js';
 import { proveBashCommand, BASH_OBSERVE_EVENT } from './bash-allowlist.js';
@@ -421,12 +421,12 @@ export interface DangerSignal {
  * string-return paths. A non-destructive tool, or a check that returned a plain
  * action-label string, yields null: those dangers offer no downgrade.
  * Consistent with `_detectDanger` by construction: both call the same
- * `check(input, { autonomy })`.
+ * `check(input, { autonomy, parentProvider })`.
  */
-function extractDangerPayload(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined): WarningPayload | null {
+function extractDangerPayload(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, parentProvider: ProviderConfigSnapshot | null | undefined): WarningPayload | null {
   const check = entry?.destructive?.check;
   if (!check) return null;
-  const detail = check(input, { autonomy });
+  const detail = check(input, { autonomy, parentProvider });
   if (detail !== null && typeof detail !== 'string') return detail;
   return null;
 }
@@ -439,16 +439,16 @@ function extractDangerPayload(toolName: string, input: unknown, autonomy: Autono
  * this directly to also receive `payload`, so the GO can offer a cheaper tier
  * when `payload.downgradeTo` is set.
  */
-export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
-  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract);
+export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract, parentProvider?: ProviderConfigSnapshot | null): DangerSignal | null {
+  const signal = _decideDanger(toolName, input, autonomy, entry, runId, contract, parentProvider);
   // Observed against the FINAL decision: a call a contract lets
   // through runs without a question, and is recorded as one that does.
   observeBashProof(toolName, input, autonomy, signal?.warning ?? null, runId);
   return signal;
 }
 
-function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined): DangerSignal | null {
-  const warning = _detectDanger(toolName, input, autonomy, entry);
+function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined, runId: string | undefined, contract: CapabilityContract | undefined, parentProvider: ProviderConfigSnapshot | null | undefined): DangerSignal | null {
+  const warning = _detectDanger(toolName, input, autonomy, entry, parentProvider);
   if (!warning) return null;
 
   // A capability contract can override NON-critical dangers only.
@@ -478,7 +478,7 @@ function _decideDanger(toolName: string, input: unknown, autonomy: AutonomyLevel
     channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion: contract?.version });
   }
 
-  const payload = extractDangerPayload(toolName, input, autonomy, entry);
+  const payload = extractDangerPayload(toolName, input, autonomy, entry, parentProvider);
   return { warning, ...(payload ? { payload } : {}) };
 }
 
@@ -513,8 +513,8 @@ function observeBashProof(toolName: string, input: unknown, autonomy: AutonomyLe
   });
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
-  return isDangerousDetailed(toolName, input, autonomy, entry, runId, contract)?.warning ?? null;
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, runId?: string, contract?: CapabilityContract, parentProvider?: ProviderConfigSnapshot | null): string | null {
+  return isDangerousDetailed(toolName, input, autonomy, entry, runId, contract, parentProvider)?.warning ?? null;
 }
 
 /** A value matches if any glob pattern in the list matches it (empty list = no match). */
@@ -1461,7 +1461,7 @@ function _scanBashDanger(
   return null;
 }
 
-function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry): string | null {
+function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLevel, entry?: ToolEntry, parentProvider?: ProviderConfigSnapshot | null): string | null {
   if (toolName === 'bash' && input && typeof input === 'object' && 'command' in input) {
     const rawCmd = String((input as { command: unknown }).command);
 
@@ -1594,7 +1594,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // Workspace write actions.
   if (entry?.destructive) {
     const { mode, check } = entry.destructive;
-    const detail = check ? check(input, { autonomy }) : '';
+    const detail = check ? check(input, { autonomy, parentProvider }) : '';
     if (detail !== null) {
       // A WarningPayload carries its OWN fully-formed GO message (spawn-agent
       // deep-tier consent: tier + cost + provider). Render it verbatim — the
