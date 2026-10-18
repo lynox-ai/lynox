@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -319,34 +319,6 @@ describe('an entry that a delete cannot remove', () => {
     const reason = reasonOf(store.save(bearer('crm', 'BAD_KEY'), dir));
     expect(reason).toContain('remove the file "bad id.json" from the API profile directory by hand');
     expect(reason).not.toContain('api_setup delete (it takes');
-  });
-});
-
-describe('content that cannot be read at all', () => {
-  it('holds every name, and the refusal says to make it readable or delete it', () => {
-    const { store, dir } = fromDirectory([asEntry(bearer('crm', 'CRM_KEY'))]);
-    writeFileSync(join(dir, 'locked.json'), JSON.stringify(bearer('locked', 'LOCKED_KEY')));
-    chmodSync(join(dir, 'locked.json'), 0o000);
-    try {
-      store.loadFromDirectory(dir);
-      expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
-      const reason = reasonOf(store.save(bearer('rep', 'REP_KEY'), dir));
-      expect(reason).toContain('Its content could not be read in full, so it is taken to hold every vault name.');
-      expect(reason).toContain('make it readable, or delete "locked" with api_setup delete');
-    } finally {
-      chmodSync(join(dir, 'locked.json'), 0o600);
-    }
-  });
-  it('with a file name that is no id, the refusal says to make it readable or remove it by hand', () => {
-    const { store, dir } = fromDirectory([]);
-    writeFileSync(join(dir, 'Locked File.json'), '{}');
-    chmodSync(join(dir, 'Locked File.json'), 0o000);
-    try {
-      store.loadFromDirectory(dir);
-      expect(reasonOf(store.save(bearer('rep', 'REP_KEY'), dir))).toContain('make the file readable, or remove the file "Locked File.json" from the API profile directory by hand');
-    } finally {
-      chmodSync(join(dir, 'Locked File.json'), 0o600);
-    }
   });
 });
 

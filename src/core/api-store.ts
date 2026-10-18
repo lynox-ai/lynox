@@ -1187,8 +1187,7 @@ const UNREADABLE_MAX_STRINGS = 10_000;
 
 function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw: string | null, beside: readonly unknown[] = []): UnreadableEntry {
   const names = new Set<string>();
-  // Content that could not be read at all says nothing about the names it holds.
-  let all = raw === null && parsed === undefined;
+  let all = false;
   const take = (s: string): void => {
     if (names.size >= UNREADABLE_MAX_STRINGS) { all = true; return; }
     names.add(s);
@@ -2277,10 +2276,9 @@ export class ApiStore {
       const where = `a stored API profile that could not be read (${e.source}, id ${JSON.stringify(e.deleteId)})`;
       // A file whose name is no id cannot be deleted through the store; then the file has to go by hand.
       const byHand = e.source.startsWith('file ') && !PROFILE_ID_PATTERN.test(e.deleteId);
-      const remedy = (e.all ? 'Its content could not be read in full, so it is taken to hold every vault name. ' : '')
-        + (byHand
-          ? `To clear it, ${e.all ? 'make the file readable, or ' : ''}remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes), then set that API up again.`
-          : `To clear it, ${e.all ? 'make it readable, or ' : ''}delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`);
+      const remedy = byHand
+        ? `To clear it, remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes), then set that API up again.`
+        : `To clear it, delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`;
       if (e.ids.has(profile.id)) {
         return `profile "${profile.id}" has the id of ${where}, and a save under it would replace that record and what its id derives. ${outcome} ${remedy}`;
       }
