@@ -113,7 +113,7 @@ const tmp = (prefix: string): string => {
 beforeEach(() => {
   vi.clearAllMocks();
   sent = [];
-  lynoxDir = tmp('lynox-verify-done-home-');
+  lynoxDir = tmp('lynox-shared-grant-home-');
   vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   restoreTransport = setPinnedTransportForTests(async (req) => {
     sent.push({ url: req.url, method: req.method, headers: req.headers, body: req.body?.toString('utf8') ?? '' });
@@ -161,14 +161,14 @@ const complete = (p: ApiProfile): ApiProfile => ({
 
 type Loader = (profiles: ApiProfile[]) => ApiStore;
 const fromDirectory: Loader = (profiles) => {
-  const dir = tmp('lynox-verify-done-');
+  const dir = tmp('lynox-shared-grant-');
   for (const p of profiles) writeFileSync(join(dir, `${p.id}.json`), JSON.stringify(p));
   const store = new ApiStore();
   store.loadFromDirectory(dir);
   return store;
 };
 const fromConnections: Loader = (profiles) => {
-  const engine = new EngineDb(join(tmp('lynox-verify-done-db-'), 'engine.db'), '');
+  const engine = new EngineDb(join(tmp('lynox-shared-grant-db-'), 'engine.db'), '');
   engines.push(engine);
   const cs = new ConnectionStore(engine);
   for (const p of profiles) {
@@ -378,14 +378,14 @@ describe('a grant shared through a provider with two API hosts (fixture provider
 
 describe('sharing: condition 1 on the register side, condition 2 on the owner\'s side', () => {
   describe.each(loaders)('boot through %s', (_loader, load) => {
-    it.each(orders)('§2a 1: two profiles on the same preset id that is not in the register are not registered, read %s', (_order, order) => {
+    it.each(orders)('sharing condition 1: two profiles on the same preset id that is not in the register are not registered, read %s', (_order, order) => {
       const a = ofPreset('unlisted', 'un-a', 'https://api.unlisted.example/v1', {}, 'auth.unlisted.example');
       const b = ofPreset('unlisted', 'un-b', 'https://api.unlisted.example/v1', { refresh_token_key: 'UN_A_REFRESH_TOKEN' }, 'auth.unlisted.example');
       const store = load(order([a, b]));
       expect(store.get('un-b')).toBeUndefined();
     });
 
-    it.each(orders)('control (§2a 1): the same two without the shared slot are both registered, read %s', (_order, order) => {
+    it.each(orders)('control (condition 1): the same two without the shared slot are both registered, read %s', (_order, order) => {
       const a = ofPreset('unlisted', 'un-a', 'https://api.unlisted.example/v1', {}, 'auth.unlisted.example');
       const b = ofPreset('unlisted', 'un-b', 'https://api.unlisted.example/v1', {}, 'auth.unlisted.example');
       const store = load(order([a, b]));
@@ -393,7 +393,7 @@ describe('sharing: condition 1 on the register side, condition 2 on the owner\'s
       expect(store.get('un-b')).toBeDefined();
     });
 
-    it.each(orders)('control (§2a 1): the same sharing through a preset the register has, on its API hosts, registers both, read %s', (_order, order) => {
+    it.each(orders)('control (condition 1): the same sharing through a preset the register has, on its API hosts, registers both, read %s', (_order, order) => {
       const a = ofPreset('twohost', 'two-a', 'https://api.one.example/v1');
       const b = ofPreset('twohost', 'two-b', 'https://api.two.example/v1', { refresh_token_key: 'TWO_A_REFRESH_TOKEN' });
       const store = load(order([a, b]));
@@ -401,7 +401,7 @@ describe('sharing: condition 1 on the register side, condition 2 on the owner\'s
       expect(store.get('two-b')).toBeDefined();
     });
 
-    it.each(orders)('control (§2a 2): the same owner beside a reader of its own is registered with it, read %s', (_order, order) => {
+    it.each(orders)('control (condition 2): the same owner beside a reader of its own is registered with it, read %s', (_order, order) => {
       const a = ofPreset('twohost', 'two-a', 'https://elsewhere.example/v1');
       const b = ofPreset('twohost', 'two-b', 'https://api.two.example/v1');
       const store = load(order([a, b]));
@@ -409,7 +409,7 @@ describe('sharing: condition 1 on the register side, condition 2 on the owner\'s
       expect(store.get('two-b')).toBeDefined();
     });
 
-    it.each(orders)('§2a 2: an owner off the provider\'s API hosts beside a reader on one is not shared with, read %s', (_order, order) => {
+    it.each(orders)('sharing condition 2: an owner off the provider\'s API hosts beside a reader on one is not shared with, read %s', (_order, order) => {
       const a = ofPreset('twohost', 'two-a', 'https://elsewhere.example/v1');
       const b = ofPreset('twohost', 'two-b', 'https://api.two.example/v1', { refresh_token_key: 'TWO_A_REFRESH_TOKEN' });
       const store = load(order([a, b]));
@@ -417,7 +417,7 @@ describe('sharing: condition 1 on the register side, condition 2 on the owner\'s
     });
   });
 
-  it('§2a 2, save: a reader on an API host is refused beside an owner off them', () => {
+  it('sharing condition 2, save: a reader on an API host is refused beside an owner off them', () => {
     const store = new ApiStore();
     expect(store.save(ofPreset('twohost', 'two-a', 'https://elsewhere.example/v1')).ok).toBe(true);
     const last = store.save(ofPreset('twohost', 'two-b', 'https://api.two.example/v1', { refresh_token_key: 'TWO_A_REFRESH_TOKEN' }));
@@ -426,9 +426,9 @@ describe('sharing: condition 1 on the register side, condition 2 on the owner\'s
   });
 });
 
-// ── §1 Weg 2 as the PRD writes it: the reader takes the owner's whole sign-in ──
+// ── a reader that takes the owner's whole sign-in ──
 
-describe('§1 Weg 2: a reader on a foreign base with the owner\'s refresh slot, token_url and client names', () => {
+describe('a reader on a foreign base with the owner\'s refresh slot, token_url and client names', () => {
   const owner = (): ApiProfile => oauth('shop-api', {}, 'api.shop.example');
   const sub = (): ApiProfile => ({
     ...oauth('sub', { refresh_token_key: 'SHOP_API_REFRESH_TOKEN', token_url: 'https://api.shop.example/oauth/token', client_id_key: 'SHOP_API_CID', client_secret_key: 'SHOP_API_CSECRET' }),
