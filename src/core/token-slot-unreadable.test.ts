@@ -337,6 +337,17 @@ describe('content that cannot be read at all', () => {
       chmodSync(join(dir, 'locked.json'), 0o600);
     }
   });
+  it('with a file name that is no id, the refusal says to make it readable or remove it by hand', () => {
+    const { store, dir } = fromDirectory([]);
+    writeFileSync(join(dir, 'Locked File.json'), '{}');
+    chmodSync(join(dir, 'Locked File.json'), 0o000);
+    try {
+      store.loadFromDirectory(dir);
+      expect(reasonOf(store.save(bearer('rep', 'REP_KEY'), dir))).toContain('make the file readable, or remove the file "Locked File.json" from the API profile directory by hand');
+    } finally {
+      chmodSync(join(dir, 'Locked File.json'), 0o600);
+    }
+  });
 });
 
 describe('content that does not parse, beyond its string literals', () => {
@@ -355,6 +366,28 @@ describe('content that does not parse, beyond its string literals', () => {
     expect(store.unreadableHolds('OWNER_ROW_KEY')).toBe(true);
     expect(store.unreadableHolds('OWNER_ROW_NAME')).toBe(true);
     expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+  });
+  it('holds the vault_keys column of a row that parses but lacks a required field', () => {
+    const engine = new EngineDb(join(tmp('lynox-unreadable-db-'), 'engine.db'), '');
+    engines.push(engine);
+    const cs = new ConnectionStore(engine);
+    cs.upsert({ id: 'thin', kind: 'api', name: 'thin', subjectId: null, direction: 'outbound', configJson: '{"base_url": "https://thin.example/v1"}', vaultKeys: ['THIN_ROW_KEY'], status: 'active' });
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.loadFromConnections(cs);
+    expect(store.unreadableHolds('THIN_ROW_KEY')).toBe(true);
+  });
+  it('a row whose id is no profile id is still cleared through api_setup delete', () => {
+    const engine = new EngineDb(join(tmp('lynox-unreadable-db-'), 'engine.db'), '');
+    engines.push(engine);
+    const cs = new ConnectionStore(engine);
+    cs.upsert({ id: 'My Row', kind: 'api', name: 'My Row', subjectId: null, direction: 'outbound', configJson: '{"auth": ', vaultKeys: ['MY_ROW_KEY'], status: 'active' });
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.loadFromConnections(cs);
+    expect(reasonOf(store.save(bearer('crm', 'MY_ROW_KEY')))).toContain('delete "My Row" with api_setup delete');
+    expect(store.remove('My Row')).toBe(true);
+    expect(store.unreadableHolds('MY_ROW_KEY')).toBe(false);
   });
 });
 
