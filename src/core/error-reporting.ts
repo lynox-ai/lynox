@@ -130,9 +130,9 @@ let _initialized = false;
 let _enabled = false;
 /**
  * Set for good once the instance holds an exact connection (`exact-debug-refusal.ts`). From then
- * on nothing is reported: every capture returns early, `beforeSend` drops whatever an SDK
- * integration still hands it, and no later init (a config reload, the privacy toggle) brings
- * the client back.
+ * on nothing is reported: every capture returns early, the client is disabled so no envelope
+ * of any kind reaches the transport, and no later init (a config reload, the privacy toggle)
+ * builds a new one.
  */
 let _refused = false;
 
@@ -151,7 +151,6 @@ const SAFE_CONTEXT_KEYS = new Set([
  * Returns true if error reporting was activated.
  */
 export async function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
-  if (_refused) return false;
   if (_initialized) return _enabled;
   _initialized = true;
 
@@ -175,7 +174,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       // Best-effort version detection
     }
 
-    // A refusal can land while the imports above were awaited; no client may be built after it.
+    // Refused (before this call, or while the imports above were awaited): no client is built.
     if (_refused) {
       _initialized = false;
       return false;
@@ -189,9 +188,6 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       tracesSampleRate: 0,     // No performance tracing (cost + PII)
       attachStacktrace: true,
       maxBreadcrumbs: 50,
-      // A client report tells Bugsink how many events were dropped and why. After a refusal
-      // (`refuseErrorReporting`) nothing may leave, a count included.
-      sendClientReports: false,
       // Explicit, because the SDK's defaults collect everything (v11 turned all of
       // these on). Measured on 11.1.0 with the defaults: the client IP arrived as
       // `user.ip_address`, and incoming request bodies were captured. `beforeSend`
@@ -231,8 +227,6 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       },
 
       beforeSend(event) {
-        // Refused after this client was built: drop, whether or not the close below got through.
-        if (_refused) return null;
         // Strip request bodies (may contain user prompts) AND the three fields
         // that carry credentials outright. The @sentry/node http integration is
         // on by default and attaches headers, cookies and the query string; the
@@ -442,8 +436,8 @@ export async function shutdownErrorReporting(): Promise<void> {
 /**
  * Stop error reporting for the rest of the process and refuse any later init. Synchronous, so
  * nothing captured after this call is sent: captures return early from here on, and the client
- * is disabled at once and closed in the background. A close that fails changes nothing: the
- * disabled client sends nothing, and `beforeSend` drops every error event once this has run.
+ * is disabled at once and closed in the background. A close that fails changes nothing: a
+ * disabled client hands no envelope to its transport.
  */
 export function refuseErrorReporting(): void {
   _refused = true;
@@ -453,14 +447,14 @@ export function refuseErrorReporting(): void {
   _sentry = null;
   if (sentry) {
     try {
-      // First, and synchronously: a disabled client sends no envelope of any kind. `beforeSend`
-      // sees error events only; feedback and the session aggregates the http integration
-      // flushes on `close` go straight to the transport, which `enabled: false` stops.
+      // First, and synchronously: a disabled client sends no envelope of any kind. That matters
+      // beyond error events: feedback and the session aggregates the http integration flushes
+      // on `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
       const client = sentry.getClient();
       if (client) client.getOptions().enabled = false;
       void sentry.close(2000).catch(() => { /* the client is disabled; nothing is sent */ });
     } catch {
-      // `beforeSend` still drops every error event once this has run
+      // captures already return early; a client that could not be disabled is left to close
     }
   }
 }
