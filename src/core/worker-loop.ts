@@ -919,6 +919,21 @@ export class WorkerLoop {
     }
   }
 
+  /**
+   * When a run that stands still will be picked up again: the end of a lease that another
+   * holder took and stopped renewing — a process that is gone (a crash, a restart). Null when
+   * the trigger is free or gone, when this loop holds the lease (its run is running), and when
+   * the holder renewed it within two heartbeats (another live process is running it).
+   */
+  resumesAt(triggerId: string, now = Date.now()): string | null {
+    const lease = this.engine.getTaskManager()?.leaseOf(triggerId) ?? null;
+    if (!lease || lease.holder === null || lease.until === null || lease.holder === this.leaseHolder) return null;
+    const until = Date.parse(lease.until);
+    if (!Number.isFinite(until) || until <= now) return null;
+    const renewedAt = until - this.lease.ttlMs;
+    return now - renewedAt > 2 * this.lease.heartbeatMs ? lease.until : null;
+  }
+
   /** @internal Exposed for testing. */
   async tick(): Promise<void> {
     if (this.ticking) return; // skip if previous tick still running

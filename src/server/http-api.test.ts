@@ -34,7 +34,7 @@ import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
-import { TriggerStore } from '../core/trigger-store.js';
+import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
@@ -9212,6 +9212,45 @@ describe('LynoxHTTPApi', () => {
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
     });
 
+    it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1', sku: 'A' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2', sku: 'A' } });
+      bulkLedger.finishPreview(id);
+      const probeOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      // Nothing written yet: no probe to check.
+      expect(await probeOf()).toBeNull();
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'written');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      // The written target, and only the field the write changed — not the one sent unchanged.
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price'] });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
+      expect(await probeOf()).toBeNull();
+    });
+
+    it('says when a run that stands still is picked up again, for the read and for the write trigger', async () => {
+      const id = planRun();
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      const resumesOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { resumesAt: unknown }).resumesAt;
+      try {
+        expect(await resumesOf()).toBeNull();
+        for (const trigger of [bulkPreviewTriggerId(id), `bulk-${id}`]) {
+          engineRef['getWorkerLoop'] = (): unknown => ({ resumesAt: (t: string) => (t === trigger ? '2026-10-18T08:53:35.000Z' : null) });
+          expect(await resumesOf(), trigger).toBe('2026-10-18T08:53:35.000Z');
+        }
+      } finally {
+        engineRef['getWorkerLoop'] = orig;
+      }
+    });
+
     it('confirms a probe only for an external run that wrote one target, and a resume widens only after one', async () => {
       const local = planRun();
       const notProbe = await jsonFetch(`/api/bulk/runs/${local}/confirm-probe`, { method: 'POST', body: '{}' });
@@ -9242,7 +9281,15 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
-        expect(((await widened.json()) as { error: string }).error).toMatch(/no confirmed probe yet/);
+        // The sentence is prompt surface (the model reads refusals): pinned word for word.
+        expect(((await widened.json()) as { error: string }).error).toBe(
+          'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
+          + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
+          + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
+          + 'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts '
+          + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
+          + 'in a run of their own.',
+        );
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();

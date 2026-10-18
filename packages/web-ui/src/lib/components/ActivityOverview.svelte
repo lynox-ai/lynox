@@ -6,7 +6,7 @@
 	read from the same SSoT (`/api/usage/summary`); per-run detail keeps
 	`/api/history/*` for the History tab.
 
-	Three tabs, query-param routed (`?tab=overview|history|workflows`):
+	Four tabs, query-param routed (`?tab=overview|history|workflows|bulk`):
 	  - overview  KPI Cards (today / 7d / 30d / MTD) + 14d bar chart + by-model +
 	              by-kind (LLM / voice_tts / voice_stt) + projection-ETA banner.
 	  - history   <HistoryView /> — Run list, filters, CSV, grouped by thread.
@@ -14,6 +14,8 @@
 	              status + "💬 Fixen" for failed runs). Moved here from Automation
 	              in the IA reorg: Activity & Cost owns *runs*, Automation owns the
 	              workflow *definitions* (Library).
+	  - bulk      <BulkRunsView /> — bulk runs (preview, approval, probe, undo) and
+	              merged contacts.
 
 	Cost formatters come from `format.ts` (canonical SSoT — never re-implemented
 	locally). CostLimits-Page was deleted in P3-PR-X; AutomationHub Activity-Tab
@@ -27,14 +29,16 @@
 	import { t, getLocale } from '../i18n.svelte.js';
 	import HistoryView from './HistoryView.svelte';
 	import WorkflowsView from './WorkflowsView.svelte';
+	import BulkRunsView from './BulkRunsView.svelte';
 
-	type Tab = 'overview' | 'history' | 'workflows';
+	type Tab = 'overview' | 'history' | 'workflows' | 'bulk';
 	type Period = 'current' | 'prev' | '7d' | '30d';
 
 	const tabs: Array<{ id: Tab; labelKey: string }> = [
 		{ id: 'overview',  labelKey: 'activity.tab.overview' },
 		{ id: 'history',   labelKey: 'activity.tab.history' },
 		{ id: 'workflows', labelKey: 'activity.tab.workflows' },
+		{ id: 'bulk',      labelKey: 'activity.tab.bulk' },
 	];
 
 	// ── Tab routing via ?tab= ─────────────────────────────────────────────
@@ -42,7 +46,7 @@
 
 	$effect(() => {
 		const p = $page.url.searchParams.get('tab');
-		tab = p === 'history' || p === 'workflows' ? p : 'overview';
+		tab = p === 'history' || p === 'workflows' || p === 'bulk' ? p : 'overview';
 	});
 
 	function selectTab(next: Tab): void {
@@ -417,6 +421,10 @@
 			<!-- Full workflow run-list (per-run cost + status + "💬 Fixen"). Owns its
 				 own load/empty/error states + p-6 padding — no extra wrapper here. -->
 			<WorkflowsView />
+		{:else if tab === 'bulk'}
+			<!-- Bulk runs and merged contacts (PRD bulk-changes-reversible §3.9); a run opens in
+				 place under `&run=<id>`. Owns its own states and padding. -->
+			<BulkRunsView />
 		{/if}
 	</div>
 </div>

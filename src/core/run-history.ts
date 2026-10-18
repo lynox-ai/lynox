@@ -3320,6 +3320,11 @@ export class RunHistory {
     return this._triggerStore?.leaseUntil(id) ?? null;
   }
 
+  /** See {@link TriggerStore.leaseOf}. */
+  triggerLease(id: string): { holder: string | null; until: string | null } | null {
+    return this._triggerStore?.leaseOf(id) ?? null;
+  }
+
   renewTriggerLease(id: string, holder: string, until: string): boolean {
     return this._requireTriggerStore().renewLease(id, holder, until);
   }
