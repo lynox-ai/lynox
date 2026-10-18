@@ -954,7 +954,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.provider_error': { de: 'Der KI-Anbieter hat einen Fehler zurückgegeben. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'The AI provider returned an error. Send your message again to retry.' },
 	'chat.note.generic': { de: 'Ein Fehler hat diese Runde unterbrochen. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'An error interrupted this turn. Send your message again to retry.' },
 	'chat.note.run_interrupted.title': { de: 'Runde unterbrochen', en: 'Turn interrupted' },
-	'chat.note.run_interrupted': { de: 'Diese Runde wurde gestoppt, bevor sie fertig war. Tippe deine Nachricht erneut, um fortzufahren.', en: 'This turn was stopped before it finished. Send your message again to continue.' },
+	'chat.note.run_interrupted': { de: 'Diese Runde wurde gestoppt, bevor sie fertig war. Was schon erledigt war, bleibt. Schreib einfach weiter, zum Beispiel „mach weiter“.', en: 'This round was stopped before it finished. What was already done stays. Just keep writing, for example “continue”.' },
 	'chat.note.turn_limit.title': { de: 'Rundenlimit erreicht', en: 'Turn limit reached' },
 	'chat.note.turn_limit': { de: 'Der Agent rief noch Werkzeuge auf, als diese Runde ihr Limit erreichte — eine fertige Antwort gibt es deshalb nicht. Lass ihn in kleineren Schritten vorgehen oder grenze die Aufgabe enger ein.', en: 'The agent was still calling tools when this turn hit its limit, so there is no finished answer. Let it work in smaller steps, or narrow the task.' },
 	'chat.note.cost_budget.title': { de: 'Kostenbudget erreicht', en: 'Cost budget reached' },

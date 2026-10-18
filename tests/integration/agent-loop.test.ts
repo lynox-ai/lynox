@@ -52,6 +52,7 @@ vi.mock('../../src/core/observability.js', () => ({
 }));
 
 import { Agent, RunAbortedError } from '../../src/core/agent.js';
+import { withRunStop } from '../../src/core/run-stop.js';
 
 // === Helpers ===
 
@@ -392,6 +393,6 @@ describe('Agent Loop Integration', () => {
     // The aborted user message is preserved so the next turn carries its context.
     expect(agent.getMessages()).toHaveLength(2);
     expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
-    expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
+    expect(agent.getMessages()[1]).toEqual(withRunStop({ role: 'user', content: 'new message' }, { code: 'run_interrupted' }));
   });
 });
