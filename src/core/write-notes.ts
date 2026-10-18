@@ -26,6 +26,16 @@ export function urlForNote(raw: string): string {
 }
 
 /**
+ * A write as a refusal names it: the method it is gated as, or, when an override names other
+ * writes (`writeMethodsNamed`), the method that is sent and every other one, because a server
+ * may run any of them and the next attempt or grant has to cover each.
+ */
+export function writeForNote(sentMethod: string, gatedMethod: string, named: readonly string[]): string {
+  const alsoNamed = named.filter((m) => m !== sentMethod);
+  return alsoNamed.length === 0 ? gatedMethod : `${sentMethod} (also naming ${alsoNamed.join(', ')})`;
+}
+
+/**
  * A header name a note or a refusal may quote: a header-name token of at most 64 characters.
  * The name was written by a model, so anything else is counted, never quoted.
  */

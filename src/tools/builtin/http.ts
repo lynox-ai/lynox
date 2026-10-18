@@ -22,7 +22,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeForNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -2550,10 +2550,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   // read as well — see its docblock for why PUT/PATCH are restorable and POST/DELETE are
   // not. Declaring it here a second time is what let the two drift.
   undo: (input) => undoClassFor(input.method ?? 'GET'),
-  // The effective method, overrides included; one that is not a method counts as a write.
+  // The effective method, overrides included; one that is not a method counts as a write. When
+  // an override names other writes, every write the request names, as the approval keys them
+  // (`PATCH+POST`): a server may run any of them.
   outwardWrite: (input) => {
-    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
-    return method === 'GET' || method === 'HEAD' ? null : method;
+    const headers = input.headers ?? {};
+    const body = gateBodyReadings(input.body, headers);
+    const method = effectiveWriteMethod(input.method ?? 'GET', headers, input.url, body) ?? 'OVERRIDE';
+    if (method === 'GET' || method === 'HEAD') return null;
+    const named = method === 'OVERRIDE' ? [] : writeMethodsNamed(input.method ?? 'GET', headers, input.url, body);
+    return named.length > 1 ? named.join('+') : method;
   },
   // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
   outwardRead: (input) => {
@@ -2668,12 +2674,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedVerbatim('Blocked: the method, or a method override (an X-HTTP-Method-Override-style header, or a `_method` query parameter or body field), is not an HTTP method. Send the request with a method name, or without the override.');
     }
     const gatedMethod = effective;
+    // The write as the refusals below name it: with every write an override names, not only the
+    // one it is gated as (`writeForNote`).
+    const writeShown = writeForNote(method.trim().toUpperCase(), gatedMethod, writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers)));
     // The approval and the outbound-effect table are keyed by the URL's host. A header a
     // server or proxy routes on instead (`Host`, `X-Forwarded-Host`, `X-Original-URL`, …)
     // would send the write somewhere the question did not name.
     const retarget = isWriteMethod(gatedMethod) ? retargetingHeader(headers) : undefined;
     if (retarget !== undefined) {
-      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
+      blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
     }
 
     // A GraphQL endpoint takes a read and every mutation the token can run as the same POST to
@@ -2687,15 +2696,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
       // so a write there carries nothing in its URL: no list of parameter names a server might read.
       if (new URL(input.url).search.length > 1) {
-        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
       }
       const reading = graphqlWrite(headers, input.body);
       if ('refusal' in reading) {
-        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
       }
       graphqlMutates = reading.mutates;
     } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
-      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+      blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
     }
 
     // A write to an account connected through a provider preset, by anyone: the owner and a
@@ -2720,7 +2729,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const wayOut = !toolContext?.apiStore
         ? 'This run has no api_profile store, so it cannot write there.'
         : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
-      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
+      blockedVerbatim(`Blocked: ${writeShown} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
     // A write to a connected account is shown with everything the request puts on the wire, as
     // the customer text says: the path and the query as sent (the query's values on the
@@ -2741,7 +2750,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const sentTarget = `${target.pathname}${target.search}`;
       if (sentTarget.includes('%') || sentTarget.length > MAX_SHOWN_TARGET
         || !target.search.slice(1).split('&').every((pair) => pair === '' || PLAIN_QUERY_PAIR.test(pair))) {
-        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${host} writes to a connected account with a path or query the approval question cannot show as sent (percent-encoded, longer than ${MAX_SHOWN_TARGET} characters, or a query value other than letters, digits and _). Nothing was sent. Put the values in the body, and keep the query to plain key=value pairs.`);
       }
       const unshown: string[] = [];
       for (const [k, v] of Object.entries(input.headers ?? {})) {
@@ -2755,7 +2764,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
       }
       if (unshown.length > 0) {
-        blockedVerbatim(`Blocked: ${gatedMethod} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
+        blockedVerbatim(`Blocked: ${writeShown} to ${host} writes to a connected account and sets headers the approval question does not show (${unshown.join(', ')}). Nothing was sent. Send it without them; content-type application/json and accept application/json are fine.`);
       }
     }
 
@@ -3068,6 +3077,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const sentMethod = method.trim().toUpperCase();
     const named = writeMethodsNamed(method, headers, input.url, gateBodyReadings(input.body, headers));
     const keyedMethod = named.join('+');
+    // The write as the refusals of this gate name it, from the same reading as the key.
+    const refusedAs = writeForNote(sentMethod, gatedMethod, named);
     const governing = isWriteMethod(gatedMethod) ? agent.governingContract() : null;
     const contract = governing?.contract;
     const outboundEffect = isOutboundEffectWrite(input.url, gatedMethod);
@@ -3105,8 +3116,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (!(remembers && isApproved(counters, key, epoch))) {
         if (!agent.promptUser) {
           blockedVerbatim(
-            `Blocked: outbound ${gatedMethod} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
-            `\n${ungrantedWriteNote(gatedMethod, input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
+            `Blocked: outbound ${refusedAs} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).` +
+            `\n${ungrantedWriteNote(refusedAs, input.url, governing?.withheld === 'untrusted', refusedReviewedHeaders(input, contract))}`,
           );
         }
         const promptUser = agent.promptUser;
@@ -3132,17 +3143,17 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         if (bodyGoesOut && (!isOwnerPrincipal(agent.principal) || connectedAccount) && (shown === undefined || 'unshowable' in shown)) {
           blockedVerbatim(
             shown !== undefined
-              ? `Blocked: the body of this ${gatedMethod} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
+              ? `Blocked: the body of this ${refusedAs} to ${hostname} holds a stored secret in an escaped or percent-encoded form, which the approval question cannot show masked. Write the value plainly, without escapes or percent-encoding.`
               : carriesInlineBinary(sentBody)
-                ? `Blocked: the body of this ${gatedMethod} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
-                : `Blocked: the body of this ${gatedMethod} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`,
+                ? `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) carries a file inline, larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Send the file by URL (for example an image \`src\` the service downloads), not inline.`
+                : `Blocked: the body of this ${refusedAs} to ${hostname} (${bodySize} bytes) is larger than the ${SHOWN_BODY_MAX_BYTES} bytes an approval question shows whole. Split it into several smaller writes (for example a document's positions or a product's variants in separate calls).`,
           );
         }
         // What the write changes in a connected account, read from that account before the
         // question: the document, the recipient by name, the amount (`preset-write-context.ts`).
         // Fail-closed: a reading that fails refuses the write, nothing is sent.
         const context = connectedAccount
-          ? await describeConnectedWrite(presetOnHost, gatedMethod, input.url, typeof sentBody === 'string' ? sentBody : undefined, { toolContext, agent, ackHosts: guardedAckHosts })
+          ? await describeConnectedWrite(presetOnHost, gatedMethod, refusedAs, input.url, typeof sentBody === 'string' ? sentBody : undefined, { toolContext, agent, ackHosts: guardedAckHosts })
           : null;
         const contextBlock = context === null ? pv`` : onBoxBlock(mask(context));
         // The readings count against the session's request budget, as the write itself will:
@@ -3169,18 +3180,21 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // Re-read once it is this call's turn: the question before it may have answered it.
             if (remembers && isApproved(counters, key, epoch)) return true;
             const deniedHere = batch === undefined ? undefined : deniedInBatch.get(batch);
-            if (remembers && deniedHere !== undefined && named.some((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)))) {
-              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: a ${gatedMethod} to this host was denied earlier in this batch.`);
+            // The refusal names the writes that were denied, which need not be the one this call is
+            // gated as: a denied PUT stands against a PATCH that also names PUT.
+            const deniedNamed = deniedHere === undefined ? [] : named.filter((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)));
+            if (remembers && deniedNamed.length > 0) {
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: a ${deniedNamed.join(' or ')} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
             // prompt would outlive the run as a pending row and block the Session's next one.
             if (agent.runSignal?.aborted) {
-              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the run was stopped.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the run was stopped.`);
             }
             // The same for this call alone: the engine stopped waiting for it (its tool timeout),
             // so its question would be withdrawn at birth and read as a denial for the batch.
             if (currentCallSignal()?.aborted) {
-              blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: the call timed out.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: the call timed out.`);
             }
             // Why this write is asked although the host may hold an approval. Engine text, so
             // spliced in as frame (a nested `pv`), never as a value.
@@ -3215,7 +3229,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const allowed = await pending;
         if (!allowed) {
-          blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} denied by user.`);
+          blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} denied by user.`);
         }
       }
     }
@@ -3610,10 +3624,12 @@ const WRITE_CONTEXT_READ_MAX_BYTES = 1_000_000;
  * provider has nothing to add. Reads with the stored credential on the write's own origin,
  * through the same host policy, following no redirect; a reading that fails, or a write the
  * table cannot describe, refuses the write (`blockedVerbatim`), so it is never asked without.
+ * `method` is the write it is gated as, `shownAs` the write as its refusals name it.
  */
 async function describeConnectedWrite(
   profiles: readonly ApiProfile[],
   method: string,
+  shownAs: string,
   url: string,
   body: string | undefined,
   deps: { toolContext: ToolContext | undefined; agent: import('../../types/index.js').IAgent; ackHosts: ReturnType<typeof resolveGuardedAckHosts> },
@@ -3621,7 +3637,7 @@ async function describeConnectedWrite(
   const presets = new Set(profiles.map((p) => p.auth?.oauth?.preset_id));
   const host = new URL(url).hostname;
   if (presets.size !== 1) {
-    blockedVerbatim(`Blocked: ${method} to ${host} was not asked: profiles of more than one provider share this host, so lynox cannot tell what the write changes. Nothing was sent.`);
+    blockedVerbatim(`Blocked: ${shownAs} to ${host} was not asked: profiles of more than one provider share this host, so lynox cannot tell what the write changes. Nothing was sent.`);
   }
   const presetId = [...presets][0];
   const context = presetId === undefined ? undefined : PRESET_WRITE_CONTEXT[presetId];
@@ -3676,7 +3692,7 @@ async function describeConnectedWrite(
     return await context.describe(method, new URL(url), body, read);
   } catch (err) {
     const why = err instanceof WriteContextRefused ? err.message : 'its reading failed';
-    blockedVerbatim(`Blocked: ${method} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
+    blockedVerbatim(`Blocked: ${shownAs} to ${host} was not asked: lynox could not show what it changes in the ${presetId} account (${why}). Nothing was sent.`);
   }
 }
 
