@@ -146,6 +146,11 @@ describe('the query identifiers of a read row, held to the handlers', () => {
       'const mod = await import(pathToFileURL(abs).href) as { handler?: unknown };',
       // The request log line.
       "const url = req.url ?? '/';",
+      // The OAuth callback's raw query, for a provider that signs it (Shopify's HMAC is over the
+      // query as sent, which `searchParams` does not give back). Parsed only by the signature
+      // check, which hands back the code to spend from the signed values; the route reads its
+      // other names through `searchParams` as everywhere else.
+      "const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');",
     ]);
   });
 });
