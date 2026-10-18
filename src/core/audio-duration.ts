@@ -18,6 +18,7 @@ import { execFile } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { INPUT_GUARD_ARGS } from './ffmpeg-input.js';
 
 const FFPROBE_TIMEOUT_MS = 5_000;
 
@@ -74,6 +75,7 @@ export async function getAudioDurationSec(buffer: Buffer, filename: string): Pro
     writeFileSync(file, buffer);
     const stdout = await runFfprobe([
       '-v', 'error',
+      ...INPUT_GUARD_ARGS, // the clip is an upload: no network protocol, no list-reading demuxer
       '-show_entries', 'format=duration',
       '-of', 'default=noprint_wrappers=1:nokey=1',
       file,
