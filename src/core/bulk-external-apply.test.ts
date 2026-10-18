@@ -71,6 +71,9 @@ interface Shop {
   landThenFail?: Set<string>;
   /** `METHOD path` whose request reaches the shop and whose connection then breaks. */
   dropAfter?: Set<string>;
+  /** Per `METHOD path`, the answers of the next requests in order (0: the connection breaks);
+   *  once used up, the shop answers as usual. */
+  sequence?: Map<string, number[]>;
 }
 
 /** A price as the shop stores it: always two decimals. */
@@ -93,6 +96,9 @@ function serve(s: Shop): () => void {
     const auth = Object.entries(input.headers).find(([k]) => k.toLowerCase() === 'authorization')?.[1];
     s.requests.push({ method: input.method, path, body, auth });
     if (s.dropAfter?.has(`${input.method} ${path}`)) throw new Error('connection reset');
+    const next = s.sequence?.get(`${input.method} ${path}`)?.shift();
+    if (next === 0) throw new Error('connection reset');
+    if (next !== undefined) return new Response(null, { status: next, headers: next === 429 ? { 'retry-after': '1' } : {} });
     const sp = s.special.get(`${input.method} ${path}`);
     if (sp) return new Response(null, { status: sp.status, headers: sp.headers ?? {} });
     const item = s.items.get(path);
@@ -990,7 +996,8 @@ describe('the write verb and the one-target probe', () => {
     // 25 targets, so one failure stays under the failure-rate halt: only the approval's bound
     // can stop the run after it.
     for (let i = 4; i < 25; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
-    s.special.set('PATCH /products/0', { status: 502 });
+    // A refusal, so the resume may send again; a send without a clear answer is not retried.
+    s.special.set('PATCH /products/0', { status: 422 });
     const restore = serve(s);
     try {
       const keys = Array.from({ length: 25 }, (_, i) => url(i));
@@ -1037,6 +1044,14 @@ describe('the write verb and the one-target probe', () => {
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
       expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+
+      // Nor is it sent again: whether the host applied it, the redirect does not say.
+      s.special.delete('PATCH /products/0');
+      const checksum = ledger.computeChecksum(runId)!;
+      expect(ledger.resume(runId, { checksum }).ok).toBe(true);
+      await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) });
+      expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, sentUnknown: 1 });
 
       const undo = ledger.planUndo(runId);
       if (!undo.ok) throw new Error(undo.reason);
@@ -1098,7 +1113,7 @@ describe('the write verb and the one-target probe', () => {
       expect(ledger.approve(runId, { checksum, maxTargets: 2 }).ok).toBe(true);
       // The first target changed since the preview (a conflict, nothing sent); the third fails.
       s.items.get('/products/0')!['price'] = '13.00';
-      s.special.set('PATCH /products/2', { status: 502 });
+      s.special.set('PATCH /products/2', { status: 422 });
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/1', '/products/2']);
@@ -2194,3 +2209,223 @@ describe('the connection and grant of each bulk target (A7)', () => {
   });
 });
 
+describe('a send without a clear answer is not sent again', () => {
+  // Five targets: under twenty, so the first failure halts the pass (`bulkFailureLimit` 0).
+  const FIVE = [0, 1, 2, 3, 4];
+  const rows = () => FIVE.map((i) => ({ target: url(i), after: { price: '15.00' } }));
+  const patches = (s: Shop): string[] => s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path);
+  const run = (runId: string, c: ExternalClient, effect: 'bulk_apply' | 'bulk_undo' = 'bulk_apply') =>
+    runBulkEffect(runId, effect, { ledger, trailFor: () => null, writerFor: writerFor(c) });
+  const resume = (runId: string): void => {
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+  };
+  const fiveShop = (): Shop => {
+    const s = shop();
+    s.items.set('/products/4', { id: 4, title: 'Item 4', price: '12.00', updated_at: 't0' });
+    return s;
+  };
+  /** A run whose first write got a 502 and did not land, resumed once: target 0 stands unknown. */
+  async function unknownFirst(s: Shop, c: ExternalClient): Promise<string> {
+    s.special.set('PATCH /products/0', { status: 502 });
+    const runId = await approvedRun(rows(), c);
+    expect((await run(runId, c)).status).toBe('halted');
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.failureRate);
+    s.special.delete('PATCH /products/0');
+    resume(runId);
+    return runId;
+  }
+
+  it('a 5xx after the send: the resume does not send it again, writes the rest and does not halt on it', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await unknownFirst(s, c);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(s.items.get('/products/0')!['price']).toBe('12.00');
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, failed: 0, failedOnce: 1, sentUnknown: 1 });
+      expect(targetErrors(runId)).toEqual(['sent_unknown']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a write that landed although it got a 5xx is found written on the resume, and not sent again', async () => {
+    const s = fiveShop();
+    s.landThenFail = new Set(['/products/0']);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      s.landThenFail.clear();
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a broken connection after the send is not sent again, whatever the host would answer now', async () => {
+    const s = fiveShop();
+    s.dropAfter = new Set(['PATCH /products/0']);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      s.dropAfter.clear();
+      s.special.set('PATCH /products/0', { status: 422 });
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a 429 that is retried and then breaks off leaves the target unknown', async () => {
+    const s = fiveShop();
+    s.sequence = new Map([['PATCH /products/0', [429, 0]]]);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a 429 that is retried and then refused is sent again on the resume: each refusal clears its own send', async () => {
+    const s = fiveShop();
+    s.sequence = new Map([['PATCH /products/0', [429, 422]]]);
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/0', '/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a send refused with 401 halts, and the resume sends it again', async () => {
+    const s = fiveShop();
+    s.special.set('PATCH /products/0', { status: 401 });
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('halted');
+      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unauthorized);
+      s.special.delete('PATCH /products/0');
+      resume(runId);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/0', '/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 5, sentUnknown: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('a send a dead loop marked and never answered is not sent again', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      // What a loop that died while its request was out leaves behind: the send, no answer.
+      ledger.markSent(runId, 0);
+      expect((await run(runId, c)).status).toBe('done');
+      expect(patches(s)).toEqual(['/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 4, sentUnknown: 1 });
+    } finally {
+      restore();
+    }
+  });
+
+  it('after a later resume the target counts as written once the change shows, and as a conflict once something else does', async () => {
+    for (const later of ['15.00', '13.00'] as const) {
+      const s = fiveShop();
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+        const runId = await unknownFirst(s, c);
+        // The second pass halts on a refusal of its own, with target 0 still unknown.
+        s.special.set('PATCH /products/2', { status: 422 });
+        expect((await run(runId, c)).status).toBe('halted');
+        expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+        s.special.delete('PATCH /products/2');
+        s.items.get('/products/0')!['price'] = later;
+        resume(runId);
+        expect((await run(runId, c)).status).toBe('done');
+        expect(patches(s).filter((p) => p === '/products/0')).toEqual(['/products/0']);
+        expect(ledger.getStatus(runId)).toMatchObject(later === '15.00'
+          ? { applied: 5, sentUnknown: 0, conflicts: 0 }
+          : { applied: 4, sentUnknown: 0, conflicts: 1 });
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('an undo whose send gets no clear answer is not sent again on its resume', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect((await run(runId, c)).status).toBe('done');
+      const undo = ledger.planUndo(runId);
+      if (!undo.ok) throw new Error(undo.reason);
+      expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+      s.requests.length = 0;
+      s.special.set('PATCH /products/0', { status: 502 });
+      expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('halted');
+      s.special.delete('PATCH /products/0');
+      resume(undo.status.id);
+      expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
+      // An undo writes newest first; each target once.
+      expect([...patches(s)].sort()).toEqual(['/products/0', '/products/1', '/products/2', '/products/3', '/products/4']);
+      expect(ledger.getStatus(undo.status.id)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('an undo finds an unknown write that never landed as already taken back, and takes back one that landed', async () => {
+    for (const landed of [false, true]) {
+      const s = fiveShop();
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+        const runId = await unknownFirst(s, c);
+        expect((await run(runId, c)).status).toBe('done');
+        if (landed) s.items.get('/products/0')!['price'] = '15.00';
+        const undo = ledger.planUndo(runId);
+        if (!undo.ok) throw new Error(undo.reason);
+        expect(undo.status.total).toBe(5);
+        expect(ledger.approve(undo.status.id, { checksum: ledger.computeChecksum(undo.status.id)! }).ok).toBe(true);
+        s.requests.length = 0;
+        expect((await run(undo.status.id, c, 'bulk_undo')).status).toBe('done');
+        expect(patches(s).includes('/products/0')).toBe(landed);
+        expect(s.items.get('/products/0')!['price']).toBe('12.00');
+      } finally {
+        restore();
+      }
+    }
+  });
+});

@@ -46,13 +46,16 @@ export interface TargetWriter {
   readonly readsBack?: boolean | undefined;
   /** The writer calls `write`'s `onSend` right before its request leaves, so a write stopped
    *  before that (a refused credential, a blocked host) does not count as sent. A writer
-   *  without it is taken to have sent whenever `write` is called. */
+   *  without it is taken to have sent whenever `write` is called. Such a writer also calls
+   *  `onRefused` once for a send the host refused (or that never left), right after its
+   *  answer; every other send that is not a success counts as one without a clear answer,
+   *  and the target is not sent to again. */
   readonly reportsSend?: boolean | undefined;
   /** A writer whose requests carry a stored credential (an external host): start noting the
    *  connections of what it sends from now on (`ExternalClient.track`). A local writer has none. */
   readonly track?: (() => () => AttachedConnection | null) | undefined;
   read(key: string, fields: readonly string[] | null): Promise<BeforeImage | 'path_changed' | 'foreign'>;
-  write(key: string, after: BeforeImage, onSend?: () => void): Promise<string | { result: string; actual: ActualImage }>;
+  write(key: string, after: BeforeImage, onSend?: () => void, onRefused?: () => void): Promise<string | { result: string; actual: ActualImage }>;
 }
 
 /**
@@ -303,6 +306,10 @@ async function applyRunEffect(
       continue;
     }
     ledger.recordFailed(runId, seq, outcome.kind, via);
+    // Counted when its send failed, or that send halted the run: not counted again, so it
+    // neither extends nor breaks a run of failures. Only an external writer gives it, and an
+    // external run is never atomic.
+    if (outcome.kind === 'sent_unknown') continue;
     if (run.atomic) return rollBack(ledger, writer, run, now);
     if (outcome.kind === 'conflict') {
       // A conflict is not a failure, and it breaks a run of failures.
@@ -379,11 +386,16 @@ async function applyRunEffect(
         return { kind: 'applied', result: 'already', actual: w.readsBack === true && !cur.absent ? { value: cur.value, estimated: false } : null };
       }
       if (cur === 'foreign' || !sameImage(cur, t.expected)) return { kind: 'conflict' };
+      // Still as expected, but an earlier send reached it without a clear answer: that write
+      // may land later or not be visible yet, and sending it again could carry the change out
+      // twice. A local writer's outcome is always known.
+      if (w.reportsSend === true && ledger.hasUnknownSend(runId, t.seq)) return { kind: 'sent_unknown' };
       // Marked as it leaves, with the connection it leaves under: a loop that dies before the
       // target is recorded still left a row saying whose credential reached the host.
       const sent = (): void => { ledger.markSent(runId, t.seq, carried?.() ?? null); };
+      const refused = (): void => { ledger.markRefused(runId, t.seq); };
       if (w.reportsSend !== true) sent();
-      const out = await w.write(t.key, t.after, sent);
+      const out = await w.write(t.key, t.after, sent, refused);
       return typeof out === 'string' ? { kind: 'applied', result: out, actual: null } : { kind: 'applied', result: out.result, actual: out.actual };
     } catch (err: unknown) {
       if (err instanceof BulkWriterHalt) return { kind: 'halt', reason: err.reason };
