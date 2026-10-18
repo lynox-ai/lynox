@@ -2,6 +2,7 @@ import type { CapabilityContract, ReviewedGrantStamp } from '../types/capability
 import { randomUUID } from 'node:crypto';
 import { withAfterUntrusted, withGrantId } from '../types/capability-contract.js';
 import type { WorkflowGrantRow } from './workflow-store.js';
+import type { WorkflowGrantLookup } from './run-history.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import { canonicalJson } from './bulk-ledger.js';
 import { isFeatureEnabled } from './features.js';
@@ -79,7 +80,10 @@ export interface GrantTrigger {
 
 /** How a run was started, as the run check needs to know it. */
 export type GrantRunOrigin =
-  /** `byHand`: the schedule run once by hand (`POST /api/triggers/:id/run`), not by its cron. */
+  /**
+   * `byHand`: started by a person pressing "Run now" on this schedule (`POST /api/triggers/:id/run`
+   * → `runTriggerNow`, the owner or a mandate), not by its cron (`isStartedByHand`).
+   */
   | { kind: 'schedule'; triggerId: string; byHand?: boolean | undefined }
   /**
    * A person pressed Run in the library, over the authenticated route. `by` is that request's
@@ -99,11 +103,8 @@ export function startedVia(origin: GrantRunOrigin): string {
  * person accepted them — or why it gets none (`null`: there was nothing to withhold).
  */
 export type GrantDecision =
-  /**
-   * `contract` carries the stamp's `grantId` (`grantIdOf`), so every run it reaches names the
-   * same `workflow_grants` row; `startedVia` is how this run was started.
-   */
-  | { contract: CapabilityContract; note: null; boundParams: Record<string, unknown>; startedVia: string }
+  /** `contract` carries the stamp's `grantId` (`grantIdOf`), so every run it reaches names the same `workflow_grants` row. */
+  | { contract: CapabilityContract; note: null; boundParams: Record<string, unknown> }
   | { contract: undefined; note: string | null };
 
 /** Whether a run's bound values are exactly the ones a grant was accepted with. */
@@ -182,8 +183,10 @@ function parseParams(json: string | null): Record<string, unknown> | null {
  *  - the checksum recomputed over the workflow as stored and the schedule's cron and values
  *    equals the stamp's. A library start reads both from the schedule, never from the
  *    request;
- *  - the stamp names its `workflow_grants` row. A stamp from before that table has none, and
- *    a run under it could not be attributed to an acceptance.
+ *  - the stamp names its `workflow_grants` row, and that row is there and is this
+ *    acceptance: same workflow, same schedule, same checksum. A stamp from before that table
+ *    names none, and one whose row is missing or names another acceptance would attribute the
+ *    run to something the person never accepted.
  * Otherwise the run goes ahead WITHOUT a contract — the default refusal of unattended
  * writes — and the note says why, for the owner's run report.
  */
@@ -192,6 +195,7 @@ export function decideRunGrant(
   origin: GrantRunOrigin,
   lookupTrigger: (id: string) => GrantTrigger | undefined,
   hasher: GrantHasher | null,
+  lookupGrant: (grantId: string) => WorkflowGrantLookup,
 ): GrantDecision {
   const contract = planned.capabilityContract;
   if (contract === undefined) return { contract: undefined, note: null };
@@ -224,11 +228,18 @@ export function decideRunGrant(
   if (typeof stamp.grantId !== 'string' || stamp.grantId === '') {
     return withheld('the grant was accepted before lynox kept a record of each acceptance. Schedule the workflow again from the library to grant it.');
   }
+  const recorded = lookupGrant(stamp.grantId);
+  if (recorded.state === 'unavailable') return withheld('the record of its acceptance cannot be read.');
+  if (recorded.state === 'missing'
+    || recorded.grant.workflowId !== planned.id
+    || recorded.grant.triggerId !== stamp.triggerId
+    || recorded.grant.checksum !== stamp.checksum) {
+    return withheld('the record of its acceptance is missing or does not match it. Schedule the workflow again from the library to grant it.');
+  }
   return {
     contract: withGrantId(withAfterUntrusted(contract, stamp.afterUntrusted), stamp.grantId),
     note: null,
     boundParams,
-    startedVia: startedVia(origin),
   };
 }
 

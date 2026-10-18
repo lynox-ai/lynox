@@ -634,9 +634,14 @@ export async function runManifest(
       grantRecorded = true;
     } catch { /* fire-and-forget — but see the grant check below */ }
   }
-  const dropGrant = options.capabilityContract !== undefined && !grantRecorded;
+  // A contract that names no accepted grant is dropped too: nothing could say which grant the
+  // run ran under. No caller hands one over today (`decideRunGrant` always names it), but this
+  // function is exported, and a copy of the contract through JSON loses the symbol silently.
+  const dropGrant = options.capabilityContract !== undefined && (grantId === undefined || !grantRecorded);
   if (dropGrant) {
-    state.grantNote = 'Ran without its write grant: the run could not be recorded, and a run under a grant must be.';
+    state.grantNote = grantId === undefined
+      ? 'Ran without its write grant: the contract names no accepted grant.'
+      : 'Ran without its write grant: the run could not be recorded, and a run under a grant must be.';
   }
 
   // 2a/B3 durable step-record: each step writes its pipeline_step_results row

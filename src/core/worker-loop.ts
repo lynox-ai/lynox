@@ -13,7 +13,7 @@ import { storedUntrustedCause } from './untrusted-signals.js';
 import { OWNER_PRINCIPAL, isMandateTag, isOwnerPrincipal, mandateNeedsOwnerStamp, principalHasEnded, principalTag } from './request-principal.js';
 import { principalOfPrompt } from './prompt-store.js';
 import type { RequestPrincipal } from './request-principal.js';
-import { HandRunDoor, isHandRunOf, runAsHandRun, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
+import { HandRunDoor, isHandRunOf, isStartedByHand, runAsHandRun, runAsStartedByHand, type HandRunGrant, type HandRunMarker, type HandRunMinter } from './hand-run-door.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fetchPinned } from './network-guard.js';
 import { RunAbortedError } from './agent.js';
@@ -885,7 +885,8 @@ export class WorkerLoop {
     if (lease === 'held') return this.#alreadyRunning(trigger.id);
     // Resolve to the canonical id (getTrigger accepts an id-prefix) so the
     // activeTasks guard + run history key on exactly the row we found.
-    void this.executeTask(trigger, null, marker);
+    // Inside the started-by-hand scope, so a run under a grant records that a person started it.
+    void runAsStartedByHand(trigger.id, () => this.executeTask(trigger, null, marker));
     return { ok: true };
   }
 
@@ -2604,7 +2605,7 @@ export class WorkerLoop {
       seed: storedUntrustedCause(task.created_untrusted),
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
-      origin: { kind: 'schedule', triggerId: task.id, byHand: isHandRunOf(task.id) },
+      origin: { kind: 'schedule', triggerId: task.id, byHand: isStartedByHand(task.id) },
       // Who started it by hand, when a request did: the workflow's steps get only the tools
       // that principal's lock allows (PRD §3.13 E4 — the build site is here, not a session).
       ...(starter ? { principal: starter } : {}),

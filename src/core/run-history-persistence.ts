@@ -410,8 +410,11 @@ export function getPipelineRun(db: Database.Database, id: string): {
   // one (it would render a bogus "run" with status 'planned'). A real run is
   // never 'planned'.
   const likePattern = `${id.replace(/[\\%_]/g, '\\$&')}%`;
+  // The columns of the declared type, not `*`: `GET /api/workflows/:id` sends this row as it is,
+  // and a column added later (`grant_id`, `started_via` — the latter holds the starting request's
+  // auth-origin label) must not reach that response because nobody listed it.
   return db.prepare(
-    "SELECT * FROM pipeline_runs WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status != 'planned'"
+    "SELECT id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, started_at, completed_at FROM pipeline_runs WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status != 'planned'"
   ).get(id, likePattern) as {
     id: string; manifest_name: string; status: string; manifest_json: string;
     total_duration_ms: number; total_cost_usd: number; total_tokens_in: number;

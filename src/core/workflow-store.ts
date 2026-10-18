@@ -73,6 +73,12 @@ export interface WorkflowGrantRow {
   afterUntrusted: boolean;
 }
 
+/** A stored binding, or a throw: a row that holds neither value is unreadable, not unkeyed. */
+function bindingOf(raw: string): 'keyed' | 'unkeyed' {
+  if (raw === 'keyed' || raw === 'unkeyed') return raw;
+  throw new Error('workflow_grants: unreadable binding');
+}
+
 /** Result of a content-schema migration pass (Move 1, PRD §4.1). */
 export interface ContentMigrationCounts {
   /** Rows examined. */
@@ -175,8 +181,10 @@ export class WorkflowStore {
 
   /**
    * Accept a reviewed grant: insert its `workflow_grants` row and write contract, stamp and
-   * confirm onto the workflow, in ONE transaction. Neither half stays without the other — no
-   * stamp naming a row that was never written, no row for a grant no workflow carries.
+   * confirm onto the workflow, in ONE transaction. Neither half commits without the other — no
+   * stamp naming a row that was never written, no row written for a workflow the stamp could
+   * not reach. Later the row outlives the stamp on purpose (a new acceptance, an edit that drops
+   * the grant, deleting the workflow): it is the record, and is never changed.
    * `setReviewedGrant` reports a missing workflow by returning `false`, not by throwing, and a
    * transaction commits whatever did not throw, so the `false` is turned into a throw inside
    * it: otherwise the row would commit for a workflow deleted between the caller's read and
@@ -212,7 +220,7 @@ export class WorkflowStore {
     if (r === undefined) return undefined;
     return {
       grantId: r.grant_id, workflowId: r.workflow_id, contractJson: r.contract_json, by: r.accepted_by,
-      name: r.name, at: r.accepted_at, checksum: r.checksum, binding: r.binding === 'keyed' ? 'keyed' : 'unkeyed',
+      name: r.name, at: r.accepted_at, checksum: r.checksum, binding: bindingOf(r.binding),
       triggerId: r.trigger_id, cron: r.cron, boundParamsJson: r.bound_params_json, afterUntrusted: r.after_untrusted === 1,
     };
   }

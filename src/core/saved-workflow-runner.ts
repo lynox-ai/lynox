@@ -8,7 +8,7 @@ import { checkPersistentBudget } from './session-budget.js';
 import { toolLockFor } from './mandate-tool-lock.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { runSavedWorkflow, type RunSavedWorkflowResult } from '../tools/builtin/pipeline.js';
-import { decideRunGrant, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
+import { decideRunGrant, startedVia, type GrantDecision, type GrantRunOrigin } from './workflow-grant.js';
 import type { PlannedPipeline } from '../types/pipeline.js';
 import type { SubAgentPromptHandles } from '../orchestrator/runtime-adapter.js';
 import type { WorkflowQuestionWait } from './workflow-questions.js';
@@ -23,6 +23,7 @@ function grantDecider(engine: Engine, origin: GrantRunOrigin): (planned: Planned
       return t === undefined ? undefined : { workflowId: t.pipeline_id ?? null, cron: t.schedule_cron ?? null, paramsJson: t.pipeline_params ?? null };
     },
     engine.getEngineDb(),
+    (grantId) => engine.getRunHistory()?.readWorkflowGrant(grantId) ?? { state: 'unavailable', grantId },
   );
 }
 
@@ -180,7 +181,7 @@ export async function runGuardedSavedWorkflow(
     // seam says which run it is. A rebase that kept either alone would leave the other
     // silently absent — the grant would fall back to "no contract", or the stamp would never
     // fire and a paid claim would be released.
-    ...(opts?.origin !== undefined ? { decideGrant: grantDecider(engine, opts.origin) } : {}),
+    ...(opts?.origin !== undefined ? { decideGrant: grantDecider(engine, opts.origin), startedVia: startedVia(opts.origin) } : {}),
     runId: opts?.runId,
     hooks: opts?.hooks,
     // And the step agents are built for that principal, so its lock also refuses them the

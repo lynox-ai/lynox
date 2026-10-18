@@ -1627,6 +1627,17 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       } finally { h.close(); cleanup(); }
     });
 
+    it('a contract that names no accepted grant is dropped, also when the row is written', async () => {
+      const { h, cleanup } = tmpHistory();
+      try {
+        mockSpawnInline.mockClear();
+        const state = await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: CONTRACT });
+        expect(contractHanded()).toBeUndefined();
+        expect(state.grantNote).toMatch(/names no accepted grant/);
+        expect(rows(h)).toEqual([expect.objectContaining({ grant_id: null })]);
+      } finally { h.close(); cleanup(); }
+    });
+
     it('verify-done: a run with a contract but no history at all gets no contract either', async () => {
       mockSpawnInline.mockClear();
       const state = await runManifest(STEP, CONFIG, { parentTools: tools, capabilityContract: granted });

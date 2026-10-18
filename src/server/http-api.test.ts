@@ -9487,8 +9487,10 @@ describe('LynoxHTTPApi', () => {
       expect(body.writeNotes).toEqual(['Not granted for an unattended run: POST https://api.example.com/v1/reports.']);
       // Only a caller that names the origin gets a grant decision at all; without it the
       // run passes no contract on.
-      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown };
+      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown; startedVia?: string };
       expect(typeof runtime.decideGrant).toBe('function');
+      // …and the run records which request started it, by that request's auth origin.
+      expect(runtime.startedVia).toBe('library:bearer');
       // The request is paid back: this file shares one per-IP rate window.
       const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
       for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);

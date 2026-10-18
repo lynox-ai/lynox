@@ -43,7 +43,6 @@ import { taskCreateTool } from '../tools/builtin/task.js';
 import { getPipeline, _resetPipelineStore, forgetPipeline, storePipeline, runSavedWorkflow } from '../tools/builtin/pipeline.js';
 import { _resetTenantInvariantForTests, runGuardedSavedWorkflow } from './saved-workflow-runner.js';
 import { acceptWorkflowGrant, prepareWorkflowGrant } from './workflow-grant.js';
-import { runAsHandRun } from './hand-run-door.js';
 import type { IAgent, PlannedPipeline, ToolEntry, TriggerRecord } from '../types/index.js';
 import type { Engine } from './engine.js';
 
@@ -132,6 +131,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       getRunHistory: () => history,
       getEngineDb: () => engineDb,
       getSecretStore: () => null,
+      getPromptStore: () => null,
       escalateToUser: () => null,
     } as unknown as Engine;
   }
@@ -410,7 +410,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const ctx = engine().getToolContext();
       const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, {
         tools: ctx.tools, toolContext: ctx, memory: null,
-        decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden, startedVia: 'library:local' }),
+        decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden }),
       });
       expect(result.grantNote).toMatch(/holds a character that does not show as text/);
       expect(posts()).toEqual([]);
@@ -518,10 +518,14 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       expect(rows[1]).toMatchObject({ grant_id: null, started_via: null });
     });
 
-    it('a schedule run by hand records schedule-hand, a library start the auth origin', async () => {
+    it('a schedule the owner runs with "Run now" records schedule-hand, a library start the auth origin', async () => {
       const trigger = accept(saveWorkflow('wf-how'));
       mockProcess.mockResolvedValueOnce(endTurn('done'));
-      await runAsHandRun(trigger.id, () => fire(trigger));
+      // The real entry point of POST /api/triggers/:id/run, without a marker: the owner's press.
+      const loop = new WorkerLoop(engine(), { hasChannels: () => false, notify } as never, 60_000);
+      expect(await loop.runTriggerNow(trigger.id)).toEqual({ ok: true });
+      await vi.waitFor(() => expect(runRows()).toHaveLength(1));
+      await vi.waitFor(() => expect(lastRun(trigger.id)).toContain('Pipeline completed'));
       mockProcess.mockResolvedValueOnce(endTurn('done'));
       const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { origin: { kind: 'library', by: 'cookie:0123abcd' } });
       expect(lib.grantNote).toBeUndefined();
@@ -547,6 +551,15 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       expect(lastRun(trigger.id)).not.toMatch(/could not be recorded/);
     });
 
+    it('a run whose acceptance row is gone runs without the grant, and does not write', async () => {
+      const trigger = accept(saveWorkflow('wf-rowgone'));
+      engineDb.getDb().prepare('DELETE FROM workflow_grants WHERE workflow_id = ?').run('wf-rowgone');
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+      await fire(trigger);
+      expect(posts()).toEqual([]);
+      expect(lastRun(trigger.id)).toMatch(/record of its acceptance is missing/);
+    });
+
     it('verify-done: the reader tells found, missing and unavailable apart', () => {
       accept(saveWorkflow('wf-read'));
       const grantId = stampOf('wf-read').grantId!;
@@ -556,8 +569,23 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       try {
         expect(bare.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
       } finally { bare.close(); }
+      // A row whose binding is neither value is unreadable, not unkeyed.
+      engineDb.getDb().prepare("UPDATE workflow_grants SET binding = 'garbled' WHERE grant_id = ?").run(grantId);
+      expect(history.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
       engineDb.close();
       expect(history.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
+    });
+
+    it('the run read API does not send how a run was started (it holds an auth-origin label)', async () => {
+      accept(saveWorkflow('wf-api'));
+      mockProcess.mockResolvedValueOnce(endTurn('done'));
+      const r = await runGuardedSavedWorkflow(engine(), 'wf-api', undefined, { origin: { kind: 'library', by: 'cookie:0123abcd' } });
+      // CONTROL: the row holds both.
+      expect(runRows()[0]).toMatchObject({ started_via: 'library:cookie:0123abcd' });
+      const read = history.getPipelineRun(r.runId!) as Record<string, unknown>;
+      expect(read['id']).toBe(r.runId);
+      expect(read).not.toHaveProperty('started_via');
+      expect(read).not.toHaveProperty('grant_id');
     });
 
     it('the owner\'s erasure empties the grant rows (pinned, not a mutation target)', () => {

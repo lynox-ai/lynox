@@ -700,6 +700,8 @@ export async function runSavedWorkflow(
      * only a caller that knows how the run was started can answer.
      */
     decideGrant?: ((planned: PlannedPipeline) => GrantDecision) | undefined;
+    /** How the run was started (`startedVia` of its origin), recorded beside the grant id when it runs under one. */
+    startedVia?: string | undefined;
     /** The run's id, when the caller already holds a claim keyed by it (the HTTP route).
      *  Absent for the cron executor, which holds no claim and lets the run mint its own. */
     runId?: string | undefined;
@@ -828,7 +830,7 @@ export async function runSavedWorkflow(
       capabilityContract: grant.contract,
       isAcceptedParam,
       // How it was started, written beside the contract's grant id on the run row.
-      startedVia: grant.contract !== undefined ? grant.startedVia : undefined,
+      startedVia: grant.contract !== undefined ? runtime?.startedVia : undefined,
       observeToolCall: collectWriteNotes(writeNotes),
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
