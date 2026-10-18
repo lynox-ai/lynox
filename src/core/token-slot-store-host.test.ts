@@ -44,3 +44,20 @@ describe('a Shopify grant shared by two profiles of one store', () => {
     expect(slotMayReach(storeOf([owner, astray]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/x', owner)).toBe(false);
   });
 });
+
+describe('the admission of two profiles that name one refresh slot', () => {
+  it('registers both when they are of one store, and neither when they are of two', async () => {
+    const { ApiStore } = await import('./api-store.js');
+    const { vi } = await import('vitest');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const together = new ApiStore();
+    together.register(shop('sh-a', 'alpha'));
+    together.register(shop('sh-b', 'alpha', 'https://alpha.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN' }));
+    expect(together.get('sh-a')).toBeDefined();
+    expect(together.get('sh-b')).toBeDefined();
+    const apart = new ApiStore();
+    apart.register(shop('sh-a', 'alpha'));
+    apart.register(shop('sh-b', 'beta', 'https://beta.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN' }));
+    expect(apart.get('sh-b')).toBeUndefined();
+  });
+});

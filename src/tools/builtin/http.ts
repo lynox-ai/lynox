@@ -1686,17 +1686,13 @@ async function attachEngineManagedAuth(
   }
   const auth = profile.auth;
   if (!auth) return {};
-  // A provider on the host it derives (Shopify): the token goes to the store the profile's own
-  // parameter derives, over https on its default port, and nowhere else. Asked before any vault
-  // read, with the same definition the token's mint uses (`presetStoreHost`).
+  // A provider on the host it derives (Shopify): the profile's base has to be the store its own
+  // parameter derives, over https, or its token would go to another store. Asked before any vault
+  // read, with the same definition the token's mint uses (`presetStoreHost`). That the request
+  // goes to that base's origin and no other is `slotMayReach`'s, below.
   const attachPreset = auth.type === 'oauth2' && auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(auth.oauth.preset_id) : undefined;
-  if (attachPreset?.apiOnDerivedHost === true) {
-    const store = presetStoreHost(profile);
-    // `url` parsed above, where the profile was looked up by its host.
-    const target = new URL(url);
-    if (store === null || target.protocol !== 'https:' || target.port !== '' || target.hostname !== store) {
-      return { refusal: `Error: api_profile "${profile.id}" connects one ${attachPreset.label} store, and this request does not go to it over https: its base_url and auth.oauth.preset_params have to name the same store. The token was not attached.` };
-    }
+  if (attachPreset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+    return { refusal: `Error: api_profile "${profile.id}" connects one ${attachPreset.label} store, and its base_url is not https on the store its auth.oauth.preset_params derive. The token was not attached. Make the two name the same store with api_setup action "update".` };
   }
   // Before any vault read or renewal: a profile that will be refused here costs no secret access.
   if ((auth.type === 'header' || auth.type === 'oauth2') && typeof auth.header_name === 'string' && isRequestShapingHeaderName(auth.header_name)) {

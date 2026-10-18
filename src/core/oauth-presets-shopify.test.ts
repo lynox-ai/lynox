@@ -72,6 +72,7 @@ describe('presetStoreHost', () => {
     ['a port', profile('https://my-store.myshopify.com:8443', 'my-store')],
     ['credentials', profile('https://u:p@my-store.myshopify.com', 'my-store')],
     ['a password alone', profile('https://:p@my-store.myshopify.com', 'my-store')],
+    ['a user name alone', profile('https://u@my-store.myshopify.com', 'my-store')],
     ['a trailing dot', profile('https://my-store.myshopify.com.', 'my-store')],
     ['a refused shop value', profile('https://My-Store.myshopify.com', 'My-Store')],
     ['no shop value', profile('https://my-store.myshopify.com', undefined)],
