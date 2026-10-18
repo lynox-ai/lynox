@@ -607,6 +607,57 @@ describe('TaskManager', () => {
     });
   });
 
+  // A run that halted where its approval told it to waits for the owner; one the engine lost
+  // did not finish. Each keeps its own word, and each is scheduled like the end it resembles.
+  describe('recordTaskRun — a planned halt is scheduled like a stop, an interrupted run like a failure', () => {
+    it('a halted one-shot is `completed` and not retried, whatever its retries say', () => {
+      const task = tm.create({ title: 'Bulk run', assignee: 'lynox', maxRetries: 3 }) as TriggerRecord;
+
+      const retrying = tm.recordTaskRun(task.id, 'Bulk run halted: the approved maximum number of targets is reached.', 'halted');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(retrying).toBe(false);
+      expect(after.status).toBe('completed');
+      expect(after.next_run_at ?? null).toBeNull();
+      expect(after.retry_count ?? 0).toBe(0);
+      expect(after.last_run_status).toBe('halted');
+    });
+
+    it('a halted run leaves a recurring trigger\'s status alone', () => {
+      const task = tm.create({ title: 'Nightly', assignee: 'lynox', scheduleCron: '0 3 * * *' }) as TriggerRecord;
+      const before = tm.getTrigger(task.id)!;
+
+      tm.recordTaskRun(task.id, 'halted as planned', 'halted');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(after.status).toBe(before.status);
+      expect(after.last_run_status).toBe('halted');
+    });
+
+    it('an interrupted one-shot with retries left is retried, exactly like a failure', () => {
+      const task = tm.create({ title: 'Report', assignee: 'lynox', maxRetries: 3 }) as TriggerRecord;
+
+      const retrying = tm.recordTaskRun(task.id, 'The engine stopped while this run was in progress.', 'interrupted');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(retrying).toBe(true);
+      expect(after.retry_count).toBe(1);
+      expect(after.next_run_at ?? '').not.toBe('');
+      expect(after.last_run_status).toBe('interrupted');
+    });
+
+    it('an interrupted one-shot without retries ends `failed`, its own word kept for the owner', () => {
+      const task = tm.create({ title: 'Report', assignee: 'lynox' }) as TriggerRecord;
+
+      tm.recordTaskRun(task.id, 'The engine stopped while this run was in progress.', 'interrupted');
+
+      const after = tm.getTrigger(task.id)!;
+      expect(after.status).toBe('failed');
+      expect(after.next_run_at ?? null).toBeNull();
+      expect(after.last_run_status).toBe('interrupted');
+    });
+  });
+
   // T1-2 regression — see PRD-HN-LAUNCH-HARDENING §3.
   describe('recordTaskRun — one-shot failure terminates the task', () => {
     it("marks a one-shot task 'failed' and clears next_run_at when it permanently fails with no retries", () => {

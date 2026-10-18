@@ -257,6 +257,60 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
   });
 });
 
+/** Run one tick of a real WorkerLoop over a memory run; returns what it recorded and announced. */
+async function tickMemoryRun(runId: string, writer: TargetWriter): Promise<{ status: string; notes: Array<{ title: string; priority: string }> }> {
+  const triggers = new TriggerStore(engineDb);
+  const recordTaskRun = vi.fn((_id: string, _r: string, _status: string) => false);
+  const notify = vi.fn(async (_n: { title: string; priority: string }) => {});
+  const engine = {
+    getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+      claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+    getBulkLedger: () => ledger,
+    getDataStore: () => store,
+    getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+    getUserConfig: () => ({}),
+  } as unknown as Engine;
+  const mod = await import('./bulk-apply.js');
+  const spy = vi.spyOn(mod, 'bulkWriterFor').mockReturnValue(writer);
+  try {
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
+    await loop.tick();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled(), { timeout: 10_000 });
+  } finally {
+    spy.mockRestore();
+  }
+  expect(recordTaskRun).toHaveBeenCalledTimes(1);
+  return { status: recordTaskRun.mock.calls[0]![2], notes: notify.mock.calls.map((c) => c[0]) };
+}
+
+// A run that stops at its approved maximum did what it was told and waits for the owner. As
+// `failed` with a high-priority ✗ it was a failure the owner learned to read past — right
+// next to the real ones, which a failure halt still is.
+describe('a planned halt is not a failure', () => {
+  it('a run at its approved maximum is recorded `halted` and announced without ✗, at normal priority', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const out = await tickMemoryRun(runId, memory(initial).writer);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
+    expect(out.status).toBe('halted');
+    expect(out.notes).toHaveLength(1);
+    expect(out.notes[0]!.priority).toBe('normal');
+    expect(out.notes[0]!.title.startsWith('\u23F8 ')).toBe(true);
+  });
+
+  it('a failure halt is still recorded `failed` and announced with ✗ at high priority', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    const out = await tickMemoryRun(runId, memory(initial, new Set(['k010', 'k011', 'k012'])).writer);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.consecutiveFailures);
+    expect(out.status).toBe('failed');
+    expect(out.notes).toHaveLength(1);
+    expect(out.notes[0]!.priority).toBe('high');
+    expect(out.notes[0]!.title.startsWith('\u2717 ')).toBe(true);
+  });
+});
+
 describe('the effect can only come from the approval (§7 b, the derivation property)', () => {
   // MUTATION: map any task_type onto `bulk_apply` in deriveSourceEffect → this fails.
   it('no create-path intent derives a bulk effect', () => {
@@ -339,6 +393,8 @@ describe('approval checks (§7 g)', () => {
     const { writer, state } = memory(initial);
     const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
     expect(out.status).toBe('halted');
+    // The run did what its approval said: a planned halt, which the trigger records as one.
+    expect(out.planned).toBe(true);
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
     expect([...state.values()].filter((v) => v.startsWith('w'))).toHaveLength(3);
   });
@@ -698,6 +754,8 @@ describe('halt thresholds', () => {
     const { writer } = memory(initial, new Set(['k010', 'k011', 'k012']));
     const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
     expect(out.status).toBe('halted');
+    // A failure halt is not a planned one: it stays a failure for the owner.
+    expect(out.planned).toBeUndefined();
     const s = ledger.getStatus(runId)!;
     expect([s.haltReason, s.applied, s.failed, s.phase]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 10, 3, 'writing']);
     expect(out.summary).not.toContain(MARK);
