@@ -8333,6 +8333,13 @@ export class LynoxHTTPApi {
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
+    /** A tenant whose model key the control plane does not supply: its judged runs report one
+     *  metered cost per model call, which are not debited and pile up until the hook drops them
+     *  — so such a tenant does not start one yet (PRD bulk-loop §3.1). */
+    const bulkJudgeOwnKey = (): boolean => {
+      const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
+      return Boolean(billingTier) && !cpSuppliesLLMKey(billingTier!);
+    };
     /** Which halt a run stands at, by name: the owner's page words its own sentences on the
      *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
     const bulkHaltKey = (haltReason: string | null): string | null =>
@@ -8436,6 +8443,9 @@ export class LynoxHTTPApi {
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
         judgeServedBy,
+        // The start route refuses every judged start on such an instance (judge_unavailable); the
+        // page says so before the click instead of after it.
+        judgeOwnKey: status.judge !== null && bulkJudgeOwnKey(),
         // A run whose process is gone stands still until its lease lapses; the owner sees when.
         resumesAt: bulkResumesAt(params['id']!),
         // The one target an external run wrote before its probe is confirmed: what the owner
@@ -8503,8 +8513,7 @@ export class LynoxHTTPApi {
           // A judged run reports one metered cost per model call. On a tenant whose model key the
           // control plane does not supply, those reports are not debited and pile up until the
           // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
-          const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
-          if (billingTier && !cpSuppliesLLMKey(billingTier)) {
+          if (bulkJudgeOwnKey()) {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
             return;
           }

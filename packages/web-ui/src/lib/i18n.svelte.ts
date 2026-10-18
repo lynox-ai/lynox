@@ -346,6 +346,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.start.list': { de: 'Liste lesen', en: 'Read the list' },
 	'bulk.start.list_note': { de: 'Die Liste wurde Seite für Seite gelesen, nicht auf einen Schlag. Kam beim Anbieter während des Lesens etwas dazu, fiel etwas weg oder wurde umsortiert, kann es bei den Zielen fehlen oder nur einmal stehen, obwohl es sich verschoben hat.', en: 'The list was read page by page, not at one instant: an element added, removed or re-sorted on the host while it was read can be missing from the targets, or listed once only though it moved.' },
 	'bulk.start.listed': { de: 'Die Liste ist gelesen: {n} Ziele. Prüfe sie unten, dann starte das Lesen.', en: 'The list is read: {n} targets. Check them below, then start reading them.' },
+	'bulk.start.listed_judge': { de: 'Die Liste ist gelesen: {n} Ziele. Prüfe sie unten, dann starte das Urteil.', en: 'The list is read: {n} targets. Check them below, then start the judging.' },
+	'bulk.start.judge_own_key': { de: 'Läufe mit Urteil lassen sich auf einer Instanz mit eigenem KI-Schlüssel nicht starten. Läufe ohne Urteil gehen hier wie gewohnt.', en: 'Runs with a judge cannot be started on an instance with its own AI key. Runs without a judge work here as usual.' },
 	'bulk.start.judge_explain': { de: 'Ein KI-Modell ({provider} · {model}) entscheidet für jedes Ziel die neuen Werte nach dieser Regel. Geschrieben wird nichts, bevor du die Vorschau freigibst.', en: 'An AI model ({provider} · {model}) decides each target\'s new values by this rule. Nothing is written before you approve the preview.' },
 	'bulk.start.rule': { de: 'Regel', en: 'Rule' },
 	'bulk.start.fields': { de: 'Felder, die das Modell setzt', en: 'Fields the model sets' },

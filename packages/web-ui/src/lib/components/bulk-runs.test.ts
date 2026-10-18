@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
@@ -78,7 +78,7 @@ describe('bulk run helpers', () => {
 	});
 
 	it('starts a waiting run the way it waits: its list first, then its judging or its read', () => {
-		const waiting = { phase: 'planned' as const, haltKey: 'awaitingStart', listFirstPage: null, judge: null, judgeServedBy: null };
+		const waiting = { phase: 'planned' as const, haltKey: 'awaitingStart', listFirstPage: null, judge: null, judgeServedBy: null, judgeOwnKey: false };
 		const judge = { tier: 'fast', unjudged: 3 };
 		const servedBy = { provider: 'mistral', label: 'Mistral Medium 3.5' };
 		expect(bulkStartKind(waiting)).toBe('read');
@@ -86,8 +86,13 @@ describe('bulk run helpers', () => {
 		expect(bulkStartKind({ ...waiting, listFirstPage: 'https://shop.example.invalid/items?page=1', judge, judgeServedBy: servedBy })).toBe('list');
 		expect(bulkStartKind({ ...waiting, haltKey: 'listed', judge, judgeServedBy: servedBy })).toBe('judge');
 		expect(bulkStartKind({ ...waiting, haltKey: 'listed' })).toBe('read');
-		// No model can judge it now: no start offered.
+		// No model can judge it now: no start offered — not even the read of its list.
 		expect(bulkStartKind({ ...waiting, judge })).toBe('no_judge');
+		expect(bulkStartKind({ ...waiting, judge, listFirstPage: 'https://shop.example.invalid/items?page=1' })).toBe('no_judge');
+		// An instance with its own model key starts no judged run, its list included; a plain run starts.
+		expect(bulkStartKind({ ...waiting, judge, judgeServedBy: servedBy, judgeOwnKey: true })).toBe('judge_own_key');
+		expect(bulkStartKind({ ...waiting, judge, judgeServedBy: servedBy, judgeOwnKey: true, listFirstPage: 'https://shop.example.invalid/items?page=1' })).toBe('judge_own_key');
+		expect(bulkStartKind({ ...waiting, judgeOwnKey: true })).toBe('read');
 		// Halted on a failure, or not planned: not a start.
 		expect(bulkStartKind({ ...waiting, haltKey: 'unavailable' })).toBeNull();
 		expect(bulkStartKind({ ...waiting, phase: 'previewed' })).toBeNull();
@@ -99,6 +104,16 @@ describe('bulk run helpers', () => {
 		expect(bulkCostCap('2,50')).toBe(2.5);
 		expect(bulkCostCap(' 12.5 ')).toBe(12.5);
 		for (const bad of ['', '0', '0.00', '-1', '1.005', '1e2', 'abc', '1.', '.5', null, undefined]) expect(bulkCostCap(bad), String(bad)).toBeNull();
+	});
+
+	it('shows every hidden character of a text the run acts on as its code point, and keeps what a language needs', () => {
+		const tag = String.fromCodePoint(0xe0041);
+		expect(bulkVisibleText(`Kürze den Titel${tag}`)).toBe('Kürze den Titel⟨U+E0041⟩');
+		expect(bulkVisibleText('a\u202Eb\u200Bc\u0007d')).toBe('a⟨U+202E⟩b⟨U+200B⟩c⟨U+0007⟩d');
+		// Line breaks, tabs, ZWJ in an emoji, ZWNJ in Persian and RTL marks are content.
+		for (const kept of ['zwei\nZeilen\tmit Tab', '👨\u200D👩\u200D👧', 'می\u200Cروم', 'abc\u200Fdef']) expect(bulkVisibleText(kept)).toBe(kept);
+		// A preview value carries them visibly too.
+		expect(bulkValueText(`neu${tag}`)).toBe('neu⟨U+E0041⟩');
 	});
 
 	it('names the provider that serves a judge call', () => {

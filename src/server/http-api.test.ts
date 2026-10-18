@@ -9014,6 +9014,24 @@ describe('LynoxHTTPApi', () => {
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
       });
 
+      it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {
+        const id = judgedRun();
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const ownKeyOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { judgeOwnKey: unknown }).judgeOwnKey;
+        expect(await ownKeyOf()).toBe(false);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        expect(await ownKeyOf()).toBe(false);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
+        expect(await ownKeyOf()).toBe(true);
+        // The page's flag and the route's refusal are one predicate.
+        const refused = await start(id, { judgeRuleHash: hash, costCapUsd: 1 });
+        expect(refused.status).toBe(409);
+        expect(((await refused.json()) as { code: string }).code).toBe('judge_unavailable');
+        // A run without a judge on the same instance carries no flag.
+        const plain = planRun();
+        expect(((await (await jsonFetch(`/api/bulk/runs/${plain}`)).json()) as { judgeOwnKey: unknown }).judgeOwnKey).toBe(false);
+      });
+
       it('a restart after a halt refuses a limit that is not a number, instead of keeping the old one', async () => {
         const id = judgedRun();
         const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;

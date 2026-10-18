@@ -56,18 +56,36 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeRuleHash: string | null;
 	/** Who would judge the run now: the provider serving the call and the model's catalog name. */
 	judgeServedBy: { provider: string; label: string } | null;
+	/** An instance with its own model key: the engine refuses every start of a judged run there. */
+	judgeOwnKey: boolean;
 }
 
 /** The start a waiting run takes: read its targets, read its list, start its judging — or none,
  *  for a judged run no model can judge now. Null for a run that does not wait for a start. */
-export type BulkStartKind = 'read' | 'list' | 'judge' | 'no_judge';
+export type BulkStartKind = 'read' | 'list' | 'judge' | 'no_judge' | 'judge_own_key';
 
-export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'listFirstPage' | 'judge' | 'judgeServedBy'>): BulkStartKind | null {
+export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>): BulkStartKind | null {
 	if (!bulkWaitsForStart(run)) return null;
+	// A judged run that cannot be judged is not started at all — not even its list, whose read
+	// would send requests to the host for a run that can never go on.
+	if (run.judge !== null && run.judgeOwnKey) return 'judge_own_key';
+	if (run.judge !== null && run.judgeServedBy === null) return 'no_judge';
 	// A list's first start reads only the list, judged or not.
 	if (run.listFirstPage !== null) return 'list';
-	if (run.judge !== null) return run.judgeServedBy === null ? 'no_judge' : 'judge';
-	return 'read';
+	return run.judge !== null ? 'judge' : 'read';
+}
+
+/** Characters that show nothing or reorder what is shown: invisible format characters, the bidi
+ *  controls, the tag block, and the control characters but tab and newline. The ones a language
+ *  needs to spell its words (ZWJ, ZWNJ, LRM, RLM, variation selectors) are not here. */
+// eslint-disable-next-line no-control-regex -- finding them is the point
+const HIDDEN_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u061C\u180E\u200B\u2028\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\u3164\uFEFF\uFFF9-\uFFFB\u{E0000}-\u{E007F}]/gu;
+
+/** Text the owner reads before a run acts on it, with every hidden character shown as its code
+ *  point. Not removed: the run reads the text as it is, so what the owner reads must be that
+ *  text too — a removed character would be one the owner never saw and the model still reads. */
+export function bulkVisibleText(text: string): string {
+	return text.replace(HIDDEN_CHARS, (c) => `⟨U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟩`);
 }
 
 /** The provider that serves a judge call, by name. */
@@ -157,5 +175,5 @@ export function bulkStep(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | '
 /** A value of a target as the preview shows it: text as it is, anything else as JSON. */
 export function bulkValueText(v: unknown): string {
 	if (v === undefined || v === null || v === '') return '';
-	return typeof v === 'string' ? v : JSON.stringify(v);
+	return bulkVisibleText(typeof v === 'string' ? v : JSON.stringify(v));
 }

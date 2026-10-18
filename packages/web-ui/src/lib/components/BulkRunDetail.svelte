@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -183,7 +183,10 @@
 				supersedable = r.body.supersedable;
 				return '';
 			}
-			return refusalOf(r);
+			// A refused start may have changed the run (an ended mandate ends it): show it as it is now.
+			const refusal = refusalOf(r);
+			if (refusal !== null) await load();
+			return refusal;
 		});
 	}
 
@@ -260,7 +263,7 @@
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
 			{/if}
 			{#if run.phase === 'planned' && run.haltKey === 'listed'}
-				<p class="text-sm">{tf('bulk.start.listed', { n: String(run.total) })}</p>
+				<p class="text-sm">{tf(run.judge !== null ? 'bulk.start.listed_judge' : 'bulk.start.listed', { n: String(run.total) })}</p>
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.list_note')}</p>
 			{/if}
 			{#if run.conflicts > 0}
@@ -329,6 +332,8 @@
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 				</div>
+			{:else if startKind === 'judge_own_key'}
+				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.judge_own_key')}</p>
 			{:else if startKind === 'no_judge'}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.no_judge_model')}</p>
 			{:else if startKind === 'judge' && run.judgeServedBy && run.judgeRule}
@@ -336,13 +341,13 @@
 					<p class="text-sm">{tf('bulk.start.judge_explain', { provider: bulkJudgeProviderName(run.judgeServedBy.provider), model: run.judgeServedBy.label })}</p>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.rule')}</h3>
-						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{run.judgeRule.rule}</p>
+						<p class="text-sm whitespace-pre-wrap rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2">{bulkVisibleText(run.judgeRule.rule)}</p>
 					</div>
 					<div>
 						<h3 class="text-xs font-medium text-text-subtle mb-1">{t('bulk.start.fields')}</h3>
 						<ul class="text-sm space-y-0.5">
 							{#each Object.entries(run.judgeRule.schema.properties) as [field, shape] (field)}
-								<li><code class="text-xs">{field}</code> <span class="text-xs text-text-subtle break-all">{bulkValueText(shape)}</span></li>
+								<li><code class="text-xs">{bulkVisibleText(field)}</code> <span class="text-xs text-text-subtle break-all">{bulkValueText(shape)}</span></li>
 							{/each}
 						</ul>
 					</div>
