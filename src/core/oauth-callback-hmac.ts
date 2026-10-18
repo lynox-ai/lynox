@@ -127,14 +127,14 @@ export interface VerifiedStoreCallback {
 }
 
 export type ShopifyCallbackBinding =
-  | { readonly ok: true; readonly binding: VerifiedStoreCallback; readonly code: string; readonly state: string }
+  | { readonly ok: true; readonly binding: VerifiedStoreCallback; readonly code: string }
   | { readonly ok: false; readonly reason: Extract<ShopifyCallbackVerdict, { ok: false }>['reason'] | 'not-a-store-profile' | 'other-store' };
 
 /**
  * Verify a Shopify callback and bind it to the profile it lands on: the signed `shop`, in lower
  * case, has to be the host the profile's own parameter derives (`storeHost`, from
- * `presetStoreHost`, `null` when the profile has none). The code and state the caller uses come
- * from the signed values, not from a second parse of the query.
+ * `presetStoreHost`, `null` when the profile has none). The code the caller exchanges comes from
+ * the signed values, not from a second parse of the query.
  */
 export function bindShopifyCallback(
   rawQuery: string,
@@ -152,6 +152,5 @@ export function bindShopifyCallback(
     ok: true,
     binding: { profileId, origin: `https://${shop}` },
     code: verdict.params.get('code') ?? '',
-    state: verdict.params.get('state') ?? '',
   };
 }

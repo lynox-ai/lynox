@@ -10415,7 +10415,7 @@ export class LynoxHTTPApi {
       if (preset?.callbackVerification === 'shopify-hmac') {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
         const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
-        if (!bound.ok || bound.code !== code || bound.state !== queryState) {
+        if (!bound.ok) {
           sendOAuthHtml(res, 400, 'The provider\'s signature on this authorization does not hold for this connection. Nothing was stored.');
           return;
         }
