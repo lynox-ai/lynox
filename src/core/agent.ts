@@ -4342,7 +4342,8 @@ export class Agent implements IAgent {
           };
         }
         // A `secret:` reference to a built-in provider's client secret is refused on the name, for
-        // every principal and tool, before the vault is asked, with the names `extractSecretNames`
+        // every principal and every tool whose input is resolved here (not the
+        // SECRET_RESOLUTION_EXEMPT ones), before the vault is asked, with the names `extractSecretNames`
         // read the input with — the same reading `resolveSecretRefs` resolves. This covers
         // references only: a profile that names the secret as its credential is attached by the
         // http tool, and what that may reach is decided there. A check that throws refuses.
