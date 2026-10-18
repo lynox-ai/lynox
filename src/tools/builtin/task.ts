@@ -48,6 +48,12 @@ interface TaskListInput {
 
 /** How much of a failed run's stored reason is rendered in the listing. */
 const FAILURE_REASON_CHARS = 300;
+/** The label of a recorded run that did not succeed; any word not listed reads FAILED. */
+const ENDED_LABEL: ReadonlyMap<string, string> = new Map([
+  ['stopped', 'STOPPED BY ITS OWNER'],
+  ['halted', 'HALTED AS PLANNED, waiting for the owner to continue it'],
+  ['interrupted', 'INTERRUPTED (the engine stopped mid-run; it was not resumed)'],
+]);
 
 /** How much of the stored parameter set is rendered. Shorter than the reason:
  *  it is a pointer to what was configured, not the configuration itself. */
@@ -121,6 +127,11 @@ export function triggerDetailLine(t: {
   // next run" note "whose reason holds for a stopped one-shot" — which is false here: a
   // stopped one-shot is written `completed`, which that note excludes by name, so it is
   // unreachable for every stopped row either way.
+  //
+  // `halted` and `interrupted` are the same case again. A halt at the approved maximum is the
+  // run doing what it was told and waiting for the owner; an interrupted run is one the
+  // engine lost, which is not a broken schedule either. Read as FAILED, the model goes
+  // looking for a cause to repair that is not there.
   const ended = t.last_run_status !== undefined && t.last_run_status !== 'success';
   if (ended) {
     const when = t.last_run_at ? ` (${clean(t.last_run_at).slice(0, 16)})` : '';
@@ -131,7 +142,7 @@ export function triggerDetailLine(t: {
     // middle dot in a provider's prose and removes the ambiguity entirely.
     const raw = clean(t.last_run_result ?? '').split(FIELD_SEPARATOR).join(' - ').trim();
     const reason = raw.length === 0 ? 'no reason was stored' : cut(raw, FAILURE_REASON_CHARS);
-    parts.push(`last run ${t.last_run_status === 'stopped' ? 'STOPPED BY ITS OWNER' : 'FAILED'}${when}: ${reason}`);
+    parts.push(`last run ${ENDED_LABEL.get(t.last_run_status ?? '') ?? 'FAILED'}${when}: ${reason}`);
     // …and whether that failure was the last word. `last run FAILED` alone does
     // not say: a cron row keeps its next run through a failure and tries again, a
     // one-shot loses it (`task-manager.ts` nulls the column) and does not. That is
