@@ -42,6 +42,12 @@ import { SQLITE_BUSY_TIMEOUT_MS, scrubFreedPages, zeroDeletedContent } from './s
 const ENGINE_HKDF_INFO = 'lynox-engine-encryption';
 /** Separate label for the keyed-digest subkey: the MAC never shares a key with AES-GCM. */
 const ENGINE_HASH_HKDF_INFO = 'lynox-engine-keyed-hash';
+/**
+ * Label for the store-binding subkey ({@link EngineDb.storeBindingDigest}). Its own, not the
+ * keyed-hash one: a store binding must not be computable from any other digest this file
+ * stores.
+ */
+const STORE_BINDING_HKDF_INFO = 'lynox-engine-store-binding';
 const ENCRYPTED_PREFIX = 'enc:';
 
 function getDefaultDbPath(): string {
@@ -1165,6 +1171,18 @@ const MIGRATIONS: string[] = [
      after_untrusted   INTEGER NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_workflow_grants_workflow ON workflow_grants(workflow_id);`,
+
+  // v38: the engine's own record that the control plane cleared this instance for an exact
+  // (Shopify) connection (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B7). One row, written once
+  // before the first store pass after the first ok, and never changed: no code updates or
+  // deletes it. Only the owner's erasure empties it (`deleteAllData` enumerates every table),
+  // and the store profiles go with it then. While it is set and the control plane reports
+  // `exact_held: false`, the managed hook asks the exact-attach route again.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (38);
+   CREATE TABLE IF NOT EXISTS exact_marker (
+     id          INTEGER PRIMARY KEY CHECK (id = 1),
+     first_ok_at TEXT NOT NULL
+   );`,
 ];
 
 /**
@@ -1177,6 +1195,7 @@ export class EngineDb {
   private readonly dbPath: string;
   private readonly _encKey: Buffer | null;
   private readonly _hashKey: Buffer | null;
+  private readonly _bindKey: Buffer | null;
   private _decWarnedNoKey = false;
   private _decWarnedFailCount = 0;
 
@@ -1194,9 +1213,11 @@ export class EngineDb {
     if (vaultKey) {
       this._encKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HKDF_INFO, CRYPTO_KEY_LENGTH));
       this._hashKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', ENGINE_HASH_HKDF_INFO, CRYPTO_KEY_LENGTH));
+      this._bindKey = Buffer.from(hkdfSync('sha256', vaultKey, 'lynox-engine', STORE_BINDING_HKDF_INFO, CRYPTO_KEY_LENGTH));
     } else {
       this._encKey = null;
       this._hashKey = null;
+      this._bindKey = null;
     }
   }
 
@@ -1370,6 +1391,30 @@ export class EngineDb {
     const h = this._hashKey ? createHmac('sha256', this._hashKey) : createHash('sha256');
     for (const p of parts) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
     return h.digest('hex');
+  }
+
+  /**
+   * The binding of a store connection's token to its profile and store (Appendix B, B4): an
+   * HMAC under a subkey of the vault key with its own label, over the profile id, the store
+   * origin and the token, length-prefixed. `null` without a vault key: an unkeyed digest
+   * would be forgeable by anyone who can write the profile record, so there is no binding,
+   * and the attach refuses.
+   */
+  storeBindingDigest(profileId: string, origin: string, value: string): string | null {
+    if (this._bindKey === null) return null;
+    const h = createHmac('sha256', this._bindKey);
+    for (const p of [profileId, origin, value]) h.update(`${String(Buffer.byteLength(p, 'utf8'))}:`).update(p);
+    return h.digest('hex');
+  }
+
+  /** Whether the exact marker is set. Throws when it cannot be read (B7: no statement then). */
+  exactMarkerSet(): boolean {
+    return this.db.prepare('SELECT 1 FROM exact_marker WHERE id = 1').get() !== undefined;
+  }
+
+  /** Set the exact marker; a second call keeps the first stamp. Throws when it cannot be written. */
+  setExactMarker(): void {
+    this.db.prepare("INSERT OR IGNORE INTO exact_marker (id, first_ok_at) VALUES (1, datetime('now'))").run();
   }
 
   /** Same as `AgentMemoryDb.setSecureDelete`, for engine.db. Returns the previous setting. */
