@@ -2997,13 +2997,13 @@ describe('api_setup tool', () => {
     const SHOPIFY_PROFILE = {
       id: 'shopify_seo',
       name: 'Shopify',
-      base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+      base_url: 'https://shop.commerce.example/admin/api/2026-04',
       description: 'Shopify Admin API',
       auth: {
         type: 'oauth2' as const,
         vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
         oauth: {
-          token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+          token_url: 'https://shop.commerce.example/admin/oauth/access_token',
           grant_type: 'client_credentials' as const,
           client_id_key: 'SHOPIFY_CLIENT_ID',
           client_secret_key: 'SHOPIFY_CLIENT_SECRET',
@@ -3037,7 +3037,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
       expect(result).toMatch(/missing the OAuth credentials/i);
       expect(result).toContain('SHOPIFY_CLIENT_ID');
@@ -3055,7 +3055,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       // Simulate a session that has already spent its HTTP budget.
       (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -3074,8 +3074,8 @@ describe('api_setup tool', () => {
         SHOPIFY_CLIENT_ID: 'client-id-xyz',
         SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
       }));
-      const ack = { accepted: true as const, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' };
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack, auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, token_url: 'http://shop.myshopify.com/admin/oauth/access_token' } } });
+      const ack = { accepted: true as const, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' };
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: ack, auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, token_url: 'http://shop.commerce.example/admin/oauth/access_token' } } });
       // Answers instead of passing through, so a regression posts to no real host, and
       // restored, so a call here cannot show up in the next test's spy.
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
@@ -3115,7 +3115,7 @@ describe('api_setup tool', () => {
       const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
 
       expect(result).toMatch(/non-vetted sub-processor/i);
-      expect(result).toContain('shop.myshopify.com');
+      expect(result).toContain('shop.commerce.example');
       expect(fetchSpy).not.toHaveBeenCalled(); // client_secret never leaves the process
       fetchSpy.mockRestore();
     });
@@ -3142,7 +3142,7 @@ describe('api_setup tool', () => {
           // shape every profile has, because nothing sets that field.
           oauth: { ...SHOPIFY_PROFILE.auth.oauth, grant_type: 'refresh_token' as const },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-refreshed', expires_in: 3600 }), {
@@ -3173,7 +3173,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
         throw new Error('ENOSPC: no space left on device');
@@ -3212,7 +3212,7 @@ describe('api_setup tool', () => {
       store.register({
         ...SHOPIFY_PROFILE,
         auth: { ...SHOPIFY_PROFILE.auth, ...extra },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 86399 }), {
@@ -3241,7 +3241,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 1e308 }), {
@@ -3278,7 +3278,7 @@ describe('api_setup tool', () => {
             refresh_token_key: 'ANTHROPIC_API_KEY',
           },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
@@ -3301,7 +3301,7 @@ describe('api_setup tool', () => {
         ...SHOPIFY_PROFILE,
         id: 'mail-account-x',
         auth: { ...SHOPIFY_PROFILE.auth, oauth: { ...SHOPIFY_PROFILE.auth.oauth, grant_type: grantType, refresh_token_key: 'SHOPIFY_REFRESH' } },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       };
       const written: string[] = [];
       const vaultMock = makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'id', SHOPIFY_CLIENT_SECRET: 'secret', SHOPIFY_REFRESH: 'r' }) as { set: (n: string, v: string) => void };
@@ -3332,7 +3332,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 3600 }), {
@@ -3361,7 +3361,7 @@ describe('api_setup tool', () => {
       const agent = createMockAgent(store, vaultMock);
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_ok', expires_in: 3600 }), {
@@ -3388,7 +3388,7 @@ describe('api_setup tool', () => {
       (agent as unknown as { toolContext: { networkPolicy: string } }).toolContext.networkPolicy = 'guarded';
       store.register({
         ...SHOPIFY_PROFILE,
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_ok', expires_in: 3600 }), {
@@ -3413,7 +3413,7 @@ describe('api_setup tool', () => {
       store.register({
         ...SHOPIFY_PROFILE,
         // Acceptance was recorded for some OTHER host; token_url still targets
-        // shop.myshopify.com, which the stale ack does not cover.
+        // shop.commerce.example, which the stale ack does not cover.
         custom_endpoint_ack: { accepted: true, hosts: ['old-accepted-host.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -3473,7 +3473,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(JSON.stringify({ access_token: 'shpat_returned_token_abc', expires_in: 86400 }), {
@@ -3512,7 +3512,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       // Lock the tenant to deny-all. The token POST carries client_secret — it
       // must be blocked by the same egress policy http_request obeys, proving
       // agent.toolContext is now threaded into the token fetch (before the fix
@@ -3537,7 +3537,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
       const counters = (agent as unknown as { sessionCounters: { httpRequests: number } }).sessionCounters;
       const before = counters.httpRequests;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
@@ -3563,7 +3563,7 @@ describe('api_setup tool', () => {
       // profile). These tests exercise fetch_token, not the create gate — which
       // now requires a real out-of-band human accept (see the disclosure-gate
       // block), so we don't route setup through it.
-      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-12T00:00:00.000Z' } });
+      store.register({ ...SHOPIFY_PROFILE, custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' } });
 
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response('<!DOCTYPE html><html><body>app_not_installed</body></html>', {

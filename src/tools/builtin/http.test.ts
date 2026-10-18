@@ -3643,8 +3643,8 @@ describe('httpRequestTool', () => {
       // This profile names no header, so the token went out as Bearer and the
       // reminder carries the header sentence too.
       const HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
-        + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
-        + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+        + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. '
+        + "Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
       expect(reminderToEnd(result), 'the reminder text changed; if that is intended, change this literal too and say why').toBe(REMINDER + HINT);
     });
 
@@ -3795,13 +3795,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
           oauth: {
-            token_url: 'https://shop.myshopify.com/admin/oauth/access_token',
+            token_url: 'https://shop.commerce.example/admin/oauth/access_token',
             grant_type: 'client_credentials',
             client_id_key: 'SHOPIFY_CLIENT_ID',
             client_secret_key: 'SHOPIFY_CLIENT_SECRET',
@@ -3818,7 +3818,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
-      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       // Hint must be OUTSIDE the untrusted_data wrap so the agent treats
       // it as system guidance, not response content.
@@ -3908,12 +3908,12 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
       });
       mockDnsPublic();
@@ -3925,10 +3925,10 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       } as never;
 
-      const result = await visible({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).toMatch(/non-vetted sub-processor/i);
-      expect(result).toContain('shop.myshopify.com');
+      expect(result).toContain('shop.commerce.example');
       expect(fetchMock).not.toHaveBeenCalled();      // token never reaches the wire
       expect(lastPinnedInputs.length).toBe(0);
     });
@@ -3939,14 +3939,14 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'],
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
@@ -3957,7 +3957,7 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       } as never;
 
-      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).not.toMatch(/non-vetted sub-processor/i);
       expect(fetchMock).toHaveBeenCalled();
@@ -5247,11 +5247,11 @@ describe('httpRequestTool', () => {
       + "The vault's access_token is almost certainly expired. Recover with:\n"
       + '  api_setup({ action: "fetch_token", id: "store-api" })\n'
       + 'That uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. '
-      + 'Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) '
+      + 'Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) '
       + "don't expose long-lived tokens there anymore.";
     const HEADER_HINT = '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: '
-      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
-      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Check the API's docs and set `auth.header_name` on this profile.";
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. '
+      + "Check the API's docs and set `auth.header_name` on this profile.";
 
     it.each([
       ['without header_name points at the header', {}, true],
@@ -5276,8 +5276,8 @@ describe('httpRequestTool', () => {
       + 'profile to make the renewal pass: say that this connection needs re-authorizing and leave '
       + 'it to the person who owns it. The engine has written the details to its log.';
     const DELEGATED_HINT = '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: '
-      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own '
-      + "(Shopify's Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
+      + 'the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. '
+      + "Then the profile needs `auth.header_name`; say so rather than setting it yourself.";
 
     it.each([
       ['without header_name points at the header', undefined, true],
@@ -5540,16 +5540,16 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
           vault_keys: ['SHOPIFY_SEO_ACCESS_TOKEN'],
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
         // Accepted custom endpoint — these tests exercise the attach mechanics,
         // not the Wave-5d allowlist gate (that has its own coverage below).
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5558,7 +5558,7 @@ describe('httpRequestTool', () => {
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       const callArgs = fetchMock.mock.calls[0][1];
       expect(callArgs.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer fresh-token-xyz' }));
@@ -5570,13 +5570,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'SHOPIFY_CLIENT_ID', client_secret_key: 'SHOPIFY_CLIENT_SECRET' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5586,7 +5586,7 @@ describe('httpRequestTool', () => {
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
-        url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json',
+        url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json',
         method: 'GET',
         headers: { Authorization: 'Bearer stale-old-token-from-previous-profile' },
       }, agent);
@@ -5602,13 +5602,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5618,7 +5618,7 @@ describe('httpRequestTool', () => {
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh' });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
-        url: 'https://shop.myshopify.com/admin/api/2026-04/x',
+        url: 'https://shop.commerce.example/admin/api/2026-04/x',
         headers: { authorization: 'Bearer stale-lowercase' },
       }, agent);
 
@@ -5634,13 +5634,13 @@ describe('httpRequestTool', () => {
       store.register({
         id: 'shopify_seo',
         name: 'Shopify',
-        base_url: 'https://shop.myshopify.com/admin/api/2026-04',
+        base_url: 'https://shop.commerce.example/admin/api/2026-04',
         description: 'Shopify Admin',
         auth: {
           type: 'oauth2',
-          oauth: { token_url: 'https://shop.myshopify.com/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
+          oauth: { token_url: 'https://shop.commerce.example/admin/oauth/access_token', grant_type: 'client_credentials', client_id_key: 'CID', client_secret_key: 'CSEC' },
         },
-        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00.000Z' },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-02T10:00:00.000Z' },
       });
 
       mockDnsPublic();
@@ -5649,7 +5649,7 @@ describe('httpRequestTool', () => {
 
       const secretStore = makeSecretStore({});
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      const result = await visible({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
       expect(result).toContain('fetch_token');
@@ -7460,5 +7460,121 @@ describe('write approvals per method and host (270)', () => {
     const hopped: CallSlot = {};
     await runInCallSlot(hopped, () => handler({ url: 'https://h.example/a' }, makeAgent()));
     expect(hopped.answeredBy).toBeNull();
+  });
+});
+
+// A Shopify store gets no request from this engine for now (`core/shopify-host.ts`). The refusal
+// sits in the credential attach, which every sending path calls before it sends; each test here
+// has a control on another host through the same setup, so a refusal of everything cannot pass.
+describe('requests to a Shopify store are refused', () => {
+  const STORE = 'https://Shop.MyShopify.com./admin/api/2026-10/graphql.json';
+  const OTHER = 'https://shop.commerce.example/admin/api/2026-10/graphql.json';
+
+  async function sent(url: string, extra: { headers?: Record<string, string>; profile?: boolean } = {}): Promise<{ out: string; fetchMock: ReturnType<typeof vi.fn> }> {
+    if (extra.profile) {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      // A key in the query is the one auth type whose host the URL scan skips.
+      store.register({ id: 'store-query', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'query', vault_keys: ['STORE_KEY'] } });
+      testCtx.apiStore = store;
+    }
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = await visible({ url, method: 'GET', headers: { ...extra.headers } }, makeAgent());
+    return { out, fetchMock };
+  }
+
+  it.each([
+    ['with no profile and no credential', {}],
+    ['with a credential header of the model\'s own', { headers: { 'X-Shopify-Access-Token': 'store-value' } }],
+    ['through a profile with its key in the query', { profile: true }],
+  ] as const)('refuses one %s, says why, and sends nothing', async (_label, extra) => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const { out, fetchMock } = await sent(STORE, extra);
+    expect(out).toContain(SHOPIFY_UNAVAILABLE);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Control: the same request to another host goes out.
+    const control = await sent(OTHER, extra);
+    expect(control.out).not.toContain('Shopify is temporarily unavailable');
+    expect(control.fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // Under the attach: `fetchPinned` refuses every hop whose URL or Host header names a store, so
+  // a redirect into one and a Host header that names one send nothing there either.
+  it('refuses a redirect into a store and does not follow it, and follows one to another host', async () => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    const run = async (location: string) => {
+      mockDnsPublic();
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 301, headers: { location } }))
+        .mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+      vi.stubGlobal('fetch', fetchMock);
+      lastPinnedInputs.length = 0;
+      const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { 'X-Shopify-Access-Token': 'store-value' } }, makeAgent());
+      return { out, fetchMock };
+    };
+    const refused = await run('https://shop.myshopify.com./admin/api/2026-10/products.json');
+    await expect(refused.out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+    expect(refused.fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastPinnedInputs.map((i) => new URL(i.url).hostname)).toEqual(['shop.commerce.example']);
+    const control = await run('https://other.commerce.example/products.json');
+    expect(await control.out).not.toContain('Shopify is temporarily unavailable');
+    expect(control.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [{ Host: 'shop.myshopify.com' }, true],
+    [{ host: 'SHOP.myshopify.com.:443' }, true],
+    [{ HOST: '  shop.myshopify.com  ' }, true],
+    [{ Host: 'shop.myshopify.com:x' }, true],
+    [{ Host: 'other.commerce.example', host: 'shop.myshopify.com' }, true],
+    [{ Host: 'shop.myshopify.com, other.commerce.example' }, true],
+    [{ Host: 'other.commerce.example:x.myshopify.com' }, true],
+    [{ Host: 'other.commerce.example:8443' }, false],
+    [{ Host: 'other.commerce.example' }, false],
+  ] as const)('Host headers %o on a read: refused %s', async (hostHeaders, refused) => {
+    const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
+    mockDnsPublic();
+    const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { ...hostHeaders } }, makeAgent());
+    if (refused) {
+      await expect(out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } else {
+      expect(await out).not.toContain('Shopify is temporarily unavailable');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('records the refusal as a failed call, not a quiet one', async () => {
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn());
+    await expect(handler({ url: STORE, method: 'GET' }, makeAgent())).rejects.toBeInstanceOf(ToolSoftFailure);
+  });
+
+  // The bulk run's requests attach through the same function and send only with a credential.
+  it('attaches no credential for a bulk request to a store, and does for another host', async () => {
+    const { attachStoredCredential } = await import('./http.js');
+    const attach = async (url: string): Promise<{ attached: boolean; headers: Record<string, string> }> => {
+      const host = new URL(url).hostname;
+      const profile = {
+        id: 'store', name: 'Store', base_url: new URL(url).origin, description: 'stub', auth: { type: 'bearer', vault_keys: ['STORE_KEY'] },
+        custom_endpoint_ack: { accepted: true, hosts: [host], accepted_at: '2026-10-18T00:00:00.000Z' },
+      };
+      const store = { getByHostname: () => profile, getHostConflict: () => undefined, knownProfiles: () => [profile], get: () => profile };
+      const headers: Record<string, string> = {};
+      const attached = await attachStoredCredential(url, headers, false, {
+        apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
+      });
+      return { attached, headers };
+    };
+    const refused = await attach(STORE);
+    expect(refused.attached).toBe(false);
+    expect(Object.keys(refused.headers)).toEqual([]);
+    const control = await attach(OTHER);
+    expect(control.attached).toBe(true);
+    expect(control.headers['Authorization']).toBe('Bearer store-value');
   });
 });

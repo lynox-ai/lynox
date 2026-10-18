@@ -801,3 +801,29 @@ describe('the one token-slot set and the predicate', () => {
     });
   });
 });
+
+// A Shopify store gets no secret for now (`shopify-host.ts`): a `secret:` reference in a request
+// to one is refused before anyone is asked, whatever the name. The control asks for another host.
+describe('a secret: reference in a request to a Shopify store', () => {
+  const call = (url: string) => ({ name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': 'secret:STORE_KEY' } } });
+
+  it.each([
+    'https://shop.MYSHOPIFY.com./admin/api/2026-10/shop.json',
+    'https://shop.myshopify.com:8443/admin/api/2026-10/shop.json',
+  ])('to %s is refused without a question and nothing is sent', async (url) => {
+    const { SHOPIFY_UNAVAILABLE } = await import('./shopify-host.js');
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, call(url), { promptUser });
+    expect(result).toContain(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+  });
+
+  it('control: to another host it is asked about, and sent once allowed', async () => {
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, call('https://shop.commerce.example/admin/api/2026-10/shop.json'), { promptUser });
+    expect(result).not.toContain('Shopify is temporarily unavailable');
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+  });
+});
