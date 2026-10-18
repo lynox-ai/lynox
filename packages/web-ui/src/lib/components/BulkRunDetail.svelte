@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkResumeKind, bulkResumeMax, bulkResumeText, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -239,6 +239,25 @@
 		});
 	}
 
+	/** Write on a run that halted while writing (`bulkResumeKind`), against the checksum of the
+	 *  run as this page showed it: a run that changed since is refused, never written on. A run
+	 *  halted at its maximum writes on only under the higher maximum the owner typed. */
+	function resume(): Promise<void> {
+		return act(async () => {
+			if (!run?.checksum) return t('common.load_failed');
+			const kind = bulkResumeKind(run);
+			const body: Record<string, unknown> = { checksum: run.checksum };
+			if (kind === 'max') {
+				const max = bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run));
+				if (max === null) return tf('bulk.resume.max_more', { max: String(run.maxTargets ?? 0), all: String(bulkWriting(run)) });
+				body['maxTargets'] = max;
+			} else if (kind !== 'write') {
+				return t('common.load_failed');
+			}
+			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body));
+		});
+	}
+
 	/** Plan the undo of this run; it is a run of its own, opened for its second approval. */
 	function planUndo(): Promise<void> {
 		return act(async () => {
@@ -273,12 +292,23 @@
 	const startKind = $derived(run ? bulkStartKind(run) : null);
 	const restartKind = $derived(run ? bulkRestartKind(run) : null);
 	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
+	const resumeKind = $derived(run ? bulkResumeKind(run) : null);
+	const resumeText = $derived(run ? bulkResumeText(run, managed, i18n) : null);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
 	const btnPlain = `${btn} border border-border hover:bg-bg-muted`;
 	const inputClass = 'w-24 rounded-[var(--radius-sm)] border border-border bg-bg px-2 py-1 text-sm';
 </script>
+
+<!-- Taking the run back: offered on its own, and beside writing on a run that halted. -->
+{#snippet undoOffer()}
+	<div class="space-y-3 border-t border-border pt-4">
+		<h2 class="text-sm font-medium">{t('bulk.undo.title')}</h2>
+		<p class="text-sm">{t('bulk.undo.explain')}</p>
+		<button type="button" class={btnPlain} disabled={busy} onclick={planUndo}>{t('bulk.undo.prepare')}</button>
+	</div>
+{/snippet}
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.back')}</button>
@@ -308,7 +338,7 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t('bulk.head.halted')}</dt>
-					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : haltText?.cause ?? run.haltReason}</dd>
+					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : haltText?.cause ?? resumeText?.cause ?? run.haltReason}</dd>
 				{/if}
 			</dl>
 
@@ -477,6 +507,43 @@
 						{/if}
 					{/if}
 				</div>
+			{:else if resumeKind !== null && resumeText}
+				<div class="space-y-3 border-t border-border pt-4">
+					{#if resumeText.before}
+						<p class="text-sm">{resumeText.before}</p>
+					{/if}
+					{#if resumeKind === 'none'}
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.resume.none')}</p>
+					{:else}
+						{#if resumeText.soFar}
+							<p class="text-sm">{resumeText.soFar}</p>
+						{/if}
+						{#if resumeKind === 'max'}
+							<div class="text-sm space-y-1">
+								<label class="flex flex-wrap items-center gap-2">
+									{t('bulk.probe.in_total')}
+									<input type="number" class={inputClass} min={(run.maxTargets ?? 0) + 1} max={bulkWriting(run)} bind:value={maxTargets} aria-invalid={bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null} />
+									{t('bulk.probe.targets')}
+								</label>
+								{#if bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null}
+									<p class="text-danger">{tf('bulk.resume.max_more', { max: String(run.maxTargets ?? 0), all: String(bulkWriting(run)) })}</p>
+								{/if}
+							</div>
+						{/if}
+						<p class="text-sm text-text-muted">{resumeText.kept}</p>
+						{#if resumeText.allows}
+							<p class="text-sm">{resumeText.allows}</p>
+						{/if}
+						<p class="text-sm text-text-muted">{t('bulk.resume.window')}</p>
+						<div class="flex flex-wrap gap-2">
+							<button type="button" class={btnPrimary} disabled={busy || (resumeKind === 'max' && bulkResumeMax(maxTargets, run.maxTargets, bulkWriting(run)) === null)} onclick={resume}>{t('bulk.resume.write')}</button>
+							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+						</div>
+					{/if}
+				</div>
+				{#if canUndo}
+					{@render undoOffer()}
+				{/if}
 			{:else if run.phase === 'previewed' && run.kind === 'apply'}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.approve.title')}</h2>
@@ -544,11 +611,7 @@
 					</div>
 				</div>
 			{:else if canUndo}
-				<div class="space-y-3 border-t border-border pt-4">
-					<h2 class="text-sm font-medium">{t('bulk.undo.title')}</h2>
-					<p class="text-sm">{t('bulk.undo.explain')}</p>
-					<button type="button" class={btnPlain} disabled={busy} onclick={planUndo}>{t('bulk.undo.prepare')}</button>
-				</div>
+				{@render undoOffer()}
 			{/if}
 
 			{#if actionError}

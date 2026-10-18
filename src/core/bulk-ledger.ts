@@ -132,6 +132,8 @@ export interface BulkRunStatus {
   /** Targets whose write failed and that stand failed now. A resume tries them again, except
    *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
+  /** The most different targets the approval lets the write verb reach; null before an approval. */
+  maxTargets: number | null;
   /** Targets that failed in at least one pass, whether or not a later pass wrote them. Null for a
    *  run approved before this was recorded: its earlier passes are not known, so a page says
    *  "at least {@link failed}" instead. */
@@ -1183,6 +1185,7 @@ export class BulkLedger {
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
       applied: row.targets_applied, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
+      maxTargets: row.max_targets,
       failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
       failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
