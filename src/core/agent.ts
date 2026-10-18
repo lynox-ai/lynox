@@ -38,7 +38,7 @@ import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import type { CaptureSuppressedReason } from './capture-telemetry.js';
-import { chatIsContained } from './containment.js';
+import { chatIsContained, containedCallAllowed, CONTAINED_CALL_REFUSAL } from './containment.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
@@ -3205,7 +3205,10 @@ export class Agent implements IAgent {
     // approval gate on web_research.
     const hasWebResearch = this.tools.some(t => t.definition.name === 'web_research');
     const searchExcluded = this._withheld('web_research') || this._withheld('web_search');
-    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools
+    // A provider-side tool runs at the provider, past the dispatch check that holds a contained
+    // chat to its list (`containment.ts`), so such a chat is offered none.
+    const contained = chatIsContained(this);
+    const builtinTools = !this.isNonDirectAnthropic && !hasWebResearch && !searchExcluded && !this._suppressTools && !contained
       ? [{ type: 'web_search_20250305' as const, name: 'web_search' as const }]
       : [];
     // Lazy-tools: OPT-IN (dormant by default). Anthropic-direct only, never on the
@@ -4274,6 +4277,19 @@ export class Agent implements IAgent {
         type: 'tool_result',
         tool_use_id: tc.id,
         content: annotateNonRetryable(`Tool not available in this session: ${tc.name}`),
+        is_error: true,
+      };
+    }
+    // A chat that read data through a store connection keeps it (`containment.ts`): only the
+    // calls on its list run, read from the record on every call, since a child agent or a
+    // workflow step of this chat may have contained it a moment ago. Before any prompt, so the
+    // user is never asked about a call that would not run; the advertised tool list stays as
+    // it is, so the cached prefix does not change when a chat becomes contained.
+    if (chatIsContained(this) && !containedCallAllowed(tc.name, tc.input)) {
+      return {
+        type: 'tool_result',
+        tool_use_id: tc.id,
+        content: annotateNonRetryable(CONTAINED_CALL_REFUSAL),
         is_error: true,
       };
     }

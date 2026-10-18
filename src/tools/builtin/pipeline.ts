@@ -20,6 +20,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 import { sameBoundValues, hiddenInBoundValues, acceptedValueMatcher, type GrantDecision } from '../../core/workflow-grant.js';
 import { maskSecretPatterns } from '../../core/secret-store.js';
+import { chatIsContained } from '../../core/containment.js';
 import { UNGRANTED_WRITE_PREFIX, WRITE_POSSIBLY_LANDED_PREFIX } from '../../core/write-notes.js';
 
 const MAX_PLANS = 10;
@@ -1215,6 +1216,12 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
     const pipelineRunHistory = agent.toolContext.runHistory;
     if (!rawPipelineConfig) {
       return 'Error: Workflow config not initialized. Workflow tools are not available.';
+    }
+    // A run from a contained chat is readable later, in another chat, only through its record,
+    // which names this chat (`containment.ts › containThreadFrom`). Without a run history there
+    // is no record, so nothing runs.
+    if (!pipelineRunHistory && chatIsContained(agent)) {
+      return 'Error: Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and this engine keeps no record of workflow runs that would name it. Work that does not need the store\'s data belongs in a new chat.';
     }
 
     // H-011: prefer fresh getProviderConfig() snapshot over stale userConfig.

@@ -295,14 +295,16 @@ export function insertPipelineRun(db: Database.Database, params: {
   grantId?: string | undefined;
   /** Workflow grant attribution: how a run under a grant was started (`schedule:…`, `library:…`, `nested:…`). */
   startedVia?: string | undefined;
+  /** The chat the run was started from (v64), or none. */
+  originThreadId?: string | undefined;
 }): void {
   // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a
   // NULL completed_at and is closed out by `updatePipelineRun` at finalize.
   // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
   // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, workflow_grant_id, started_via)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, workflow_grant_id, started_via, origin_thread_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
@@ -310,6 +312,7 @@ export function insertPipelineRun(db: Database.Database, params: {
     params.stepCount ?? 0, params.parentRunId ?? null, params.error ?? null,
     params.workflowId ?? null,
     params.grantId ?? null, params.startedVia ?? null,
+    params.originThreadId ?? null,
   );
 }
 
@@ -395,6 +398,11 @@ export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<
     id: string; manifest_name: string; status: string; total_duration_ms: number;
     total_cost_usd: number; step_count: number; error: string | null; started_at: string;
   }>;
+}
+
+export function getPipelineRunOrigin(db: Database.Database, id: string): string | null | undefined {
+  const row = db.prepare('SELECT origin_thread_id FROM pipeline_runs WHERE id = ?').get(id) as { origin_thread_id: string | null } | undefined;
+  return row === undefined ? undefined : row.origin_thread_id;
 }
 
 export function getPipelineRun(db: Database.Database, id: string): {

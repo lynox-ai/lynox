@@ -47,6 +47,7 @@ import {
 } from './project.js';
 import { getWorkspaceDir, isWorkspaceActive } from './workspace.js';
 import { compose, engineText, renderFence, type Part } from './data-boundary.js';
+import type { Containment } from './containment.js';
 // setMemoryKnowledgeLayer removed — knowledgeLayer now on ToolContext
 
 // ── History + Budget + Subscriptions ────────────────────────────
@@ -224,6 +225,7 @@ export async function generateInitBriefing(
   context: LynoxContext,
   runHistory: RunHistory | null,
   _activeScopes: MemoryScopeRef[],
+  containment: Containment | null,
 ): Promise<BriefingResult> {
   if (context.source !== 'cli' || !context.localDir) {
     return { briefing: undefined, manifest: null };
@@ -234,7 +236,7 @@ export async function generateInitBriefing(
 
     // Run history briefing (highest priority — kept intact)
     if (runHistory) {
-      const brief = generateBriefing(context.localDir, runHistory);
+      const brief = generateBriefing(context.localDir, runHistory, containment);
       if (brief) parts.push(brief);
     }
 

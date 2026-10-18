@@ -2,6 +2,10 @@ import type Database from 'better-sqlite3';
 import type { IAgent } from '../types/index.js';
 import { chatThreadOf } from '../tools/builtin/private-thread.js';
 import { isProvisionedInstance } from './wire-capture.js';
+import type { ThreadStore } from './thread-store.js';
+import { isShopifyAdminHost, normalizeHostForMatch } from './shopify-host.js';
+import { canonicalHost } from './bulk-external.js';
+import { FOLLOW_UP_TOOL_NAME } from './follow-up-fallback.js';
 
 /**
  * Containment: the record of which containers a store connection's credential was attached
@@ -77,6 +81,20 @@ export class Containment {
     if (container.id === '') throw new Error('a container needs an id');
     insertContained(this.db, container.kind, container.id, connection);
   }
+
+  /**
+   * Contain a thread for every connection another thread is contained for, and answer how many
+   * that were. A second call keeps the rows already there. Throws when the rows cannot be read
+   * or written.
+   */
+  containFromThread(sourceThreadId: string, threadId: string): number {
+    if (sourceThreadId === '' || threadId === '') throw new Error('a container needs an id');
+    const rows = this.db.prepare(
+      "SELECT kind, connection_id FROM contained WHERE container_kind = 'thread' AND container_id = ?",
+    ).all(sourceThreadId) as { kind: string; connection_id: string }[];
+    for (const r of rows) insertContained(this.db, 'thread', threadId, { kind: r.kind, connectionId: r.connection_id });
+    return rows.length;
+  }
 }
 
 function insertContained(db: Database.Database, kind: 'thread' | 'bulk_run', id: string, c: ContainedConnection): void {
@@ -149,3 +167,104 @@ export function containedRefusal(agent: Pick<IAgent, 'currentThreadId' | 'origin
   return 'Not stored: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds is not kept in memory. '
     + 'Work that should be remembered belongs in a new chat that does not read the store.';
 }
+
+/**
+ * Contain the thread that reads what a contained thread produced — a workflow run that chat
+ * started — before anything of it is shown there: the reading thread gets every connection of
+ * the source and its `skip_extraction`, read back as the credential funnel does.
+ *
+ * Throws when that cannot be established: no store, no thread store, no reading thread, a
+ * source with no row to copy (its containment was only a read that could not answer), or a
+ * flag that does not hold. The caller then shows nothing.
+ */
+export function containThreadFrom(
+  stores: {
+    readonly containment: Containment | null;
+    readonly threadStore: Pick<ThreadStore, 'getThread' | 'updateThread'> | null;
+  },
+  sourceThreadId: string,
+  readerThreadId: string | undefined,
+): void {
+  if (readerThreadId === undefined || readerThreadId === '') throw new Error('the reader has no thread to contain');
+  const { containment, threadStore } = stores;
+  if (!containment) throw new Error('no containment store');
+  if (!threadStore) throw new Error('no thread store');
+  if (containment.containFromThread(sourceThreadId, readerThreadId) === 0) {
+    throw new Error('the source has no containment row to copy');
+  }
+  // Read back, not trusted: an UPDATE of a thread row that does not exist changes nothing and
+  // throws nothing.
+  if (threadStore.getThread(readerThreadId)?.skip_extraction !== 1) threadStore.updateThread(readerThreadId, { skip_extraction: true });
+  if (threadStore.getThread(readerThreadId)?.skip_extraction !== 1) throw new Error('the private flag did not hold');
+}
+
+/**
+ * The answer a reader gives instead of a workflow run that a contained chat started, when the
+ * reading chat could not be contained as well.
+ */
+export const CONTAINED_READ_REFUSAL =
+  'Not shown: this run was started from a chat that read data through a store connection, and this engine could not record that this chat now reads that data too.';
+
+/**
+ * The tools a contained chat may call. What such a chat holds may only go back to the store it
+ * came from or stay in the chat, so the set is what reads, asks, or works inside the chat:
+ * `http_request` only to a store host ({@link containedCallAllowed}), the reads of memory and
+ * history, the follow-up chips, a question to the user, the child agents and workflow steps
+ * (which are held by the same check, since they run for this chat), and the bulk tools for a
+ * run that writes to a store. Everything else — a tool registered later included — is refused.
+ */
+export const CONTAINED_TOOLS: ReadonlySet<string> = Object.freeze(new Set<string>([
+  'http_request',
+  'memory_recall',
+  'memory_list',
+  'recall',
+  'archive_search',
+  'recall_tool_result',
+  FOLLOW_UP_TOOL_NAME,
+  'ask_user',
+  'spawn_agent',
+  'run_workflow',
+  'bulk_plan',
+  'bulk_status',
+]));
+
+/**
+ * Hosts a contained chat may reach besides the store's own, such as the store's asset CDN.
+ * Empty: which hosts a store's data is served from has not been measured yet, and a host named
+ * here without that could carry the data out.
+ */
+export const CONTAINED_CDN_HOSTS: ReadonlySet<string> = Object.freeze(new Set<string>());
+
+/** Whether a contained chat may make this call (see {@link CONTAINED_TOOLS}). */
+export function containedCallAllowed(name: string, input: unknown): boolean {
+  if (!CONTAINED_TOOLS.has(name)) return false;
+  if (name === 'http_request') return storeRequestUrl(fieldOf(input, 'url'));
+  if (name === 'bulk_plan') {
+    if (fieldOf(input, 'target_system') !== 'http') return false;
+    const raw = fieldOf(input, 'target_host');
+    const host = typeof raw === 'string' ? canonicalHost(raw) : null;
+    return host !== null && isShopifyAdminHost(host);
+  }
+  return true;
+}
+
+function fieldOf(input: unknown, key: string): unknown {
+  return typeof input === 'object' && input !== null ? (input as Record<string, unknown>)[key] : undefined;
+}
+
+function storeRequestUrl(url: unknown): boolean {
+  if (typeof url !== 'string') return false;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:') return false;
+  const host = normalizeHostForMatch(parsed.hostname);
+  return isShopifyAdminHost(host) || CONTAINED_CDN_HOSTS.has(host);
+}
+
+/**
+ * The answer a contained chat gets for a call outside {@link CONTAINED_TOOLS}. It names the
+ * reason and where other work belongs, and nothing about which call would get through.
+ */
+export const CONTAINED_CALL_REFUSAL =
+  'Not run: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds stays in this chat. '
+  + 'Work that does not need the store\'s data belongs in a new chat.';

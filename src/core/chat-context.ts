@@ -1,6 +1,19 @@
 import type { RunHistory } from './run-history.js';
 import type { InboxItem, PlannedPipeline } from '../types/index.js';
 import { wrapChannelMessage } from './data-boundary.js';
+import { CONTAINED_READ_REFUSAL, containThreadFrom, threadIsContained, type Containment } from './containment.js';
+import type { ThreadStore } from './thread-store.js';
+
+/**
+ * The chat a context is loaded into, and the stores that contain it: a run started from a
+ * contained chat is loaded only after the reading chat is contained too
+ * (`containment.ts › containThreadFrom`).
+ */
+export interface ChatContextReader {
+  readonly threadId: string | undefined;
+  readonly containment: Containment | null;
+  readonly threadStore: Pick<ThreadStore, 'getThread' | 'updateThread'> | null;
+}
 
 /**
  * A typed reference to an object a chat is opened ON — the payload of the
@@ -196,6 +209,7 @@ export function resolveChatContext(
   runHistory: RunHistory | null,
   ref: ChatContextRef,
   inboxState?: ChatInboxReader | null,
+  reader?: ChatContextReader,
 ): string | null {
   if (ref.kind === 'mail') {
     // An inbox item the user wants to answer in chat. The agent drafts + sends
@@ -411,6 +425,17 @@ export function resolveChatContext(
   // ref.kind === 'run' — a (failed) workflow run to diagnose + fix in chat.
   const run = runHistory.getPipelineRun(ref.id);
   if (!run) return null;
+  // A run started from a contained chat: the reading chat is contained before anything of the
+  // run is loaded, and without a reader (or when that fails) only the refusal is.
+  const origin = runHistory.getPipelineRunOrigin(run.id);
+  if (origin && threadIsContained(reader?.containment ?? null, origin)) {
+    try {
+      if (!reader) throw new Error('no reading chat');
+      containThreadFrom(reader, origin, reader.threadId);
+    } catch {
+      return `[Loaded workflow run — id: ${run.id}]\n${CONTAINED_READ_REFUSAL}`;
+    }
+  }
   const stepResults = runHistory.getPipelineStepResults(run.id);
   const trace = stepResults
     .map(s => `  [${s.status}] ${oneLine(s.step_id, MAX_STEP_ID_CHARS)}${s.error ? ` — ${oneLine(s.error, MAX_ERR_CHARS)}` : ''}`)

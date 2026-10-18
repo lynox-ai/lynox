@@ -51,6 +51,7 @@ import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { isProvisionedInstance } from '../core/wire-capture.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
+import { threadIsContained, type Containment } from '../core/containment.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
@@ -869,6 +870,26 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
 }
 
 /** {@link jsonResponse} for an answer no cache may keep (it holds personal text). */
+/**
+ * A memory or artifact write the UI makes from a chat names it (`source_thread_id`). From a
+ * contained chat it is refused before anything is written, read from the record, fail-closed:
+ * what such a chat holds stays in it (`core/containment.ts`). A write that names no chat is
+ * unchanged. Answers `true` when it has answered the request.
+ */
+function refuseContainedSource(res: ServerResponse, body: unknown, containment: Containment | null): boolean {
+  const id = body && typeof body === 'object' ? (body as Record<string, unknown>)['source_thread_id'] : undefined;
+  if (id === undefined) return false;
+  if (typeof id !== 'string' || id === '') {
+    errorResponse(res, 400, 'source_thread_id must be a thread id');
+    return true;
+  }
+  if (threadIsContained(containment, id)) {
+    errorResponse(res, 409, 'Not saved: this chat read data through a store connection, or this engine cannot read whether it did, and what it holds stays in it.');
+    return true;
+  }
+  return false;
+}
+
 function noStoreJson(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
   res.writeHead(status, {
@@ -3952,10 +3973,12 @@ export class LynoxHTTPApi {
           if (ids.length > 0) ref = { kind: 'mail-batch', ids };
         }
         if (ref) {
+          // The session id is the chat's thread id: a run from a contained chat contains it.
           const preamble = resolveChatContext(
             engine.getRunHistory(),
             ref,
             engine.getInboxRuntime()?.state ?? null,
+            { threadId: sessionId, containment: engine.getToolContext().containment, threadStore: engine.getThreadStore() },
           );
           // Close the loaded-context block with an explicit boundary sentinel
           // before the user's own text (closeLoadedContext, the single source of
@@ -5822,6 +5845,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
+      if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
       if (engine.getSecretStore()?.containsSecret(content)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
       await new MemoryFacade(memory, engine.getKnowledgeLayer()).replaceDocument(ns, content);
@@ -5833,6 +5857,7 @@ export class LynoxHTTPApi {
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
+      if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
       if (!text) { errorResponse(res, 400, 'Missing text'); return; }
       if (engine.getSecretStore()?.containsSecret(text)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
@@ -5859,6 +5884,7 @@ export class LynoxHTTPApi {
       // Accept BOTH body contracts: the UI sends {old_content,new_content}; older/tool
       // callers send {old,new}. Reading only {old,new} made every UI inline edit a
       // silent no-op (empty strings → identity replace, reported as success).
+      if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
       const b = body as Record<string, unknown> | null;
       const pick = (primary: string, fallback: string): string => {
         const v = b?.[primary] ?? b?.[fallback];
@@ -8716,6 +8742,7 @@ export class LynoxHTTPApi {
       if (b['content'].length > MAX_ARTIFACT_BYTES) {
         errorResponse(res, 413, 'Artifact content too large (max 5 MB)'); return;
       }
+      if (refuseContainedSource(res, body, engine.getToolContext().containment)) return;
       const artifact = store.save({
         title: b['title'],
         content: b['content'],

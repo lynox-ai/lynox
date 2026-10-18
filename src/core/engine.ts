@@ -1446,7 +1446,7 @@ export class Engine {
 
     // Generate session briefing
     if (this.context) {
-      const briefingResult = await generateInitBriefing(this.context, this.runHistory, this.activeScopes);
+      const briefingResult = await generateInitBriefing(this.context, this.runHistory, this.activeScopes, this._toolContext.containment);
       this.briefing = briefingResult.briefing;
       this.currentManifest = briefingResult.manifest;
     }
