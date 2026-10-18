@@ -217,8 +217,8 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 	});
 });
 
-// A planned run that halted on a failure goes on from its page (row 631), with the sentences
-// business-planning approved on 2026-10-18. Read from the i18n source, both languages, so a key
+// A planned run that halted on a failure goes on from its page, with its own sentence for each
+// halt. Read from the i18n source, both languages, so a key
 // the page asks for and the table lacks fails here instead of showing no sentence.
 describe('restarting a run that halted on a failure', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
