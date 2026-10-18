@@ -72,6 +72,27 @@ export interface CallSlot {
   abort?: AbortController | undefined;
   /** How many questions this call is waiting on right now. */
   awaitingAnswers?: number | undefined;
+  /** Set by {@link noteGrantLift} when a write grant let this call's write through. */
+  grantLift?: GrantLift | undefined;
+}
+
+/**
+ * The mark of a write a grant let through: which accepted grant (`workflow_grants.id`) and
+ * which part of its contract.
+ *
+ * Two rules keep this field readable by later additions without a schema break:
+ *  - It means "lifted by this grant", and only that. A refusal, a held-back contract, a gate's
+ *    state or the call's outcome go into fields of their own, never into this one as a state:
+ *    otherwise "present = lifted" turns false for every reader written against it.
+ *  - `entry: 'v1'` means the one HTTP tuple of a v1 contract, and that in v1 only the write
+ *    gate in `http_request` (`contractGrantsWrite`) sets the mark. A missing mark under v1
+ *    does not say "the danger check did not lift": that check also lifts warn-level calls
+ *    that are no write. A later mark from another place uses a new `entry` value, so records
+ *    already written keep their meaning.
+ */
+export interface GrantLift {
+  grantId: string;
+  entry: 'v1';
 }
 
 const slotStorage = new AsyncLocalStorage<CallSlot>();
@@ -122,6 +143,22 @@ export function noteAnsweredBy(host: string): void {
   const slot = slotStorage.getStore();
   if (!slot) return;
   slot.answeredBy = slot.answeredBy === undefined || slot.answeredBy === host ? host : null;
+}
+
+/**
+ * Mark the current call as a write the grant `lift` names let through. Called at the one place
+ * that lets an unattended write through on a grant, and nowhere else; outside a slot a no-op.
+ * The mark is not cleared when the call fails afterwards: the write was let through, and what
+ * became of it is the call's outcome, not part of the mark.
+ */
+export function noteGrantLift(lift: GrantLift): void {
+  const slot = slotStorage.getStore();
+  if (slot) slot.grantLift = { ...lift };
+}
+
+/** The mark {@link noteGrantLift} left on `slot`, as a copy; `undefined` when none did. */
+export function grantLiftOf(slot: CallSlot): GrantLift | undefined {
+  return slot.grantLift === undefined ? undefined : { ...slot.grantLift };
 }
 
 /**
