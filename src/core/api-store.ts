@@ -1193,7 +1193,6 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
     names.add(s);
   };
   const walk = (v: unknown, depth: number): void => {
-    if (all) return;
     if (typeof v === 'string') { take(v); return; }
     if (typeof v !== 'object' || v === null) return;
     if (depth >= UNREADABLE_MAX_DEPTH) { all = true; return; }
