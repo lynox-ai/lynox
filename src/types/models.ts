@@ -1446,6 +1446,32 @@ export function modelCapability(model: string): ModelCapability | undefined {
   return ownEntry(MODEL_CAPABILITIES, model) ?? ownEntry(MODEL_CAPABILITIES, normalizeModelId(model));
 }
 
+/**
+ * Is this raw model id in the deep cost band?
+ *
+ * Direct registry hit first. Then one fallback, and it is the whole point of
+ * this helper: `normalizeModelId` strips only the **Vertex** version suffix
+ * (`@YYYYMMDD`), so an Anthropic-style DASH-dated snapshot of a registered deep
+ * model — `claude-opus-5-20260601`, the same shape as the registered
+ * `claude-haiku-4-5-20251001` — misses the registry entirely and reads as
+ * "unknown". Unknown is the branch that PASSES headless, so without this an
+ * operator could pin a dated Opus in a step and have it run autonomously at the
+ * deep rate with no consent, on any instance without a `max_tier` ceiling
+ * (self-host / BYOK; managed is covered by `modelIdExceedsMaxTier`).
+ *
+ * Deliberately NOT the "unknown ⇒ deep" rule of a spawn child's own explicit
+ * model profile: that would refuse every local-gateway pin and break existing
+ * autonomous workflows on self-host models. A genuinely unregistered id still
+ * passes — only one that resolves to
+ * a registered deep model once the date is removed is refused. `undated !== id`
+ * keeps the fallback from re-testing an id that carried no date.
+ */
+export function modelIdIsDeepBand(id: string): boolean {
+  if (modelCapability(id)?.tier === 'deep') return true;
+  const undated = id.replace(/-\d{8}$/, '');
+  return undated !== id && modelCapability(undated)?.tier === 'deep';
+}
+
 /** Backstop for unknown model ids. Matches the pre-registry hard-coded
  *  fallbacks in getContextWindow / getDefaultMaxTokens / getMaxContinuations.
  *  Exported so server-side synthetic-model shapes (e.g. /api/config

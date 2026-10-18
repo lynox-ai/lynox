@@ -1792,6 +1792,25 @@ describe('Agent', () => {
       expect(consumed).toBe('balanced');
     });
 
+    it('hands the guard what a child of this agent would inherit, without the key', async () => {
+      // spawn's consent check judges a child that inherits this agent's pinned model only
+      // when the guard gets this agent's provider config. Drop the argument and call[6] is undefined.
+      vi.mocked(isDangerousDetailed).mockClear();
+      const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_pin', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], apiKey: 'k-test', apiBaseURL: 'https://api.example.com/v1', openaiModelId: 'claude-opus-4-6', modelPinnedByProfile: true });
+      await agent.send('Spawn');
+      const call = vi.mocked(isDangerousDetailed).mock.calls.find((c) => c[0] === 'spawn_agent')!;
+      expect(call[6]).toMatchObject({ provider: agent.getProviderConfig().provider, openaiModelId: 'claude-opus-4-6', modelPinnedByProfile: true });
+      // The agent does hold a key and an endpoint; the guard gets neither.
+      expect(agent.getProviderConfig().apiKey).toBe('k-test');
+      expect(agent.getProviderConfig().apiBaseURL).toBe('https://api.example.com/v1');
+      expect(call[6]?.apiKey).toBeUndefined();
+      expect(call[6]?.apiBaseURL).toBeUndefined();
+    });
+
     it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
       vi.mocked(isDangerousDetailed).mockReturnValueOnce({
         warning: '⚠ spawn_agent: deep',
