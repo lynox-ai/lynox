@@ -1185,9 +1185,10 @@ interface UnreadableEntry {
 const UNREADABLE_MAX_DEPTH = 32;
 const UNREADABLE_MAX_STRINGS = 10_000;
 
-function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw: string | null): UnreadableEntry {
+function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw: string | null, beside: readonly unknown[] = []): UnreadableEntry {
   const names = new Set<string>();
-  let all = false;
+  // Content that could not be read at all says nothing about the names it holds.
+  let all = raw === null && parsed === undefined;
   const take = (s: string): void => {
     if (names.size >= UNREADABLE_MAX_STRINGS) { all = true; return; }
     names.add(s);
@@ -1199,13 +1200,17 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
     for (const item of Array.isArray(v) ? v : Object.values(v)) walk(item, depth + 1);
   };
   walk(parsed, 0);
-  // Content that did not parse: every string literal in it, as far as one can be told.
+  // What the store keeps beside the content (a row's name and its `vault_keys` column).
+  walk(beside, 0);
+  // Content that did not parse: every string literal in it, and every run of name characters, so
+  // that a quote lost in the middle does not shift a name out of the pairing.
   if (raw !== null && parsed === undefined) {
     for (const m of raw.matchAll(/"((?:[^"\\]|\\.)*)"/g)) {
       let s = m[1]!;
       try { s = JSON.parse(`"${s}"`) as string; } catch { /* keep the raw text */ }
       take(s);
     }
+    for (const m of raw.matchAll(/[A-Za-z0-9_.-]+/g)) take(m[0]);
   }
   const ids = new Set<string>([deleteId]);
   const inner: unknown = typeof parsed === 'object' && parsed !== null ? (parsed as { id?: unknown }).id : undefined;
@@ -1217,10 +1222,15 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
   return { source, deleteId, ids, names, all };
 }
 
-/** Why a read profile is no profile to register: a required field missing or not a string. */
+/**
+ * Why a read profile is no profile to register: a required field missing, or an `id` or
+ * `base_url` that is not a string (every name and every host is read from those two). `name` and
+ * `description` only have to be set, as they always had to. {@link ApiStore.save} refuses what
+ * this refuses, so no save stores a profile the next boot cannot read.
+ */
 function missingRequiredField(profile: unknown): boolean {
-  const p = Object(profile) as Record<string, unknown>;
-  return ['id', 'name', 'base_url', 'description'].some((f) => typeof p[f] !== 'string' || p[f] === '');
+  const p = profile as Record<string, unknown>;
+  return ['id', 'base_url'].some((f) => typeof p[f] !== 'string' || p[f] === '') || !p['name'] || !p['description'];
 }
 
 export class ApiStore {
@@ -1610,13 +1620,13 @@ export class ApiStore {
         profile = connectionRowToProfile(row);
         if (missingRequiredField(profile)) {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
-          fault.push(unreadableEntry(source, row.id, profile, null));
+          fault.push(unreadableEntry(source, row.id, profile, null, [row.name, row.vaultKeys]));
           continue;
         }
         read.push({ source, deleteId: row.id, profile: migrateV1Profile(profile) });
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
-        fault.push(unreadableEntry(source, row.id, profile, row.configJson));
+        fault.push(unreadableEntry(source, row.id, profile, row.configJson, [row.name, row.vaultKeys]));
       }
     }
     return this._loadAll(read, sources, fault);
@@ -2167,6 +2177,11 @@ export class ApiStore {
   }
 
   private _saveAdmit(profile: ApiProfile, dryRun: boolean): string | null {
+    // What the boot would not read as a profile is not stored: it would come back as an entry
+    // that holds every string it carries, against every other profile.
+    if (missingRequiredField(profile)) {
+      return `profile ${JSON.stringify(String(profile.id))} needs an id and a base_url that are text, and a name and a description. Nothing was saved.`;
+    }
     const other = this._otherKindAt(profile.id);
     if (other !== null) return `A ${other} connection already uses the id "${profile.id}". Save this API under another id.`;
     return this._admit(profile, 'save', this.profiles.has(profile.id), dryRun);
@@ -2260,7 +2275,12 @@ export class ApiStore {
     const outcome = mode === 'save' ? 'Nothing was saved.' : 'It is not registered; nothing was deleted.';
     for (const e of this.unreadable.values()) {
       const where = `a stored API profile that could not be read (${e.source}, id ${JSON.stringify(e.deleteId)})`;
-      const remedy = `To clear it, delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`;
+      // A file whose name is no id cannot be deleted through the store; then the file has to go by hand.
+      const byHand = e.source.startsWith('file ') && !PROFILE_ID_PATTERN.test(e.deleteId);
+      const remedy = (e.all ? 'Its content could not be read in full, so it is taken to hold every vault name. ' : '')
+        + (byHand
+          ? `To clear it, ${e.all ? 'make the file readable, or ' : ''}remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes), then set that API up again.`
+          : `To clear it, ${e.all ? 'make it readable, or ' : ''}delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`);
       if (e.ids.has(profile.id)) {
         return `profile "${profile.id}" has the id of ${where}, and a save under it would replace that record and what its id derives. ${outcome} ${remedy}`;
       }

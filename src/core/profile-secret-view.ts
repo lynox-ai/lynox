@@ -384,14 +384,14 @@ function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
  * another profile's unparsable `base_url` only keeps that profile out of a shared grant.
  */
 export function slotMayReach(
-  apiStore: Pick<ApiStore, 'knownProfiles' | 'get'> & Partial<Pick<ApiStore, 'unreadableHolds'>>,
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'get' | 'unreadableHolds'>,
   name: string,
   role: SlotRole,
   target: string | undefined,
   asker?: ApiProfile,
 ): boolean {
   try {
-    if (apiStore.unreadableHolds?.(name) === true) return false;
+    if (apiStore.unreadableHolds(name)) return false;
     const profiles = apiStore.knownProfiles();
     const grant = slotGrant(profiles, name);
     if (grant.kind === 'free') return true;

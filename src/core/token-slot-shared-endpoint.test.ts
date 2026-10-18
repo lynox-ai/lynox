@@ -50,7 +50,7 @@ describe('a grant is shared only between profiles whose provider derives the sam
   it('does not let a reader whose parameters derive another endpoint exchange the owner\'s refresh token', () => {
     const owner = tenanted('tn-a', 'alpha');
     const reader = tenanted('tn-b', 'beta', { refresh_token_key: 'TN_A_REFRESH_TOKEN' });
-    const store = { knownProfiles: () => [owner, reader], get: (id: string) => [owner, reader].find((p) => p.id === id) };
+    const store = { unreadableHolds: () => false, knownProfiles: () => [owner, reader], get: (id: string) => [owner, reader].find((p) => p.id === id) };
     // The fixture really does derive two endpoints, or this test proves nothing.
     expect(endpointOf('alpha')).not.toBe(endpointOf('beta'));
     expect(slotMayReach(store, 'TN_A_REFRESH_TOKEN', 'exchange', endpointOf('alpha'), reader)).toBe(false);
@@ -60,7 +60,7 @@ describe('a grant is shared only between profiles whose provider derives the sam
   it('control: a reader of the same tenant shares the grant and exchanges at the owner\'s endpoint', () => {
     const owner = tenanted('tn-a', 'alpha');
     const reader = tenanted('tn-b', 'alpha', { refresh_token_key: 'TN_A_REFRESH_TOKEN' });
-    const store = { knownProfiles: () => [owner, reader], get: (id: string) => [owner, reader].find((p) => p.id === id) };
+    const store = { unreadableHolds: () => false, knownProfiles: () => [owner, reader], get: (id: string) => [owner, reader].find((p) => p.id === id) };
     expect(slotMayReach(store, 'TN_A_REFRESH_TOKEN', 'exchange', endpointOf('alpha'), reader)).toBe(true);
   });
 });

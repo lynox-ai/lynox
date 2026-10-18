@@ -675,7 +675,7 @@ describe('a vault name an oauth2 profile only configures as its refresh slot', (
 
 describe('the one token-slot set and the predicate', () => {
   /** A store view in which every one of `profiles` is stored and registered. */
-  const view = (...profiles: ApiProfile[]) => ({ knownProfiles: () => profiles, get: (id: string) => profiles.find((p) => p.id === id) });
+  const view = (...profiles: ApiProfile[]) => ({ unreadableHolds: () => false, knownProfiles: () => profiles, get: (id: string) => profiles.find((p) => p.id === id) });
 
   it('counts the names an exchange wrote, the derived pair and a configured refresh slot as token slots', async () => {
     const { tokenSlotNames } = await import('./api-store.js');
@@ -698,7 +698,7 @@ describe('the one token-slot set and the predicate', () => {
     const { slotMayReach } = await import('./profile-secret-view.js');
     const broken: ApiProfile = { ...shopApi(), base_url: 'not a url' };
     expect(slotMayReach(view(broken), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(false);
-    expect(slotMayReach({ knownProfiles: () => { throw new Error('store unavailable'); }, get: () => undefined }, 'ANY_NAME', 'request', 'https://api.shop.example/x')).toBe(false);
+    expect(slotMayReach({ unreadableHolds: () => false, knownProfiles: () => { throw new Error('store unavailable'); }, get: () => undefined }, 'ANY_NAME', 'request', 'https://api.shop.example/x')).toBe(false);
     // Control: the same profile with a base that parses.
     expect(slotMayReach(view(shopApi()), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(true);
   });

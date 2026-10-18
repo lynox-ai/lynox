@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -192,6 +192,8 @@ describe.each(loaders)('a stored owner the boot cannot read, through %s', (_load
     writeFileSync(join(dir, 'owner.json'), JSON.stringify(brokenOwner()));
     first.loadFromDirectory(dir);
     expect(first.get('sub')).toBeUndefined();
+    // The boot's own wording: the profile stays stored.
+    expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain('uses the vault name OWNER_REFRESH_TOKEN, which a stored API profile that could not be read (file "owner.json", id "owner") may hold; whose it is cannot be told. It is not registered; nothing was deleted.');
   });
 });
 
@@ -313,6 +315,76 @@ describe('an entry that a delete cannot remove', () => {
     expect(store.remove('bad id', dir)).toBe(false);
     expect(existsSync(join(dir, 'bad id.json'))).toBe(true);
     expect(store.unreadableHolds('BAD_KEY')).toBe(true);
+    // The refusal says how to clear it all the same: by hand.
+    const reason = reasonOf(store.save(bearer('crm', 'BAD_KEY'), dir));
+    expect(reason).toContain('remove the file "bad id.json" from the API profile directory by hand');
+    expect(reason).not.toContain('api_setup delete (it takes');
+  });
+});
+
+describe('content that cannot be read at all', () => {
+  it('holds every name, and the refusal says to make it readable or delete it', () => {
+    const { store, dir } = fromDirectory([asEntry(bearer('crm', 'CRM_KEY'))]);
+    writeFileSync(join(dir, 'locked.json'), JSON.stringify(bearer('locked', 'LOCKED_KEY')));
+    chmodSync(join(dir, 'locked.json'), 0o000);
+    try {
+      store.loadFromDirectory(dir);
+      expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+      const reason = reasonOf(store.save(bearer('rep', 'REP_KEY'), dir));
+      expect(reason).toContain('Its content could not be read in full, so it is taken to hold every vault name.');
+      expect(reason).toContain('make it readable, or delete "locked" with api_setup delete');
+    } finally {
+      chmodSync(join(dir, 'locked.json'), 0o600);
+    }
+  });
+});
+
+describe('content that does not parse, beyond its string literals', () => {
+  it('holds a name a lost quote shifted out of the literals', () => {
+    const { store, dir } = fromDirectory([{ id: 'owner', raw: '{"refresh_token_key": "OWNER_CUSTOM_RT, "token_url": "https://x.example"}' }]);
+    expect(reasonOf(store.save(bearer('crm', 'OWNER_CUSTOM_RT'), dir))).toContain('uses the vault name OWNER_CUSTOM_RT');
+  });
+  it('holds the row\'s name and its vault_keys column', () => {
+    const engine = new EngineDb(join(tmp('lynox-unreadable-db-'), 'engine.db'), '');
+    engines.push(engine);
+    const cs = new ConnectionStore(engine);
+    cs.upsert({ id: 'owner', kind: 'api', name: 'OWNER_ROW_NAME', subjectId: null, direction: 'outbound', configJson: '{"auth": ', vaultKeys: ['OWNER_ROW_KEY'], status: 'active' });
+    const store = new ApiStore();
+    store.setConnectionStore(cs);
+    store.loadFromConnections(cs);
+    expect(store.unreadableHolds('OWNER_ROW_KEY')).toBe(true);
+    expect(store.unreadableHolds('OWNER_ROW_NAME')).toBe(true);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(false);
+  });
+});
+
+// ── what the loader reads, and what a save may store ──
+
+describe.each(loaders)('the fields the boot requires, through %s', (_loader, boot) => {
+  it('loads a stored profile whose description is set but not text, as it always did', () => {
+    const { store } = boot([{ id: 'num', profile: { ...bearer('num', 'NUM_KEY'), description: 7 } }]);
+    expect(store.get('num')).toBeDefined();
+    expect(store.unreadableHolds('NUM_KEY')).toBe(false);
+  });
+  it('a profile saved with a nested description is read back as a profile, and every other profile boots', () => {
+    const deep = JSON.parse(`${'['.repeat(40)}"VICTIM_ACCESS_TOKEN"${']'.repeat(40)}`) as unknown;
+    const first = boot([asEntry(oauth('victim'))]);
+    const odd = { ...bearer('odd', 'ODD_KEY'), description: deep } as unknown as ApiProfile;
+    expect(first.store.save(odd, first.dir).ok).toBe(true);
+    // The next boot reads what the save stored.
+    const again = _loader === 'loadFromDirectory'
+      ? (() => { const s = new ApiStore(); s.loadFromDirectory(first.dir); return s; })()
+      : (() => { const cs = (first.store as unknown as { connStore: ConnectionStore }).connStore; const s = new ApiStore(); s.setConnectionStore(cs); s.loadFromConnections(cs); return s; })();
+    expect(again.get('odd')).toBeDefined();
+    expect(again.get('victim')).toBeDefined();
+    expect(again.unreadableHolds('VICTIM_ACCESS_TOKEN')).toBe(false);
+  });
+  it('refuses a save the boot would not read as a profile', () => {
+    const { store, dir } = boot([]);
+    const odd = { ...bearer('odd', 'ODD_KEY'), base_url: ['https://odd.example/v1'] } as unknown as ApiProfile;
+    const result = store.save(odd, dir);
+    expect(reasonOf(result)).toContain('needs an id and a base_url that are text');
+    expect(store.get('odd')).toBeUndefined();
   });
 });
 
@@ -339,6 +411,9 @@ describe('two files with one id', () => {
     ]);
     expect(store.get('shop')).toBeUndefined();
     expect(store.size).toBe(0);
+    // Neither version is a stored profile the checks weigh, nor one an update reads.
+    expect(store.knownProfiles().map((p) => p.id)).not.toContain('shop');
+    expect(store.storedProfile('shop')).toBeUndefined();
     expect(reasonOf(store.save(bearer('crm', 'SHOP_KEY'), dir))).toContain('uses the vault name SHOP_KEY');
     expect(reasonOf(store.save(bearer('rep', 'SHOP_REFRESH_TOKEN'), dir))).toContain('uses the vault name SHOP_REFRESH_TOKEN');
     expect(reasonOf(store.save(bearer('shop', 'FRESH_KEY'), dir))).toContain('profile "shop" has the id of');
@@ -365,11 +440,18 @@ describe.each(loaders)('a profile whose registration throws during the boot, thr
       if (p.id === 'shop') throw new Error('boom');
       return real.call(this, p, mode);
     });
-    const { store } = boot([asEntry(bearer('a-rep', 'SHOP_ACCESS_TOKEN')), asEntry(oauth('shop'))]);
+    // a-rep signs in with shop's client id: no token slot the two meet on, so only the entry the
+    // throw leaves behind holds it back.
+    const { store } = boot([asEntry(bearer('a-rep', 'SHOP_CID')), asEntry(oauth('shop'))]);
     spy.mockRestore();
     expect(store.get('shop')).toBeUndefined();
-    expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
+    expect(store.unreadableHolds('SHOP_CID')).toBe(true);
     expect(store.get('a-rep')).toBeUndefined();
+  });
+  it('control: without the throw, both are registered', () => {
+    const { store } = boot([asEntry(bearer('a-rep', 'SHOP_CID')), asEntry(oauth('shop'))]);
+    expect(store.get('shop')).toBeDefined();
+    expect(store.get('a-rep')).toBeDefined();
   });
 });
 
