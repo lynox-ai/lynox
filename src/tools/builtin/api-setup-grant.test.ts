@@ -1254,7 +1254,9 @@ describe('fetch_token — what a successful exchange records', () => {
     it('control: naming its own access slot, which another profile reads on purpose, takes the token', async () => {
       const store = new ApiStore();
       store.register(crmProfile());
-      store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+      // The admission holds this reader back now: stored, not registered. The output check reads
+      // stored profiles, so the reader still names the slot.
+      expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
       const vault = vaultWithRefresh();
       tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
 
@@ -1267,7 +1269,9 @@ describe('fetch_token — what a successful exchange records', () => {
     it('control: a renewal names no output and is not asked, whoever else reads its slot', async () => {
       const store = new ApiStore();
       store.register(crmProfile());
-      store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+      // The admission holds this reader back now: stored, not registered. The output check reads
+      // stored profiles, so the reader still names the slot.
+      expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
       const vault = vaultWithRefresh();
       tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
 
@@ -1447,7 +1451,9 @@ describe('fetch_token — what a successful exchange records', () => {
     const store = new ApiStore();
     store.register(crmProfile());
     // Another profile reads the name this exchange writes its access token to.
-    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
     const vault = vaultWithRefresh();
     const agent = makeAgent(store, vault);
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
@@ -1805,7 +1811,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('keeps a recorded token another profile still reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
-    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1820,7 +1828,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
     // Not an array, but the attach reads `vault_keys?.[0]` from it all the same.
-    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: { 0: ACCESS } as unknown as string[] } });
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: { 0: ACCESS } as unknown as string[] } })).toBe(false);
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1860,12 +1870,14 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(result).toContain(`Still in the vault: ${ACCESS}.`);
   });
 
-  // A recorded name of the exchange's choosing, not the derived pair: a profile that signs in with
-  // a name in another's derived pair is not admitted (`derivedPairCollision`).
+  // A recorded name of the exchange's choosing, not the derived pair.
   it('keeps a recorded token another profile reads as its basic password', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
-    expect(store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: 'CRM_MINTED' } })).toBe(true);
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: 'CRM_MINTED' } })).toBe(false);
+    expect(store.knownProfiles().map((p) => p.id)).toContain('legacy');
     const vault = makeVault({ CRM_MINTED: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1877,7 +1889,10 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('keeps a recorded token another profile names as its oauth client secret', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
-    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(true);
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(false);
+    expect(store.knownProfiles().map((p) => p.id)).toContain('other-oauth');
     const vault = makeVault({ CRM_MINTED: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1894,7 +1909,10 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   ])('a recorded token another profile names: %s', async (_label, connectedBy, left) => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { connected_by: connectedBy, written: wrote({ CRM_MINTED: 'shared' }) } }));
-    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(true);
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(false);
+    expect(store.knownProfiles().map((p) => p.id)).toContain('other-oauth');
     const vault = makeVault({ CRM_MINTED: 'shared' });
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(makeAgent(store, vault)));
@@ -1905,7 +1923,14 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('keeps a recorded token that another profile has on its own record', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } }));
-    store.register({ ...crmProfile(), id: 'second', base_url: 'https://second.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['second.example.com'] }, oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } });
+    // Two records of one name: the admission registers neither now, and the delete of a profile
+    // that is not registered purges nothing — this would be green for that reason alone. Registered
+    // as an older store kept them, while `knownProfiles` shows the admission no other stored
+    // profile.
+    const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
+    expect(store.register({ ...crmProfile(), id: 'second', base_url: 'https://second.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['second.example.com'] }, oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } })).toBe(true);
+    unseen.mockRestore();
+    expect(store.get('crm-api')).toBeDefined();
     const vault = makeVault({ SHARED_TOKEN: 'v' });
     const agent = makeAgent(store, vault);
 
@@ -3830,11 +3855,19 @@ describe('mandates and stored credentials', () => {
     releases: 'all' | 'none' = 'all',
     /** What the API answers (the token endpoint always answers 200). */
     status = 200,
+    /**
+     * Register as an older store kept the profiles: while `knownProfiles` shows the admission no
+     * other stored profile. For a pair the admission no longer registers together whose other check
+     * is the one under test.
+     */
+    legacy = false,
   ): Promise<{ calls: Array<{ url: string; auth: string | undefined }>; out: string }> {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);
     const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
-    for (const p of profiles) apiStore.register(p);
+    const unseen = legacy ? vi.spyOn(apiStore, 'knownProfiles').mockReturnValue([]) : undefined;
+    for (const p of profiles) expect(apiStore.register(p), p.id).toBe(true);
+    unseen?.mockRestore();
     const calls: Array<{ url: string; auth: string | undefined }> = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -4042,7 +4075,10 @@ describe('mandates and stored credentials', () => {
 
   it('a profile a mandate wrote does not get the token of a preset account', async () => {
     const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
-    const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    // The admission holds the mandate's profile back now (it sends the preset profile's token as
+    // its key); without the older store it would carry nothing for want of a profile, and this
+    // test would say nothing about the mandate rule.
+    const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL, 'all', 200, true);
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
   });
 
@@ -4272,7 +4308,8 @@ describe('fetch_token — whose consent a grant records', () => {
   it('refuses a mandate\'s exchange whose refresh slot another author\'s profile reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ created_by: TAG_A }, 'client_credentials'));
-    store.register({ id: 'owners-refresh', name: 'Owner', base_url: 'https://crm.example/v1', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_API_REFRESH_TOKEN'] } });
+    // Held back by the admission now, and still stored: the check reads stored profiles.
+    expect(store.register({ id: 'owners-refresh', name: 'Owner', base_url: 'https://crm.example/v1', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_API_REFRESH_TOKEN'] } })).toBe(false);
     const post = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-mandate', expires_in: 3600 }));
     const out = await fetchToken(makeAgent(store, vault(), undefined, undefined, A));
     expect(out).toContain('where a renewed refresh token of this profile would go');

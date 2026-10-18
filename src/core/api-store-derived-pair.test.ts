@@ -84,23 +84,35 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
       });
     }
 
-    it('control: a profile that sends the access token on purpose is admitted, in either order', () => {
+    // Sending another profile's token as a key of one's own was a pinned, wanted behaviour until
+    // the admission check: it is the profile that sends the name that goes, in either order —
+    // refused when it arrives at a save, held back at the boot.
+    it('a profile that sends the access token as its key is not admitted beside it, in either order', () => {
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const first = new ApiStore();
       expect(first.register(shop(), mode)).toBe(true);
-      expect(first.register(bearer('reporting', 'reports.example', 'SHOP_API_ACCESS_TOKEN'), mode)).toBe(true);
+      expect(first.register(bearer('reporting', 'reports.example', 'SHOP_API_ACCESS_TOKEN'), mode)).toBe(false);
+      expect(first.get('shop-api')).toBeDefined();
       const second = new ApiStore();
       expect(second.register(bearer('reporting', 'reports.example', 'SHOP_API_ACCESS_TOKEN'), mode)).toBe(true);
-      expect(second.register(shop(), mode)).toBe(true);
+      expect(second.register(shop(), mode)).toBe(mode === 'load');
+      expect(second.get('reporting') === undefined).toBe(mode === 'load');
     });
 
-    it('control: a profile that renews with the other one\'s refresh token on purpose is admitted, in either order', () => {
+    // Renewing with another profile's refresh token without a built-in provider between them is a
+    // second claim on the slot (P1): neither is registered at the boot, and a save refuses the one
+    // that arrives.
+    it('a profile that renews with the other one\'s refresh token is not admitted beside it, in either order', () => {
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       const sub = (): ApiProfile => oauth('sub', 'api.sub.example', { refresh_token_key: 'SHOP_API_REFRESH_TOKEN' });
       const first = new ApiStore();
       expect(first.register(shop(), mode)).toBe(true);
-      expect(first.register(sub(), mode)).toBe(true);
+      expect(first.register(sub(), mode)).toBe(false);
+      expect(first.get('shop-api') === undefined).toBe(mode === 'load');
       const second = new ApiStore();
       expect(second.register(sub(), mode)).toBe(true);
-      expect(second.register(shop(), mode)).toBe(true);
+      expect(second.register(shop(), mode)).toBe(false);
+      expect(second.get('sub') === undefined).toBe(mode === 'load');
     });
 
     it('control: two oauth2 profiles with names of their own are both admitted, and one saves over itself', () => {
@@ -125,13 +137,16 @@ describe('ApiStore — a derived token pair another profile signs in with', () =
     expect(store.register(own, 'save')).toBe(true);
   });
 
+  // Every `vault_keys` position counts, not only the ones a basic profile signs in with: the attach
+  // and a `secret:` reference send the others. These two were controls ("admitted") until the
+  // admission check.
   it.each([
-    ['names its own pair, so vault_keys are not its sign-in names', { type: 'basic', basic_format: 'user_pass_split', username_key: 'CRM_USER', password_key: 'CRM_PASSWORD', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'] }],
-    ['is pre-encoded, which the engine does not sign in with from vault_keys', { type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'] }],
-  ] as const)('control: a basic profile that %s is admitted beside the oauth2 profile', (_label, auth) => {
+    ['names its own pair, but keeps the oauth2 profile\'s names in vault_keys', { type: 'basic', basic_format: 'user_pass_split', username_key: 'CRM_USER', password_key: 'CRM_PASSWORD', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'] }],
+    ['is pre-encoded, with the oauth2 profile\'s names in vault_keys', { type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['SHOP_API_ACCESS_TOKEN', 'SHOP_API_REFRESH_TOKEN'] }],
+  ] as const)('refuses a basic profile that %s', (_label, auth) => {
     const store = new ApiStore();
     expect(store.register(shop(), 'save')).toBe(true);
-    expect(store.register({ ...bearer('crm', 'api.crm.example', 'X'), auth: { ...auth, vault_keys: [...auth.vault_keys] } }, 'save')).toBe(true);
+    expect(store.register({ ...bearer('crm', 'api.crm.example', 'X'), auth: { ...auth, vault_keys: [...auth.vault_keys] } }, 'save')).toBe(false);
   });
 
   it('control: a profile that is not oauth2 derives no pair, so its own names are not asked', () => {
@@ -238,21 +253,26 @@ describe('ApiStore — the boot keeps the same profile of a derived-pair clash i
       expect(store.get('bbb-erp')).toBeUndefined();
     });
 
-    it('drops no one for an oauth2 profile the boot refuses on its own account', () => {
-      // `mail-account-foo` derives a slot that belongs to the instance, so the boot refuses it
-      // before asking whose names its pair meets. The holder loaded before it stays registered.
+    // Until the admission check this read "drops no one": the holder stayed registered. A profile
+    // held back for a reason of its own is still stored and still claims its pair, so its partner
+    // goes as well.
+    it('drops the holder of an oauth2 profile the boot refuses on its own account, in either order', () => {
       vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-      const { store } = boot([holder('aaa-crm', 'MAIL_ACCOUNT_FOO_ACCESS_TOKEN'), oauth('mail-account-foo')]);
-      expect(store.get('mail-account-foo')).toBeUndefined();
-      expect(store.get('aaa-crm')).toBeDefined();
-      expect(store.getByHostname('aaa-crm.example')?.id).toBe('aaa-crm');
+      for (const id of ['aaa-crm', 'zzz-crm']) {
+        const { store } = boot([holder(id, 'MAIL_ACCOUNT_FOO_ACCESS_TOKEN'), oauth('mail-account-foo')]);
+        expect(store.get('mail-account-foo')).toBeUndefined();
+        expect(store.get(id)).toBeUndefined();
+        expect(store.getByHostname(`${id}.example`)).toBeUndefined();
+      }
     });
 
-    it('control: a profile that sends the access token on purpose stays registered beside it, in either order', () => {
+    // Was a control ("stays registered") until the admission check.
+    it('holds back a profile that sends the access token as its key, in either order', () => {
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
       for (const sender of ['aaa-report', 'zzz-report']) {
         const { store } = boot([oauth('shop-api'), { ...holder(sender, 'X'), auth: { type: 'bearer', vault_keys: ['SHOP_API_ACCESS_TOKEN'] } }]);
         expect(store.get('shop-api')).toBeDefined();
-        expect(store.get(sender)).toBeDefined();
+        expect(store.get(sender)).toBeUndefined();
       }
     });
   });
