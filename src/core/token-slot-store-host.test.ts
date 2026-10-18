@@ -113,7 +113,7 @@ describe('a token the callback bound to a store, after its profile was re-pointe
     } as ApiProfile);
     for (const [binding, reaches] of [[true, false], [false, true]] as const) {
       const p = repointed(binding);
-      expect(slotMayReach(storeOf([p]), accessTokenKey('sh-x'), 'request', 'https://api.example.com/v1/x', p), String(binding)).toBe(reaches);
+      expect(reach(storeOf([p]), accessTokenKey('sh-x'), 'request', 'https://api.example.com/v1/x', p), String(binding)).toBe(reaches);
     }
   });
 });
