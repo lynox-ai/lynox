@@ -4827,6 +4827,24 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(404);
         expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeDefined();
       });
+
+      it('are forgotten too when there is no vault to purge', async () => {
+        const { ApiStore } = await import('../core/api-store.js');
+        const releases = await releasesWith('crm-api');
+        const engine = engineRef();
+        const origStore = engine['getSecretStore'];
+        engine['getSecretStore'] = () => null;
+        const store = new ApiStore();
+        store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, created_by: 'mandate:setup@example.org' });
+        mockGetApiStore.mockReturnValue(store);
+        try {
+          const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+          expect(await res.json()).toEqual({ ok: true, noVault: true });
+          expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeUndefined();
+        } finally {
+          engine['getSecretStore'] = origStore;
+        }
+      });
     });
 
     it('answers with what the purge left, so the page can say it', async () => {
