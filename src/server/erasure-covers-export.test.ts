@@ -17,6 +17,10 @@ import type { FlatFileMemory } from '../core/memory.js';
 import { HISTORY_KEPT_ON_ERASURE, type RunHistory } from '../core/run-history.js';
 import { MEMORY_KEPT_ON_ERASURE } from '../core/agent-memory-db.js';
 import type { PromptStore } from '../core/prompt-store.js';
+import type { TaskManager } from '../core/task-manager.js';
+import type { EngineDb } from '../core/engine-db.js';
+import { acceptWorkflowGrant, prepareWorkflowGrant } from '../core/workflow-grant.js';
+import { forgetPipeline, getPipeline } from '../tools/builtin/pipeline.js';
 
 /**
  * The property `GET /api/export` and `DELETE /api/data` owe each other:
@@ -124,6 +128,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     getSecretStore: () => SecretStore | null;
     getRunHistory: () => RunHistory | null;
     getPromptStore: () => PromptStore | null;
+    getTaskManager: () => TaskManager | null;
+    getEngineDb: () => EngineDb | null;
   } {
     return (api as unknown as { engine: ReturnType<typeof engineOf> }).engine;
   }
@@ -589,52 +595,91 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
   }, 120_000);
 
   /**
-   * The grant record of a reviewed workflow grant lives in two files: the acceptance in
-   * engine.db (`workflow_grants`, with the contract as shown, the auth-origin label, the
-   * typed name and the bound values) and the attribution of each run in history.db
-   * (`pipeline_runs.workflow_grant_id`, `started_via`). The owner decided that nothing of it
-   * outlives an erasure. The table-wide checks above cannot show that for these two: no
-   * other test seeds them, so an empty table after the erasure proves nothing.
+   * The grant record of a reviewed workflow grant: what accepting it writes, through the same
+   * function the scheduling route calls (`acceptWorkflowGrant`), and what a run under it adds.
+   * - engine.db `workflow_grants`: the contract as shown, the auth-origin label, the typed name.
+   * - engine.db `workflows`: the stamp and contract the acceptance writes into the workflow.
+   * - the schedule the acceptance creates, which carries the bound values.
+   * - history.db `pipeline_runs.workflow_grant_id` and `started_via` of a run under the grant.
+   * The owner decided that nothing of it outlives an erasure. The table-wide checks above do not
+   * show that here: no other erasure test seeds these tables, so an empty table afterwards
+   * proves nothing.
    */
-  it('leaves nothing of a grant record: neither the acceptance nor the run that names it', async () => {
-    const rh = engineOf().getRunHistory();
-    if (rh === null) throw new Error('fixture: no run history');
+  it('leaves nothing of a grant record: neither the acceptance, its schedule, nor the run that names it', async () => {
+    const e = engineOf();
+    const rh = e.getRunHistory();
+    const tm = e.getTaskManager();
+    const engineDb = e.getEngineDb();
+    if (rh === null || tm === null || engineDb === null) throw new Error('fixture: run history, task manager and engine.db must be open');
     rh.insertPlannedPipeline({
       id: 'wf-granted', name: 'wf-granted', goal: 'post the weekly report', reasoning: 'r', estimatedCost: 0,
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }],
     } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
-    const at = '2026-10-18T00:00:00.000Z';
-    const accepted = rh.acceptWorkflowReviewedGrant({
-      grantId: 'grant-zzmarker-7f3a', workflowId: 'wf-granted', contractJson: '{"note":"ZZMARKER-grant-contract-7f3a"}',
-      by: 'cookie:zzmarker', name: 'ZZMARKER-grant-name-7f3a', at, checksum: 'c', binding: 'unkeyed',
-      triggerId: 'trigger-granted', cron: '0 9 * * 1', boundParamsJson: '{"to":"ZZMARKER-grant-param-7f3a"}', afterUntrusted: false,
-    }, { by: 'cookie:zzmarker', at, checksum: 'c', binding: 'unkeyed', triggerId: 'trigger-granted', afterUntrusted: false, grantId: 'grant-zzmarker-7f3a' }, at);
-    expect(accepted, 'fixture: the workflow must exist for the acceptance to be written').toBe(true);
+    forgetPipeline('wf-granted');
+    const planned = getPipeline('wf-granted', rh);
+    if (planned === undefined) throw new Error('fixture: the saved workflow did not load');
+    const entry = { method: 'POST', host: GRANT_HOST, paths: ['/v1/reports'], params: {}, cron: '0 9 * * 1', afterUntrusted: false };
+    const shown = prepareWorkflowGrant(planned, entry, engineDb);
+    if (!shown.ok) throw new Error(`fixture: ${shown.error}`);
+    const accepted = acceptWorkflowGrant(planned, { ...entry, checksum: shown.checksum, name: GRANT_NAME, title: GRANT_TITLE }, 'cookie:zzmarker', { history: rh, taskManager: tm, hasher: engineDb });
+    if (!accepted.ok) throw new Error(`fixture: ${accepted.error}`);
+    forgetPipeline('wf-granted');
+    const grantId = (rows => rows[0]?.id)(grants());
+    if (grantId === undefined) throw new Error('fixture: the acceptance wrote no grant row');
     rh.insertPipelineRun({
       id: 'run-granted', manifestName: 'wf-granted', status: 'completed', manifestJson: '{}',
-      workflowId: 'wf-granted', grantId: 'grant-zzmarker-7f3a', startedVia: 'library:cookie:zzmarker',
+      workflowId: 'wf-granted', grantId, startedVia: 'library:cookie:zzmarker',
     });
 
-    const grants = (): unknown[] => {
-      const db = new BetterSqlite3(join(dir, 'engine.db'), { readonly: true });
-      try { return db.prepare('SELECT id, name, contract_json, bound_params_json FROM workflow_grants').all(); } finally { db.close(); }
-    };
-    const attributedRuns = (): unknown[] => {
-      const db = new BetterSqlite3(join(dir, 'history.db'), { readonly: true });
-      try {
-        return db.prepare('SELECT id, workflow_grant_id, started_via FROM pipeline_runs WHERE workflow_grant_id IS NOT NULL OR started_via IS NOT NULL').all();
-      } finally { db.close(); }
-    };
-    // POSITIVE CONTROL: both halves of the record are on disk before the erasure.
-    expect(grants()).toEqual([{ id: 'grant-zzmarker-7f3a', name: 'ZZMARKER-grant-name-7f3a', contract_json: '{"note":"ZZMARKER-grant-contract-7f3a"}', bound_params_json: '{"to":"ZZMARKER-grant-param-7f3a"}' }]);
-    expect(attributedRuns()).toEqual([{ id: 'run-granted', workflow_grant_id: 'grant-zzmarker-7f3a', started_via: 'library:cookie:zzmarker' }]);
+    // POSITIVE CONTROL: every part of the record is on disk before the erasure.
+    expect(grants()).toEqual([expect.objectContaining({ name: GRANT_NAME })]);
+    expect(grants()[0]!.contract_json).toContain(GRANT_HOST);
+    expect(stampedWorkflows()).toEqual(['wf-granted']);
+    expect(schedulesNamed(GRANT_TITLE), 'fixture: the acceptance must have created its schedule').not.toEqual([]);
+    expect(attributedRuns()).toEqual([{ id: 'run-granted', workflow_grant_id: grantId, started_via: 'library:cookie:zzmarker' }]);
 
     const { status } = await erase();
     expect(status).toBe(200);
     expect(grants(), 'the acceptance must not outlive an Art. 17 erasure').toEqual([]);
+    expect(stampedWorkflows(), 'no workflow may still carry a grant stamp after an Art. 17 erasure').toEqual([]);
+    expect(schedulesNamed(GRANT_TITLE), 'the schedule a grant created must not outlive an Art. 17 erasure').toEqual([]);
     expect(attributedRuns(), 'no run may still name a grant or how it was started after an Art. 17 erasure').toEqual([]);
   }, 120_000);
+
+  const GRANT_HOST = 'zzmarker-grant-7f3a.example.com';
+  const GRANT_NAME = 'ZZMARKER-grant-name-7f3a';
+  const GRANT_TITLE = 'ZZMARKER-grant-schedule-7f3a';
+
+  function readDb<T>(file: 'engine.db' | 'history.db', read: (db: BetterSqlite3.Database) => T): T {
+    const db = new BetterSqlite3(join(dir, file), { readonly: true });
+    try { return read(db); } finally { db.close(); }
+  }
+  function grants(): Array<{ id: string; name: string | null; contract_json: string }> {
+    return readDb('engine.db', db => db.prepare('SELECT id, name, contract_json FROM workflow_grants').all() as Array<{ id: string; name: string | null; contract_json: string }>);
+  }
+  function stampedWorkflows(): string[] {
+    return readDb('engine.db', db => (db.prepare("SELECT id FROM workflows WHERE json_extract(definition_json, '$.reviewedGrant') IS NOT NULL").all() as Array<{ id: string }>).map(r => r.id));
+  }
+  /** Every row, in either file, of a table with a `title` column that holds `title`. */
+  function schedulesNamed(title: string): string[] {
+    const found: string[] = [];
+    for (const file of ['engine.db', 'history.db'] as const) {
+      readDb(file, db => {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>;
+        for (const { name } of tables) {
+          const cols = db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{ name: string }>;
+          if (!cols.some(c => c.name === 'title')) continue;
+          const n = (db.prepare(`SELECT COUNT(*) AS n FROM "${name}" WHERE title = ?`).get(title) as { n: number }).n;
+          if (n > 0) found.push(`${file}:${name}=${String(n)}`);
+        }
+      });
+    }
+    return found;
+  }
+  function attributedRuns(): unknown[] {
+    return readDb('history.db', db => db.prepare('SELECT id, workflow_grant_id, started_via FROM pipeline_runs WHERE workflow_grant_id IS NOT NULL OR started_via IS NOT NULL').all());
+  }
 
   /**
    * The legacy memory store, `agent-memory.db`. The erasure used to SOFT-delete its
