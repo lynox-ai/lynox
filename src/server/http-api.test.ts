@@ -38,6 +38,7 @@ import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 // === Mock dependencies ===
 
@@ -248,6 +249,12 @@ vi.mock('../core/engine.js', () => ({
     // No engine.db: no mandate is live and no release exists (tests that need either swap them).
     this.getMandateEnds = vi.fn().mockReturnValue(null);
     this.getSecretReleases = vi.fn().mockReturnValue(null);
+    // Each vault secret bound as the boot migration binds it, over whatever store the test swaps
+    // in (`tests/helpers/vault-bindings.ts`). The callback tests' token endpoint comes from the
+    // preset seam, which a profile without a preset does not derive itself; the owner allowed
+    // the client secret to go there.
+    const bindings = bindingsAsMigrated(() => mockGetApiStore() as never, new Map([['CRM_CLIENT_SECRET', ['https://api.openai.com/token']]]));
+    this.getVaultNameBindings = vi.fn().mockReturnValue(bindings);
     // A trail that takes every row: a mandate's read is refused without one (D15). Tests that
     // check what is written, or what happens when it cannot be, swap it.
     this.getAuditLog = vi.fn().mockReturnValue({ record: vi.fn() });
@@ -269,7 +276,7 @@ vi.mock('../core/engine.js', () => ({
     // MemoryFacade (the /api/memory mutation choke point) reads this to mirror to the
     // knowledge layer; null = doc-only, which is all the route tests assert on.
     this.getKnowledgeLayer = vi.fn().mockReturnValue(null);
-    this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
+    this.getToolContext = vi.fn().mockReturnValue({ tools: [], vaultNameBindings: bindings });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
       listVaultNames: () => [],
@@ -15967,6 +15974,63 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     expect(await res.text()).toContain('Connected');
     expect(mockSecretSet.mock.calls.map((c: unknown[]) => c[0]))
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
+  });
+
+  describe('W-Preset: a second profile of the provider, on another base, with the owner\'s client pair', () => {
+    // Real bindings: the boot binds the owner's client secret to the owner's profile, and a profile
+    // stored after it does not take the secret along by naming it. Loaded only if the tree has them.
+    const bindingsModule = import('../core/vault-name-bindings.js').catch(() => null);
+    let bindingsDir = '';
+    let bindingsDb: import('../core/engine-db.js').EngineDb | null = null;
+    let previous: unknown;
+    afterEach(() => {
+      (api as unknown as { engine: Record<string, unknown> }).engine['getVaultNameBindings'] = previous;
+      bindingsDb?.close();
+      bindingsDb = null;
+      if (bindingsDir !== '') rmSync(bindingsDir, { recursive: true, force: true });
+      bindingsDir = '';
+    });
+
+    /** The owner's preset profile stored at the boot, the migration run, then `later` stored. */
+    async function booted(later: import('../core/api-store.js').ApiProfile[]): Promise<void> {
+      const { store } = await arrange({ oauthExtra: { preset_id: 'bexio' } });
+      const { EngineDb } = await import('../core/engine-db.js');
+      bindingsDir = mkdtempSync(join(tmpdir(), 'lynox-cb-bindings-'));
+      bindingsDb = new EngineDb(join(bindingsDir, 'engine.db'));
+      const mod = await bindingsModule;
+      const bindings = mod ? new mod.VaultNameBindings(bindingsDb.getDb()) : null;
+      if (mod && bindings) mod.migrateVaultNameBindings(bindings, store, () => {});
+      const engine = (api as unknown as { engine: Record<string, unknown> }).engine;
+      previous = engine['getVaultNameBindings'];
+      engine['getVaultNameBindings'] = () => bindings;
+      for (const p of later) expect(store.register(p)).toBe(true);
+    }
+
+    async function cookieFor(profileId: string): Promise<string> {
+      const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+      const signed = signProfileOAuthState({ state: STATE, profileId, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+      if (signed === null) throw new Error('fixture could not be signed');
+      return `lynox_profile_oauth_state=${encodeURIComponent(signed)}`;
+    }
+
+    it('completes no connection for it, and spends no code', async () => {
+      await booted([{
+        id: 'bexio-evil', name: 'x', base_url: 'https://evil.example/v1', description: 'x',
+        auth: { type: 'oauth2', vault_keys: ['CRM_CLIENT_ID'], oauth: { client_id_key: 'CRM_CLIENT_ID', client_secret_key: 'CRM_CLIENT_SECRET', preset_id: 'bexio' } },
+      }]);
+      mockExchangeToken.mockClear();
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie: await cookieFor('bexio-evil') } });
+      expect(res.status).toBe(409);
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    it('control: the owner\'s own profile connects', async () => {
+      await booted([]);
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie: await cookieFor(PROFILE) } });
+      expect(res.status).toBe(200);
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('a token slot named as the client credentials', () => {

@@ -13,7 +13,10 @@
  */
 import type { ApiStore } from '../../src/core/api-store.js';
 import type { ToolContext } from '../../src/core/tool-context.js';
-import { namerDestinations } from '../../src/core/vault-name-bindings.js';
+
+// Loaded only if the tree has it: a test file that uses this helper then also runs against a tree
+// without bindings, where nothing reads them.
+const bindingsModule = await import('../../src/core/vault-name-bindings.js').catch(() => null);
 
 export function bindingsAsMigrated(
   apiStore: Pick<ApiStore, 'knownProfiles'> | null | undefined | (() => Pick<ApiStore, 'knownProfiles'> | null | undefined),
@@ -25,7 +28,7 @@ export function bindingsAsMigrated(
   const view = {
     boundOf(name: string): string[] {
       const s = store();
-      const dests = s ? namerDestinations(s.knownProfiles(), name) : new Map<string, string[]>();
+      const dests = s && bindingsModule ? bindingsModule.namerDestinations(s.knownProfiles(), name) : new Map<string, string[]>();
       const [only] = [...dests.values()];
       const migrated = dests.size === 1 && only !== undefined ? only : [];
       return [...new Set([...migrated, ...(extended.get(name) ?? []), ...(confirmed?.get(name) ?? [])])].sort();
