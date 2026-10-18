@@ -875,10 +875,14 @@ describe('OAuthGraphProvider — review fixes', () => {
     const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
     const events: MailWatchEvent[] = [];
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
-    await vi.waitFor(() => { expect(events.length).toBe(1); });
-    await new Promise((r) => setTimeout(r, 80));
-    await handle.stop();
-    await provider.close();
+    try {
+      await vi.waitFor(() => { expect(events.length).toBe(1); });
+      await new Promise((r) => setTimeout(r, 80));
+    } finally {
+      // A failing wait must not leave the watch ticking into the next test.
+      await handle.stop();
+      await provider.close();
+    }
     expect(events[0]).toMatchObject({ type: 'error' });
     expect((events[0] as { error: MailError }).error.code).toBe('rate_limited');
     expect(fetchMock, 'paused: one request over eight intervals').toHaveBeenCalledTimes(1);
