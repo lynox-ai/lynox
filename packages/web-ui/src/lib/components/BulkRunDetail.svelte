@@ -117,15 +117,16 @@
 		});
 	}
 
-	/** Confirm the probe, then resume with the cap the owner set — against the checksum the
-	 *  run carries after the confirmation, read fresh rather than reused. */
+	/** Confirm the probe, then resume with the cap the owner set — against the checksum of the
+	 *  run as this page showed it. The checksum does not cover the probe, so confirming does
+	 *  not move it; a run that changed since it was shown is refused, never resumed. */
 	function confirmProbeAndResume(): Promise<void> {
 		return act(async () => {
+			if (!run?.checksum) return t('common.load_failed');
+			const shown = run.checksum;
 			const confirmed = await post(`/bulk/runs/${encodeURIComponent(runId)}/confirm-probe`);
 			if (!confirmed.ok) return refusalOf(confirmed);
-			const fresh = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
-			if (!fresh.ok || !fresh.body.checksum) return t('common.load_failed');
-			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, { checksum: fresh.body.checksum, maxTargets }));
+			return refusalOf(await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, { checksum: shown, maxTargets }));
 		});
 	}
 
