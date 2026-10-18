@@ -1516,12 +1516,16 @@ export class Agent implements IAgent {
     this.abortController?.abort();
   }
 
-  /** How many messages of the last run stayed in the context after a stop
-   *  (question included), or null when the run did not keep a prefix. Read once:
-   *  the Session mirrors it on disk (`persistFailedTurnDisplay`). */
-  private _interruptKeep: number | null = null;
+  /** After a stop: `count` = messages of the last run still in the context (question
+   *  included); `before` = messages the run's first write puts on disk AHEAD of the
+   *  question (unwritten when the run began, while the question was not written
+   *  ahead of the run). Null when the run did not keep a prefix. Read once: the
+   *  Session mirrors it on disk (`persistFailedTurnDisplay`). */
+  private _interruptKeep: { count: number; before: number } | null = null;
+  /** `before` for the current run, fixed at its start. */
+  private _unpersistedAheadOfQuestion = 0;
 
-  takeInterruptKeep(): number | null {
+  takeInterruptKeep(): { count: number; before: number } | null {
     const keep = this._interruptKeep;
     this._interruptKeep = null;
     return keep;
@@ -1541,7 +1545,7 @@ export class Agent implements IAgent {
     this.messages.length = end;
     this.messages[end - 1] = withRunStop(this.messages[end - 1]!, stop);
     this._persistedMark = Math.min(this._persistedMark, end);
-    this._interruptKeep = end - qIdx;
+    this._interruptKeep = { count: end - qIdx, before: this._unpersistedAheadOfQuestion };
     return true;
   }
 
@@ -1553,7 +1557,9 @@ export class Agent implements IAgent {
   keepUnsentQuestion(content: BetaMessageParam['content'], persisted: boolean): void {
     this.messages.push(withRunStop({ role: 'user', content }, { code: 'run_interrupted' }));
     if (persisted) this._persistedMark = this.messages.length;
-    this._interruptKeep = 1;
+    // Nothing of this run is on disk ahead of the question: no checkpoint ran, so
+    // from the run's start seq there is at most the question the Session wrote.
+    this._interruptKeep = { count: 1, before: 0 };
   }
 
   /** The current run's abort signal; `undefined` between runs. A tool that waits on a
@@ -2385,6 +2391,10 @@ export class Agent implements IAgent {
     // Held by identity: a stop keeps this question and the completed steps after it
     // (`_keepCompletedPrefix`), and finds it again even if the array was rebuilt.
     const userTurn: BetaMessageParam = { role: 'user', content };
+    // Written ahead of the question by the run's first checkpoint, unless the Session
+    // already wrote the question (then the mark jumps past everything below).
+    this._unpersistedAheadOfQuestion = opts?.userMessagePrePersisted === true
+      ? 0 : Math.max(0, this.messages.length - this._persistedMark);
     this.messages.push(userTurn);
     this._interruptKeep = null;
     // The Session writes the user turn durably BEFORE the run (so a crash before

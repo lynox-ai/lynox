@@ -406,14 +406,46 @@ describe('review fixes', { timeout: 60_000 }, () => {
     expect(reload(engine, session)).toEqual(live);
   });
 
+  it('a stop before the send after failed writes: disk still equals live', async () => {
+    const engine = await boot();
+    const session = engine.createSession();
+    const store = engine.getThreadStore()!;
+    const realAppend = store.appendMessages.bind(store);
+    // The earlier turn's three writes (its question, its checkpoint, its end of run)
+    // and this run's durable question write fail; everything after succeeds.
+    let calls = 0;
+    const spy = vi.spyOn(store, 'appendMessages').mockImplementation((...args: Parameters<typeof store.appendMessages>) => {
+      if (++calls <= 4) throw new Error('SQLITE_BUSY');
+      return realAppend(...args);
+    });
+    try {
+      mockProcess.mockResolvedValueOnce(endTurn('earlier answer'));
+      await session.run('earlier question');
+      expect(session.getAgent()!.getUnpersistedTail(), 'the earlier turn is not on disk').toHaveLength(2);
+      let release!: () => void;
+      (session as unknown as { _compactionInFlight: Promise<void> | null })._compactionInFlight =
+        new Promise<void>((r) => { release = r; });
+      const turn = session.run('stopped early');
+      await new Promise((r) => setTimeout(r, 10));
+      session.abort();
+      release();
+      await expect(turn).rejects.toBeInstanceOf(RunAbortedError);
+    } finally { spy.mockRestore(); }
+    const live = session.getAgent()!.getMessages();
+    expect(calls, 'the four failed writes, then the stop\'s own write').toBe(5);
+    expect(readRunStop(live.at(-1)!)).toEqual({ code: 'run_interrupted' });
+    expect(JSON.stringify(apiRows(engine, session))).toBe(JSON.stringify(live));
+    expect(reload(engine, session)).toEqual(live);
+  });
+
   it('the disk count starts at the question row, not at the run start seq', async () => {
     const engine = await boot();
     const store = engine.getThreadStore()!;
     store.createThread('t-seq');
     const q = 'the question';
     const rows: BetaMessageParam[] = [
-      // Left unwritten by an earlier failed persist, written first by this run, and
-      // the same text sent once before: the count must start at the LAST match.
+      // Left unwritten by an earlier failed persist and written first by this run
+      // (one of them the same text as the question): the count skips `before` rows.
       { role: 'user', content: q },
       { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
       { role: 'user', content: q },
@@ -423,7 +455,7 @@ describe('review fixes', { timeout: 60_000 }, () => {
     ];
     const start = store.getNextSeq('t-seq');
     store.appendMessages('t-seq', rows, start);
-    expect(store.markDisplayOnlyAfterApiRows('t-seq', start, 3, JSON.stringify(q))).toEqual({ marked: 1 });
+    expect(store.markDisplayOnlyAfterApiRows('t-seq', start, 3, 2)).toEqual({ marked: 1 });
     const api = store.getMessages('t-seq', { apiOnly: true });
     expect(api).toHaveLength(5);
     expect(api.at(-1)!.content_json).toContain('tool_result');

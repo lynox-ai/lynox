@@ -103,8 +103,8 @@ export interface FailedTurnDisplayInput {
   kept?: {
     /** Messages of the run still in the context, the question included. */
     count: number;
-    /** `JSON.stringify` of the question's content, to find its row on disk. */
-    questionJson?: string | undefined;
+    /** API rows of this run written before the question (`Agent.takeInterruptKeep`). */
+    before?: number | undefined;
     /** `agent.getUnpersistedTail()` after the cut. */
     unpersisted: BetaMessageParam[];
     onPersisted?: ((count: number) => void) | undefined;
@@ -137,7 +137,7 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
       // unfinished rest flips, the kept rows not yet written follow as API rows, and
       // the note comes last, so on a reload the API row right before it is the end
       // of the kept prefix (`hydrateApiMessages`).
-      const flipped = threadStore.markDisplayOnlyAfterApiRows(sessionId, startSeq, kept.count, kept.questionJson);
+      const flipped = threadStore.markDisplayOnlyAfterApiRows(sessionId, startSeq, kept.count, kept.before ?? 0);
       let written = 0;
       if (kept.unpersisted.length > 0) {
         threadStore.appendMessages(sessionId, kept.unpersisted, threadStore.getNextSeq(sessionId), {

@@ -1625,11 +1625,11 @@ export class Session {
       if (!sentToAgent && failure.noteCode === 'run_interrupted' && runOptions?.internal !== true) {
         runAgent?.keepUnsentQuestion?.(userContent as BetaMessageParam['content'], userTurnPrePersisted);
       }
-      const keepCount = runOptions?.internal === true ? null : runAgent?.takeInterruptKeep?.() ?? null;
+      const keep = runOptions?.internal === true ? null : runAgent?.takeInterruptKeep?.() ?? null;
       persistFailedTurnDisplay({
-        kept: keepCount === null || !runAgent ? undefined : {
-          count: keepCount,
-          questionJson: JSON.stringify(userContent),
+        kept: keep === null || !runAgent ? undefined : {
+          count: keep.count,
+          before: keep.before,
           unpersisted: runAgent.getUnpersistedTail(),
           onPersisted: (n) => runAgent.markPersisted(n),
         },
