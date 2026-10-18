@@ -85,8 +85,8 @@ describe('bulk run helpers', () => {
 	});
 });
 
-// The note on an unchecked kind of change and its confirmation are approved customer texts
-// (2026-10-13): German word for word, English the engine's own constants. Compared as whole
+// The note on an unchecked kind of change and its confirmation are approved customer texts:
+// German word for word, English the engine's own constants. Compared as whole
 // lines of the table — i18n is a Svelte module and cannot be imported here.
 describe('the approved unchecked-change texts', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');

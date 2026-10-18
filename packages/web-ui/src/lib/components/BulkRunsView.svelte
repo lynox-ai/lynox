@@ -1,5 +1,5 @@
 <!--
-	BulkRunsView — the owner's surface for bulk runs (PRD bulk-changes-reversible §3.9, Stück E):
+	BulkRunsView — the owner's surface for bulk runs (PRD bulk-changes-reversible §3.9):
 	the run list and the merged contacts, as the fourth tab of Activity (`?tab=bulk`). A run
 	opens on its own page in the same tab (`?tab=bulk&run=<id>`, <BulkRunDetail />), so a link
 	to a run survives a reload.

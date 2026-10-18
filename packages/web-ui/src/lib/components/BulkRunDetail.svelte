@@ -15,7 +15,7 @@
 
 	let { runId, onBack, onOpen }: { runId: string; onBack: () => void; onOpen: (id: string) => void } = $props();
 
-	// As many as the prototype showed: the owner's next act stays in view below them.
+	// A first page short enough that the owner's next act stays in view below it.
 	const i18n = { t, tf };
 	const FIRST_PAGE = 6;
 	const PAGE = 500;
