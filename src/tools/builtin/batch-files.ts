@@ -316,8 +316,11 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
       }
       case 'transform': {
         if (!input.find || input.replace === undefined) return 'find and replace are required for transform operation';
-        // Whether the inserted text is the placeholder does not depend on the file, so the
-        // per-file path check (`refuseEvictionPlaceholder`) runs only when it is.
+        // Whether the inserted text is the placeholder does not depend on the file. The result can
+        // still form it from what the file already holds (`replaceAll` expands `$&`, `$'` and `` $` ``,
+        // and an empty `replace` joins the text around `find`), so a file whose result holds the
+        // placeholder and whose content did not is judged too. A file that already held it can
+        // still be repaired.
         const insertsPlaceholder = containsEvictionMarker(input.replace);
         for (const file of files) {
           try {
@@ -330,6 +333,7 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
             const updated = content.replaceAll(input.find, input.replace);
             if (content !== updated) {
               if (insertsPlaceholder) refuseEvictionPlaceholder(input.replace, file);
+              else if (containsEvictionMarker(updated) && !containsEvictionMarker(content)) refuseEvictionPlaceholder(updated, file);
               writeFileSync(file, updated, 'utf-8');
               results.push(`Transformed: ${file}`);
             } else {

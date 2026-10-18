@@ -132,6 +132,22 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
     }
   });
 
+  it('transform: the placeholder is not formed from what the file holds, by a $ pattern or by removing text', async () => {
+    const [, placeholder] = placeholders()[1]!;
+    const cut = placeholder.indexOf('successful save') + 'successful sav'.length;
+    const head = placeholder.slice(0, cut);
+    const tail = placeholder.slice(cut + 1);
+    for (const [how, held, find, replace] of [
+      ['$& expansion', `${head}${tail}`, 'successful sav', '$&e'],
+      ['removed text', `${head}X${placeholder.slice(cut)}`, 'X', ''],
+    ] as const) {
+      writeFileSync(join(artifacts, 'ab12cd34.html'), held);
+      const out = await run({ pattern: '*.html', directory: artifacts, operation: 'transform', find, replace });
+      expect(out, how).toMatch(/Error transforming .*ab12cd34\.html: refused[\s\S]*placeholder/);
+      expect(readFileSync(join(artifacts, 'ab12cd34.html'), 'utf8'), how).toBe(held);
+    }
+  });
+
   it('transform: real text is still written, also into an artifact that already holds the placeholder (a repair)', async () => {
     const [, placeholder] = placeholders()[0]!;
     writeFileSync(join(artifacts, 'lost.html'), `<h1>Pitch</h1>${placeholder}`);
