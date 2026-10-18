@@ -9215,11 +9215,12 @@ describe('LynoxHTTPApi', () => {
     it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
       const host = 'shop.example.com';
       const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
-      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1', sku: 'A' } })), contract: mintBulkContract(host, keys) });
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1', sku: 'A', dims: { w: 1, h: 2 }, note: null } })), contract: mintBulkContract(host, keys) });
       if (!planned.ok) throw new Error('not planned');
       const id = planned.status.id;
       bulkLedger.resumePreview(id);
-      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2', sku: 'A' } });
+      // `dims` comes back with its keys in another order (the same value); `note` is new.
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2', sku: 'A', dims: { h: 2, w: 1 } } });
       bulkLedger.finishPreview(id);
       const probeOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
       // Nothing written yet: no probe to check.
@@ -9231,8 +9232,8 @@ describe('LynoxHTTPApi', () => {
       // Still writing, not stopped: confirming would be refused, so nothing is offered.
       expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
-      // The written target, and only the field the write changed — not the one sent unchanged.
-      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price'] });
+      // The written target, and only the fields the write changed — not the ones sent unchanged.
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
     });

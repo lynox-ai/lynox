@@ -335,6 +335,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'bulk.probe.explain': { de: 'lynox hat ein Ziel geschrieben und angehalten: {target}. Öffne es bei {provider} und sieh nach, ob ausser „{field}“ alles gleich geblieben ist.', en: 'lynox wrote one target and stopped: {target}. Open it at {provider} and check that everything except “{field}” stayed the same.' },
 	'bulk.probe.explain_whole': { de: 'lynox hat ein Ziel geschrieben und angehalten: {target}. Öffne es bei {provider} und sieh nach, ob es so aussieht, wie die Vorschau es zeigte.', en: 'lynox wrote one target and stopped: {target}. Open it at {provider} and check that it looks the way the preview showed it.' },
 	'bulk.probe.confirm': { de: 'Ich habe das Ziel bei {provider} geprüft. Was der Lauf nicht ändert, ist gleich geblieben.', en: 'I checked the target at {provider}. What the run does not change stayed the same.' },
+	'bulk.probe.confirm_whole': { de: 'Ich habe das Ziel bei {provider} geprüft. Es sieht so aus, wie die Vorschau es zeigte.', en: 'I checked the target at {provider}. It looks the way the preview showed it.' },
 	'bulk.probe.confirm_measured': { de: 'Das gilt auch für spätere Läufe, die bei {provider} dieselbe Art Eintrag auf dieselbe Weise ändern.', en: 'This also applies to later runs that change the same kind of entry at {provider} in the same way.' },
 	'bulk.probe.in_total': { de: 'Insgesamt höchstens', en: 'In total at most' },
 	'bulk.probe.targets': { de: 'Ziele', en: 'targets' },

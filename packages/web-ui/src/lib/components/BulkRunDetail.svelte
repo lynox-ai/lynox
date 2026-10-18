@@ -308,7 +308,7 @@
 						: tf('bulk.probe.explain_whole', { target: run.probe.key, provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
-						<span>{tf('bulk.probe.confirm', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
+						<span>{tf(run.probe.fields.length > 0 ? 'bulk.probe.confirm' : 'bulk.probe.confirm_whole', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
 					</label>
 					<label class="flex items-center gap-2 text-sm">
 						{t('bulk.probe.in_total')}
