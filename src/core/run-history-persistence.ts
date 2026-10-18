@@ -291,20 +291,25 @@ export function insertPipelineRun(db: Database.Database, params: {
   /** Slice C2: the saved-workflow id this run executed (null for ad-hoc/inline
    *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
   workflowId?: string | undefined;
+  /** Workflow grant attribution: the accepted grant this run ran under (`workflow_grants.id`), or none. */
+  grantId?: string | undefined;
+  /** Workflow grant attribution: how a run under a grant was started (`schedule:…`, `library:…`, `nested:…`). */
+  startedVia?: string | undefined;
 }): void {
   // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a
   // NULL completed_at and is closed out by `updatePipelineRun` at finalize.
   // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
   // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, workflow_grant_id, started_via)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
     params.totalTokensIn ?? 0, params.totalTokensOut ?? 0,
     params.stepCount ?? 0, params.parentRunId ?? null, params.error ?? null,
     params.workflowId ?? null,
+    params.grantId ?? null, params.startedVia ?? null,
   );
 }
 
@@ -405,8 +410,11 @@ export function getPipelineRun(db: Database.Database, id: string): {
   // one (it would render a bogus "run" with status 'planned'). A real run is
   // never 'planned'.
   const likePattern = `${id.replace(/[\\%_]/g, '\\$&')}%`;
+  // The columns of the declared type, not `*`: `GET /api/workflows/:id` sends this row as it is,
+  // and a column added later (`workflow_grant_id`, `started_via` — the latter holds the starting request's
+  // auth-origin label) must not reach that response because nobody listed it.
   return db.prepare(
-    "SELECT * FROM pipeline_runs WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status != 'planned'"
+    "SELECT id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, started_at, completed_at FROM pipeline_runs WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status != 'planned'"
   ).get(id, likePattern) as {
     id: string; manifest_name: string; status: string; manifest_json: string;
     total_duration_ms: number; total_cost_usd: number; total_tokens_in: number;

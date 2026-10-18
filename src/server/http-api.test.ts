@@ -2,11 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll, o
 import { CP_ADMIN_PRINCIPAL, principalFromTag, OWNER_PRINCIPAL, type RequestPrincipal } from '../core/request-principal.js';
 import { parseBrokerStartToken } from '../contract/broker-start.js';
 import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
-import { request as httpRequest, ServerResponse, type Server } from 'node:http';
+import { request as httpRequest, Agent as HttpAgent, ServerResponse, type Server } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { loginSession as webUiLoginSession } from '../../packages/web-ui/src/lib/server/auth.js';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync, chmodSync, linkSync, readlinkSync, truncateSync, appendFileSync } from 'node:fs';
 import { closeWorkspaceBase } from '../core/workspace-rel.js';
 import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
@@ -34,7 +34,7 @@ import { BULK_LIST_NOTE, listReadContract, parseListSource } from '../core/bulk-
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { judgeTemplate, normalizeJudgeRule } from '../core/bulk-judge-rule.js';
 import { BulkTriggerLockedError, ForeignTodoError, TaskManager, TodoHasForeignSubtasksError, TriggerTierUnsupportedError } from '../core/task-manager.js';
-import { TriggerStore } from '../core/trigger-store.js';
+import { TriggerStore, bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { RunHistory } from '../core/run-history.js';
 import { InputRequiredError } from '../core/input-required.js';
 import { ChangesetManager } from '../core/changeset.js';
@@ -546,6 +546,45 @@ function repayRateWindow(): void {
   const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
   const before = new Map([...window].map(([k, v]) => [k, v.count]));
   onTestFinished(() => { for (const [k, e] of window) e.count = before.get(k) ?? 0; });
+}
+
+/**
+ * A download whose file is changed on disk once the first bytes have arrived. Says how the
+ * client saw the answer end: `complete` (the body as announced), `broken` (cut off or not
+ * parseable), or `waiting` (still open after `waitMs`: a client left hanging). The connection is
+ * kept alive, as a browser keeps it: a closing connection would end a short answer by itself.
+ */
+function downloadWhileChanging(path: string, change: () => void, waitMs = 3000): Promise<{ outcome: 'complete' | 'broken' | 'waiting'; announced: number; received: number }> {
+  return new Promise((settle) => {
+    let received = 0;
+    let announced = -1;
+    let changed = false;
+    const agent = new HttpAgent({ keepAlive: true });
+    const done = (outcome: 'complete' | 'broken' | 'waiting'): void => { clearTimeout(timer); agent.destroy(); settle({ outcome, announced, received }); };
+    const req = httpRequest(`${baseUrl}${path}`, { headers: authHeaders(), agent }, (r) => {
+      announced = Number(r.headers['content-length']);
+      r.on('data', (c: Buffer) => { received += c.length; if (!changed) { changed = true; change(); } });
+      // A response that completes and is then followed by bytes the parser refuses is broken too.
+      r.on('end', () => { if (!r.complete) done('broken'); else setTimeout(() => done('complete'), 200); });
+      r.on('error', () => done('broken'));
+    });
+    req.on('error', () => done('broken'));
+    const timer = setTimeout(() => { req.destroy(); agent.destroy(); settle({ outcome: 'waiting', announced, received }); }, waitMs);
+    req.end();
+  });
+}
+
+/** Counts the body bytes the server writes into responses, until `restore`. A client stops
+ *  reading at Content-Length, so what a server sends beyond it shows only here. */
+function countResponseBytes(): { bytes: () => number; restore: () => void } {
+  let bytes = 0;
+  const original = ServerResponse.prototype.write;
+  const spy = vi.spyOn(ServerResponse.prototype, 'write').mockImplementation(function (this: ServerResponse, ...args: Parameters<typeof original>) {
+    const chunk: unknown = args[0];
+    if (typeof chunk === 'string' || chunk instanceof Uint8Array) bytes += Buffer.byteLength(chunk);
+    return original.apply(this, args);
+  });
+  return { bytes: () => bytes, restore: () => spy.mockRestore() };
 }
 
 /**
@@ -1736,7 +1775,7 @@ describe('LynoxHTTPApi', () => {
         const origHistory = engineRef['getRunHistory'] as () => Record<string, unknown>;
         const history = origHistory();
         engineRef['getEngineDb'] = () => unkeyed;
-        engineRef['getRunHistory'] = () => ({ ...history, setWorkflowReviewedGrant: setGrant, deleteTrigger });
+        engineRef['getRunHistory'] = () => ({ ...history, acceptWorkflowReviewedGrant: setGrant, deleteTrigger });
         try { await test(); } finally { engineRef['getEngineDb'] = origDb; engineRef['getRunHistory'] = origHistory; }
       }
 
@@ -1820,8 +1859,12 @@ describe('LynoxHTTPApi', () => {
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
             });
             expect(res.status).toBe(201);
-            expect(setGrant).toHaveBeenCalledWith('wf-sched', expect.objectContaining({ origin: 'reviewed' }), expect.objectContaining({
-              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+            const grantId = expect.stringMatching(/^[0-9a-f-]{36}$/);
+            expect(setGrant).toHaveBeenCalledWith(expect.objectContaining({
+              grantId, workflowId: 'wf-sched', triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+              contractJson: expect.stringContaining('"origin":"reviewed"'),
+            }), expect.objectContaining({
+              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
             }), expect.any(String));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');
@@ -4263,7 +4306,7 @@ describe('LynoxHTTPApi', () => {
 
     it('GET of the api profiles leaves out the grant\'s credential record — fingerprints, foreign tokens, key check — and keeps the rest', async () => {
       const profile = { id: 'shop', name: 'shop', base_url: 'https://shop.example', description: 'd', oauth_grant: { grant_id: 'g-1', fingerprints: { SHOP_KEY: 'k-1' }, foreign: ['t-1'], fingerprint_check: 'c-1' } };
-      mockGetApiStore.mockReturnValue({ getAll: () => [profile], get: () => profile });
+      mockGetApiStore.mockReturnValue({ getAll: () => [profile], unreadableHolds: () => false, knownProfiles: () => [profile], get: () => profile });
       try {
         const list = await (await jsonFetch('/api/api-profiles')).json() as { profiles: Array<{ oauth_grant?: Record<string, unknown> }> };
         expect(list.profiles[0]?.oauth_grant).toEqual({ grant_id: 'g-1' });
@@ -4320,7 +4363,9 @@ describe('LynoxHTTPApi', () => {
         custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
         ...(author === undefined ? {} : { created_by: author }),
       });
-      for (const other of opts.others ?? []) store.register(other);
+      // Every `others` here names the connection's token slot: the admission holds it back now,
+      // still stored, and the checks read stored profiles.
+      for (const other of opts.others ?? []) expect(store.register(other)).toBe(false);
       mockGetApiStore.mockReturnValue(store);
       mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
       const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
@@ -8954,6 +8999,14 @@ describe('LynoxHTTPApi', () => {
         expect(shown['judgeRule']).toEqual({ rule: RULE.rule, schema: RULE.schema, tier: 'fast' });
         expect(shown['judgeRuleHash']).toBe(bulkLedger.getJudgeRuleForOwner(id)!.hash);
         expect(typeof shown['judgeModel']).toBe('string');
+        // Who judges, as the start names it: the provider whose decided model this is, and the
+        // catalog's name for that model — never a name for some other model.
+        const servedBy = shown['judgeServedBy'] as { provider: string; label: string };
+        const { JUDGE_MODELS } = await import('../core/bulk-judge.js');
+        const { modelCapability } = await import('../types/index.js');
+        expect(JUDGE_MODELS[servedBy.provider as keyof typeof JUDGE_MODELS]).toBe(shown['judgeModel']);
+        expect(servedBy.label).toBe(modelCapability(shown['judgeModel'] as string)!.uiLabel);
+        expect(servedBy.label).not.toBe(shown['judgeModel']);
         const t = await (await jsonFetch(`/api/bulk/runs/${id}/targets`)).json() as { targets: { after: unknown; changedFields: unknown }[] };
         expect(t.targets.map((x) => [x.after, x.changedFields])).toEqual([[null, null]]);
 
@@ -8965,6 +9018,24 @@ describe('LynoxHTTPApi', () => {
         const ok = await start(id, { judgeRuleHash: shown['judgeRuleHash'], costCapUsd: 1.5 });
         expect(ok.status).toBe(200);
         expect(new TriggerStore(bulkDb).getDue().map((d) => [d.id, d.effect])).toEqual([[`bulk-preview-${id}`, 'bulk_judge']]);
+      });
+
+      it('says before the click that an instance with its own model key starts no judged run, and only there', async () => {
+        const id = judgedRun();
+        const hash = bulkLedger.getJudgeRuleForOwner(id)!.hash;
+        const ownKeyOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { judgeOwnKey: unknown }).judgeOwnKey;
+        expect(await ownKeyOf()).toBe(false);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+        expect(await ownKeyOf()).toBe(false);
+        vi.stubEnv('LYNOX_BILLING_TIER', 'hosted');
+        expect(await ownKeyOf()).toBe(true);
+        // The page's flag and the route's refusal are one predicate.
+        const refused = await start(id, { judgeRuleHash: hash, costCapUsd: 1 });
+        expect(refused.status).toBe(409);
+        expect(((await refused.json()) as { code: string }).code).toBe('judge_unavailable');
+        // A run without a judge on the same instance carries no flag.
+        const plain = planRun();
+        expect(((await (await jsonFetch(`/api/bulk/runs/${plain}`)).json()) as { judgeOwnKey: unknown }).judgeOwnKey).toBe(false);
       });
 
       it('a restart after a halt refuses a limit that is not a number, instead of keeping the old one', async () => {
@@ -9173,6 +9244,73 @@ describe('LynoxHTTPApi', () => {
       expect(asUndo).toMatchObject({ kind: 'undo', writeForm: 'unmeasured', writeFormNote: null, writeFormConfirmation: null });
     });
 
+    it('names the one target a probe wrote and the fields it changed, until the probe is confirmed', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1', sku: 'A', dims: { w: 1, h: 2 }, note: null } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      // `dims` comes back with its keys in another order (the same value); `note` is new.
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2', sku: 'A', dims: { h: 2, w: 1 } } });
+      bulkLedger.finishPreview(id);
+      const probeOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown }).probe;
+      // Nothing written yet: no probe to check.
+      expect(await probeOf()).toBeNull();
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'written');
+      // Still writing, not stopped: confirming would be refused, so nothing is offered.
+      expect(await probeOf()).toBeNull();
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      // The written target, and only the fields the write changed — not the ones sent unchanged.
+      expect(await probeOf()).toEqual({ key: keys[0], fields: ['price', 'note'] });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
+      expect(await probeOf()).toBeNull();
+    });
+
+    it('offers no probe for a target found already holding its value, and names the halt and what an undo takes back', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      const runOf = async (): Promise<{ probe: unknown; haltKey: unknown; undoable: unknown }> => (await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown; haltKey: unknown; undoable: unknown };
+      expect(await runOf()).toMatchObject({ haltKey: null, undoable: 0 });
+      // The first write went out and no answer came: it may have landed, so an undo takes it.
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordFailed(id, 0, 'write_failed');
+      // The second was found holding its value already: applied, but not written.
+      expect(bulkLedger.claimTarget(id, 1)).toBe(true);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 1, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 2 });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
+    });
+
+    it('says when a run that stands still is picked up again, for the read and for the write trigger', async () => {
+      const id = planRun();
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = engineRef['getWorkerLoop'];
+      const resumesOf = async (): Promise<unknown> => ((await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { resumesAt: unknown }).resumesAt;
+      try {
+        expect(await resumesOf()).toBeNull();
+        for (const trigger of [bulkPreviewTriggerId(id), `bulk-${id}`]) {
+          engineRef['getWorkerLoop'] = (): unknown => ({ resumesAt: (t: string) => (t === trigger ? '2026-10-18T08:53:35.000Z' : null) });
+          expect(await resumesOf(), trigger).toBe('2026-10-18T08:53:35.000Z');
+        }
+      } finally {
+        engineRef['getWorkerLoop'] = orig;
+      }
+    });
+
     it('confirms a probe only for an external run that wrote one target, and a resume widens only after one', async () => {
       const local = planRun();
       const notProbe = await jsonFetch(`/api/bulk/runs/${local}/confirm-probe`, { method: 'POST', body: '{}' });
@@ -9203,7 +9341,15 @@ describe('LynoxHTTPApi', () => {
       try {
         const widened = await jsonFetch(`/api/bulk/runs/${id}/resume`, { method: 'POST', body: JSON.stringify({ checksum, maxTargets: 2 }) });
         expect(widened.status).toBe(409);
-        expect(((await widened.json()) as { error: string }).error).toMatch(/no confirmed probe yet/);
+        // The sentence is prompt surface (the model reads refusals): pinned word for word.
+        expect(((await widened.json()) as { error: string }).error).toBe(
+          'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the '
+          + 'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes '
+          + 'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, '
+          + 'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts '
+          + 'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes '
+          + 'in a run of their own.',
+        );
       } finally {
         mockGetApiStore.mockReturnValue(null);
         mockSecretResolve.mockReset();
@@ -9444,8 +9590,10 @@ describe('LynoxHTTPApi', () => {
       expect(body.writeNotes).toEqual(['Not granted for an unattended run: POST https://api.example.com/v1/reports.']);
       // Only a caller that names the origin gets a grant decision at all; without it the
       // run passes no contract on.
-      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown };
+      const runtime = mockRunSavedWorkflow.mock.calls.at(-1)![4] as { decideGrant?: unknown; startedVia?: string };
       expect(typeof runtime.decideGrant).toBe('function');
+      // …and the run records which request started it, by that request's auth origin.
+      expect(runtime.startedVia).toBe('library:bearer');
       // The request is paid back: this file shares one per-IP rate window.
       const window = (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
       for (const entry of window.values()) entry.count = Math.max(0, entry.count - 1);
@@ -13079,6 +13227,66 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    it('downloads a file whose name is outside Latin-1, under that name', async () => {
+      repayRateWindow();
+      writeFileSync(join(base, 'safe', '日本語.txt'), 'x');
+      try {
+        const dl = await jsonFetch(`/api/files/download?path=${encodeURIComponent('safe/日本語.txt')}`);
+        expect([dl.status, dl.headers.get('content-disposition'), await dl.text()])
+          .toEqual([200, `attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`, 'x']);
+      } finally { rmSync(join(base, 'safe', '日本語.txt'), { force: true }); }
+    });
+
+    it('downloads an empty file as an empty answer', async () => {
+      repayRateWindow();
+      writeFileSync(join(base, 'safe', 'empty.txt'), '');
+      try {
+        const dl = await jsonFetch('/api/files/download?path=safe/empty.txt');
+        expect([dl.status, dl.headers.get('content-length'), await dl.text()]).toEqual([200, '0', '']);
+      } finally { rmSync(join(base, 'safe', 'empty.txt'), { force: true }); }
+    });
+
+    it('closes the file when the client goes away during a download', async () => {
+      repayRateWindow();
+      const big = join(base, 'safe', 'big-plain.bin');
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), big]);
+      const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
+      try {
+        for (let i = 0; i < 5; i++) {
+          await new Promise<void>((done) => {
+            const req = httpRequest(`${baseUrl}/api/files/download?path=safe/big-plain.bin`, { headers: authHeaders() }, (r) => {
+              r.once('data', () => { r.destroy(); req.destroy(); done(); });
+            });
+            req.on('error', () => done());
+            req.end();
+          });
+        }
+        await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big-plain.bin'))).toEqual([]), { timeout: 5000 });
+      } finally { rmSync(big, { force: true }); }
+    });
+
+    it('breaks off a download whose file shrinks, and sends no more than announced when it grows', async () => {
+      repayRateWindow();
+      const file = join(base, 'safe', 'changing.bin');
+      try {
+        execFileSync('truncate', ['-s', String(64 * 1024 * 1024), file]);
+        const shrunk = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => truncateSync(file, 1));
+        expect([shrunk.outcome, shrunk.announced]).toEqual(['broken', 64 * 1024 * 1024]);
+        expect(shrunk.received).toBeLessThan(shrunk.announced);
+        execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
+        const counted = countResponseBytes();
+        let grown;
+        let sentAtAppend = -1;
+        try {
+          grown = await downloadWhileChanging('/api/files/download?path=safe/changing.bin', () => { sentAtAppend = counted.bytes(); appendFileSync(file, Buffer.alloc(1024 * 1024)); });
+        } finally { counted.restore(); }
+        // The file grew while most of it was still unsent, so the bound is what held the answer at 20 MB.
+        expect(sentAtAppend).toBeLessThan(10 * 1024 * 1024);
+        expect(counted.bytes()).toBe(20 * 1024 * 1024);
+        expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
+      } finally { rmSync(file, { force: true }); }
+    });
+
     // Root reads through mode bits, so the fixture cannot fail there: skipped, visibly.
     it.skipIf(process.getuid?.() === 0)('answers an unreadable directory with 500, not an empty listing', async () => {
       const locked = join(base, 'locked');
@@ -13195,12 +13403,29 @@ describe('LynoxHTTPApi', () => {
 
     const openFds = (): string[] => readdirSync('/proc/self/fd').map((n) => { try { return readlinkSync(`/proc/self/fd/${n}`); } catch { return ''; } });
 
-    it('closes the open file when the answer cannot be sent, e.g. a name a header cannot carry', async () => {
+    it('downloads a file whose name is outside Latin-1, under that name', async () => {
       repayRateWindow();
       writeFileSync(join(ws, '日本語.txt'), 'x');
-      const before = openFds().filter((l) => l.endsWith('日本語.txt')).length;
-      for (let i = 0; i < 10; i++) expect(await status(`/api/files/download?path=${q('日本語.txt')}`)).toBe(404);
-      expect(openFds().filter((l) => l.endsWith('日本語.txt')).length).toBe(before);
+      const dl = await jsonFetch(`/api/files/download?path=${q('日本語.txt')}`);
+      expect([dl.status, dl.headers.get('content-disposition'), await dl.text()])
+        .toEqual([200, `attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`, 'x']);
+    });
+
+    it('closes the open file when the answer cannot be sent', async () => {
+      repayRateWindow();
+      writeFileSync(join(ws, 'once.txt'), 'x');
+      const before = openFds().filter((l) => l.endsWith('once.txt')).length;
+      // The header write is what fails, as Node does for a header value it refuses.
+      const writeHead = vi.spyOn(ServerResponse.prototype, 'writeHead');
+      try {
+        for (let i = 0; i < 10; i++) {
+          writeHead.mockImplementationOnce(() => { throw new TypeError('Invalid character in header content'); });
+          expect(await status('/api/files/download?path=once.txt')).toBe(404);
+        }
+      } finally {
+        writeHead.mockRestore();
+      }
+      expect(openFds().filter((l) => l.endsWith('once.txt')).length).toBe(before);
     });
 
     it('closes the open file when the client goes away during a download', async () => {
@@ -13216,6 +13441,26 @@ describe('LynoxHTTPApi', () => {
         });
       }
       await vi.waitFor(() => expect(openFds().filter((l) => l.endsWith('big.bin'))).toEqual([]), { timeout: 5000 });
+    });
+
+    it('breaks off a download whose file shrinks, and sends no more than announced when it grows', async () => {
+      repayRateWindow();
+      const file = join(ws, 'changing.bin');
+      execFileSync('truncate', ['-s', String(64 * 1024 * 1024), file]);
+      const shrunk = await downloadWhileChanging('/api/files/download?path=changing.bin', () => truncateSync(file, 1));
+      expect([shrunk.outcome, shrunk.announced]).toEqual(['broken', 64 * 1024 * 1024]);
+      expect(shrunk.received).toBeLessThan(shrunk.announced);
+      execFileSync('truncate', ['-s', String(20 * 1024 * 1024), file]);
+      const counted = countResponseBytes();
+      let grown;
+      let sentAtAppend = -1;
+      try {
+        grown = await downloadWhileChanging('/api/files/download?path=changing.bin', () => { sentAtAppend = counted.bytes(); appendFileSync(file, Buffer.alloc(1024 * 1024)); });
+      } finally { counted.restore(); }
+      // The file grew while most of it was still unsent, so the bound is what held the answer at 20 MB.
+      expect(sentAtAppend).toBeLessThan(10 * 1024 * 1024);
+      expect(counted.bytes()).toBe(20 * 1024 * 1024);
+      expect(grown).toEqual({ outcome: 'complete', announced: 20 * 1024 * 1024, received: 20 * 1024 * 1024 });
     });
 
     it('counts an unaddressable name only when it is shown, and makes a missing workspace', async () => {
@@ -15235,6 +15480,42 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       .toEqual(['CRM_API_ACCESS_TOKEN', 'CRM_API_REFRESH_TOKEN']);
   });
 
+  describe('a token slot named as the client credentials', () => {
+    // `shop-api`'s exchanges wrote SHOP_MINTED: a token of that connection, which never goes to
+    // a token endpoint as a client id or secret, this one's included.
+    // The admission no longer registers a profile that signs in with another's token beside it:
+    // the owner is registered as an older store kept it, while `knownProfiles` shows the admission
+    // no other profile. The callback's own check is the one under test.
+    async function withOwner(oauthExtra: Record<string, unknown>): Promise<string> {
+      const { cookie, store } = await arrange({ oauthExtra });
+      const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
+      expect(store.register({
+        id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'Shop',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://api.shop.example/oauth/token', client_id_key: 'SHOP_CID', client_secret_key: 'SHOP_CSECRET' } },
+        oauth_grant: { written: [{ name: 'SHOP_MINTED', fp: 'fp-minted' }] },
+      })).toBe(true);
+      unseen.mockRestore();
+      mockExchangeToken.mockClear();
+      return cookie;
+    }
+
+    it.each([['client secret', 'client_secret_key'], ['client id', 'client_id_key']])('refuses one named as the %s before anything is sent', async (_label, field) => {
+      const cookie = await withOwner({ [field]: 'SHOP_MINTED' });
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(409);
+      expect(await res.text()).toContain('names an OAuth token as its client credentials');
+      expect(mockExchangeToken).not.toHaveBeenCalled();
+      expect(mockSecretSet).not.toHaveBeenCalled();
+    });
+
+    it('control: with its own client pair beside the same owner, the code is exchanged', async () => {
+      const cookie = await withOwner({});
+      const res = await fetch(`${baseUrl}/api/oauth/callback?code=c&state=${STATE}`, { redirect: 'manual', headers: { cookie } });
+      expect(res.status).toBe(200);
+      expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // PRD §3.13 (H2i): the callback records whose consent the tokens came from, taken from the
   // signed start — and stores nothing for a mandate whose profile changed hands, or whose
   // mandate ended, while the consent was on the provider's page.
@@ -15387,14 +15668,17 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       const { accessTokenKey } = await import('../core/api-store.js');
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
       store.register({ ...store.get(PROFILE)!, created_by: TAG });
-      // Set up by the owner while the mandate's human was on the provider's page.
-      store.register({
+      // Set up by the owner while the mandate's human was on the provider's page. The admission
+      // holds it back now; it is still stored, and the check reads stored profiles.
+      expect(store.register({
         id: 'crm-pat', name: 'CRM PAT', base_url: 'https://crm.example/v1', description: 'd',
         auth: { type: 'bearer', vault_keys: [accessTokenKey(PROFILE)] },
-      });
+      })).toBe(false);
+      expect(store.knownProfiles().map((p) => p.id)).toContain('crm-pat');
       mockExchangeToken.mockClear();
       const res = await complete(cookie);
       expect(res.status).toBe(409);
+      expect(await res.text()).toContain('can no longer be completed for the session that started it');
       expect(mockExchangeToken).not.toHaveBeenCalled();
       expect(mockSecretSet).not.toHaveBeenCalled();
     });
@@ -16615,7 +16899,7 @@ describe('mandate stance of every user route', () => {
     });
     const mandate: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
     const readsWith = (p: ApiProfile): boolean =>
-      secretsForProfile(vault, p, { getAll: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
+      secretsForProfile(vault, p, { knownProfiles: () => [] }, { principal: mandate, ends: { isLive: () => true }, releases: null })
         .resolve('OWNER_KEY') === 'owner-value';
     // The probe can say no: a profile the mandate wrote does not read the owner's name unreleased.
     expect(readsWith(profile('mandate:setup@example.org')), 'control: a mandate profile reads nothing unreleased').toBe(false);

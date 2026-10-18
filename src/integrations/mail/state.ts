@@ -16,6 +16,7 @@ import { ensureDirSync } from '../../core/atomic-write.js';
 import { scrubFreedPages, zeroDeletedContent } from '../../core/sqlite-constants.js';
 import type { MailAccountConfig, MailAccountType, MailAuthType, MailAddress, MailEnvelope, MailPresetSlug } from './provider.js';
 import { isValidAccountType, isValidAuthType } from './provider.js';
+import type { DeltaCursor, DeltaCursorStore } from './providers/oauth-graph.js';
 
 function defaultDbPath(): string {
   return join(getLynoxDir(), 'mail-state.db');
@@ -550,6 +551,26 @@ const MIGRATIONS: string[] = [
   `BEGIN;
    INSERT OR IGNORE INTO schema_version (version) VALUES (17);
    ALTER TABLE mail_scheduled ADD COLUMN sending_at INTEGER;
+   COMMIT;`,
+
+  // v18: where a Microsoft Graph mailbox's watch resumes, per account and folder (the
+  // `DeltaCursor` of `providers/oauth-graph.ts`): the next Graph link and the newest
+  // `receivedDateTime` seen. In memory it is lost on every restart, and the watch begins again
+  // at "now", past everything that arrived while the process was down. It goes with its
+  // account: deleting the account row deletes its cursors. One transaction, as v17, and
+  // `IF NOT EXISTS`, as v15: a table already there does not leave the file unopenable. Its
+  // shape is then not checked; this migration is the only thing that creates the table.
+  `BEGIN;
+   INSERT OR IGNORE INTO schema_version (version) VALUES (18);
+   CREATE TABLE IF NOT EXISTS mail_delta_cursors (
+     account_id TEXT NOT NULL,
+     folder TEXT NOT NULL,
+     link TEXT NOT NULL,
+     since TEXT NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (account_id, folder),
+     FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE
+   );
    COMMIT;`,
 ];
 
@@ -1107,6 +1128,8 @@ export class MailStateDb {
    * accommodate non-mail pseudo-account channels; cascade is now an
    * application invariant we enforce here. Dedup state (processed_mail_messages,
    * mail_followups) is left intact — caller decides whether to forget it.
+   * Rows that still carry an FK onto mail_accounts go through its ON DELETE
+   * CASCADE, the Graph delta cursors (`mail_delta_cursors`) among them.
    */
   deleteAccount(id: string): boolean {
     const txn = this.db.transaction(() => {
@@ -1119,6 +1142,29 @@ export class MailStateDb {
       return result.changes > 0;
     });
     return txn();
+  }
+
+  // ── Delta cursors (Microsoft Graph watch, v18) ──────────────────────────
+
+  getDeltaCursor(accountId: string, folder: string): DeltaCursor | null {
+    const row = this.db
+      .prepare<[string, string], { link: string; since: string }>('SELECT link, since FROM mail_delta_cursors WHERE account_id = ? AND folder = ?')
+      .get(accountId, folder);
+    return row ? { link: row.link, since: row.since } : null;
+  }
+
+  /** Throws when no account row has this id: a cursor belongs to an account. */
+  setDeltaCursor(accountId: string, folder: string, cursor: DeltaCursor): void {
+    this.db
+      .prepare(
+        `INSERT INTO mail_delta_cursors (account_id, folder, link, since, updated_at) VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT (account_id, folder) DO UPDATE SET link = excluded.link, since = excluded.since, updated_at = excluded.updated_at`,
+      )
+      .run(accountId, folder, cursor.link, cursor.since);
+  }
+
+  clearDeltaCursor(accountId: string, folder: string): void {
+    this.db.prepare('DELETE FROM mail_delta_cursors WHERE account_id = ? AND folder = ?').run(accountId, folder);
   }
 
   // ── Follow-ups ──────────────────────────────────────────────────────────
@@ -1511,5 +1557,22 @@ export class MailStateDb {
     } catch {
       return 0;
     }
+  }
+}
+
+/**
+ * The persistent `DeltaCursorStore`: a watch resumes where it stopped, across restarts.
+ * Nothing constructs it yet; the provider it serves is not wired (see `providers/oauth-graph.ts`).
+ */
+export class MailStateDeltaCursorStore implements DeltaCursorStore {
+  constructor(private readonly state: MailStateDb) {}
+  get(accountId: string, folder: string): DeltaCursor | null {
+    return this.state.getDeltaCursor(accountId, folder);
+  }
+  set(accountId: string, folder: string, cursor: DeltaCursor): void {
+    this.state.setDeltaCursor(accountId, folder, cursor);
+  }
+  clear(accountId: string, folder: string): void {
+    this.state.clearDeltaCursor(accountId, folder);
   }
 }

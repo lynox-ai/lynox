@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
+import { isDangerous, contractGrants, isReviewedHeaderName, normalizeCommand, splitCommandSegments, withoutLeadingOptions, joinLineContinuations, readCommandWords, curlOptionFromWords, CRITICAL_BASH, DANGEROUS_BASH, DANGEROUS_AFTER_CRITICAL_BASH, _checkPatterns, _listUnions } from './permission-guard.js';
 import type { AutonomyLevel, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { WarningPayload } from '../types/tools.js';
@@ -2875,6 +2875,21 @@ describe('isDangerous — capability-contract grant', () => {
     expect(r).toContain('[BLOCKED');
   });
 
+  // A contract grants http_request and nothing else, even when it lists another tool and that
+  // tool's call carries the very url and method the contract grants.
+  it.each(['bash', 'write_file', 'edit_file', 'spawn_agent', 'mail_send', 'run_pipeline'])('never grants %s, whatever the contract lists', (tool) => {
+    const listed: CapabilityContract = { ...contract, grantedTools: ['http_request', tool] };
+    const input = { command: 'curl -sS -X POST https://api.acme.test/v1/reports/monthly -d x', url: 'https://api.acme.test/v1/reports/monthly', method: 'POST' };
+    expect(contractGrants(tool, input, listed)).toBe(false);
+    expect(contractGrants('http_request', input, listed)).toBe(true);
+  });
+
+  it('leaves a bash command that sends data refused unattended, under a contract that lists bash', () => {
+    const bashContract: CapabilityContract = { ...contract, grantedTools: ['http_request', 'bash'] };
+    const input = { command: 'curl -sS -X POST https://api.acme.test/v1/reports/monthly -d x', url: 'https://api.acme.test/v1/reports/monthly', method: 'POST' };
+    expect(isDangerous('bash', input, 'autonomous', undefined, undefined, bashContract)).not.toBeNull();
+  });
+
   it('a denied contract-governed call stamps the contract version onto the audit channel', () => {
     const events: Array<{ contractVersion?: number | undefined }> = [];
     const handler = (m: unknown): void => { events.push(m as { contractVersion?: number | undefined }); };
@@ -3349,5 +3364,160 @@ describe('write_file outside the project — a name that starts with two dots', 
   });
   it('a `..` component still leaves the project (control)', () => {
     expect(isDangerous('write_file', { path: `${process.cwd()}/../elsewhere/file.txt`, content: 'ok' }, 'autonomous')).toContain('write outside project directory');
+  });
+});
+
+describe('curl arguments are read as the shell splits them', () => {
+  const modes: Array<AutonomyLevel | undefined> = ['autonomous', undefined];
+
+  it.each([
+    // An empty expansion moves the option after it to the front of the word.
+    ['curl ${X}-XPOST http://h/'], ['curl $X-XPOST http://h/'], ['curl $@-XPOST http://h/'],
+    ['curl $(true)-XPOST http://h/'], ['curl `true`-XPOST http://h/'], ['curl -o $( (date) )-x.json ${X}-XPOST http://h/'],
+    // A brace list makes words out of literal text.
+    ['curl {-XPOST,} http://h/'], ['curl {--data,a=b} http://h/'], ['curl {-d,a=b} http://h/'], ['curl {-T,f} http://h/'],
+    // An operator whose text puts an option there.
+    ['curl ${X:--XPOST} http://h/'], ['curl ${X--XPOST} http://h/'], ['curl ${X=-XPOST} http://h/'],
+    ['curl ${X:+-XPOST} http://h/'], ['curl ${X/*/-XPOST} http://h/'], ['curl ${X:--d}x http://h/'],
+    ['curl $"-XPOST" http://h/'], ['Y=-d; curl ${X:-$Y} a=b http://h/'],
+    // A value the command sets or computes itself.
+    ['X=-d; curl -s "$X" a=b http://h/'], ['read X; curl "$X" a=b http://h/'], ['. ./vars; curl "$X" a=b http://h/'], ['eval "$S"; curl "$X" a=b http://h/'],
+    ["curl \"$(printf -- '-d')\" a=b http://h/"], ['curl $(printf -- -d) a=b http://h/'], ['curl -s "$(echo -d)" a=b http://h/'],
+    ['curl $(cat opts) http://h/'], ['curl "$(cat opts)" http://h/'],
+    // Option text the expansion completes, or a quoted option name.
+    ['curl -$X a=b http://h/'], ['curl -s$X a=b http://h/'], ['curl --da"ta" a=b http://h/'], ['curl -X"$M" http://h/'],
+    // Continued over a line.
+    ['curl https://h/x \\\n -d a=b'], ['curl https://h/x \\\n ${X}-XPOST'], ['cu\\\nrl ${X}-XPOST http://h/'],
+  ])('asks about %j in both modes', (command) => {
+    for (const mode of modes) expect(isDangerous('bash', { command }, mode), String(mode)).not.toBeNull();
+  });
+
+  it.each([
+    ['curl http://${SERVICE}-backend:8080/healthz'], ['curl https://$ENV-prod.example.com'],
+    ['curl -o "$(date +%F)-dump.json" https://example.com/x'],
+    ["curl 'https://example.com/?sort=title,-created'"], ['curl https://example.com/items?sort=title,-created'],
+    ['curl http://localhost:$PORT/health'], ['curl "$URL"'], ['curl -s "$API/items" | jq .'],
+    ['BASE=https://api.x.test; curl -sS "$BASE/v1/items"'], ['curl "$REG"/v2/$IMG/manifests'],
+    ['curl -H "Authorization: Bearer $TOKEN" https://api.x.test/me'], ['curl -w "%{http_code}" -o /dev/null -s https://x.test'],
+    ['curl -X GET "$URL"'], ["cat <<'EOF'\nit's fine\nEOF\ncurl -s https://x.test"], ["# don't\ncurl -s https://x.test"],
+  ])('leaves %j free in an unattended run', (command) => {
+    expect(isDangerous('bash', { command }, 'autonomous')).toBeNull();
+  });
+
+  it('keeps a command substitution with spaces in it as one word, and stops at `--`', () => {
+    const [cmd] = readCommandWords('curl "$(printf -- \'-d\')" -- -d');
+    expect(cmd!.words).toHaveLength(4);
+    expect(cmd!.words[1]).toEqual([{ kind: 'text', text: '' }, { kind: 'expansion', source: "$(printf -- '-d')" }]);
+    // Words after `--` are no options to curl. (The regex rules still read the written text.)
+    expect(curlOptionFromWords('curl https://h/ -- -d')).toBeNull();
+    expect(curlOptionFromWords('curl https://h/ -d')).not.toBeNull();
+  });
+
+  it('reads a process substitution as one word that is no option', () => {
+    const cmds = readCommandWords('curl <(printf -- -d) http://h/');
+    const plain = cmds.map((c) => c.words.map((w) => w.map((p) => (p.kind === 'text' ? p.text : p.source)).join('')));
+    expect(plain).toEqual([['curl', '<(printf -- -d)', 'http://h/']]);
+    expect(curlOptionFromWords('curl <(printf -- -d) http://h/')).toBeNull();
+  });
+
+  it('does not read a heredoc body or a comment as a command, and drops a redirection target', () => {
+    const cmds = readCommandWords("cat <<EOF >out\ncurl -d x\nEOF\n# curl -d y\ncurl -s https://h 2>&1 >/dev/null");
+    const plain = cmds.map((c) => c.words.map((w) => w.map((p) => (p.kind === 'text' ? p.text : p.source)).join('')));
+    expect(plain).toEqual([['cat'], ['curl', '-s', 'https://h']]);
+  });
+
+  it('asks when a quote never closes in a command that names curl', () => {
+    expect(readCommandWords("curl 'x").at(-1)!.complete).toBe(false);
+    expect(isDangerous('bash', { command: "curl -s https://h/ 'x" }, 'autonomous')).not.toBeNull();
+  });
+
+  it('reads a positional parameter as set by the command once `set` appears', () => {
+    expect(curlOptionFromWords('set -- -d a=b; curl "$1" "$2" http://h/')).not.toBeNull();
+    expect(curlOptionFromWords('curl "$1" http://h/')).toBeNull();
+  });
+
+  it('reads the arguments after `&>file` as the same command', () => {
+    expect(readCommandWords('curl -s &>/dev/null -d a=b http://h/').map((c) => c.words.length)).toEqual([5]);
+    expect(curlOptionFromWords('curl -s &>/dev/null -d a=b http://h/')).not.toBeNull();
+  });
+
+  it('reads an indirection as a name the command sets', () => {
+    expect(curlOptionFromWords('curl "${!X}" http://h/')).not.toBeNull();
+    // Control: the same name, nothing that sets it.
+    expect(curlOptionFromWords('curl "$X" http://h/')).toBeNull();
+  });
+
+  it('reads on after a `--` that ends what it took for curl\'s arguments', () => {
+    // The first word named curl is not the command here; the second one is.
+    expect(curlOptionFromWords('x curl -- curl -d a=b http://h/')).not.toBeNull();
+    expect(curlOptionFromWords('x curl -- curl -s http://h/')).toBeNull();
+  });
+
+  it('names the stronger reason when an unattended rule asks too', () => {
+    expect(isDangerous('bash', { command: 'eval "$CMD"; curl ${X:--d} a=b http://h/' }, 'autonomous')).toContain('eval (arbitrary code execution)');
+  });
+
+  it('reads curl\'s arguments once, however many curl words follow', () => {
+    const start = performance.now();
+    curlOptionFromWords('curl '.repeat(40_000) + 'http://h/');
+    expect(performance.now() - start).toBeLessThan(2_000);
+  });
+
+  it('looks for the end of a brace list within a bound, and leaves a longer one unread', () => {
+    const start = performance.now();
+    readCommandWords('curl ' + '{'.repeat(40_000));
+    expect(performance.now() - start).toBeLessThan(2_000);
+    expect(readCommandWords('curl {' + 'a,'.repeat(1_000) + 'b} http://h/').at(-1)!.complete).toBe(false);
+    expect(readCommandWords('curl {' + 'a,'.repeat(100) + 'b} http://h/').at(-1)!.complete).toBe(true);
+  });
+
+  it('reads a run of newlines once when it looks for shell text read from elsewhere', () => {
+    // 100 names and a run of newlines: with `\s*` after a newline anchor, each name took seconds.
+    const names = Array.from({ length: 100 }, (_, i) => `"$V${i}"`).join(' ');
+    const cmd = `curl ${names} http://h/` + '\n'.repeat(10_000);
+    const start = performance.now();
+    expect(curlOptionFromWords(cmd)).toBeNull();
+    expect(performance.now() - start).toBeLessThan(1_000);
+    // The check itself still reads every place a command starts.
+    expect(curlOptionFromWords('\n\n  source ./vars\ncurl "$X" a=b http://h/')).not.toBeNull();
+  });
+
+  it('looks each name up once, however often the command repeats it', () => {
+    // `$$` is a positional-style name; each one used to scan the whole command again.
+    const cmd = 'curl ' + '$'.repeat(200_000) + ' http://h/';
+    const start = performance.now();
+    curlOptionFromWords(cmd);
+    expect(performance.now() - start).toBeLessThan(2_000);
+  });
+
+  it('asks once the name lookups have read past their budget, instead of reading on', () => {
+    // One name, assigned plain text thousands of times: each assignment's value is read.
+    const many = 'X=a; '.repeat(20_000) + 'curl "$X" http://h/';
+    expect(curlOptionFromWords(many)).not.toBeNull();
+    // The same shape, short, stays free: the budget is what asks, not the shape.
+    expect(curlOptionFromWords('X=a; '.repeat(20) + 'curl "$X" http://h/')).toBeNull();
+    // Thousands of names the command never sets: each lookup scans the whole command.
+    const names = Array.from({ length: 5_000 }, (_, i) => `"$V${i}"`).join(' ');
+    expect(curlOptionFromWords(`curl ${names} http://h/`)).not.toBeNull();
+    expect(curlOptionFromWords('curl "$V1" "$V2" http://h/')).toBeNull();
+  });
+});
+
+
+describe('contractGrants on a GraphQL endpoint', () => {
+  const contract = {
+    version: 7, grantedTools: ['http_request'], httpMethods: ['GET', 'HEAD', 'POST', 'OPTIONS'],
+    hostPatterns: ['h.example'], pathPatterns: ['/graphql', '/v1/*'], paramConstraints: {},
+  } as const;
+  const grants = (method: string, url: string): boolean => contractGrants('http_request', { method, url }, contract as never);
+
+  it.each(['POST', 'OPTIONS'])('grants no %s to a GraphQL path, whatever the contract lists', (method) => {
+    expect(grants(method, 'https://h.example/graphql')).toBe(false);
+  });
+
+  it('CONTROL: grants a GET and a HEAD there, and a POST to a REST path on the host', () => {
+    expect(grants('GET', 'https://h.example/graphql')).toBe(true);
+    expect(grants('HEAD', 'https://h.example/graphql')).toBe(true);
+    expect(grants('POST', 'https://h.example/v1/a')).toBe(true);
   });
 });

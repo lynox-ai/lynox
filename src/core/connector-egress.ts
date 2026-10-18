@@ -96,6 +96,38 @@ export async function googleFetch(
 }
 
 /**
+ * The hosts the engine fetches for a Microsoft 365 grant: Graph and nothing else.
+ *
+ * `login.microsoftonline.com` is not here, and that is the point: the control plane does
+ * discovery and every token exchange, so the engine never talks to the token endpoint
+ * (PRD-M365-MAILBOX §3.4). National clouds are out of scope. Exact-match like
+ * {@link GOOGLE_API_HOSTS}: a hop off this host is refused under `guarded`.
+ */
+export const GRAPH_API_HOSTS: ReadonlySet<string> = new Set([
+  'graph.microsoft.com',
+]);
+
+/**
+ * A Microsoft Graph call on behalf of the tenant's Microsoft grant. Same shape and the same
+ * redirect handling as {@link googleFetch}, with its own host set — a Graph call never rides
+ * on the Google set, and the mail provider reaches Graph only through here, never through
+ * `http_request` (whose mail-host refusal in `bulk-mail-targets.ts` stays as it is).
+ */
+export async function graphFetch(
+  url: string,
+  init: RequestInit,
+  ctx: HostPolicyContext | undefined,
+): Promise<Response> {
+  const { response } = await fetchWithValidatedRedirects(
+    url,
+    init,
+    { surface: 'connector', hosts: GRAPH_API_HOSTS },
+    ctx,
+  );
+  return response;
+}
+
+/**
  * A call to this instance's own control plane.
  *
  * ⚠ It does NOT follow redirects, and that is the reason it is not built on

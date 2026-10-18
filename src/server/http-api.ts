@@ -28,14 +28,14 @@ import {
 import { derivePresetEndpoints } from '../core/oauth-presets.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
-import { mandateMayConnect, mayServeAsClientId, secretsForProfile, withheldFrom } from '../core/profile-secret-view.js';
+import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, withheldFrom } from '../core/profile-secret-view.js';
 import { tokenFingerprint } from '../core/oauth-refresh-failure.js';
 import { buildAuthorizeUrl, decideConnect, isRefusal } from './oauth-connect-decision.js';
 import { Engine } from '../core/engine.js';
 import type { KnowledgeEntry, KnowledgeStatus } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
-import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
+import { stripUntrustedSeparators, attachmentDisposition, sanitizeUploadFilename } from '../core/sanitize.js';
 import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError, MAX_EXTRACTED_CHARS } from '../core/document-extract.js';
 import { ambientCrossSiteRefusal, crossSiteWriteRefusal, droppedAllowedOrigins, droppedAllowedOriginWarning, hostRefusal, isOwnOriginByAddress, normalizeAllowedOrigins } from './cross-site-write.js';
@@ -101,9 +101,10 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -1013,6 +1014,20 @@ function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
   const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
   return proto === 'https';
 }
+
+/**
+ * Why an external run is not approved or resumed for more than one target, and what to do
+ * next. The model reads refusals and takes a rule from them, so the sentence says exactly
+ * when a run stays at one target (`probeHolds`): a probe is per host, verb and kind of entry,
+ * and an unchecked change needs a probe of its own run, written to an unchecked target.
+ */
+export const BULK_PROBE_REQUIRED =
+  'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the ' +
+  'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes ' +
+  'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, ' +
+  'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts ' +
+  'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes ' +
+  'in a run of their own.';
 
 function errorResponse(
   res: ServerResponse,
@@ -7639,7 +7654,7 @@ export class LynoxHTTPApi {
         // there was none, which would have dropped `origin` for every keyless call: the
         // cheapest way to lose a security decision is to make it the sibling of an optional one.
         result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
-          origin: { kind: 'library' },
+          origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
             // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before
@@ -8306,8 +8321,8 @@ export class LynoxHTTPApi {
       nothing_to_undo: [409, 'The bulk run has no applied target left to undo.'],
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
-      mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Mail leaves this instance only once it is confirmed in the chat: send it from the chat, and change a mail setting at the provider itself.'],
-      probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
+      mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Send mail from the chat, where lynox asks before each email, and change a mail setting at the provider itself.'],
+      probe_required: [409, BULK_PROBE_REQUIRED],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
@@ -8318,8 +8333,43 @@ export class LynoxHTTPApi {
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
-    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed' }>(status: T): T & { checksumNote?: string } =>
-      status.checksumBinding === 'unkeyed' ? { ...status, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : status;
+    /** A tenant whose model key the control plane does not supply: its judged runs report one
+     *  metered cost per model call, which are not debited and pile up until the hook drops them
+     *  — so such a tenant does not start one yet (PRD bulk-loop §3.1). */
+    const bulkJudgeOwnKey = (): boolean => {
+      const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
+      return Boolean(billingTier) && !cpSuppliesLLMKey(billingTier!);
+    };
+    /** Which halt a run stands at, by name: the owner's page words its own sentences on the
+     *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkHaltKey = (haltReason: string | null): string | null =>
+      haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
+    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
+      const named = { ...status, haltKey: bulkHaltKey(status.haltReason) };
+      return status.checksumBinding === 'unkeyed' ? { ...named, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : named;
+    };
+    /** When a run that stands still is picked up again, from the lease of the trigger it runs
+     *  under (the read phase's, or the write phase's); null when nothing waits on a lease. */
+    const bulkResumesAt = (runId: string): string | null => {
+      const loop = engine.getWorkerLoop();
+      if (!loop) return null;
+      return loop.resumesAt(bulkPreviewTriggerId(runId)) ?? loop.resumesAt(`bulk-${runId}`);
+    };
+    /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
+    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
+      // Offered only where confirm-probe can succeed: a target found already holding its
+      // value was not written, and a run still writing has not stopped at its probe.
+      if (status.probeConfirmed) return null;
+      const key = ledger.probeKey(status.id);
+      const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
+      if (!written) return null;
+      const fieldsOf = (image: { absent: boolean; value?: unknown }): Record<string, unknown> =>
+        !image.absent && image.value !== null && typeof image.value === 'object' && !Array.isArray(image.value) ? image.value as Record<string, unknown> : {};
+      const before = fieldsOf(written.expected);
+      const after = fieldsOf(written.after);
+      const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
+      return { key: written.key, fields };
+    };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
@@ -8363,9 +8413,14 @@ export class LynoxHTTPApi {
       // bulk-loop §3.1) — and the model it would be judged on now (§4).
       const judgeRule = status.judge !== null && isOwnerPrincipal(this._principalOf(req)) ? ledger.getJudgeRuleForOwner(params['id']!) : null;
       let judgeModel: string | null = null;
+      // The judge as the owner reads it before the start: the provider that serves the call and
+      // the model's name from the catalog, the same name the settings show.
+      let judgeServedBy: { provider: string; label: string } | null = null;
       if (status.judge !== null) {
-        const { judgeModelId } = await import('../core/bulk-judge.js');
+        const { judgeModelId, JUDGE_MODELS } = await import('../core/bulk-judge.js');
         judgeModel = judgeModelId(engine.getUserConfig(), status.judge.tier, getActiveProvider());
+        const axis = judgeModel === null ? undefined : Object.entries(JUDGE_MODELS).find(([, id]) => id === judgeModel)?.[0];
+        if (axis !== undefined && judgeModel !== null) judgeServedBy = { provider: axis, label: modelCapability(judgeModel)?.uiLabel ?? judgeModel };
       }
       // The checksum decrypts every target; it is only needed where it can be presented —
       // approving a preview or resuming an approved run.
@@ -8387,6 +8442,18 @@ export class LynoxHTTPApi {
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
+        judgeServedBy,
+        // The start route refuses every judged start on such an instance (judge_unavailable); the
+        // page says so before the click instead of after it.
+        judgeOwnKey: status.judge !== null && bulkJudgeOwnKey(),
+        // A run whose process is gone stands still until its lease lapses; the owner sees when.
+        resumesAt: bulkResumesAt(params['id']!),
+        // The one target an external run wrote before its probe is confirmed: what the owner
+        // opens at the provider, and the fields the write changed there.
+        probe: bulkProbeOf(status, ledger),
+        // What an undo would take back now; for an external run that includes a failed write,
+        // which may have landed although its answer never came back.
+        undoable: ledger.countUndoable(status.id),
       });
     }, READS));
 
@@ -8446,8 +8513,7 @@ export class LynoxHTTPApi {
           // A judged run reports one metered cost per model call. On a tenant whose model key the
           // control plane does not supply, those reports are not debited and pile up until the
           // hook drops them — so such a tenant does not start one yet (PRD bulk-loop §3.1).
-          const billingTier = readEnvAlias('LYNOX_BILLING_TIER');
-          if (billingTier && !cpSuppliesLLMKey(billingTier)) {
+          if (bulkJudgeOwnKey()) {
             errorResponse(res, 409, 'A bulk run with a judge cannot be started on an instance with its own model key yet.', 'judge_unavailable');
             return;
           }
@@ -10304,6 +10370,12 @@ export class LynoxHTTPApi {
       const vetting = vetTokenEndpoint(endpoints.tokenUrl, profile.custom_endpoint_ack);
       if (isTokenEndpointRefused(vetting)) {
         sendOAuthHtml(res, 409, 'This connection points somewhere this engine may not send credentials. Nothing was changed.');
+        return;
+      }
+
+      // A token is never a client id or secret: asked on the names, before either is read.
+      if ([oauth.client_id_key, oauth.client_secret_key].some((n) => typeof n === 'string' && !slotMayReach(apiStore, n, 'client', endpoints.tokenUrl, profile))) {
+        sendOAuthHtml(res, 409, 'This connection names an OAuth token as its client credentials, which this engine does not send. Nothing was changed.');
         return;
       }
 
@@ -12544,6 +12616,20 @@ export class LynoxHTTPApi {
       return resolveFileAreaPath(filePath);
     }
 
+    /** Sends `stream` as an answer whose Content-Length is `size`. A file that shrank after its
+     *  size was read would end the answer short, and the client would wait for bytes that never
+     *  come: the answer is broken off instead. pipeline also destroys the stream, and so closes
+     *  the fd, when the client goes away. */
+    async function sendExactly(stream: NodeJS.ReadableStream, res: ServerResponse, size: number): Promise<void> {
+      const { pipeline, Transform } = await import('node:stream');
+      let seen = 0;
+      const count = new Transform({
+        transform(chunk: Buffer, _enc, done) { seen += chunk.length; done(null, chunk); },
+        flush(done) { done(seen < size ? new Error('The file shrank during the download') : null); },
+      });
+      pipeline(stream, count, res, () => {});
+    }
+
     this.addStatic('user', 'GET /api/files/download', async (req, res) => {
       const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
       const filePath = url.searchParams.get('path');
@@ -12563,13 +12649,13 @@ export class LynoxHTTPApi {
             try {
               res.writeHead(200, {
                 'Content-Type': 'application/octet-stream',
-                'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(basename(target.shown))}"`,
+                'Content-Disposition': attachmentDisposition(basename(target.shown)),
                 'Content-Length': size,
               });
               // Bounded by the size answered in Content-Length, also when the file grows.
               if (size > 0) stream = createReadStream('', { fd, start: 0, end: size - 1, autoClose: true });
             } catch (err) {
-              // Nothing owns the fd yet (a header Node refuses, e.g. a name it cannot carry).
+              // Nothing owns the fd yet (a header Node refuses).
               closeSync(fd);
               throw err;
             }
@@ -12577,9 +12663,7 @@ export class LynoxHTTPApi {
               closeSync(fd);
               res.end();
             } else {
-              // pipeline destroys the stream, and so closes the fd, when the client goes away.
-              const { pipeline } = await import('node:stream');
-              pipeline(stream, res, () => {});
+              await sendExactly(stream, res, size);
             }
             return;
           }
@@ -12595,10 +12679,12 @@ export class LynoxHTTPApi {
         const name = basename(resolved);
         res.writeHead(200, {
           'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${sanitizeAttachmentFilename(name)}"`,
+          'Content-Disposition': attachmentDisposition(name),
           'Content-Length': st.size,
         });
-        createReadStream(resolved).pipe(res);
+        // Bounded by the size answered in Content-Length, also when the file grows.
+        if (st.size === 0) { res.end(); return; }
+        await sendExactly(createReadStream(resolved, { start: 0, end: st.size - 1 }), res, st.size);
       } catch {
         errorResponse(res, 404, 'File not found');
       }

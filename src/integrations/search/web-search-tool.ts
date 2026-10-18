@@ -7,6 +7,8 @@ import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { recordSessionCost } from '../../core/session-budget.js';
 import { rerankSearchResults } from './search-reranker.js';
+import { delegatedRedirects, httpTarget, outwardReadRecorder } from '../../core/audit-log.js';
+import { isOwnerPrincipal } from '../../core/request-principal.js';
 
 interface WebSearchInput {
   action: 'search' | 'read';
@@ -97,6 +99,9 @@ const API_SETUP_AGENT_REMINDER = `
 
 export function createWebSearchTool(provider: SearchProvider): ToolEntry<WebSearchInput> {
   return {
+    // A read of a page names it, host and path. A search names only that it searched: its
+    // text can carry a customer's name, and the trail holds no content.
+    outwardRead: (input) => (input.action === 'read' && typeof input.url === 'string' ? httpTarget('GET', input.url) : 'search'),
     definition: {
       name: 'web_research',
       description: `Search the web or read a URL. Provider: ${provider.name}.
@@ -192,7 +197,9 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
             recordSessionCost(agent.sessionCounters, reranked.abortedCost.upperBoundUsd);
           }
           results = reranked.results;
-          results = await enrichResults(results, ctx);
+          // A delegated session gets the results as the engine found them: the pages behind
+          // them would be reads whose hosts no row named before they were sent.
+          if (isOwnerPrincipal(agent.principal)) results = await enrichResults(results, ctx);
           const formatted = formatSearchResults(results);
           if (results.length === 0) return formatted;
           const { wrapUntrustedData } = await import('../../core/data-boundary.js');
@@ -213,7 +220,7 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
           throw new ToolSoftFailure('Error: "url" is required for action "read".', 'missing url');
         }
         try {
-          const result = await extractContent(input.url, undefined, ctx);
+          const result = await extractContent(input.url, undefined, ctx, delegatedRedirects(outwardReadRecorder(agent, 'web_research:redirect')));
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
           if (result.truncated) parts.push('(Content truncated)');
           parts.push('', result.content);

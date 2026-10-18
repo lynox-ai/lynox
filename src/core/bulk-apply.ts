@@ -134,6 +134,28 @@ export interface BulkEffectDeps {
    * the signal is not read at all.
    */
   ownerStopped?: (() => boolean) | undefined;
+  /**
+   * The actor trail of this call of the run, or null for a run that writes none (PRD
+   * customer-granted-operator-access §3.9). Required, so no caller leaves it out by accident:
+   * the engine builds one for an external run a delegated session planned, and passes null
+   * for every other.
+   */
+  trailFor: (run: BulkRunForApply) => BulkRunTrail | null;
+}
+
+/**
+ * The trail of one call of a run: a row before the call reads or writes anything, and one when
+ * it ends, with how many targets it wrote. A run that is resumed, or waits for targets another
+ * loop holds, is written in several calls, and each has its pair, all with the run's id.
+ */
+export interface BulkRunTrail {
+  /** Writes the row before the call. Throws when it cannot be written: the call then sends nothing. */
+  begin(): void;
+  /**
+   * Writes the row after the call. Never throws: a row before stands alone if this one fails.
+   * The counts are `null` when the ledger could not be read for them, which is not "none".
+   */
+  end(outcome: BulkEffectOutcome['status'] | 'error', written: number | null, failed: number | null): void;
 }
 
 /**
@@ -141,6 +163,31 @@ export interface BulkEffectDeps {
  * halted, inside its approval window, and still matching the checksum approved.
  */
 export async function runBulkEffect(runId: string, effect: BulkEffect, deps: BulkEffectDeps): Promise<BulkEffectOutcome> {
+  // Set once the row before the call is written; every way out of the call then writes the
+  // row after it, a thrown error included.
+  let opened: { trail: BulkRunTrail; applied: number; failed: number } | null = null;
+  let outcome: BulkEffectOutcome | undefined;
+  try {
+    outcome = await applyRunEffect(runId, effect, deps, (trail, run) => {
+      opened = { trail, applied: run.applied, failed: run.failed };
+    });
+    return outcome;
+  } finally {
+    const o = opened as { trail: BulkRunTrail; applied: number; failed: number } | null;
+    if (o !== null) {
+      // The counts are read here, where the ledger may already be failing: a read that throws
+      // must neither drop the row nor turn a finished call into an error, and the row then says
+      // the counts are unknown rather than zero.
+      let after: { applied: number; failed: number } | null;
+      try { after = deps.ledger.getRunForApply(runId) ?? null; } catch { after = null; }
+      o.trail.end(outcome?.status ?? 'error', after === null ? null : after.applied - o.applied, after === null ? null : after.failed - o.failed);
+    }
+  }
+}
+
+async function applyRunEffect(
+  runId: string, effect: BulkEffect, deps: BulkEffectDeps, opened: (trail: BulkRunTrail, run: BulkRunForApply) => void,
+): Promise<BulkEffectOutcome> {
   const { ledger } = deps;
   const now = deps.now ?? Date.now;
   const run = ledger.getRunForApply(runId);
@@ -167,6 +214,18 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     ledger.halt(runId, BULK_HALT_REASONS.unavailable);
     return { status: 'refused', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.unavailable}.`) };
   }
+  // Before anything of this call is read or written: a run whose row cannot be written does
+  // not run.
+  const trail = deps.trailFor(run);
+  if (trail !== null) {
+    try {
+      trail.begin();
+    } catch {
+      ledger.halt(runId, BULK_HALT_REASONS.runUnrecorded);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.runUnrecorded}.`) };
+    }
+    opened(trail, run);
+  }
   ledger.setPhase(runId, ['approved'], 'writing');
 
   const writingTotal = ledger.countWriting(runId);
@@ -175,6 +234,12 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   let consecutive = 0;
   // A target passed over because the maximum is reached: the run then ends halted on it.
   let cappedOut = false;
+  // …and the cap was the probe's, not the approval's: the halt names the probe.
+  let cappedByProbe = false;
+  // The approval and every resume check the probe, but a run approved wide under an earlier
+  // rule, or whose probe stopped holding since, would still be written wide: the effect checks
+  // it again and writes one target at most without a probe that holds.
+  const probeCap = ledger.probeHoldsFor(runId) ? null : 1;
 
   for (const seq of pending) {
     // Let other work (and another loop on the same ledger) in between targets.
@@ -194,8 +259,10 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
     // to is passed over rather than stopped in front of, so a later retry still runs.
-    if (current.maxTargets !== null && ledger.sentCount(runId) >= current.maxTargets && !ledger.wasSent(runId, seq)) {
+    const cap = probeCap === null ? current.maxTargets : Math.min(current.maxTargets ?? probeCap, probeCap);
+    if (cap !== null && ledger.sentCount(runId) >= cap && !ledger.wasSent(runId, seq)) {
       cappedOut = true;
+      if (probeCap !== null && (current.maxTargets === null || current.maxTargets > probeCap)) cappedByProbe = true;
       continue;
     }
     if (now() > deadline) {
@@ -243,8 +310,9 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
     // Another loop may have written or failed the rest: with no target left to write, the
     // run is finished, not stopped at its maximum.
     if (cappedOut) {
-      ledger.halt(runId, BULK_HALT_REASONS.maxTargets);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.maxTargets}.`) };
+      const reason = cappedByProbe ? BULK_HALT_REASONS.probeRequired : BULK_HALT_REASONS.maxTargets;
+      ledger.halt(runId, reason);
+      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
     }
     // The stop that came during the loop's last write, with the rest held by another loop:
     // no pass between targets is left to read it, and `pending` would re-arm the trigger and

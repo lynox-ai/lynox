@@ -700,6 +700,8 @@ export async function runSavedWorkflow(
      * only a caller that knows how the run was started can answer.
      */
     decideGrant?: ((planned: PlannedPipeline) => GrantDecision) | undefined;
+    /** How the run was started (`startedVia` of its origin), recorded beside the grant id when it runs under one. */
+    startedVia?: string | undefined;
     /** The run's id, when the caller already holds a claim keyed by it (the HTTP route).
      *  Absent for the cron executor, which holds no claim and lets the run mint its own. */
     runId?: string | undefined;
@@ -773,6 +775,12 @@ export async function runSavedWorkflow(
   if (grant.contract !== undefined && !sameBoundValues(bound.params, grant.boundParams)) {
     grant = { contract: undefined, note: 'Ran without its write grant: it was started with other values than the ones the grant was accepted with.' };
   }
+  // A grant whose start nobody named could not be recorded fully (`pipeline_runs.started_via`),
+  // so it does not run either. Every caller that passes `decideGrant` passes `startedVia` with it
+  // (`runGuardedSavedWorkflow`); this keeps a future one from recording half the attribution.
+  if (grant.contract !== undefined && runtime?.startedVia === undefined) {
+    grant = { contract: undefined, note: 'Ran without its write grant: this way of starting it does not say how the run was started.' };
+  }
   // Asked again here and not only when the grant is accepted: a grant stamped before the
   // check existed carries its values unchecked, and its stamp still matches.
   if (grant.contract !== undefined && hiddenInBoundValues(grant.boundParams) !== null) {
@@ -827,6 +835,8 @@ export async function runSavedWorkflow(
       // defaults) stop a runaway from inside the run.
       capabilityContract: grant.contract,
       isAcceptedParam,
+      // How it was started, written beside the contract's grant id on the run row.
+      startedVia: grant.contract !== undefined ? runtime?.startedVia : undefined,
       observeToolCall: collectWriteNotes(writeNotes),
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
@@ -854,7 +864,8 @@ export async function runSavedWorkflow(
       .map(o => ({ stepId: o.stepId, error: o.error, costUsd: o.costUsd }));
     return {
       ok: true, runId: state.runId, status: state.status, costUsd, stepErrors, error: state.error,
-      ...(grant.note !== null ? { grantNote: grant.note } : {}),
+      // The decision's note, or the runner's when it had to drop the contract (an unrecorded run).
+      ...(grant.note !== null ? { grantNote: grant.note } : state.grantNote !== undefined ? { grantNote: state.grantNote } : {}),
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {

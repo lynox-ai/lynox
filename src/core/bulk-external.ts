@@ -66,7 +66,9 @@ export type ExternalRead =
   /** The profile's own rate limit is spent; nothing was sent. */
   | { kind: 'rate_limited' }
   /** 429: wait this long (capped) before the next request to the host. */
-  | { kind: 'retry_after'; ms: number };
+  | { kind: 'retry_after'; ms: number }
+  /** A read of a run a delegated session planned whose trail row could not be written: not sent. */
+  | { kind: 'unrecorded' };
 
 /** Longest a `Retry-After` is honoured for within one tick (plan §6 Q3(c)). */
 export const BULK_RETRY_AFTER_CAP_MS = 60_000;
@@ -327,6 +329,14 @@ export interface ExternalClientDeps {
    * form may set off. Required, so no caller can build a client that skips the check.
    */
   connectedAccount: (url: string) => boolean;
+  /**
+   * For a run a delegated session planned: records a GET in the actor trail before it is sent,
+   * true when the row was written (PRD customer-granted-operator-access §3.9). A read whose row
+   * cannot be written is not sent, and the run halts (`unrecorded`). `null` for the owner's own
+   * run, whose reads leave no row. Required, so no caller can build a client that decides this
+   * by leaving it out.
+   */
+  recordRead: ((url: string) => boolean) | null;
   now?: () => number;
 }
 
@@ -395,6 +405,8 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     if (!(await deps.attach(url, headers, gated))) return { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
+    // Last before it leaves, so the row stands for a request that is sent.
+    if (method === 'GET' && deps.recordRead !== null && !deps.recordRead(url)) return { kind: 'unrecorded' };
     const timeout = AbortSignal.timeout(BULK_REQUEST_TIMEOUT_MS);
     let res: Response;
     onSend?.();
@@ -500,6 +512,7 @@ export function externalWriter(client: ExternalClient, opts: {
       case 'unauthorized': throw new BulkWriterHalt(BULK_HALT_REASONS.unauthorized);
       case 'blocked': throw new BulkWriterHalt(BULK_HALT_REASONS.blocked);
       case 'not_granted': throw new BulkWriterHalt(BULK_HALT_REASONS.contract);
+      case 'unrecorded': throw new BulkWriterHalt(BULK_HALT_REASONS.unrecorded);
       case 'secret': throw new BulkSecretError();
       case 'redirect': throw new BulkRedirectError();
       default: return got;

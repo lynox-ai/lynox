@@ -63,7 +63,7 @@ function formatStatus(s: BulkRunStatus): string {
       'such a field: leave it out, or make that change in the provider\'s own interface.');
   }
   if (s.judge !== null) {
-    lines.push(`A model (${s.judge.tier} tier) decides each target's new values with the run's rule: ` +
+    lines.push(`A model decides each target's new values with the run's rule: ` +
       `${String(s.judge.unjudged)} target(s) without a verdict yet. The verdicts are only in the run's ledger, for the user to review.`);
   }
   // Model spend exists only on a run with a judge; every other run would print "$0" here.
@@ -213,7 +213,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
           properties: {
             rule: { type: 'string', description: 'What to decide for each target, in plain words (up to 4000 characters).' },
             schema: { type: 'object', description: 'The fields the model sets, field name → {type: "string", maxLength} or {type: "string", enum: [...]} or {type: "number"|"integer"} or {type: "boolean"}. No pattern, no lists or nested objects; at most 20 fields.' },
-            tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Model tier. Default fast.' },
+            tier: { type: 'string', enum: ['fast', 'balanced', 'deep'], description: 'Which tier places the call (its provider, its limit). The model that judges is set per provider, not by the tier. Default fast.' },
           },
           required: ['rule', 'schema'],
         },

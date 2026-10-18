@@ -27,6 +27,9 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
   /^GOOGLE_OAUTH_/,
+  // The Microsoft grant (`microsoft/vault-keys.ts`): an access token and the
+  // control plane's sealed handle. Same class as the Google grant above.
+  /^MICROSOFT_OAUTH_/,
   // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials. They
   // are resolved engine-internally — never an agent tool-input ref, which is what
   // keeps them on this list. Operators supply them per deployment.

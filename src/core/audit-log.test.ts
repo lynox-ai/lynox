@@ -3,7 +3,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EngineDb } from './engine-db.js';
-import { AuditLog, httpTarget, requestOutcomePhase, requestPathTarget } from './audit-log.js';
+import { AuditLog, OutwardReadUnrecorded, delegatedRedirects, httpTarget, namedTarget, outwardReadRecorder, requestOutcomePhase, requestPathTarget } from './audit-log.js';
+import { OWNER_PRINCIPAL } from './request-principal.js';
+import { createMailReadTool } from '../integrations/mail/tools/mail-read.js';
+import { createMailSearchTool } from '../integrations/mail/tools/mail-search.js';
+import { createMailTriageTool } from '../integrations/mail/tools/mail-triage.js';
+import { createWebSearchTool } from '../integrations/search/web-search-tool.js';
+import type { SearchProvider } from '../integrations/search/search-provider.js';
+import { calendarReadTool } from '../tools/builtin/calendar.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { ToolEntry } from '../types/index.js';
 import type { MailRegistry } from '../integrations/mail/tools/registry.js';
@@ -222,5 +229,121 @@ describe('requestOutcomePhase', () => {
       [500, 'failed'], [503, 'failed'], [0, 'failed'],
     ];
     expect(cases.map(([status]) => [status, requestOutcomePhase(status)])).toEqual(cases);
+  });
+});
+
+describe('what a tool call reads outside the instance (ToolEntry.outwardRead)', () => {
+  const noAuth = (): null => null;
+  const mail = {} as MailRegistry;
+  const provider = { name: 'test', search: async () => [] } as unknown as SearchProvider;
+  const tools: Array<ToolEntry<never>> = [
+    httpRequestTool, apiSetupTool, createWebSearchTool(provider), calendarReadTool,
+    createSheetsTool(noAuth), createDocsTool(noAuth), createDriveTool(noAuth), createCalendarTool(noAuth),
+    createMailReadTool(mail), createMailSearchTool(mail), createMailTriageTool(mail), createMailReplyTool(mail), createMailSendTool(mail),
+  ] as unknown as Array<ToolEntry<never>>;
+  const target = (name: string, input: Record<string, unknown>): string | null => {
+    const t = tools.find(x => x.definition.name === name)!;
+    return t.outwardRead ? t.outwardRead(input as never) : null;
+  };
+  const SECRET_TEXT = 'Customer Muster AG';
+
+  it('names an http read by method, host and path, and leaves a write to its own row', () => {
+    expect(target('http_request', { url: 'https://u:p@api.example.invalid/v1/a?q=x#f' })).toBe('GET api.example.invalid/v1/a');
+    expect(target('http_request', { url: 'https://api.example.invalid/v1/a', method: 'HEAD' })).toBe('HEAD api.example.invalid/v1/a');
+    expect(target('http_request', { url: 'https://api.example.invalid/v1/a', method: 'POST' })).toBeNull();
+    expect(target('http_request', { url: 'https://api.example.invalid/?_method=PUT' }), 'a GET that names a write is a write').toBeNull();
+  });
+
+  it('names the page api_setup bootstraps from, and nothing for its other actions', () => {
+    expect(target('api_setup', { action: 'bootstrap', docs_url: 'https://docs.example.invalid/api?x=1' })).toBe('GET docs.example.invalid/api');
+    expect(target('api_setup', { action: 'bootstrap', openapi_url: 'https://docs.example.invalid/openapi.json' })).toBe('GET docs.example.invalid/openapi.json');
+    expect(target('api_setup', { action: 'bootstrap', docs_url: 'https://a.example.invalid/d', openapi_url: 'https://b.example.invalid/o' }), 'the docs page first, as the handler').toBe('GET a.example.invalid/d');
+    expect(target('api_setup', { action: 'list' })).toBeNull();
+    expect(target('api_setup', { action: 'fetch_token' })).toBeNull();
+  });
+
+  it('names a page web_research reads, and only that it searched — never the search text', () => {
+    expect(target('web_research', { action: 'read', url: 'https://news.example.invalid/a?ref=x' })).toBe('GET news.example.invalid/a');
+    expect(target('web_research', { action: 'search', query: SECRET_TEXT })).toBe('search');
+  });
+
+  it('names mailboxes and messages, never what was searched for', () => {
+    expect(target('mail_read', { account: 'work', folder: 'INBOX', uid: 7 })).toBe('account=work folder=INBOX uid=7');
+    expect(target('mail_reply', { uid: 7, body: SECRET_TEXT })).toBe('uid=7');
+    expect(target('mail_search', { account: 'work', text: SECRET_TEXT, from: SECRET_TEXT, subject: SECRET_TEXT })).toBe('search account=work');
+    expect(target('mail_search', { text: SECRET_TEXT })).toBe('search');
+    expect(target('mail_triage', { account: 'work', folder: 'INBOX' })).toBe('list account=work folder=INBOX');
+    expect(target('mail_send', { to: 'x@example.invalid' }), 'a send reads no third party\'s data').toBeNull();
+  });
+
+  it('names Google reads by action and id — a drive search without its query — and leaves writes to their rows', () => {
+    expect(target('google_calendar', { action: 'list_events' })).toBe('list_events calendar=primary');
+    expect(target('google_calendar', { action: 'free_busy', calendars: ['a@example.invalid', 'b@example.invalid'] })).toBe('free_busy calendars=a@example.invalid,b@example.invalid');
+    expect(target('google_calendar', { action: 'create_event' })).toBeNull();
+    expect(target('google_docs', { action: 'read', document_id: 'd1' })).toBe('read document=d1');
+    expect(target('google_docs', { action: 'append', document_id: 'd1', content: SECRET_TEXT }), 'append reads the document first').toBe('append document=d1');
+    expect(target('google_docs', { action: 'replace', document_id: 'd1' })).toBeNull();
+    expect(target('google_drive', { action: 'search', query: SECRET_TEXT })).toBe('search');
+    expect(target('google_drive', { action: 'read', file_id: 'f1' })).toBe('read file=f1');
+    expect(target('google_drive', { action: 'list', folder_id: 'p1' })).toBe('list folder=p1');
+    expect(target('google_drive', { action: 'move', file_id: 'f1' }), 'move reads the folders first').toBe('move file=f1');
+    expect(target('google_drive', { action: 'share', file_id: 'f1' })).toBeNull();
+    expect(target('google_sheets', { action: 'read', spreadsheet_id: 's1', range: 'A1:B2' })).toBe('read spreadsheet=s1 range=A1:B2');
+    expect(target('google_sheets', { action: 'list' })).toBe('list');
+    expect(target('google_sheets', { action: 'write' })).toBeNull();
+  });
+
+  it('names a subscribed calendar by its label, never its address', () => {
+    expect(target('calendar_read', { calendar: 'work' })).toBe('calendar=work');
+    expect(target('calendar_read', {})).toBe('calendar=all');
+  });
+});
+
+describe('namedTarget', () => {
+  it('writes name=value pairs, leaves an absent value out, and lets no value add a pair or pose as a query', () => {
+    expect(namedTarget([['a', 'x'], ['b', undefined], ['c', 3]])).toBe('a=x c=3');
+    expect(namedTarget([['folder', 'In box?x=1&y=2\n#z']])).toBe('folder=In box%3Fx%3D1%26y%3D2%0A%23z');
+    expect(namedTarget([['folder', 'x uid=9']]), 'a space does not start a pair').toBe('folder=x uid%3D9');
+  });
+});
+
+describe('outwardReadRecorder and delegatedRedirects', () => {
+  const MANDATE_P: RequestPrincipal = { kind: 'mandate', email: 'r@example.invalid', mandateId: 'M1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string; runId?: string };
+  const log = (recs: Rec[]): AuditLog => ({ record: (e: Rec) => { recs.push(e); } }) as unknown as AuditLog;
+
+  it('records a read under the principal and run it was made for, and nothing for the owner', () => {
+    const recs: Rec[] = [];
+    outwardReadRecorder({ principal: MANDATE_P, currentRunId: 'run-1', toolContext: { auditLog: log(recs) } }, 'x:read')!('GET h/p');
+    expect(recs).toEqual([expect.objectContaining({ principal: MANDATE_P, action: 'x:read', target: 'GET h/p', phase: 'read', runId: 'run-1' })]);
+    expect(outwardReadRecorder({ principal: OWNER_PRINCIPAL, toolContext: { auditLog: log(recs) } }, 'x:read')).toBeNull();
+  });
+
+  it('throws when the row cannot be written: no log, or one that throws', () => {
+    const none = outwardReadRecorder({ principal: MANDATE_P, toolContext: { auditLog: null } }, 'x:read')!;
+    expect(() => none('t')).toThrow(OutwardReadUnrecorded);
+    const broken = outwardReadRecorder({ principal: MANDATE_P, toolContext: { auditLog: { record: () => { throw new Error('disk'); } } as unknown as AuditLog } }, 'x:read')!;
+    expect(() => broken('t')).toThrow(OutwardReadUnrecorded);
+  });
+
+  it('records each redirect hop as a read, refuses one that keeps a write, and is nothing for the owner', () => {
+    const seen: string[] = [];
+    const hop = delegatedRedirects((t) => { seen.push(t); })!;
+    hop('https://other.example.invalid/next?q=1', 'GET');
+    expect(seen).toEqual(['GET other.example.invalid/next']);
+    expect(() => hop('https://other.example.invalid/x', 'PUT')).toThrow(/not followed under delegated access/);
+    expect(seen, 'the refused hop wrote no row').toHaveLength(1);
+    expect(delegatedRedirects(null)).toBeUndefined();
+  });
+
+  it('refuses a GET hop a server would act on as a write — by its address or a header it carries — and records a plain one', () => {
+    const seen: string[] = [];
+    const hop = delegatedRedirects((t) => { seen.push(t); })!;
+    expect(() => hop('https://a.example.invalid/items/5?_method=DELETE', 'GET')).toThrow(/not followed under delegated access/);
+    expect(() => hop('https://a.example.invalid/items/5', 'GET', { 'X-HTTP-Method-Override': 'DELETE' })).toThrow(/not followed under delegated access/);
+    expect(() => hop('https://a.example.invalid/items/5', 'GET', { 'X-HTTP-Method-Override': 'BREW' }), 'an override that is not a method').toThrow(/not followed/);
+    expect(seen).toEqual([]);
+    hop('https://a.example.invalid/items/5?page=2', 'GET', { accept: 'application/json' });
+    expect(seen, 'the counter-direction: a plain GET hop stays a read and gets its row').toEqual(['GET a.example.invalid/items/5']);
   });
 });

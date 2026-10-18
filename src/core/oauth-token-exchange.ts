@@ -48,6 +48,7 @@ import { resolveGuardedAckHosts } from './tool-context.js';
 import type { ToolContext } from './tool-context.js';
 import { isVettedEgressHost, isEndpointAcked } from './llm/endpoint-allowlist.js';
 import type { CustomEndpointAck } from './llm/endpoint-allowlist.js';
+import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** 15 s per leg; the wall timer sits one second beyond it. */
 export const TOKEN_EXCHANGE_TIMEOUT_MS = 15_000;
@@ -220,6 +221,12 @@ export async function exchangeToken(
         ? `token exchange refused: the token endpoint on ${stillVetted.host} is not https, and the client secret would be sent in clear.`
         : `token exchange refused: ${stillVetted.host} is not a vetted endpoint for this profile.`,
     };
+  }
+
+  // A Shopify store gets no client secret and no grant for now (`shopify-host.ts`). Here, not in
+  // the vetting: every exchange, the connect callback, `fetch_token` and a renewal, ends here.
+  if (isShopifyAdminUrl(req.endpoint.url)) {
+    return { ok: false, message: `token exchange refused: ${SHOPIFY_UNAVAILABLE}` };
   }
 
   const headers: Record<string, string> = { 'Accept': 'application/json' };

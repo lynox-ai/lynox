@@ -58,6 +58,23 @@ export function isHandRunOf(triggerId: string): boolean {
   return handRunScope.getStore() === triggerId;
 }
 
+/**
+ * Whether a run was started through "Run now" (`runTriggerNow`) — by the owner, a mandate, or a
+ * script holding an API token — rather than by its schedule's tick. WIDER than {@link isHandRunOf}: that one is only a
+ * mandate's test run of a proposal; this one is every start by hand, the owner's included.
+ * Read for the record of how a run under a grant was started (`started_via`); it passes and
+ * withholds nothing.
+ */
+const startedByHandScope = new AsyncLocalStorage<string>();
+
+export function runAsStartedByHand<T>(triggerId: string, fn: () => Promise<T>): Promise<T> {
+  return startedByHandScope.run(triggerId, fn);
+}
+
+export function isStartedByHand(triggerId: string): boolean {
+  return startedByHandScope.getStore() === triggerId;
+}
+
 export class HandRunDoor {
   readonly #issued = new Map<object, HandRunGrant>();
   #minterClaimed = false;

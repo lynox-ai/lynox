@@ -70,6 +70,27 @@ export function sanitizeAttachmentFilename(name: string): string {
 }
 
 /**
+ * The `Content-Disposition` value for a download named `name`. Node refuses a header
+ * character outside Latin-1, so a name in Japanese, Chinese or with an emoji could not be
+ * downloaded at all. The name travels percent-encoded as UTF-8 in `filename*` (RFC 6266 /
+ * RFC 5987), which RFC 6266 tells clients to prefer; `filename` carries an ASCII stand-in
+ * for clients that read only that one.
+ */
+export function attachmentDisposition(name: string): string {
+  // A lone surrogate would make encodeURIComponent throw; it becomes U+FFFD instead.
+  // Direction controls would let a saved name read differently than it is (`inv\u202Efdp.exe`
+  // shows as `invexe.pdf`); they and the line/paragraph separators become `_`. Joiners stay:
+  // Persian and Indic names and emoji sequences need them.
+  const clean = sanitizeAttachmentFilename(name)
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '\uFFFD')
+    .replace(/\p{Bidi_Control}|[\u2028\u2029]/gu, '_');
+  const ascii = clean.replace(/[^\x20-\x7e]/gu, '_');
+  // encodeURIComponent leaves ' ( ) * ! unescaped; none of them is an attr-char but `!`.
+  const encoded = encodeURIComponent(clean).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+/**
  * Sanitise an uploaded file's name before it is interpolated into the LLM-facing
  * `[File: name]` / `[Document: name]` framing (chat upload + knowledge-layer
  * ingestion). A crafted name with a line break — a real C0 control OR an exotic

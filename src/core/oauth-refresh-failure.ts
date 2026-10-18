@@ -254,25 +254,45 @@ export const MICROSOFT_REFRESH_CODES = {
  * it in code.
  */
 export function classifyMicrosoftRefreshFailure(httpStatus: number, body: string): MicrosoftRefreshFailureKind {
-  if (httpStatus >= 500 || httpStatus === 429) return 'transient';
+  return readMicrosoftRefreshFailure(httpStatus, body).kind;
+}
+
+/**
+ * The verdict of {@link classifyMicrosoftRefreshFailure}, together with the
+ * numbers in `error_codes` it was decided on — from the same parse, so a code
+ * shown to the user can never come from a reading of the body the verdict did
+ * not make.
+ *
+ * `codes` is empty when the body has none (not JSON, no array, no number in it),
+ * and for a 5xx or 429, whose body is never read. They are references to quote,
+ * not text: nothing from `error_description` is passed on.
+ */
+export function readMicrosoftRefreshFailure(
+  httpStatus: number,
+  body: string,
+): { kind: MicrosoftRefreshFailureKind; codes: readonly number[] } {
+  if (httpStatus >= 500 || httpStatus === 429) return { kind: 'transient', codes: [] };
   let parsed: { error?: unknown; error_codes?: unknown };
   try {
     parsed = JSON.parse(body) as { error?: unknown; error_codes?: unknown };
   } catch {
-    return 'needs-user';
+    return { kind: 'needs-user', codes: [] };
   }
   // `null` is the one JSON value whose fields cannot be read; every other
   // non-object (a number, a string, an array) has no `error` and falls through
   // to `needs-user` below.
-  if (parsed === null) return 'needs-user';
+  if (parsed === null) return { kind: 'needs-user', codes: [] };
   const codes = Array.isArray(parsed.error_codes)
     ? parsed.error_codes.filter((c): c is number => typeof c === 'number')
     : [];
   const has = (list: readonly number[]): boolean => codes.some((c) => list.includes(c));
-  if (has(MICROSOFT_REFRESH_CODES.needsAdmin)) return 'needs-admin';
-  const error = parsed.error;
-  if (error === 'temporarily_unavailable') return 'transient';
-  if (error === 'invalid_client' || error === 'unauthorized_client') return 'client-misconfigured';
-  if (error === 'invalid_grant' && has(MICROSOFT_REFRESH_CODES.grantRevoked)) return 'grant-revoked';
-  return 'needs-user';
+  const kind = ((): MicrosoftRefreshFailureKind => {
+    if (has(MICROSOFT_REFRESH_CODES.needsAdmin)) return 'needs-admin';
+    const error = parsed.error;
+    if (error === 'temporarily_unavailable') return 'transient';
+    if (error === 'invalid_client' || error === 'unauthorized_client') return 'client-misconfigured';
+    if (error === 'invalid_grant' && has(MICROSOFT_REFRESH_CODES.grantRevoked)) return 'grant-revoked';
+    return 'needs-user';
+  })();
+  return { kind, codes };
 }

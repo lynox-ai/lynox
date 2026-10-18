@@ -12,8 +12,9 @@ import { DEMO_SESSION_MAX_AGE_S, isDemoMode } from '$lib/server/demo-mode.js';
 // Demo-mode auto-session: when LYNOX_DEMO_MODE=true the engine is a public
 // playground, so the root route mints a session for any anonymous visitor and
 // drops them straight at /app. Defence in depth: only fires when the env var is
-// the literal string 'true'; the CP provisioner only injects that on tenants
-// whose subdomain matches `*-demo`. Mint is also gated by the per-IP rate
+// the literal string 'true'; the CP provisioner only injects that on instances
+// the control plane flags as demo (an operator-set flag, not the subdomain
+// name). Mint is also gated by the per-IP rate
 // limiter so a botnet can't churn cookies and exhaust the demo tenant's LLM
 // budget — exceeding the limit returns 429 from the standard /login path.
 export const load: PageServerLoad = async ({ cookies, url, getClientAddress, setHeaders }) => {

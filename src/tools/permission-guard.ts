@@ -1,5 +1,5 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod } from '../core/outbound-write.js';
+import { effectiveWriteMethod, isGraphqlEndpoint } from '../core/outbound-write.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ToolEntry, WarningPayload } from '../types/index.js';
@@ -549,6 +549,10 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   const method = (typeof obj.method === 'string' ? obj.method : 'GET').toUpperCase();
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
   if (typeof obj.url !== 'string') return false;
+  // No contract grants a write to a GraphQL endpoint: there a read and every mutation the token
+  // can run are the same POST to the same path, and nothing here reads the document. Read from
+  // the URL alone, so it holds for the callers that never pass a body.
+  if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
   try {
@@ -556,8 +560,9 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   } catch {
     return false;
   }
-  // No contract grants a mail API, whoever wrote it: the published promise is that mail
-  // leaves the instance only once it is confirmed in the chat.
+  // No contract grants a mail API on the list in `core/bulk-mail-targets.ts`, whoever wrote
+  // it, so no grant sends unattended through one; the mail tools ask in the chat before each
+  // email.
   if (isMailProviderTarget(obj.url)) return false;
   const listQuery = LIST_QUERIES.get(contract);
   if (listQuery === undefined) {
@@ -963,6 +968,439 @@ export function joinLineContinuations(cmd: string): string {
     .replace(/\r(?!\n)|[\u2028\u2029]/g, ' ');
 }
 
+// ── curl arguments read as the shell splits them ──────────────────────────
+
+/** One piece of a shell word: text the shell takes as written, or an expansion it fills in. */
+type WordPart =
+  | { kind: 'text'; text: string }
+  | { kind: 'expansion'; source: string };
+
+/** The words of one simple command, and whether the reading reached the end of the input. */
+interface CommandWords { words: WordPart[][]; complete: boolean }
+
+/**
+ * The end of a balanced span that opens at `start` (`(`, `{` or `[`), skipping quoted text and
+ * escapes inside it; -1 when it never closes.
+ */
+function balancedEnd(s: string, start: number, open: string, close: string): number {
+  let depth = 0;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === '\\') { i++; continue; }
+    if (c === "'") { const j = s.indexOf("'", i + 1); if (j < 0) return -1; i = j; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && s[j] !== '"') j += s[j] === '\\' ? 2 : 1;
+      if (j >= s.length) return -1;
+      i = j;
+      continue;
+    }
+    if (c === '`') { const j = s.indexOf('`', i + 1); if (j < 0) return -1; i = j; continue; }
+    if (c === open) depth++;
+    else if (c === close && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/** The end of the expansion that starts with the `$` at `i`, or null when that `$` is plain text. */
+function expansionEnd(s: string, i: number): number | null {
+  const next = s[i + 1];
+  if (next === '(') return balancedEnd(s, i + 1, '(', ')');
+  if (next === '{') return balancedEnd(s, i + 1, '{', '}');
+  if (next === '[') return balancedEnd(s, i + 1, '[', ']');
+  if (next === '"') {
+    let j = i + 2;
+    while (j < s.length && s[j] !== '"') j += s[j] === '\\' ? 2 : 1;
+    return j >= s.length ? -1 : j + 1;
+  }
+  if (next !== undefined && /[A-Za-z_]/.test(next)) {
+    let j = i + 2;
+    while (j < s.length && /[A-Za-z0-9_]/.test(s[j]!)) j++;
+    return j;
+  }
+  if (next !== undefined && /[0-9@*#?$!-]/.test(next)) return i + 2;
+  return null;
+}
+
+/** The longest brace list the reader looks for the end of; see `readCommandWords`. */
+const BRACE_LIST_MAX = 1024;
+
+/**
+ * Split a command into simple commands and their words the way the shell does, as far as a
+ * danger check needs: quotes and escapes are resolved, `$…`, `${…}`, `$(…)`, `$((…))`, `$[…]`
+ * and backticks are kept whole as one expansion, however many spaces they hold, a comment and
+ * a heredoc body are not read as commands, and a redirection's target is no argument. A brace
+ * list (`{a,b}`, `{1..3}`) is marked on its word as an expansion of its own.
+ *
+ * Where it reads differently from bash: a backslash inside double quotes is always dropped,
+ * `$'…'` is left to `normalizeCommand`, and a heredoc inside `$(…)` is not known, so a quote in
+ * its body can leave the command unread.
+ *
+ * `complete` is false when a quote or an expansion never closes: the shell would refuse such a
+ * command, but a reader that loses its place there must not read the rest as checked.
+ */
+export function readCommandWords(cmd: string): CommandWords[] {
+  const commands: CommandWords[] = [];
+  let words: WordPart[][] = [];
+  let word: WordPart[] | null = null;
+  let dropNextWord = false;
+  const heredocs: Array<{ delimiter: string; tabs: boolean }> = [];
+  const text = (t: string): void => { (word ??= []).push({ kind: 'text', text: t }); };
+  const expansion = (source: string): void => { (word ??= []).push({ kind: 'expansion', source }); };
+  const endWord = (): void => {
+    if (word === null) return;
+    if (dropNextWord) dropNextWord = false;
+    else words.push(word);
+    word = null;
+  };
+  const endCommand = (): void => {
+    endWord();
+    if (words.length > 0) commands.push({ words, complete: true });
+    words = [];
+  };
+  const incomplete = (): CommandWords[] => {
+    endWord();
+    commands.push({ words, complete: false });
+    return commands;
+  };
+
+  let i = 0;
+  while (i < cmd.length) {
+    const c = cmd[i]!;
+    if (c === ' ' || c === '\t') { endWord(); i++; continue; }
+    if (c === '\n') {
+      endCommand();
+      i++;
+      // A heredoc body is data for the command above it, never a command.
+      for (const { delimiter, tabs } of heredocs.splice(0)) {
+        while (i < cmd.length) {
+          const eol = cmd.indexOf('\n', i);
+          const line = cmd.slice(i, eol < 0 ? cmd.length : eol);
+          i = eol < 0 ? cmd.length : eol + 1;
+          if ((tabs ? line.replace(/^\t+/, '') : line) === delimiter) break;
+        }
+      }
+      continue;
+    }
+    if (c === '#' && word === null) {
+      const eol = cmd.indexOf('\n', i);
+      i = eol < 0 ? cmd.length : eol;
+      continue;
+    }
+    // `\` before a line break continues the line: the shell drops both before it splits words.
+    if (c === '\\') { if (i + 1 < cmd.length && cmd[i + 1] !== '\n') text(cmd[i + 1]!); i += 2; continue; }
+    if (c === "'") {
+      const j = cmd.indexOf("'", i + 1);
+      if (j < 0) return incomplete();
+      text(cmd.slice(i + 1, j));
+      i = j + 1;
+      continue;
+    }
+    if (c === '"') {
+      text('');
+      let j = i + 1;
+      while (j < cmd.length && cmd[j] !== '"') {
+        const d = cmd[j]!;
+        if (d === '\\') { if (j + 1 < cmd.length) text(cmd[j + 1]!); j += 2; continue; }
+        if (d === '`') {
+          const k = cmd.indexOf('`', j + 1);
+          if (k < 0) return incomplete();
+          expansion(cmd.slice(j, k + 1));
+          j = k + 1;
+          continue;
+        }
+        if (d === '$') {
+          const end = expansionEnd(cmd, j);
+          if (end === -1) return incomplete();
+          if (end !== null) { expansion(cmd.slice(j, end)); j = end; continue; }
+        }
+        text(d);
+        j++;
+      }
+      if (j >= cmd.length) return incomplete();
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      const j = cmd.indexOf('`', i + 1);
+      if (j < 0) return incomplete();
+      expansion(cmd.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    if (c === '$') {
+      const end = expansionEnd(cmd, i);
+      if (end === -1) return incomplete();
+      if (end !== null) { expansion(cmd.slice(i, end)); i = end; continue; }
+      text('$');
+      i++;
+      continue;
+    }
+    if (c === '{') {
+      // A brace list only on an unquoted word with no space in it: `{-d,a=b}` → `-d a=b`. The
+      // search for its end stops at the word's end and at BRACE_LIST_MAX characters, so a run of
+      // braces costs a bounded scan each. A word that runs past that bound unclosed is unread.
+      let bound = i;
+      while (bound < cmd.length && bound - i < BRACE_LIST_MAX && !/\s/.test(cmd[bound]!)) bound++;
+      const end = balancedEnd(cmd.slice(i, bound), 0, '{', '}');
+      if (end < 0 && bound - i >= BRACE_LIST_MAX) return incomplete();
+      const body = end > 0 ? cmd.slice(i + 1, i + end - 1) : '';
+      if (end > 0 && !/\s/.test(body) && (body.includes(',') || body.includes('..'))) {
+        expansion(cmd.slice(i, i + end));
+        i += end;
+        continue;
+      }
+      text('{');
+      i++;
+      continue;
+    }
+    if (c === '<' || c === '>' || (c === '&' && cmd[i + 1] === '>')) {
+      // `2>file`: digits written right before the operator name a descriptor, not an argument.
+      if (word !== null && /^\d+$/.test(plainText(word) ?? '')) word = null;
+      endWord();
+      if (cmd[i + 1] === '(') {
+        // Process substitution: the shell passes a path in its place, never option text. The
+        // word keeps its own text as a stand-in.
+        const end = balancedEnd(cmd, i + 1, '(', ')');
+        if (end < 0) return incomplete();
+        text(cmd.slice(i, end));
+        i = end;
+        continue;
+      }
+      if (c === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') {
+        const m = /^<<(-?)\s*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/.exec(cmd.slice(i));
+        if (m) {
+          heredocs.push({ delimiter: m[2] ?? m[3] ?? m[4] ?? '', tabs: m[1] === '-' });
+          i += m[0].length;
+          continue;
+        }
+      }
+      while (i < cmd.length && /[<>&|]/.test(cmd[i]!)) i++;
+      // `2>&1`, `>&-`: the target is a descriptor, already consumed; otherwise the next word is.
+      if (/[0-9-]/.test(cmd[i] ?? '') && cmd[i - 1] === '&') { while (i < cmd.length && /[0-9-]/.test(cmd[i]!)) i++; continue; }
+      dropNextWord = true;
+      continue;
+    }
+    if (c === '|' || c === ';' || c === '&' || c === '(' || c === ')') { endCommand(); i++; continue; }
+    text(c);
+    i++;
+  }
+  endCommand();
+  return commands;
+}
+
+/** curl's short options that take the next word (or the rest of their own word) as a value. */
+const CURL_SHORT_WITH_VALUE = new Set('AbcCdDeEFHKmoPQrtTuUwxXyYz');
+/**
+ * curl's long options that take a value. Only a value of an option listed here is skipped; an
+ * option that is not listed leaves the next word to be read as an argument. A missing entry can
+ * shift which word is read as a value further on; the regex rules still read the written text.
+ */
+const CURL_LONG_WITH_VALUE = new Set([
+  '--abstract-unix-socket', '--alt-svc', '--aws-sigv4', '--cacert', '--capath', '--cert', '--cert-type',
+  '--ciphers', '--config', '--connect-timeout', '--connect-to', '--continue-at', '--cookie', '--cookie-jar',
+  '--crlfile', '--data', '--data-ascii', '--data-binary', '--data-raw', '--data-urlencode', '--delegation',
+  '--dns-servers', '--doh-url', '--dump-header', '--ech', '--egd-file', '--engine', '--etag-compare', '--etag-save',
+  '--expect100-timeout', '--form', '--form-string', '--ftp-account', '--ftp-alternative-to-user', '--ftp-method',
+  '--ftp-port', '--ftp-ssl-ccc-mode', '--happy-eyeballs-timeout-ms', '--haproxy-clientip', '--header',
+  '--hostpubmd5', '--hostpubsha256', '--hsts', '--interface', '--ip-tos', '--ipfs-gateway', '--json',
+  '--keepalive-cnt', '--keepalive-time', '--key', '--key-type', '--krb', '--libcurl', '--limit-rate',
+  '--local-port', '--login-options', '--mail-auth', '--mail-from', '--mail-rcpt', '--max-filesize',
+  '--max-redirs', '--max-time', '--netrc-file', '--noproxy', '--oauth2-bearer', '--output', '--output-dir',
+  '--pass', '--pinnedpubkey', '--preproxy', '--proto', '--proto-default', '--proto-redir', '--proxy',
+  '--proxy-cacert', '--proxy-capath', '--proxy-cert', '--proxy-cert-type', '--proxy-ciphers', '--proxy-crlfile',
+  '--proxy-header', '--proxy-key', '--proxy-key-type', '--proxy-pass', '--proxy-pinnedpubkey',
+  '--proxy-service-name', '--proxy-tls13-ciphers', '--proxy-tlsauthtype', '--proxy-tlspassword',
+  '--proxy-tlsuser', '--proxy-user', '--proxy1.0', '--pubkey', '--quote', '--random-file', '--range',
+  '--rate', '--referer', '--request', '--request-target', '--resolve', '--retry', '--retry-delay',
+  '--retry-max-time', '--sasl-authzid', '--service-name', '--socks4', '--socks4a', '--socks5',
+  '--socks5-gssapi-service', '--socks5-hostname', '--speed-limit', '--speed-time', '--stderr',
+  '--telnet-option', '--tftp-blksize', '--time-cond', '--tls-max', '--tls13-ciphers', '--tlsauthtype',
+  '--tlspassword', '--tlsuser', '--trace', '--trace-ascii', '--trace-config', '--unix-socket',
+  '--upload-file', '--url', '--url-query', '--user', '--user-agent', '--variable', '--write-out',
+]);
+
+const CURL_UNREADABLE = 'HTTP request with an option the guard cannot read (shell expansion)';
+
+/** The text of a word the shell takes as written, or null when an expansion is part of it. */
+function plainText(word: WordPart[]): string | null {
+  let out = '';
+  for (const part of word) {
+    if (part.kind === 'expansion') return null;
+    out += part.text;
+  }
+  return out;
+}
+
+/**
+ * Can this expansion, standing where an argument starts, put an option there that the command
+ * text does not show? A command substitution can; so can `${…}` with an operator whose text
+ * starts a word with `-` (`${X:--d}`), a locale string (`$"-d"`), a brace list, a positional
+ * parameter once `set` appears, an indirection (`${!x}` names `x` without a `$`, which counts as
+ * setting it), and a variable the command itself sets, unless every setting is a plain value that
+ * does not start with `-`. A variable the command never names comes from the environment the
+ * engine builds for every call (each runs in a fresh shell), which the command does not control,
+ * unless the command reads shell text from elsewhere (`.`, `source`, `eval`).
+ */
+function expansionCanPlaceOption(source: string, ctx: CurlReading): boolean {
+  if (source.startsWith('$(') || source.startsWith('`') || source.startsWith('{')) return true;
+  if (source.startsWith('$"')) return /^\$"\s*-/.test(source);
+  if (source.startsWith('$[')) return false;
+  const inner = source.startsWith('${') ? source.slice(2, -1) : source.slice(1);
+  const name = /^[!#]?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/.exec(inner);
+  if (!name) return true;
+  const rest = inner.slice(name[0].length);
+  if (rest !== '' && !/^\[[^\]]*\]$/.test(rest)) {
+    // An operator: its default, alternative or replacement text is what may come out.
+    if (/[$`]/.test(rest)) return true;
+    if (/(^|[:=+?/#%^,\s-])-/.test(rest.replace(/^\[[^\]]*\]/, '').replace(/^:?[-=+?]/, ' ').replace(/^\/\/?/, ' '))) return true;
+  }
+  const id = name[1]!;
+  // Each name is looked up once per command: a command that repeats one expansion thousands of
+  // times must not scan itself once per repetition.
+  const key = /^[A-Za-z_]/.test(id) ? id : ' positional';
+  let known = ctx.known.get(key);
+  if (known === undefined) {
+    known = key === ' positional' ? /\bset\b/.test(ctx.cmd) : variableSetByCommand(id, ctx);
+    ctx.known.set(key, known);
+  }
+  return known;
+}
+
+/**
+ * One reading of a command: what is known about each name, and how much more of the command
+ * the name lookups may read. Each lookup scans the whole command and reads the value of every
+ * assignment to the name, so a crafted command with many names or many assignments would cost
+ * the square of its length. The budget bounds these lookups, not the rest of the reading. Past
+ * it a name counts as set by the command, which asks.
+ */
+interface CurlReading { cmd: string; known: Map<string, boolean>; budget: number }
+
+/**
+ * A command that reads shell text from elsewhere (`.`, `source`, `eval`, `set -a`) can set any
+ * variable without naming it. `[ \t]*`, not `\s*`: a newline is itself where a command starts, and
+ * `\s*` would read every newline run again from each newline in it.
+ */
+const READS_SHELL_TEXT = /(?:^|[;&|(`\n]|\$\()[ \t]*(?:source|\.|eval|set\s+-[a-z]*a)(?=\s)/;
+
+const CURL_READ_BUDGET_FACTOR = 32;
+const CURL_READ_BUDGET_MIN = 4_000_000;
+
+/**
+ * Does the command set `id` itself? Any mention of the name other than as `$id` / `${id}` counts
+ * (`read id`, `for id in`, `printf -v id`, `export id`), except an assignment `id=value` whose
+ * value is plain text that does not start with `-`.
+ */
+function variableSetByCommand(id: string, ctx: CurlReading): boolean {
+  const { cmd } = ctx;
+  if (READS_SHELL_TEXT.test(cmd)) return true;
+  ctx.budget -= cmd.length;
+  if (ctx.budget < 0) return true;
+  const mention = new RegExp(String.raw`(^|[^$\w{])${id}\b`, 'g');
+  for (const m of cmd.matchAll(mention)) {
+    const at = m.index + m[1]!.length + id.length;
+    if (cmd[at] !== '=') return true;
+    const rest = cmd.slice(at + 1, at + 1 + 4096);
+    ctx.budget -= rest.length;
+    if (ctx.budget < 0) return true;
+    if (rest === '' || /^[\s;&|)]/.test(rest)) continue;
+    const value = readCommandWords(rest)[0]?.words[0];
+    const plain = value ? plainText(value) : null;
+    if (plain === null || plain.startsWith('-')) return true;
+  }
+  return false;
+}
+
+/** The text before a word's first expansion, and whether it has one. */
+function leadingText(word: WordPart[]): { lead: string; expanded: boolean } {
+  let lead = '';
+  for (const part of word) {
+    if (part.kind === 'expansion') return { lead, expanded: true };
+    lead += part.text;
+  }
+  return { lead, expanded: false };
+}
+
+const SAFE_METHOD = /^(?:GET|HEAD|OPTIONS)$/;
+
+/**
+ * The curl option a word holds, read the way curl would: a label when it sends data or changes
+ * the method, or when an expansion inside it supplies option text; `value-next` when it takes
+ * the next word as its value; null otherwise.
+ */
+function curlOptionVerdict(word: WordPart[], next: WordPart[] | undefined): { label: string } | 'value-next' | null {
+  const { lead, expanded } = leadingText(word);
+  if (!lead.startsWith('-')) return null;
+  if (lead === '-') return expanded ? { label: CURL_UNREADABLE } : null;
+  if (lead.startsWith('--')) {
+    const eq = lead.indexOf('=');
+    if (eq < 0 && expanded) return { label: CURL_UNREADABLE };
+    const name = eq < 0 ? lead : lead.slice(0, eq);
+    if (/^--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|upload-file|json|config)$/.test(name)) return { label: 'HTTP data submission via curl' };
+    if (name === '--request') {
+      const method = eq >= 0 ? (expanded ? null : lead.slice(eq + 1)) : (next ? plainText(next) : '');
+      if (method === null || !SAFE_METHOD.test(method)) return { label: 'HTTP mutation via curl' };
+      return eq < 0 ? 'value-next' : null;
+    }
+    return eq < 0 && CURL_LONG_WITH_VALUE.has(name) ? 'value-next' : null;
+  }
+  const letters = lead.slice(1);
+  for (let k = 0; k < letters.length; k++) {
+    const letter = letters[k]!;
+    if ('dFTK'.includes(letter)) return { label: 'HTTP data submission via curl' };
+    const attached = k + 1 < letters.length || expanded;
+    if (letter === 'X') {
+      const method = attached ? (expanded ? null : letters.slice(k + 1)) : (next ? plainText(next) : '');
+      if (method === null || !SAFE_METHOD.test(method)) return { label: 'HTTP mutation via curl' };
+      return attached ? null : 'value-next';
+    }
+    if (CURL_SHORT_WITH_VALUE.has(letter)) return attached ? null : 'value-next';
+  }
+  // The letters ran out before an expansion: the expansion supplies more options.
+  return expanded ? { label: CURL_UNREADABLE } : null;
+}
+
+/**
+ * A curl invocation whose arguments, read as the shell splits them, carry an option that sends
+ * data or changes the method, or an option the command text does not show because an expansion
+ * puts it there. Read alongside the regex rules, never instead of them: they still read the
+ * written text, so this only adds to what is asked about.
+ */
+export function curlOptionFromWords(rawCmd: string): { label: string } | null {
+  const cmd = normalizeCommand(rawCmd);
+  const ctx: CurlReading = { cmd, known: new Map(), budget: Math.max(CURL_READ_BUDGET_MIN, CURL_READ_BUDGET_FACTOR * cmd.length) };
+  for (const { words, complete } of readCommandWords(cmd)) {
+    for (let w = 0; w < words.length; w++) {
+      const name = plainText(words[w]!);
+      if (name === null || !/(?:^|\/)curl$/i.test(name)) continue;
+      let valueNext = false;
+      let a = w + 1;
+      for (; a < words.length; a++) {
+        const word = words[a]!;
+        if (valueNext) { valueNext = false; continue; }
+        if (plainText(word) === '--') break;
+        const verdict = curlOptionVerdict(word, words[a + 1]);
+        if (verdict === 'value-next') { valueNext = true; continue; }
+        if (verdict) return verdict;
+        // Leading expansions: what they can put there, and what an empty one moves to the front.
+        let p = 0;
+        while (p < word.length && (word[p]!.kind === 'expansion' || (word[p] as { text: string }).text === '')) {
+          const part = word[p]!;
+          if (part.kind === 'expansion' && expansionCanPlaceOption(part.source, ctx)) return { label: CURL_UNREADABLE };
+          p++;
+        }
+        const after = word[p];
+        if (p > 0 && after?.kind === 'text' && after.text.startsWith('-')) return { label: CURL_UNREADABLE };
+      }
+      // The words up to where this curl's arguments ended were read; go on after them, so each
+      // word is read once. After a `--` the words are read again as possible commands.
+      w = a;
+    }
+    if (!complete && /\bcurl\b/i.test(cmd)) return { label: CURL_UNREADABLE };
+  }
+  return null;
+}
+
 // Build the per-chunk scan surface: the normalized form, the quote-removed
 // form the shell actually executes (`r''m -rf /` → `rm -rf /`), and both split
 // into segments so cross- and intra-segment patterns are all covered. With
@@ -1038,7 +1476,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
       if (hit) {
         return `⚠ ${toolName}: ${hit.label} — "${preview}" [BLOCKED — this action needs to be run manually for safety]`;
       }
-      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH);
+      const ask = _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? _scanBashDanger(rawCmd, UNATTENDED_ASK_BASH) ?? curlOptionFromWords(rawCmd);
       if (ask) {
         return `⚠ ${toolName}: ${ask.label} — "${preview}"`;
       }
@@ -1049,7 +1487,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     // no one watches must not pass silently where someone could have been asked. Lists in turn,
     // not merged: a merged list would let a rule on an earlier segment take the label of a
     // stricter rule on a later one.
-    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH);
+    const hit = _scanBashDanger(rawCmd, CRITICAL_BASH) ?? _scanBashDanger(rawCmd, DANGEROUS_AFTER_CRITICAL_BASH) ?? _scanBashDanger(rawCmd, SENDS_OR_KEEPS_BASH) ?? curlOptionFromWords(rawCmd);
     if (hit) {
       return `⚠ ${toolName}: ${hit.label} — "${preview}"`;
     }

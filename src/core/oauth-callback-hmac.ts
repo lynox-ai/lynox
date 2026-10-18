@@ -1,0 +1,117 @@
+/**
+ * The signature Shopify puts on the redirect back from its authorize page.
+ *
+ * Shopify's documentation says only: remove `hmac`, sort, HMAC-SHA256 under the
+ * app's client secret, compare in constant time. How the values are written into
+ * the signed text it does not say, so this follows Shopify's own library
+ * (`@shopify/shopify-api`, `lib/utils/hmac-validator.ts` with
+ * `processed-query.ts`, read at shopify-app-js `d282da59`): drop `hmac`, sort
+ * the names with `localeCompare`, write the pairs back with `URLSearchParams`
+ * and turn its `+` into `%20`. The values are re-encoded, not signed as decoded:
+ * a base64 `host` ending in `==` is signed as `%3D%3D`.
+ *
+ * One deliberate difference: the library also drops a `signature` parameter.
+ * Here it is signed like any other, so a callback that carries one is refused
+ * unless the signature covers it. Dropping it would let an unsigned value through
+ * in the map this returns.
+ *
+ * This is a check ON TOP of the state cookie, not instead of it. The cookie says
+ * lynox started this flow; the signature says a party holding the secret sent
+ * these parameters. It does NOT say they are about the profile's store: an app
+ * installed on several stores gets genuine signatures for each of them. The
+ * caller compares `shop` with the store the profile names before it uses the
+ * code, and reads the values from the map this returns, not from a second parse.
+ * Every entry in that map is covered by the signature except `hmac` itself.
+ *
+ * Fail-closed on a name given twice: a callback has no reason to repeat one, and
+ * readers differ on which copy counts.
+ *
+ * Tested against one published example (a third-party library's docs) and
+ * vectors built with the library's procedure. No redirect from a real Shopify
+ * store has gone through it yet.
+ */
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+/**
+ * How far `timestamp` may lie from the instance's clock, in seconds, either way.
+ * Shopify's library uses the same 90 seconds
+ * (`HMAC_TIMESTAMP_PERMITTED_CLOCK_TOLERANCE_SEC`).
+ */
+export const SHOPIFY_CALLBACK_WINDOW_SECONDS = 90;
+
+/**
+ * The store domain as Shopify's OAuth documentation checks it, anchored at both
+ * ends. Stricter than the library's `sanitizeShop`, which also takes `_` and
+ * other Shopify domains.
+ */
+const SHOPIFY_SHOP = /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/;
+
+/** What the authorize redirect has to carry beyond the signature. */
+const REQUIRED = ['code', 'shop', 'state'] as const;
+
+export type ShopifyCallbackVerdict =
+  | { readonly ok: true; readonly params: ReadonlyMap<string, string> }
+  | {
+    readonly ok: false;
+    readonly reason:
+      | 'no-secret'
+      | 'missing-hmac'
+      | 'malformed-hmac'
+      | 'repeated-param'
+      | 'signature-mismatch'
+      | 'missing-param'
+      | 'bad-shop'
+      | 'bad-timestamp'
+      | 'timestamp-outside-window';
+  };
+
+const HEX_SHA256 = /^[0-9a-f]{64}$/;
+
+/**
+ * Check the redirect's signature, the parameters a code exchange needs, and the
+ * redirect's age.
+ *
+ * `rawQuery` is the query as it arrived, with or without the leading `?`.
+ * `nowMs` is the instance's clock; a parameter so the window can be tested at
+ * its edges.
+ */
+export function verifyShopifyCallback(
+  rawQuery: string,
+  clientSecret: string,
+  nowMs: number,
+): ShopifyCallbackVerdict {
+  if (clientSecret === '') return { ok: false, reason: 'no-secret' };
+
+  const params = new Map<string, string>();
+  for (const [name, value] of new URLSearchParams(rawQuery)) {
+    if (params.has(name)) return { ok: false, reason: 'repeated-param' };
+    params.set(name, value);
+  }
+
+  const hmac = params.get('hmac');
+  if (hmac === undefined) return { ok: false, reason: 'missing-hmac' };
+  // Lower-case hex only, which is what Shopify's library produces (`HashFormat.Hex`);
+  // anything else is refused rather than normalised. The length check is also what
+  // keeps `timingSafeEqual` below from throwing.
+  if (!HEX_SHA256.test(hmac)) return { ok: false, reason: 'malformed-hmac' };
+
+  const signed = new URLSearchParams();
+  for (const name of [...params.keys()].filter((n) => n !== 'hmac').sort((a, b) => a.localeCompare(b))) {
+    signed.append(name, params.get(name) ?? '');
+  }
+  const message = signed.toString().replace(/\+/g, '%20');
+  const expected = createHmac('sha256', clientSecret).update(message, 'utf8').digest();
+  if (!timingSafeEqual(expected, Buffer.from(hmac, 'hex'))) return { ok: false, reason: 'signature-mismatch' };
+
+  // Everything below reads signed values only.
+  if (REQUIRED.some((name) => (params.get(name) ?? '') === '')) return { ok: false, reason: 'missing-param' };
+  if (!SHOPIFY_SHOP.test(params.get('shop') ?? '')) return { ok: false, reason: 'bad-shop' };
+
+  const timestamp = params.get('timestamp');
+  if (timestamp === undefined || !/^[0-9]{1,15}$/.test(timestamp)) return { ok: false, reason: 'bad-timestamp' };
+  // Written as "inside", so a clock that is not a number fails it.
+  const ageSeconds = nowMs / 1000 - Number(timestamp);
+  if (!(Math.abs(ageSeconds) <= SHOPIFY_CALLBACK_WINDOW_SECONDS)) return { ok: false, reason: 'timestamp-outside-window' };
+
+  return { ok: true, params };
+}

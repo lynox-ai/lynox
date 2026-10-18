@@ -1229,7 +1229,8 @@ describe('connect refuses before the link what the route would refuse', () => {
   it('hands a mandate no link when its token slot is a name the owner\'s profile reads', async () => {
     const store = new ApiStore();
     store.register({ ...scoped(), created_by: TAG });
-    store.register({ id: 'shop-pat', name: 'Shop PAT', base_url: 'https://acme.shops.example.com/admin', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_API_ACCESS_TOKEN'] } });
+    // Held back by the admission now, and still stored: the check reads stored profiles.
+    expect(store.register({ id: 'shop-pat', name: 'Shop PAT', base_url: 'https://acme.shops.example.com/admin', description: 'd', auth: { type: 'bearer', vault_keys: ['SHOP_API_ACCESS_TOKEN'] } })).toBe(false);
     const result = await connect(mandateAgent(store));
     expect(result).toContain('a profile of somebody else reads');
     expect(result).not.toContain('/api/oauth/connect/');

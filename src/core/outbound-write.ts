@@ -387,16 +387,161 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
 }
 
 /**
+ * Whether a URL is a GraphQL endpoint, read from the URL alone: a path segment `graphql`
+ * (`GRAPHQL_SEGMENT`, as `normalizeWritePath` routes it), or a host label that starts with
+ * `graphql`. A path whose routing is not known here (`ambiguous`, a decoding error included)
+ * counts when any way of decoding it names `graphql`, and a URL that does not parse counts.
+ *
+ * Only the URL, so that every caller can ask it, those that never see a body included. A
+ * GraphQL API on another path (`/api`, `/v2`) is not recognised and is handled as any POST is.
+ */
+/**
+ * A path segment a server routes to its GraphQL endpoint: `graphql`, with a format suffix a
+ * router strips or matches on (`graphql.json`, Rails' `(.:format)`), and with trailing dots, which
+ * IIS drops. Read from the decoded, lower-cased segment.
+ */
+const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)?\.*$/i;
+
+export function isGraphqlEndpoint(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return true;
+  }
+  if (parsed.hostname.toLowerCase().split('.').some((label) => label.startsWith('graphql'))) return true;
+  const { path, ambiguous } = normalizeWritePath(parsed.pathname);
+  // A path whose routing is not known here (a double encoding, an escape that does not decode,
+  // a character a router may strip) is read every way a server may decode it, and any reading
+  // that names `graphql` anywhere counts. Not every such path: an encoded space is a REST path.
+  if (ambiguous) return [parsed.pathname, ...serverReadings(parsed.pathname)].some((reading) => reading.toLowerCase().includes('graphql'));
+  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment));
+}
+
+/** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */
+const GRAPHQL_WRITE_OPERATION = /\b(?:mutation|subscription)\b/i;
+
+const GRAPHQL_BODY_KEYS = new Set(['query', 'operationName', 'variables', 'extensions']);
+
+const GRAPHQL_CONTENT_TYPE = /^\s*application\/json\s*(?:;\s*charset\s*=\s*(?:"utf-8"|utf-8)\s*)?$/i;
+
+/**
+ * Whether any object in a JSON text names one key twice, keys compared as decoded (`"query"` and
+ * `"qu\u0065ry"` are the same key). `JSON.parse` keeps the last of them; a server's parser may
+ * keep the first, and then it runs a document the gate never read. The text must already parse.
+ * A loop, not a recursion: nesting depth costs no stack.
+ */
+function jsonRepeatsAKey(text: string): boolean {
+  const frames: { keys: Set<string> | null; expectKey: boolean }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i]!;
+    if (c === '"') {
+      let j = i + 1;
+      while (text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      const top = frames[frames.length - 1];
+      if (top?.keys && top.expectKey) {
+        const key = JSON.parse(text.slice(i, j + 1)) as string;
+        if (top.keys.has(key)) return true;
+        top.keys.add(key);
+        top.expectKey = false;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === '{') frames.push({ keys: new Set(), expectKey: true });
+    else if (c === '[') frames.push({ keys: null, expectKey: false });
+    else if (c === '}' || c === ']') frames.pop();
+    else if (c === ',') { const top = frames[frames.length - 1]; if (top?.keys) top.expectKey = true; }
+    i++;
+  }
+  return false;
+}
+
+/**
+ * A write to a GraphQL endpoint, read as the server will run it — or refused when that cannot be
+ * told from the request. Refused: a media type other than `application/json` (a missing one and
+ * two headers that differ only in case included), a body that is not exactly one JSON object, a
+ * key named twice in any object, a top-level key other than `query`, `operationName`,
+ * `variables` and `extensions`, an `extensions.persistedQuery` (the server may run a stored
+ * document instead of `query`), and a `query` that is not a string. Anything that throws while
+ * reading is a refusal too.
+ *
+ * `mutates` is the word `mutation` or `subscription` anywhere in `query`, as a GraphQL name.
+ * Searched in the whole document, not in its first operation: `query A{…} mutation B{…}` with
+ * `operationName: "B"` runs B. A false hit (the word in a string or a field name) only means the
+ * write is asked again.
+ */
+export function graphqlWrite(headers: Readonly<Record<string, string>>, body: unknown): { refusal: string } | { mutates: boolean } {
+  const types = Object.entries(headers).filter(([name]) => name.trim().toLowerCase() === 'content-type');
+  if (types.length !== 1 || !GRAPHQL_CONTENT_TYPE.test(types[0]![1])) {
+    return { refusal: 'a write to a GraphQL endpoint must send one Content-Type header, application/json' };
+  }
+  if (typeof body !== 'string') return { refusal: 'a write to a GraphQL endpoint must send a JSON object body' };
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { refusal: 'a write to a GraphQL endpoint must send exactly one JSON object, not a batch' };
+    }
+    if (jsonRepeatsAKey(body)) return { refusal: 'the body names a key twice' };
+    const fields = parsed as Record<string, unknown>;
+    const other = Object.keys(fields).find((key) => !GRAPHQL_BODY_KEYS.has(key));
+    if (other !== undefined) return { refusal: 'the body carries a field other than query, operationName, variables and extensions' };
+    const extensions = fields['extensions'];
+    if (extensions !== undefined && (typeof extensions !== 'object' || extensions === null || Array.isArray(extensions) || Object.hasOwn(extensions, 'persistedQuery'))) {
+      return { refusal: 'the body asks for a persisted query, which the server runs instead of the document it shows' };
+    }
+    const query = fields['query'];
+    if (typeof query !== 'string') return { refusal: 'the body has no query string' };
+    return { mutates: GRAPHQL_WRITE_OPERATION.test(query) };
+  } catch {
+    return { refusal: 'the body is not JSON this check can read' };
+  }
+}
+
+/**
+ * Whether a request that is not a write carries a GraphQL write in its URL: any `query`
+ * parameter that names `mutation` or `subscription`. Some servers run a document sent this way;
+ * the question could not show it, so such a request is refused rather than asked.
+ */
+export function graphqlUrlWrites(url: string): boolean {
+  try {
+    return new URL(url).searchParams.getAll('query').some((query) => GRAPHQL_WRITE_OPERATION.test(query));
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Paths on an API host that send to a third party or issue something bindingly. Keyed by the
  * HOST and not by a connected profile: a call reaches a host with a preset profile, with a
  * token profile or with none, and the table holds for each of them. Matched per segment, for
  * every write method.
  *
- * bexio: `…/send` mails a document to its recipient, `…/issue` issues an invoice. Only these
- * two are named; bexio's full path catalogue was not checked against this list.
+ * bexio, read from its OpenAPI specification 3.0.0 (every documented write, each judged by what
+ * it sets off): `send` mails an invoice, reminder or quote to its recipient; `issue`, `reissue`,
+ * `revert_issue` / `revertIssue` and `cancel` issue, re-issue, withdraw or cancel a binding
+ * document; `bookings/{status}` books a bill or an expense or sets it back to draft; `accept`
+ * and `reject` decide a quote; `mark_as_sent` marks an invoice, reminder or quote as sent and
+ * `mark_as_unsent` a reminder as not sent, neither sending anything; `payments` and
+ * `outgoing-payments` create, edit, cancel or delete a payment out to a recipient. Not named:
+ * the writes that create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or
+ * order), record an incoming payment (`kb_invoice/{id}/payment`), archive, reactivate or restore,
+ * and the `actions` of bills and expenses, whose only action in the specification is
+ * `DUPLICATE`. An order's `repetition` is held by {@link OUTBOUND_EFFECT_FIELDS}. NOT held by
+ * either table: a payment in the body of a bill (`purchase/bills`, field `payment`) and an
+ * employee's `iban` (`payroll/employees`, on create and on edit). On this host a connected
+ * account asks for every write anyway, and a bulk run reaches only its measured forms (a
+ * contact), so neither reaches them unasked; a write note still treats them as ordinary writes.
  */
 export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly segments: readonly string[] }[] = [
-  { host: 'api.bexio.com', segments: ['send', 'issue'] },
+  {
+    host: 'api.bexio.com',
+    segments: [
+      'send', 'issue', 'reissue', 'revert_issue', 'revertissue', 'cancel', 'accept', 'reject',
+      'bookings', 'mark_as_sent', 'mark_as_unsent', 'payments', 'outgoing-payments',
+    ],
+  },
 ];
 
 /** Whether a write to `url` with `method` is one the table names. A read never is. */
@@ -409,8 +554,10 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   if (!entry) return false;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   if (ambiguous) return true;
-  // A segment matches as itself or with a format suffix (`send.json`).
-  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || segment.startsWith(`${s}.`)));
+  // A segment matches as itself or followed by anything but a letter or digit (`send.json`,
+  // `send:x`, `send-`, `send,`): which of these a provider's router still reads as the action is
+  // not documented, so every such form counts. `sender` does not.
+  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || (segment.startsWith(s) && /[^a-z0-9]/u.test(segment.charAt(s.length)))));
 }
 
 /** What a field of {@link OUTBOUND_EFFECT_FIELDS} sets off at the provider. */
@@ -449,7 +596,7 @@ export const OUTBOUND_EFFECT_FIELDS: readonly OutboundEffectField[] = [
   { path: WOO('orders'), fields: ['customer_id'], effect: 'data_to_third_party', says: 'WooCommerce moves the order, with its addresses, into another customer\'s account' },
   { path: WOO('customers'), fields: ['password', 'email'], effect: 'credential', says: 'WooCommerce changes how the customer signs in; a changed email address also receives the password reset' },
   { path: WOO('webhooks'), fields: 'any', effect: 'data_to_third_party', says: 'a WooCommerce webhook decides where the shop sends its order and customer data' },
-  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/\d+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
+  { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/[^/]+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
   { host: 'api.bexio.com', path: /^\/2\.0\/kb_order\/\d+\/repetition$/, fields: 'any', effect: 'money', says: 'bexio invoices this order again on this schedule' },
 ];
 

@@ -102,18 +102,20 @@ import { computeComposition, type CompositionSnapshot } from './context-composit
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys } from './api-store.js';
+import { slotMayReach } from './profile-secret-view.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
-import { currentCallSignal, runInCallSlot, trackCallAnswer } from './call-connection.js';
+import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
-import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
+import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
 
 /** A helper request that is out and has not answered yet — what an abort would leave unbooked. */
 interface AbortableHelperCall { modelId: string; maxTokens: number; request: unknown; stream: unknown }
@@ -1017,11 +1019,26 @@ export class Agent implements IAgent {
     // land attacker text active+pinned in the always-loaded focus block instead of pending_review.
     'archive_search',
   ]);
+  /**
+   * Reads of stored memory, counted as external content only while a capability contract
+   * governs this agent. A memory a person approved can still carry text that came from outside,
+   * and the person approving it does not read it as an instruction to a later unattended write.
+   * A run that needs memory before a granted write has the grant's own switch for that
+   * (`afterUntrusted`). Without a contract these reads keep their ordinary standing.
+   */
+  private static readonly CONTRACT_EXTERNAL_TOOLS: ReadonlySet<string> = new Set([
+    'memory_recall', 'memory_list', 'recall',
+  ]);
+  /** Whether a call to `name` brings external content into this agent (see the two lists). */
+  private isExternalContentTool(name: string): boolean {
+    return Agent.EXTERNAL_CONTENT_TOOLS.has(name)
+      || (this.capabilityContract !== undefined && Agent.CONTRACT_EXTERNAL_TOOLS.has(name));
+  }
   /** DK.1 (H4): true when any external-content tool ran this turn (the capability signal a
    *  `remember` write ORs with {@link sawUntrustedData} to derive `sourceUntrusted`). */
   get sawExternalContentTool(): boolean {
     for (const name of this._turnToolNames) {
-      if (Agent.EXTERNAL_CONTENT_TOOLS.has(name)) return true;
+      if (this.isExternalContentTool(name)) return true;
     }
     return false;
   }
@@ -1426,7 +1443,7 @@ export class Agent implements IAgent {
           // arms the taint by NAME during a live run — those results carry no wrap
           // marker — so the resume re-derivation must scan tool_use names too, or a
           // rehydrated thread that ran such a tool silently disarms its durable-write gate.
-          if (Agent.EXTERNAL_CONTENT_TOOLS.has(block.name)) return true;
+          if (this.isExternalContentTool(block.name)) return true;
         } else if (block.type === 'tool_result') {
           const rc = block.content;
           if (typeof rc === 'string') {
@@ -3745,6 +3762,16 @@ export class Agent implements IAgent {
         resolvedHost = new URL(String(resolved.url)).host;
       } catch { resolvedHost = undefined; }
       if (resolvedHost !== parsed.host) return notGoing('would reach a different host once its secrets are filled in');
+      // A Shopify store gets no secret for now (`shopify-host.ts`), approved or not: refused
+      // before any question, since the request tool would refuse the request itself anyway.
+      if (isShopifyAdminHost(parsed.hostname)) return refuse(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
+      // A token slot goes only to where its grant points, whoever approved what before: asked
+      // before the profile's names and the session's approvals, and refused, never asked.
+      const apiStore = this.toolContext.apiStore;
+      const offGrant = apiStore ? secretNames.filter((n) => !slotMayReach(apiStore, n, 'request', rawUrl)) : [];
+      if (offGrant.length > 0) {
+        return refuse(`Blocked: tool "http_request" would send ${offGrant.join(', ')} to ${parsed.hostname}. ${offGrant.length === 1 ? 'That vault name holds' : 'Those vault names hold'} an OAuth token, which goes only to where its own connection points: an access token to that connection's base_url, a refresh token to no request at all; a name more than one profile claims goes nowhere. Call the API through the profile that holds the connection and let the engine attach the token, without a secret: reference.`);
+      }
       const host = parsed.hostname;
       const profile = this.toolContext.apiStore?.getByHostname(host);
       const accepted = profile !== undefined && isEndpointAcked(profile.custom_endpoint_ack, rawUrl);
@@ -3777,6 +3804,13 @@ export class Agent implements IAgent {
       });
     }
 
+    // A token slot is never handed to a tool whose destination cannot be read, asked or not:
+    // the question would name the token, not the host it reaches.
+    const toolStore = this.toolContext.apiStore;
+    const tokens = toolStore ? secretNames.filter((n) => !slotMayReach(toolStore, n, 'other', undefined)) : [];
+    if (tokens.length > 0) {
+      return refuse(`Blocked: tool "${tc.name}" would receive ${tokens.join(', ')}, ${tokens.length === 1 ? 'a vault name that holds' : 'vault names that hold'} an OAuth token. A token is used only in an http_request to its own connection, where the engine attaches it; no other tool receives one.`);
+    }
     if (!this.promptUser) {
       if (taintedBeforeThisCall) {
         return refuse(`Blocked: tool "${tc.name}" would receive secret(s) ${secretNames.join(', ')} after this conversation took in untrusted content, and there is no one to approve it.`);
@@ -4064,6 +4098,27 @@ export class Agent implements IAgent {
   }
 
   /**
+   * The actor trail's `read` row for a mandate's call that reads outside the instance
+   * (`ToolEntry.outwardRead`). `true` when the call may run: the owner's call, a call that
+   * reads nothing outside, or one whose row was written. `false` when the row cannot be
+   * written — no trail store, or the insert threw — and the call must not run. Like the
+   * write's row it is built from `tc.input`, before any secret was resolved into it, and it
+   * names the target only: never what came back, never a query or a search text.
+   */
+  private _recordOutwardRead(tc: BetaToolUseBlock, tool: ToolEntry): boolean {
+    const record = outwardReadRecorder(this, `${tc.name}:read`);
+    if (record === null) return true;
+    const target = tool.outwardRead ? tool.outwardRead(tc.input as never) : null;
+    if (target === null) return true;
+    try {
+      record(target);
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
    * or `null` when there is nothing to record: the owner's call, or a call that writes
    * nothing outside. Only the owner is exempt, so a principal kind added later is recorded
@@ -4153,7 +4208,7 @@ export class Agent implements IAgent {
     // DK.1 F5: a denylist tool's output persists in context across turns (many do not wrap,
     // so a later marker scan cannot see them) — arm the sticky conversation latch so a
     // deferred `remember` on a later clean turn is still routed to pending_review.
-    if (Agent.EXTERNAL_CONTENT_TOOLS.has(tc.name)) {
+    if (this.isExternalContentTool(tc.name)) {
       this._conversationSawUntrusted = true;
       // Several of these tools return what they read without wrapping it, so the marker
       // below never sees it. `http_request` always wraps and reports which host answered,
@@ -4384,6 +4439,12 @@ export class Agent implements IAgent {
     // not run unrecorded (PRD customer-granted-operator-access §3.13 "Verbundene Konten").
     // After every gate the dispatch itself holds; the gates inside the handler come later,
     // which is why the outcome is a second row and not part of this one.
+    // What it reads outside is recorded the same way, first: a write that reads before it
+    // writes (a reply reads the mail it answers) gets both rows, and a call refused here
+    // leaves no write attempt behind.
+    if (!this._recordOutwardRead(tc, tool)) {
+      return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE_READ, is_error: true };
+    }
     const trail = this._beginOutwardTrail(tc, tool);
     if (trail === 'refused') {
       return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE, is_error: true };
@@ -4543,7 +4604,10 @@ export class Agent implements IAgent {
       );
 
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id });
+        // The grant mark rides on the event the runner records a step from; the two emits after
+        // a handler ran are the only ones that can carry it (`GrantLift`).
+        const grant = grantLiftOf(callSlot);
+        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(grant !== undefined ? { grant } : {}) });
       }
       return {
         type: 'tool_result',
@@ -4597,7 +4661,9 @@ export class Agent implements IAgent {
         // terminate the run. Emitting it here triggers the UI's global toast
         // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
         // next to a still-streaming response.
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true });
+        // A write let through and then failed (the fetch threw) keeps its mark: lifted, and failed.
+        const grant = grantLiftOf(callSlot);
+        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the

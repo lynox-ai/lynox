@@ -102,6 +102,58 @@ describe('isMailProviderTarget', () => {
     expect(isMailProviderTarget(url)).toBe(true);
   });
 
+  // One witness per mailbox API host. Zoho and Nylas on the send path each documents; for
+  // Fastmail, whose session hands out the method URL at run time, on each host it may be.
+  it.each([
+    'https://api.fastmail.com/jmap/api/',
+    'https://api.fastmail.com/jmap/session',
+    'https://jmap.fastmail.com/jmap/api/',
+    'https://mail.zoho.com/api/accounts/1/messages',
+    'https://mail.zoho.eu/api/accounts/1/messages',
+    'https://mail.zoho.in/api/accounts/1/messages',
+    'https://mail.zoho.com.au/api/accounts/1/messages',
+    'https://mail.zoho.jp/api/accounts/1/messages',
+    'https://mail.zoho.com.cn/api/accounts/1/messages',
+    'https://mail.zoho.ae/api/accounts/1/messages',
+    'https://mail.zoho.sa/api/accounts/1/messages',
+    'https://mail.zohocloud.ca/api/accounts/1/messages',
+    'https://api.us.nylas.com/v3/grants/g1/messages/send',
+    'https://api.eu.nylas.com/v3/grants/g1/messages/send',
+    'https://api.nylas.com/send',
+    'https://ireland.api.nylas.com/send',
+  ])('refuses the mailbox API at %s', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
+  });
+
+  it.each([
+    'https://www.fastmail.com/dev/',
+    'https://accounts.zoho.com/oauth/v2/token',
+    'https://www.zohoapis.com/crm/v2/Leads',
+    'https://developer.nylas.com/docs/',
+    'https://api.fastmail.com.example.com/jmap/api/',
+  ])('leaves %s alone, which is not a mailbox API host', (url) => {
+    expect(isMailProviderTarget(url)).toBe(false);
+  });
+
+  // The whole host, not its mail paths: contacts and an organisation's users go with it.
+  it.each([
+    'https://api.us.nylas.com/v3/grants/g1/contacts',
+    'https://mail.zoho.eu/api/organization/1/accounts',
+  ])('refuses %s, which is on a mailbox API host', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
+  });
+
+  // A host with trailing dots names the same host; one dot or several.
+  it.each([
+    'https://api.fastmail.com./jmap/api/',
+    'https://api.fastmail.com../jmap/api/',
+    'https://api.sendgrid.com.../v3/mail/send',
+    'https://gmail.googleapis.com../gmail/v1/users/me/messages/send',
+    'https://graph.microsoft.com../v1.0/me/sendMail',
+  ])('refuses %s, spelled with trailing dots', (url) => {
+    expect(isMailProviderTarget(url)).toBe(true);
+  });
+
   it('refuses every path on a sending service, in any spelling of its host', () => {
     expect(isMailProviderTarget('https://api.sendgrid.com/v3/marketing/singlesends/1/schedule')).toBe(true);
     expect(isMailProviderTarget('https://API.Resend.com./emails/batch')).toBe(true);
@@ -172,6 +224,7 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
     rateLimit: () => null,
     scan: detectSecretInContent,
     connectedAccount: () => false,
+    recordRead: null,
   });
 
   it('plans a mail API target as invalid, and a target on another host as a target', () => {
@@ -202,20 +255,21 @@ describe('planning, approving and writing a bulk run to a mail API', () => {
   });
 
   // 016: on an ordinary resource path the VALUE of a field sets off the effect (an order's status
-  // mails its customer, a payment's amount is paid out); the request is never sent, whichever
+  // mails its customer, an order's repetition invoices it again); the request is never sent, whichever
   // source planned it, and an undo writing such a field back is refused the same way.
   it('(016) sends nothing that sets a field of the outbound-effect field table, even under a contract that grants it', async () => {
     const order = 'https://shop.example.com/wp-json/wc/v3/orders/5';
-    const payment = 'https://api.bexio.com/4.0/banking/payments/4';
+    // An ordinary resource path: the path table does not name it, only the field table holds it.
+    const repetition = 'https://api.bexio.com/2.0/kb_order/4/repetition';
     const woo = client('shop.example.com', [order], 'PUT');
     expect(await woo.write(order, 'PUT', { status: 'completed' })).toEqual({ kind: 'not_granted' });
-    const bexio = client('api.bexio.com', [payment], 'PUT');
-    expect(await bexio.write(payment, 'PUT', { amount: '10.00' })).toEqual({ kind: 'not_granted' });
+    const bexio = client('api.bexio.com', [repetition], 'POST');
+    expect(await bexio.write(repetition, 'POST', { interval: 'monthly' })).toEqual({ kind: 'not_granted' });
     expect(requests).toEqual([]);
     // The controls: a field off the table reaches the transport, and so does reading the target.
     expect(await woo.write(order, 'PUT', { transaction_id: 'x' })).toEqual({ kind: 'ok', value: undefined });
     expect(await woo.get(order)).toMatchObject({ kind: 'ok' });
-    expect(await bexio.get(payment), 'reading a payment sets nothing off').toMatchObject({ kind: 'ok' });
+    expect(await bexio.get(repetition), 'reading a repetition sets nothing off').toMatchObject({ kind: 'ok' });
     expect(requests.map((r) => r.method)).toEqual(['PUT', 'GET', 'GET']);
   });
 

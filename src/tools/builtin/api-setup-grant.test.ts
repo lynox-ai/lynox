@@ -20,6 +20,7 @@ import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 import { TOKEN_EXCHANGE_TIMEOUT_MS } from '../../core/oauth-token-exchange.js';
 import { ApiStore, type ApiProfile, type OAuthGrantRecord } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
+import { scopeSecretStore } from '../../core/secret-scope.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
@@ -792,6 +793,89 @@ describe('fetch_token — a profile connected through a provider preset', () => 
   });
 });
 
+describe('fetch_token — a grant a user gave is never renewed as an app token', () => {
+  const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
+  const withPreset = (p: ApiProfile, presetId = 'bexio'): ApiProfile =>
+    ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: presetId, scope: 'contact_show' } } });
+  /** What the callback leaves when the consent came back without a refresh token: no `grant_type`. */
+  const withoutGrantType = (p: ApiProfile): ApiProfile => {
+    const oauth = { ...p.auth!.oauth! };
+    delete oauth.grant_type;
+    return { ...p, auth: { ...p.auth!, oauth } };
+  };
+  const CALLBACK = { oauth_grant: { origin: 'callback' as const, state: 'no-refresh' as const } };
+  const VAULT = { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' };
+  // The three sentences a refusal can pick from, and the two next steps.
+  const AUTHORIZED = 'was authorized by a user';
+  const PRESET_ONLY = 'connects through the "bexio" provider, which issues its tokens only through a user\'s authorization';
+  const CONNECT = 'action "connect"';
+  const OWNER = 'needs re-authorizing by the person who owns it';
+  const refused: { name: string; profile: ApiProfile; says: string; next: string; notSays: readonly string[] }[] = [
+    // Never connected: a preset profile created and sent to fetch_token (the attach says
+    // "Mint one first with: api_setup fetch_token" for any oauth2 profile without a token).
+    { name: 'a preset profile never connected, client_credentials named', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials')), says: PRESET_ONLY, next: CONNECT, notSays: [AUTHORIZED, OWNER] },
+    // The file the callback left, back in the store without its grant record.
+    { name: 'a preset profile with no grant type and no grant record', profile: withPreset(withoutGrantType(crmProfile({ custom_endpoint_ack: ACK2 }))), says: PRESET_ONLY, next: CONNECT, notSays: [AUTHORIZED, OWNER] },
+    { name: 'a preset profile the callback connected', profile: withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 }))), says: `${AUTHORIZED} through the "bexio" provider`, next: CONNECT, notSays: [PRESET_ONLY, OWNER] },
+    // `connect` runs only for a built-in preset, so these two are not sent there.
+    { name: 'a profile the callback connected, no preset', profile: withoutGrantType(crmProfile(CALLBACK)), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT] },
+    { name: 'a profile the callback connected, naming a preset this engine does not know', profile: withPreset(withoutGrantType(crmProfile(CALLBACK)), 'not-a-provider'), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT, 'not-a-provider'] },
+  ];
+
+  for (const r of refused) {
+    it(`refuses client_credentials for ${r.name}, before anything is sent`, async () => {
+      const store = new ApiStore();
+      expect(store.register(r.profile)).toBe(true);
+      const before = JSON.stringify(store.get('crm-api'));
+      const vault = makeVault(VAULT);
+      const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'app-token', expires_in: 86399 }));
+
+      const result = await fetchToken(makeAgent(store, vault));
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(result).toContain(r.says);
+      expect(result).toContain('declares no refresh_token grant');
+      expect(result).toContain(r.next);
+      for (const other of r.notSays) expect(result).not.toContain(other);
+      expect(result).not.toContain('secret-1');
+      expect(JSON.stringify(store.get('crm-api'))).toBe(before);
+      expect(vault.peek(ACCESS)).toBeUndefined();
+    });
+  }
+
+  it('still renews an app-only profile that carries the grant record of an earlier fetch_token', async () => {
+    // The record this handler writes after every exchange: names it wrote, and who connected.
+    // A refusal keyed on "has an oauth_grant" would stop exactly this profile's second token.
+    const store = new ApiStore();
+    expect(store.register(crmProfile({ oauth_grant: { written: [{ name: ACCESS, fp: tokenFingerprint('old-token') }], connected_by: 'owner' } }, 'client_credentials'))).toBe(true);
+    const vault = makeVault({ ...VAULT, [ACCESS]: 'old-token' });
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', expires_in: 86399 }));
+
+    const result = await fetchToken(makeAgent(store, vault));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const body = new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body));
+    expect(body.get('grant_type')).toBe('client_credentials');
+    expect(result).not.toContain(AUTHORIZED);
+    expect(vault.peek(ACCESS)).toBe('new-token');
+  });
+
+  it('still renews an app-only profile that names a preset this engine does not know', async () => {
+    // The save keeps such an id and only notes it; `connect` refuses the profile. Reading it
+    // as a user's consent would leave the profile with no way to a token at all.
+    const store = new ApiStore();
+    expect(store.register(withPreset(crmProfile({}, 'client_credentials'), 'not-a-provider'))).toBe(true);
+    const vault = makeVault(VAULT);
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', expires_in: 86399 }));
+
+    await fetchToken(makeAgent(store, vault));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body)).get('grant_type')).toBe('client_credentials');
+    expect(vault.peek(ACCESS)).toBe('new-token');
+  });
+});
+
 describe('fetch_token — a refused scope', () => {
   const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
   const withPreset = (p: ApiProfile, extra: Record<string, unknown> = {}): ApiProfile =>
@@ -806,8 +890,9 @@ describe('fetch_token — a refused scope', () => {
    */
   const states: { name: string; profile: ApiProfile; vault: Record<string, string>; grant: string }[] = [
     { name: 'connected, refresh token presented', profile: withPreset(crmProfile({ oauth_grant: stamp('client-1', 'rt-1'), custom_endpoint_ack: ACK2 })), vault: STANDARD_VAULT, grant: 'refresh_token' },
-    { name: 'never connected, client credentials', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials')), vault: STANDARD_VAULT, grant: 'client_credentials' },
-    { name: 'last consent returned no refresh token', profile: withPreset(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-0'), origin: 'callback', state: 'no-refresh' }, custom_endpoint_ack: ACK2 }, 'client_credentials')), vault: { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }, grant: 'client_credentials' },
+    // A preset profile on `client_credentials` (never connected, or a last consent without a
+    // refresh token) does not reach a scope refusal any more: fetch_token refuses it before
+    // anything is sent (the describe further up).
     { name: 'refresh token read from its own slot', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }), { refresh_token_key: 'CRM_OWN_REFRESH' }), vault: { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' }, grant: 'refresh_token' },
   ];
 
@@ -1191,10 +1276,11 @@ describe('fetch_token — what a successful exchange records', () => {
     ])('does not store the access token under a name another profile took while the POST ran, %s', async (_label, rotatedRefresh) => {
       const store = new ApiStore();
       store.register(crmProfile());
-      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
-      // The profile arrives while the exchange is on the wire.
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' });
+      // The profile and its key arrive while the exchange is on the wire.
       vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
         store.register(feedProfile());
+        vault.set('CRM_OWN_TOKEN', 'feed-key');
         return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
       });
       const feedProfile = (): ApiProfile => ({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
@@ -1223,9 +1309,10 @@ describe('fetch_token — what a successful exchange records', () => {
     it('takes the refresh token out again when the profile was also deleted while the POST ran', async () => {
       const store = new ApiStore();
       store.register(crmProfile());
-      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', CRM_OWN_TOKEN: 'feed-key' });
+      const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1' });
       vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
         store.register({ id: 'feed', name: 'Feed', base_url: 'https://feed.example/v1', description: 'Feed', auth: { type: 'bearer', vault_keys: ['CRM_OWN_TOKEN'] } });
+        vault.set('CRM_OWN_TOKEN', 'feed-key');
         store.unregister('crm-api');
         return new Response(JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
       });
@@ -1235,6 +1322,198 @@ describe('fetch_token — what a successful exchange records', () => {
       expect(result).toContain(`was deleted while it ran. Removed the tokens its exchanges wrote: ${REFRESH}.`);
       expect(vault.peek(REFRESH)).toBeUndefined();
       expect(vault.peek('CRM_OWN_TOKEN')).toBe('feed-key');
+    });
+
+    describe('a value no profile uses', () => {
+      const vaultWith = (extra: Record<string, string>): MockVault => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [REFRESH]: 'rt-1', ...extra });
+
+      it('refuses a name that holds a value the user stored, before posting anything', async () => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({ STRIPE_KEY: 'sk-by-hand' });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "STRIPE_KEY" already holds a value in the vault that is not a token of this profile');
+        expect(result).toContain(`Leave output_secret_name out, so the token goes to "${ACCESS}"`);
+        expect(result).toContain('they can delete it in Settings → API Keys');
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(vault.peek('STRIPE_KEY')).toBe('sk-by-hand');
+      });
+
+      it('refuses a name that has a row only in the vault file', async () => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        // Not in the store's map: a row written past it, as the mail credentials are.
+        const vault = Object.assign(vaultWith({}), { listVaultNames: () => ['OLD_SHOP_TOKEN'] });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'OLD_SHOP_TOKEN' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "OLD_SHOP_TOKEN" already holds a value in the vault that is not a token of this profile');
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(vault.peek('OLD_SHOP_TOKEN')).toBeUndefined();
+      });
+
+      it.each([
+        ['left out', undefined],
+        ['named', ACCESS],
+      ])('control: its own derived access slot takes the token over a value no record names, output name %s', async (_label, outputName) => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({ [ACCESS]: 'at-by-hand' });
+        tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', ...(outputName ? { output_secret_name: outputName } : {}) }, makeAgent(store, vault)) as string;
+
+        expect(result).not.toContain('Error');
+        expect(vault.peek(ACCESS)).toBe('at-1');
+      });
+
+      it.each([
+        ['without a new refresh token', undefined],
+        ['and keeps the new refresh token the provider sent', 'rt-2'],
+      ])('does not store the access token under a name that came to hold a value while the POST ran, %s', async (_label, rotatedRefresh) => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({});
+        const expiryBefore = exchangedTokenExpiryFor('crm-api');
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          vault.set('CRM_OWN_TOKEN', 'by-hand');
+          return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600, ...(rotatedRefresh ? { refresh_token: rotatedRefresh } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
+        });
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "CRM_OWN_TOKEN" was no longer a name this exchange may write when the token arrived');
+        expect(result).toContain('so the access token was not stored.');
+        expect(result).toContain(`Leave output_secret_name out, so the token goes to "${ACCESS}".`);
+        expect(exchangedTokenExpiryFor('crm-api')).toBe(expiryBefore);
+        expect(vault.peek('CRM_OWN_TOKEN')).toBe('by-hand');
+        expect(vault.peek(REFRESH)).toBe(rotatedRefresh ?? 'rt-1');
+        const grant = store.get('crm-api')?.oauth_grant;
+        expect(grant?.written ?? []).toEqual(rotatedRefresh ? wrote({ [REFRESH]: rotatedRefresh }) : []);
+        expect(store.get('crm-api')?.auth?.oauth?.token_expires_at).toBeUndefined();
+        if (rotatedRefresh) expect(result).toContain(`The provider's new refresh token was stored as "${REFRESH}".`);
+        else expect(result).not.toContain('new refresh token');
+      });
+
+      it('refuses a name the profile itself reads, which the model can add to it', async () => {
+        const store = new ApiStore();
+        const base = crmProfile();
+        store.register({ ...base, auth: { ...base.auth!, vault_keys: [...(base.auth!.vault_keys ?? []), 'STRIPE_KEY'] } });
+        const vault = vaultWith({ STRIPE_KEY: 'sk-by-hand' });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+        expect(result).toContain('output_secret_name "STRIPE_KEY" already holds a value in the vault that is not a token of this profile');
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(vault.peek('STRIPE_KEY')).toBe('sk-by-hand');
+      });
+
+      describe('for a profile that reads its refresh token from the derived access name', () => {
+        // Leaving the output name out walks into the refresh refusal there, so no refusal may advise it.
+        const onDerived = (): ApiProfile => { const base = crmProfile(); return { ...base, auth: { ...base.auth!, oauth: { ...base.auth!.oauth!, refresh_token_key: ACCESS } } }; };
+        const derivedVault = (extra: Record<string, string>): MockVault => makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', [ACCESS]: 'rt-1', ...extra });
+        const advisesRight = (result: string): void => {
+          expect(result).toContain(`Leaving output_secret_name out does not help: this profile reads its refresh token from "${ACCESS}"`);
+          expect(result).not.toContain('Leave output_secret_name out');
+        };
+
+        it('the refusal before posting does not advise leaving the name out', async () => {
+          const store = new ApiStore();
+          store.register(onDerived());
+          const vault = derivedVault({ STRIPE_KEY: 'sk-by-hand' });
+          const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+          expect(result).toContain('already holds a value in the vault that is not a token of this profile');
+          advisesRight(result);
+          expect(fetchSpy).not.toHaveBeenCalled();
+        });
+
+        it('the refusal in a scoped run does not advise leaving the name out', async () => {
+          const store = new ApiStore();
+          store.register(onDerived());
+          const vault = derivedVault({});
+          const scopedVault = scopeSecretStore(vault as never, ['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET', ACCESS]) as unknown as MockVault;
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, scopedVault)) as string;
+
+          expect(result).toContain('is not available in this run');
+          advisesRight(result);
+        });
+
+        it('the refusal after the exchange does not advise leaving the name out', async () => {
+          const store = new ApiStore();
+          store.register(onDerived());
+          const vault = derivedVault({});
+          vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+            vault.set('STRIPE_KEY', 'sk-by-hand');
+            return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+          });
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, vault)) as string;
+
+          expect(result).toContain('was no longer a name this exchange may write when the token arrived');
+          advisesRight(result);
+          expect(vault.peek('STRIPE_KEY')).toBe('sk-by-hand');
+        });
+      });
+
+      describe('in a run that sees only part of the vault', () => {
+        const scoped = (vault: MockVault): MockVault =>
+          scopeSecretStore(vault as never, ['CRM_CLIENT_ID', 'CRM_CLIENT_SECRET', REFRESH]) as unknown as MockVault;
+
+        it.each([
+          ['a name that holds a value outside the scope', { STRIPE_KEY: 'sk-by-hand' }],
+          ['a name that holds nothing', {}],
+        ])('refuses %s, before posting anything', async (_label, extra) => {
+          const store = new ApiStore();
+          store.register(crmProfile());
+          const vault = vaultWith(extra);
+          const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'STRIPE_KEY' }, makeAgent(store, scoped(vault))) as string;
+
+          expect(result).toContain('output_secret_name "STRIPE_KEY" is not available in this run');
+          expect(result).toContain(`Leave output_secret_name out, so the token goes to "${ACCESS}"`);
+          expect(fetchSpy).not.toHaveBeenCalled();
+          expect(vault.peek('STRIPE_KEY')).toBe((extra as Record<string, string>).STRIPE_KEY);
+        });
+
+        it('control: its own derived access slot takes the token there', async () => {
+          const store = new ApiStore();
+          store.register(crmProfile());
+          const vault = vaultWith({});
+          tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
+
+          const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api' }, makeAgent(store, scoped(vault))) as string;
+
+          expect(result).not.toContain('Error');
+          expect(vault.peek(ACCESS)).toBe('at-1');
+        });
+      });
+
+      it('control: a name its own record came to name while the POST ran takes the token', async () => {
+        const store = new ApiStore();
+        store.register(crmProfile());
+        const vault = vaultWith({});
+        // Another exchange of this profile wrote the name and recorded it meanwhile.
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_OWN_TOKEN: 'at-0' }) } }));
+          vault.set('CRM_OWN_TOKEN', 'at-0');
+          return new Response(JSON.stringify({ access_token: 'at-1', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+        });
+
+        const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'crm-api', output_secret_name: 'CRM_OWN_TOKEN' }, makeAgent(store, vault)) as string;
+
+        expect(result).not.toContain('Error');
+        expect(vault.peek('CRM_OWN_TOKEN')).toBe('at-1');
+      });
     });
 
     it('control: a name its own earlier exchange wrote takes the token again', async () => {
@@ -1254,7 +1533,9 @@ describe('fetch_token — what a successful exchange records', () => {
     it('control: naming its own access slot, which another profile reads on purpose, takes the token', async () => {
       const store = new ApiStore();
       store.register(crmProfile());
-      store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+      // The admission holds this reader back now: stored, not registered. The output check reads
+      // stored profiles, so the reader still names the slot.
+      expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
       const vault = vaultWithRefresh();
       tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
 
@@ -1267,7 +1548,9 @@ describe('fetch_token — what a successful exchange records', () => {
     it('control: a renewal names no output and is not asked, whoever else reads its slot', async () => {
       const store = new ApiStore();
       store.register(crmProfile());
-      store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+      // The admission holds this reader back now: stored, not registered. The output check reads
+      // stored profiles, so the reader still names the slot.
+      expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
       const vault = vaultWithRefresh();
       tokenEndpoint(200, JSON.stringify({ access_token: 'at-1', expires_in: 3600 }));
 
@@ -1447,7 +1730,9 @@ describe('fetch_token — what a successful exchange records', () => {
     const store = new ApiStore();
     store.register(crmProfile());
     // Another profile reads the name this exchange writes its access token to.
-    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
     const vault = vaultWithRefresh();
     const agent = makeAgent(store, vault);
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
@@ -1805,7 +2090,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('keeps a recorded token another profile still reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
-    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } });
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1820,7 +2107,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
     // Not an array, but the attach reads `vault_keys?.[0]` from it all the same.
-    store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: { 0: ACCESS } as unknown as string[] } });
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: { 0: ACCESS } as unknown as string[] } })).toBe(false);
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1860,12 +2149,14 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(result).toContain(`Still in the vault: ${ACCESS}.`);
   });
 
-  // A recorded name of the exchange's choosing, not the derived pair: a profile that signs in with
-  // a name in another's derived pair is not admitted (`derivedPairCollision`).
+  // A recorded name of the exchange's choosing, not the derived pair.
   it('keeps a recorded token another profile reads as its basic password', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
-    expect(store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: 'CRM_MINTED' } })).toBe(true);
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: 'CRM_MINTED' } })).toBe(false);
+    expect(store.knownProfiles().map((p) => p.id)).toContain('legacy');
     const vault = makeVault({ CRM_MINTED: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1877,7 +2168,10 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('keeps a recorded token another profile names as its oauth client secret', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
-    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(true);
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(false);
+    expect(store.knownProfiles().map((p) => p.id)).toContain('other-oauth');
     const vault = makeVault({ CRM_MINTED: 'shared' });
     const agent = makeAgent(store, vault);
 
@@ -1894,7 +2188,10 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   ])('a recorded token another profile names: %s', async (_label, connectedBy, left) => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { connected_by: connectedBy, written: wrote({ CRM_MINTED: 'shared' }) } }));
-    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(true);
+    // The admission holds this reader back now: stored, not registered. The purge reads stored
+    // profiles, so it still keeps the name.
+    expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(false);
+    expect(store.knownProfiles().map((p) => p.id)).toContain('other-oauth');
     const vault = makeVault({ CRM_MINTED: 'shared' });
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(makeAgent(store, vault)));
@@ -1905,7 +2202,14 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('keeps a recorded token that another profile has on its own record', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } }));
-    store.register({ ...crmProfile(), id: 'second', base_url: 'https://second.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['second.example.com'] }, oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } });
+    // Two records of one name: the admission registers neither now, and the delete of a profile
+    // that is not registered purges nothing — this would be green for that reason alone. Registered
+    // as an older store kept them, while `knownProfiles` shows the admission no other stored
+    // profile.
+    const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
+    expect(store.register({ ...crmProfile(), id: 'second', base_url: 'https://second.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['second.example.com'] }, oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } })).toBe(true);
+    unseen.mockRestore();
+    expect(store.get('crm-api')).toBeDefined();
     const vault = makeVault({ SHARED_TOKEN: 'v' });
     const agent = makeAgent(store, vault);
 
@@ -2593,6 +2897,33 @@ describe('who may have a token renewed on their behalf', () => {
   });
 });
 
+describe('the 401 reminder: would fetch_token swap a user\'s access?', () => {
+  // The reminder tells the model to run `fetch_token`. For a grant a user gave,
+  // `fetch_token` now refuses, so the reminder must not send the model there.
+  it('says yes for a preset profile and for a callback-authorized one', async () => {
+    const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: { preset_id: 'bexio' } } }, false)).toBe(true);
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: {} }, oauth_grant: { origin: 'callback' } }, false)).toBe(true);
+  });
+
+  it('says no for an app-only profile, with or without a grant record', async () => {
+    const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
+    // `fetch_token` writes `oauth_grant` itself after each exchange; that record
+    // carries no origin and must not read as a user's consent.
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: {} } }, false)).toBe(false);
+    expect(oauthFetchTokenWouldSwapDelegatedAccess(
+      { auth: { oauth: { grant_type: 'client_credentials' } }, oauth_grant: {} },
+      false,
+    )).toBe(false);
+  });
+
+  it('says no for a preset id this engine does not know', async () => {
+    const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
+    // `connect` refuses such a profile, so "re-authorize" would be advice nobody can follow.
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(false);
+  });
+});
+
 describe('which profiles may be renewed unattended', () => {
   /**
    * The second predicate, asserted directly. It answers a different question
@@ -2653,6 +2984,31 @@ describe('which profiles may be renewed unattended', () => {
       { auth: { oauth: { grant_type: 'client_credentials' } }, oauth_grant: { origin: 'callback' } },
       false,
     )).toBe(false);
+  });
+
+  it('refuses a preset profile with no refresh token, even without a callback record', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // A preset exists for the authorization-code flow, so its access token is a
+    // user's. Without its grant record (a profile file that re-entered the store)
+    // nothing else says so, and by the grant-type rule alone this is the
+    // client-credentials shape the gate permits.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { preset_id: 'bexio' } } }, false)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: { preset_id: 'bexio', grant_type: 'client_credentials' } } },
+      false,
+    )).toBe(false);
+    // A preset id this engine does not know marks nothing: the profile is app-only.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(true);
+  });
+
+  it('permits a preset profile that carries the refresh_token grant', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // The preset refuses the client-credentials swap, not the renewal: a preset
+    // whose consent returned a refresh token renews by it, unattended.
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: { preset_id: 'bexio', grant_type: 'refresh_token' } }, oauth_grant: { origin: 'callback' } },
+      true,
+    )).toBe(true);
   });
 
   it('permits a callback-authorized profile once it carries the refresh_token grant', async () => {
@@ -3830,11 +4186,19 @@ describe('mandates and stored credentials', () => {
     releases: 'all' | 'none' = 'all',
     /** What the API answers (the token endpoint always answers 200). */
     status = 200,
+    /**
+     * Register as an older store kept the profiles: while `knownProfiles` shows the admission no
+     * other stored profile. For a pair the admission no longer registers together whose other check
+     * is the one under test.
+     */
+    legacy = false,
   ): Promise<{ calls: Array<{ url: string; auth: string | undefined }>; out: string }> {
     const db = new EngineDb(join(mockLynoxDir, 'engine.db'));
     engines.push(db);
     const apiStore = new ApiStore(join(mockLynoxDir, 'apis'), new ConnectionStore(db));
-    for (const p of profiles) apiStore.register(p);
+    const unseen = legacy ? vi.spyOn(apiStore, 'knownProfiles').mockReturnValue([]) : undefined;
+    for (const p of profiles) expect(apiStore.register(p), p.id).toBe(true);
+    unseen?.mockRestore();
     const calls: Array<{ url: string; auth: string | undefined }> = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -3849,6 +4213,11 @@ describe('mandates and stored credentials', () => {
     // A mandate's renewal is recorded before it runs (H2h); this block is about the credential,
     // so the log only has to accept the rows. Without one the renewal is skipped by design.
     agent.toolContext['auditLog'] = { record: (): void => {} };
+    // A write reaches the consent gate, which reads the governing contract: none here.
+    (agent as unknown as Record<string, unknown>)['governingContract'] = () => ({ contract: undefined, withheld: 'none' });
+    // …and shows the body masked, through the vault's own masking: nothing to mask here.
+    const sec = (agent as unknown as { secretStore?: Record<string, unknown> }).secretStore;
+    if (sec && typeof sec['maskSecrets'] !== 'function') sec['maskSecrets'] = (t: string): string => t;
     const out = await httpRequestTool.handler(
       { method: 'GET', ...req } as never,
       agent as never,
@@ -3867,31 +4236,30 @@ describe('mandates and stored credentials', () => {
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
-  it.each([
-    ['the host as the profile names it', 'https://api.crm.example/v1/contacts'],
-    ['the host with a trailing root dot', 'https://api.crm.example./v1/contacts'],
-    ['the host with two trailing dots', 'https://api.crm.example../v1/contacts'],
-  ])('a mandate\'s write to a preset account (%s) is refused before the credential is attached: no renewal, nothing sent', async (_label, url) => {
-    const { calls, out } = await send([presetProfile()], vault(SEED), { url, method: 'POST', body: '{}' }, mandate);
-    expect(out).toContain('writes to an account the owner connected');
-    expect(calls).toEqual([]);
+  // PRD §3.13 (H2i-3): a mandate writes to a connected account like the owner, after the approval
+  // of that one write (asked by the http tool's consent gate; this block answers it with Allow).
+  it('a mandate\'s allowed write to a preset account goes out with the account\'s credential', async () => {
+    const { calls } = await send([presetProfile()], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
-  // PRD §3.13 (H2i): on the account this session connected itself, a task would run on a
-  // connection that stops working when the mandate ends, so the refusal does not offer one.
-  it('a mandate\'s write to the account it connected itself is refused without proposing a task', async () => {
+  // The profile map keys the host as the profile names it, so for the credential a trailing root
+  // dot finds no profile and none is attached (the connected-account check strips the dot); the
+  // consent gate reads the host without the dot and asks. That is the owner's path too, and a
+  // mandate gets nothing the owner would not.
+  it('a mandate\'s write to the host with a trailing root dot goes out as the owner\'s does: no credential', async () => {
+    const req = { url: 'https://api.crm.example./v1/contacts', method: 'POST', body: '{}' };
+    const asMandate = await send([presetProfile()], vault(SEED), req, mandate);
+    const asOwner = await send([presetProfile()], vault(SEED), req, OWNER_PRINCIPAL);
+    expect(asOwner.calls.some((c) => c.url.startsWith('https://api.crm.example./'))).toBe(true);
+    expect(asMandate.calls).toEqual(asOwner.calls);
+    expect(asMandate.calls.find((c) => c.url.startsWith('https://api.crm.example'))?.auth).toBeUndefined();
+  });
+
+  it('a mandate\'s allowed write to the account it connected itself goes out with that account\'s credential', async () => {
     const own: ApiProfile = { ...presetProfile(), created_by: M, oauth_grant: { ...presetProfile().oauth_grant, connected_by: M } };
-    const { calls, out } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
-    expect(out).toContain('writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.');
-    expect(out).not.toContain('task_create');
-    expect(calls).toEqual([]);
-  });
-
-  it('a mandate\'s write is refused on a host a preset profile shares with another profile', async () => {
-    const second: ApiProfile = { ...crmProfile({ id: 'crm-two', auth: { type: 'none' } }) };
-    const { calls, out } = await send([presetProfile(), second], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
-    expect(out).toContain('writes to an account the owner connected');
-    expect(calls).toEqual([]);
+    const { calls } = await send([own], vault(SEED), { url: 'https://api.crm.example/v1/contacts', method: 'POST', body: '{}' }, mandate);
+    expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBe('Bearer FRESH');
   });
 
   const bearer = (vaultKey: string, created_by?: string): ApiProfile => ({
@@ -4038,7 +4406,10 @@ describe('mandates and stored credentials', () => {
 
   it('a profile a mandate wrote does not get the token of a preset account', async () => {
     const shop: ApiProfile = { ...presetProfile(), id: 'shop-api', base_url: 'https://api.shop.example/v1', custom_endpoint_ack: { ...PRESET_ACK, hosts: ['api.shop.example', 'auth.bexio.com'] } };
-    const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL);
+    // The admission holds the mandate's profile back now (it sends the preset profile's token as
+    // its key); without the older store it would carry nothing for want of a profile, and this
+    // test would say nothing about the mandate rule.
+    const { calls } = await send([shop, bearer('SHOP_API_ACCESS_TOKEN', M)], vault({ SHOP_API_ACCESS_TOKEN: 'owner-token' }), { url: 'https://api.crm.example/v1/contacts' }, OWNER_PRINCIPAL, 'all', 200, true);
     expect(calls.find((c) => c.url.startsWith('https://api.crm.example/'))?.auth).toBeUndefined();
   });
 
@@ -4268,7 +4639,8 @@ describe('fetch_token — whose consent a grant records', () => {
   it('refuses a mandate\'s exchange whose refresh slot another author\'s profile reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ created_by: TAG_A }, 'client_credentials'));
-    store.register({ id: 'owners-refresh', name: 'Owner', base_url: 'https://crm.example/v1', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_API_REFRESH_TOKEN'] } });
+    // Held back by the admission now, and still stored: the check reads stored profiles.
+    expect(store.register({ id: 'owners-refresh', name: 'Owner', base_url: 'https://crm.example/v1', description: 'd', auth: { type: 'bearer', vault_keys: ['CRM_API_REFRESH_TOKEN'] } })).toBe(false);
     const post = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2', refresh_token: 'rt-mandate', expires_in: 3600 }));
     const out = await fetchToken(makeAgent(store, vault(), undefined, undefined, A));
     expect(out).toContain('where a renewed refresh token of this profile would go');

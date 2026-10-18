@@ -5,7 +5,10 @@ import {
   presetIds,
   presetNotFollowed,
   presetRegisterOf,
+  presetScopeParam,
   presetScopeRequest,
+  presetTokenBodyFormat,
+  presetTokenHeaderName,
   type OAuthPreset,
   PRESET_ID_PATTERN,
 } from './oauth-presets.js';
@@ -81,7 +84,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     const module = await import('./oauth-presets.js');
     expect(Object.keys(module).sort()).toEqual(
       // `presetScopeRequest`, `presetScopeNeedUnmet` and `presetNotFollowed` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetNotFollowed', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeRequest'].sort(),
+      // So are `presetScopeParam`, `presetTokenHeaderName` and `presetTokenBodyFormat`: each reads one field of a preset it is handed.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetNotFollowed', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
     );
   });
 
@@ -430,5 +434,57 @@ describe('presetNotFollowed: a profile on a provider\'s API host goes through th
     ['a base_url that is not a URL', 'not a url', { type: 'bearer' }],
   ] as const)('control: holds nothing for %s', (_label, base_url, auth) => {
     expect(presetNotFollowed({ base_url, auth })).toBeUndefined();
+  });
+});
+
+describe('what a preset says about the request shape, and what a preset that says nothing gets', () => {
+  const COMMA: OAuthPreset = {
+    ...CONSTANT,
+    id: 'example-comma',
+    scopeSeparator: ',',
+    tokenHeaderName: 'X-Example-Access-Token',
+    tokenBodyFormat: 'form',
+    callbackVerification: 'shopify-hmac',
+  };
+
+  it('joins the scopes with a space by default and with the preset\'s separator when it names one', () => {
+    expect(presetScopeParam(CONSTANT, ['read_a', 'read_b'])).toBe('read_a read_b');
+    expect(presetScopeParam(COMMA, ['read_a', 'read_b'])).toBe('read_a,read_b');
+  });
+
+  it('names no header by default (Authorization: Bearer) and the preset\'s header when it names one', () => {
+    expect(presetTokenHeaderName(CONSTANT)).toBeUndefined();
+    expect(presetTokenHeaderName(COMMA)).toBe('X-Example-Access-Token');
+  });
+
+  it.each([
+    ['no value anywhere', undefined, undefined, 'form'],
+    ['the profile\'s json', undefined, 'json', 'json'],
+    ['the profile\'s form', undefined, 'form', 'form'],
+    ['the preset\'s form over the profile\'s json', 'form', 'json', 'form'],
+    ['the preset\'s json over the profile\'s form', 'json', 'form', 'json'],
+    ['the preset\'s json with no profile value', 'json', undefined, 'json'],
+  ] as const)('token body format: %s', (_label, presetFormat, profileFormat, expected) => {
+    const preset: OAuthPreset = presetFormat === undefined ? CONSTANT : { ...CONSTANT, tokenBodyFormat: presetFormat };
+    expect(presetTokenBodyFormat(preset, profileFormat)).toBe(expected);
+  });
+
+  it('gives the shipped bexio preset what its link and token requests compute today: a space join, the profile\'s format or form', () => {
+    const bexio = OAUTH_PRESETS.get('bexio');
+    expect(bexio).toBeDefined();
+    if (!bexio) return;
+    expect(presetTokenHeaderName(bexio)).toBeUndefined();
+    expect(presetScopeParam(bexio, ['openid', 'offline_access', 'contact_show'])).toBe('openid offline_access contact_show');
+    expect(presetTokenBodyFormat(bexio, undefined)).toBe('form');
+    expect(presetTokenBodyFormat(bexio, 'json')).toBe('json');
+  });
+
+  // A tripwire: the change that gives a shipped preset one of these also wires its consumer,
+  // and removes this test.
+  it('ships no preset that sets any of the four yet', () => {
+    for (const id of OAUTH_PRESETS.ids()) {
+      const preset = OAUTH_PRESETS.get(id);
+      expect([preset?.scopeSeparator, preset?.tokenHeaderName, preset?.tokenBodyFormat, preset?.callbackVerification]).toEqual([undefined, undefined, undefined, undefined]);
+    }
   });
 });

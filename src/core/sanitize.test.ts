@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripUntrustedSeparators, collapseToSingleLine, sanitizeAttachmentFilename, sanitizeUploadFilename, readBodyCapped } from './sanitize.js';
+import { stripUntrustedSeparators, collapseToSingleLine, sanitizeAttachmentFilename, attachmentDisposition, sanitizeUploadFilename, readBodyCapped } from './sanitize.js';
 
 // Build control characters via code point so the test source carries none.
 const LF = String.fromCharCode(10);
@@ -43,6 +43,45 @@ describe('sanitizeAttachmentFilename', () => {
 
   it('keeps a normal filename', () => {
     expect(sanitizeAttachmentFilename('report-2026.pdf')).toBe('report-2026.pdf');
+  });
+});
+
+describe('attachmentDisposition', () => {
+  it('carries a name outside Latin-1 as UTF-8 in filename*, with an ASCII stand-in', () => {
+    expect(attachmentDisposition('日本語.txt')).toBe(`attachment; filename="___.txt"; filename*=UTF-8''%E6%97%A5%E6%9C%AC%E8%AA%9E.txt`);
+    expect(attachmentDisposition('Grüsse 🎉.pdf')).toBe(`attachment; filename="Gr_sse _.pdf"; filename*=UTF-8''Gr%C3%BCsse%20%F0%9F%8E%89.pdf`);
+  });
+
+  it('keeps a plain name readable and escapes what is not an attr-char', () => {
+    expect(attachmentDisposition('report-2026.pdf')).toBe(`attachment; filename="report-2026.pdf"; filename*=UTF-8''report-2026.pdf`);
+    expect(attachmentDisposition("it's (draft)*.txt")).toBe(`attachment; filename="it's (draft)*.txt"; filename*=UTF-8''it%27s%20%28draft%29%2A.txt`);
+  });
+
+  it('drops what sanitizeAttachmentFilename drops, in both parameters', () => {
+    expect(attachmentDisposition('a' + CR + LF + 'b' + QUOTE + BACKSLASH + '.txt')).toBe(`attachment; filename="ab.txt"; filename*=UTF-8''ab.txt`);
+  });
+
+  it('replaces direction controls and line separators, and keeps joiners', () => {
+    const RLO = String.fromCharCode(0x202e);
+    expect(attachmentDisposition('inv' + RLO + 'fdp.exe')).toBe(`attachment; filename="inv_fdp.exe"; filename*=UTF-8''inv_fdp.exe`);
+    // Every Bidi_Control character (Unicode 17), and the two separators.
+    for (const cp of [0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x2028, 0x2029]) {
+      expect(attachmentDisposition('a' + String.fromCharCode(cp) + 'b'), cp.toString(16)).toBe(`attachment; filename="a_b"; filename*=UTF-8''a_b`);
+    }
+    const ZWNJ = String.fromCharCode(0x200c);
+    expect(attachmentDisposition('می' + ZWNJ + 'خواهم.txt')).toContain(`filename*=UTF-8''${encodeURIComponent('می' + ZWNJ + 'خواهم')}.txt`);
+  });
+
+  it('turns a lone surrogate into U+FFFD instead of throwing', () => {
+    expect(attachmentDisposition('x' + String.fromCharCode(0xd800) + '.txt')).toBe(`attachment; filename="x_.txt"; filename*=UTF-8''x%EF%BF%BD.txt`);
+  });
+
+  it('yields a value Node accepts as a header', async () => {
+    const { validateHeaderValue } = await import('node:http');
+    for (const n of ['日本語.txt', 'Grüsse 🎉.pdf', 'x' + String.fromCharCode(0xdc00)]) {
+      expect(() => validateHeaderValue('Content-Disposition', attachmentDisposition(n))).not.toThrow();
+    }
+    expect(() => validateHeaderValue('Content-Disposition', `attachment; filename="${sanitizeAttachmentFilename('日本語.txt')}"`)).toThrow();
   });
 });
 

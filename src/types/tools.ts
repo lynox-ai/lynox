@@ -6,6 +6,7 @@ import type { IAgent } from './agent.js';
 import type { AutonomyLevel, CostSnapshot } from './modes.js';
 import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
+import type { GrantLift } from '../core/call-connection.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -103,6 +104,16 @@ export interface ToolEntry<TInput = unknown> {
    */
   outwardWrite?: ((input: TInput) => string | null) | undefined;
   /**
+   * What a call reads from OUTSIDE the instance — a provider's API, a third party, the public
+   * web — as the target it reads (host and path, an action), or `null` for a call that reads
+   * nothing outside. Never content, and never a query or a search text: a search can carry a
+   * customer's name. A mandate's call that returns a target leaves a `read` row before it runs,
+   * and does not run without it (`Agent._recordOutwardRead`). A write that reads first — a
+   * reply reads the mail it answers — declares both. A tool a mandate may use declares this
+   * exactly when it is on `MANDATE_OUTWARD_READERS` (`mandate-tool-lock.ts`).
+   */
+  outwardRead?: ((input: TInput) => string | null) | undefined;
+  /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
    * is appended and checkpointed, the loop returns the turn's text instead of
    * looping back to the model. Use for terminal tools whose whole job is a
@@ -198,7 +209,8 @@ export type StreamEvent =
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
-  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
+  /** `grant`: the write grant that let this call's write through (`GrantLift` says what the mark means and does not). */
+  | { type: 'tool_result'; name: string; result: string;           agent: string; toolUseId?: string | undefined; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined; grant?: GrantLift | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`

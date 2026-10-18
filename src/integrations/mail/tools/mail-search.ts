@@ -8,6 +8,7 @@ import { getErrorMessage } from '../../../core/utils.js';
 import { MailError, type MailEnvelope, type MailSearchOptions, type MailSearchQuery } from '../provider.js';
 import { renderTriageList } from '../triage/envelope.js';
 import { resolveProviders, type MailRegistry } from './registry.js';
+import { namedTarget } from '../../../core/audit-log.js';
 
 interface MailSearchInput {
   account?: string | undefined;
@@ -26,6 +27,8 @@ interface MailSearchInput {
 
 export function createMailSearchTool(registry: MailRegistry): ToolEntry<MailSearchInput> {
   return {
+    // That a mailbox was searched, never what for: the terms can name a customer.
+    outwardRead: (input) => ['search', namedTarget([['account', input.account], ['folder', input.folder]])].filter((s) => s !== '').join(' '),
     definition: {
       name: 'mail_search',
       description:

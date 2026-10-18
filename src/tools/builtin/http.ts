@@ -10,10 +10,10 @@ import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
-import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { newCorrelationId } from '../../core/audit-log.js';
+import { isOwnerPrincipal } from '../../core/request-principal.js';
+import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
+import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -37,10 +37,12 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
+import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
-import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
+import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
+import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -157,15 +159,24 @@ function blockedVerbatim(message: string): never {
  * answered it, so the write may have happened even though the call ends refused. Its own
  * class so the handler can say that instead of "blocked", ahead of the generic rewrite.
  */
+/** Why a hop after a sent write was not followed, as the note after the write says it. */
+const REFUSED_HOP_REASON = {
+  grant: "which this run's grant does not cover",
+  // Delegated access (`delegatedRedirects`): its own refusal says "nothing was sent", which
+  // after a write that was sent and answered would invite the model to send it again.
+  'delegated-write': 'which a server would act on as a write, and under delegated access a redirect is followed only as a read',
+  unrecorded: "which could not be recorded in the instance's log as a read right now",
+} as const;
+
 export class RedirectRefusedAfterWrite extends Error {
-  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' = 'grant') {
+  constructor(method: string, sentUrl: string, redirectUrl: string, why: 'grant' | 'consent' | 'delegated-write' | 'unrecorded' = 'grant') {
     super(
       `${WRITE_POSSIBLY_LANDED_PREFIX} ${method} ${urlForNote(sentUrl)} was sent and answered with a redirect to ` +
-      (why === 'grant'
-        ? `${urlForNote(redirectUrl)}, which this run's grant does not cover; the redirect was not followed. ` +
-          `Do not repeat the request: check the target system for whether it was carried out.`
-        : `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
-          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`),
+      (why === 'consent'
+        ? `${urlForNote(redirectUrl)}, which needs its own approval; the redirect was not followed. ` +
+          `Check the target system for whether the request was carried out before sending it again: sent to that address directly, it goes through its own checks there, which may ask, refuse it, or send it under an approval already given.`
+        : `${urlForNote(redirectUrl)}, ${REFUSED_HOP_REASON[why]}; the redirect was not followed. ` +
+          `Do not repeat the request: check the target system for whether it was carried out.`),
     );
     this.name = 'RedirectRefusedAfterWrite';
   }
@@ -313,6 +324,12 @@ export async function fetchWithValidatedRedirects(
   // paths to the origin the agent trusts, which it will then call WITH the
   // credentials that origin's api_profile carries. `response.url` cannot serve
   // here: fetchPinned constructs its Responses, so that field is always empty.
+  //
+  // Called for every redirect hop the guards above let through, with the method and headers it
+  // is about to be requested with, before it is requested. What it throws stops the call there: a delegated
+  // session's reader records each hop it follows as a read of its own, and does not follow a
+  // hop it cannot record (`outwardReadRecorder`).
+  onRedirect?: ((nextUrl: string, method: string, headers: Record<string, string>) => void) | undefined,
 ): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
   let currentUrl = url;
   // Every host the request reached, the final one included: an answer counts as the approved
@@ -382,6 +399,16 @@ export async function fetchWithValidatedRedirects(
         throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, verdict === 'consent' ? 'consent' : 'grant');
       }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
+    }
+    try {
+      onRedirect?.(nextUrl, method, headers);
+    } catch (err) {
+      // The hop's own refusal speaks of the hop alone. A call that started with a write has
+      // sent it already, and the note must say so, as the guard's refusal above does.
+      if (!isWriteMethod(originalMethod)) throw err;
+      if (err instanceof DelegatedHopRefused) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'delegated-write');
+      if (err instanceof OutwardReadUnrecorded) throw new RedirectRefusedAfterWrite(originalMethod, url, nextUrl, 'unrecorded');
+      throw err;
     }
     currentUrl = nextUrl;
   }
@@ -841,6 +868,38 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
 }
 
 /**
+ * Did a USER give this grant, so that an app-level token would replace their consent?
+ *
+ * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
+ * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
+ * (`auth.oauth.preset_id` that `OAUTH_PRESETS` knows): the built-in presets are
+ * authorization-code flows, and the preset also marks a profile that re-entered the store
+ * without its grant record (a JSON in the apis directory). A preset whose provider issues
+ * app tokens would be refused here too, so adding one means revisiting this.
+ *
+ * ⚠ Known presets only. A profile may be saved naming a provider this engine does not have
+ * (the save only notes it), and `connect` refuses such a profile — so reading any
+ * `preset_id` as a user's consent would refuse an app-only profile's exchange and send it
+ * to a `connect` that cannot run.
+ *
+ * ⚠ NOT "has an `oauth_grant`": `fetch_token` writes one after every successful exchange,
+ * app-only profiles included (`written`, `connected_by`), and the renewal on attach runs the
+ * same handler — so that test would refuse an app-only profile's second token. A profile
+ * with neither mark is an app-only profile and is not told apart from one.
+ *
+ * The one place this question is answered: the unattended gate, the 401 reminder and
+ * `fetch_token` itself (`api-setup.ts`) all ask it here.
+ */
+export function oauthGrantIsUserDelegated(profile: {
+  auth?: { oauth?: { preset_id?: string | undefined } | undefined } | undefined;
+  oauth_grant?: { origin?: 'callback' | undefined } | undefined;
+}): boolean {
+  if (profile.oauth_grant?.origin === 'callback') return true;
+  const presetId = profile.auth?.oauth?.preset_id;
+  return typeof presetId === 'string' && OAUTH_PRESETS.get(presetId) !== undefined;
+}
+
+/**
  * Whether this PROFILE may be renewed unattended — a different question from
  * whether the CALLER may trigger one, which is why it is a second predicate and
  * not another condition in the first.
@@ -853,13 +912,15 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  *
  * Allowed, because neither can be that swap:
  *   · `grant_type: 'refresh_token'` — presents the user's own grant back;
- *   · `grant_type: 'client_credentials'`, explicitly chosen;
- *   · neither of those, no refresh token, and no callback behind it — the
- *     hand-built app-only profile this piece exists for, Shopify's shape.
+ *   · `grant_type: 'client_credentials'`, explicitly chosen, on a profile with
+ *     no callback and no built-in preset behind it;
+ *   · neither of those, no refresh token, and no callback or built-in preset
+ *     behind it — the hand-built app-only profile this piece exists for,
+ *     Shopify's shape.
  *
  * Refused:
- *   · anything whose `oauth_grant.origin` is `callback` and that is not a
- *     refresh-token grant;
+ *   · anything `oauthGrantIsUserDelegated` marks (a callback, or a built-in
+ *     preset) that is not a refresh-token grant;
  *   · a stored refresh token with no explicit `grant_type` — the older,
  *     hand-configured version of the same ambiguity.
  *
@@ -873,12 +934,15 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * was whether a human had been sent to a consent screen, which only
  * `oauth_grant.origin` records.
  *
- * A model calling `fetch_token` by hand can still do all of this. What is
- * refused here is doing it BY ITSELF, on expiry, with nobody choosing it.
+ * A model calling `fetch_token` by hand could do all of this until `fetch_token`
+ * asked `oauthGrantIsUserDelegated` itself: a client-credentials exchange for a
+ * user-delegated grant is now refused there too, by hand or not. What stays open by
+ * hand is the hand-configured shape below (a stored refresh token, no grant type),
+ * which only the 401 reminder discourages.
  */
 export function oauthProfileMayBeRenewedUnattended(
   profile: {
-    auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined } | undefined } | undefined;
+    auth?: { oauth?: { grant_type?: string | undefined; refresh_token_key?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
     oauth_grant?: { origin?: 'callback' | undefined } | undefined;
   },
   hasStoredRefreshToken: boolean,
@@ -892,10 +956,12 @@ export function oauthProfileMayBeRenewedUnattended(
   // grant type makes `fetch_token` post CLIENT-CREDENTIALS, and a named one that
   // is neither of the two it supports is simply posted and rejected. So the
   // question is no longer "which grant type" but "whose token would that
-  // replace", and `oauth_grant.origin` is the one field that answers it: the
-  // engine writes it, a value arriving in a create or update is discarded
-  // (`api-setup.ts`, the update path reads the stored record back over it), and
-  // `callback` means a human sat at the provider's consent screen for this.
+  // replace", and `oauthGrantIsUserDelegated` answers it. Its load-bearing half
+  // is `oauth_grant.origin`: the engine writes it, a value arriving in a create
+  // or update is discarded (`api-setup.ts`, the update path reads the stored
+  // record back over it), and `callback` means a human sat at the provider's
+  // consent screen for this. Its other half, a built-in preset, lives in
+  // model-authorable `auth.oauth`.
   //
   // ⚠ What this does NOT claim, because an earlier version of this comment did:
   // that the engine-owned half is asked FIRST. It is asked second. An injected
@@ -907,7 +973,7 @@ export function oauthProfileMayBeRenewedUnattended(
   // profile's own slot and `fetch_token` refuses when that slot is empty, so the
   // worst an inside edit buys is an exchange the caller could have run by hand —
   // which `mayRenewOAuthUnattended` already established it may.
-  if (profile.oauth_grant?.origin === 'callback') return false;
+  if (oauthGrantIsUserDelegated(profile)) return false;
   if (grantType === 'client_credentials') return true;
   return !hasStoredRefreshToken;
 }
@@ -939,7 +1005,7 @@ export function oauthProfileMayBeRenewedUnattended(
  */
 export function oauthFetchTokenWouldSwapDelegatedAccess(
   profile: {
-    auth?: { oauth?: { grant_type?: string | undefined } | undefined } | undefined;
+    auth?: { oauth?: { grant_type?: string | undefined; preset_id?: string | undefined } | undefined } | undefined;
     oauth_grant?: { origin?: 'callback' | undefined } | undefined;
   },
   hasStoredRefreshToken: boolean,
@@ -950,8 +1016,8 @@ export function oauthFetchTokenWouldSwapDelegatedAccess(
   // destructive — and silencing the reminder for it would withhold the one
   // action that at least reports the real problem.
   if (grantType !== undefined && grantType !== 'client_credentials') return false;
-  // A human was sent to a consent screen for this.
-  if (profile.oauth_grant?.origin === 'callback') return true;
+  // A human was sent to a consent screen for this (or the profile is a preset's).
+  if (oauthGrantIsUserDelegated(profile)) return true;
   // And the OTHER half of the gate's refused set, which the first version of
   // this predicate missed: a hand-configured profile holding a refresh token it
   // never declared. Its access token is a user's too — somebody pasted it — and
@@ -1562,6 +1628,11 @@ async function attachEngineManagedAuth(
   /** The request may change something there ({@link isWriteMethod} of the method sent). */
   write: boolean,
 ): Promise<AttachedAuth> {
+  // A Shopify store gets nothing from this engine for now (`core/shopify-host.ts`): refused here,
+  // before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
+  // the request carries and whether or not a profile exists. `http_request`, the write-context
+  // reads and a bulk run's requests all pass through here before they send.
+  if (isShopifyAdminUrl(url)) return { refusal: `Error: ${SHOPIFY_UNAVAILABLE}` };
   const vault = agent.secretStore;
   const apiStore = toolContext?.apiStore;
   if (apiStore) stampResolvedConnection(url, apiStore);
@@ -1639,6 +1710,9 @@ async function attachEngineManagedAuth(
     headers[name] = value;
     return { slot: name.toLowerCase() };
   };
+  /** The first of `names` that holds a token this request may not carry to `url`, if any. */
+  const slotOffGrant = (names: ReadonlyArray<string | undefined>): string | undefined =>
+    names.find((n): n is string => typeof n === 'string' && !slotMayReach(apiStore, n, 'request', url, profile));
 
   // The engine is about to hand a stored credential to this host, so the host must
   // be vetted or carry a recorded human acceptance. `isVettedEgressHost`, not
@@ -1667,6 +1741,9 @@ async function attachEngineManagedAuth(
     if (!url.toLowerCase().startsWith('https://')) {
       return { refusal: `Error: api_profile "${profile.id}" uses a stored access token — refusing to attach it over a non-HTTPS URL. Use https://.` };
     }
+    // Before the revoked-grant check and the renewal: a request this refuses reads nothing.
+    const offGrant = slotOffGrant([accessTokenKey(profile.id)]);
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
     // A revoked grant is said so here, before a request goes out, rather than
     // after it comes back 401 — where the hint below would call it an expired
     // token and send the model to fetch_token, which cannot help. Only while the
@@ -1820,6 +1897,8 @@ async function attachEngineManagedAuth(
     if (protectedKeys.length > 0) {
       return { refusal: protectedKeyRefusal(profile.id, protectedKeys.map((k) => shapedForLog(k, VAULT_NAME_SHAPE, 80)).join(' + ')) };
     }
+    const offGrant = slotOffGrant([userKey, passKey]);
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
     const user = secretStore.resolve(userKey);
     const pass = secretStore.resolve(passKey);
     // Truthiness, not a null check: an EMPTY vault value would ship
@@ -1864,6 +1943,8 @@ async function attachEngineManagedAuth(
     if (isProtectedSecretWrite(tokenKey)) {
       return { refusal: protectedKeyRefusal(profile.id, shapedForLog(tokenKey, VAULT_NAME_SHAPE, 80)) };
     }
+    const offGrant = slotOffGrant([tokenKey]);
+    if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
     if (!hostVetted) {
       return { hint: () => `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
     }
@@ -1920,6 +2001,7 @@ async function attachEngineManagedAuth(
       slotFilled: filled,
       crossOriginRedirect: ctx.crossOriginRedirect,
       secretStore,
+      mayReference: (name) => slotMayReach(apiStore, name, 'request', url, profile),
     }),
   };
 }
@@ -2068,6 +2150,8 @@ function modelOwnedAuthHint(a: {
   slotFilled: boolean;
   crossOriginRedirect: boolean;
   secretStore: { resolve(key: string): string | null | undefined };
+  /** Whether a `secret:` reference to this name in a request to this URL would be sent at all. */
+  mayReference: (name: string) => boolean;
 }): string {
   const { auth } = a;
   const slot = modelOwnedSlot(auth);
@@ -2105,6 +2189,12 @@ function modelOwnedAuthHint(a: {
 
   const key = auth.type === 'basic' ? userKey : auth.vault_keys?.[0];
   const label = safeToken(key);
+
+  // A name that holds another connection's token, or one more than one profile claims: the
+  // engine refuses to send it here, so the hint does not recommend it, and does not look it up.
+  if (key !== undefined && !a.mayReference(key)) {
+    return `The engine did not attach this profile's credential: api_profile "${a.profileId}" names "${label ?? '?'}" as its credential, a vault name that holds the token of an OAuth connection this request does not go to (or that more than one profile claims). The engine sends that token only to where its own connection points, so a reference to it here is refused as well — do NOT reference it. Give this profile a credential of its own with api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.${vetting}`;
+  }
 
   // The key NAME comes from the profile, so it can name a slot that belongs to the
   // platform or holds the tenant's own provider key. The engine-owned branches refuse
@@ -2152,6 +2242,15 @@ function modelOwnedAuthHint(a: {
       ? `You set the ${slot} header on this request yourself; the engine neither added nor replaced it. Nothing here says the value is wrong — only that the engine is not the one supplying it.`
       : `This request carried no usable ${slot} header — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${auth.type === 'basic' ? 'Basic ' : ''}secret:${label ?? ''}" }.`}`;
   return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
+}
+
+/**
+ * A profile whose credential is a token slot this request may not carry (`slotMayReach`): the
+ * token of an OAuth connection whose grant does not point at this URL, a refresh token, or a
+ * name more than one profile claims.
+ */
+function slotReachRefusal(profileId: string, name: string, hostname: string): string {
+  return `Error: api_profile "${profileId}" would send ${shapedForLog(name, DERIVED_NAME_SHAPE, 80)} to ${hostname}, but that vault name holds an OAuth token that goes only to where its own connection points (an access token to its base_url, a refresh token only to its token endpoint), or more than one profile claims it. Nothing was sent. Give this profile a credential of its own with api_setup action="update", or send the request through the profile that holds the connection.`;
 }
 
 /** Shared wording — the same refusal for basic and bearer/header. */
@@ -2245,6 +2344,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
   outwardWrite: (input) => {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
     return method === 'GET' || method === 'HEAD' ? null : method;
+  },
+  // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
+  outwardRead: (input) => {
+    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
+    return method === 'GET' || method === 'HEAD' ? httpTarget(method, input.url) : null;
   },
   definition: {
     name: 'http_request',
@@ -2362,14 +2466,36 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} sets a header that re-targets the request (${retarget.trim().toLowerCase()}), which a write may not do. Send it without one.`);
     }
 
-    // A mandate's turn does not write to an account connected through a provider preset
-    // (PRD customer-granted-operator-access §3.13). The consent prompt is no bar here: a
-    // mandate answers its own session's prompts (each write there is asked on its own, see the
-    // consent gate below). The write goes to the owner as a proposal instead. Checked before
-    // the credential is attached (so a refused write renews no token) and before the
-    // contract (so no grant opens it). Every profile on the host counts, a host two profiles
-    // share included, and the host is read without trailing root dots, which name the same
-    // host to DNS and a different key to the profile map.
+    // A GraphQL endpoint takes a read and every mutation the token can run as the same POST to
+    // the same path. So a write there is read as the document it sends (`graphqlWrite`): one the
+    // check cannot read is refused, a mutation is asked every time like a DELETE, and a read is
+    // remembered under a key of its own, so it never covers a REST write to the host or the other
+    // way round. A request that is not a write is refused when its URL carries a mutation.
+    const graphqlEndpoint = isGraphqlEndpoint(input.url);
+    let graphqlMutates = false;
+    if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
+      // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
+      // so a write there carries nothing in its URL: no list of parameter names a server might read.
+      if (new URL(input.url).search.length > 1) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
+      }
+      const reading = graphqlWrite(headers, input.body);
+      if ('refusal' in reading) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);
+      }
+      graphqlMutates = reading.mutates;
+    } else if (graphqlEndpoint && graphqlUrlWrites(input.url)) {
+      blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} carries a GraphQL mutation in its URL, which is not sent this way. Send it as a POST with a JSON body, so it can be asked.`);
+    }
+
+    // A write to an account connected through a provider preset, by anyone: the owner and a
+    // mandate alike (PRD customer-granted-operator-access §3.13, "Schreiben": a mandate writes in
+    // every connected account with the owner's scopes). What holds such a write is the consent
+    // gate below, which asks each one with what it sends and remembers no answer, and grants none
+    // by contract; a mandate's write is recorded in the actor trail (`ToolEntry.outwardWrite`).
+    // Every profile on the host counts, a host two profiles share included, and the host is read
+    // without trailing root dots, which name the same host to DNS and a different key to the
+    // profile map.
     const presetOnHost = isWriteMethod(gatedMethod) ? presetProfilesOnHost(input.url, toolContext) : [];
     // A provider's API host (`apiHosts`) is a connected account by its host, not by a stored
     // profile: a write there goes through a profile on the host, which `attachEngineManagedAuth`
@@ -2378,32 +2504,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // anything else is decided. Reads are not held.
     const claimant = isWriteMethod(gatedMethod) ? hostClaimant(input.url) : undefined;
     if (claimant !== undefined && (!toolContext?.apiStore || profilesOnHost(input.url, toolContext.apiStore).length === 0)) {
-      // The way out depends on who asks: a mandate does not write to a connected account at all
-      // (below), and with no profile on the host a task it proposed would be refused for the
-      // owner too until the owner connects the provider; a run without a profile store has
+      // The way out is the same for the owner and a mandate: a mandate connects an account through
+      // a preset on a profile it wrote itself (§3.13, N10a). A run without a profile store has
       // nowhere to keep a profile.
-      const wayOut = !isOwnerPrincipal(agent.principal)
-        ? `This session does not write there. Tell the owner which change you would make: the owner first connects ${claimant.label} through that provider, and the change can then be proposed as a task (task_create) the owner approves.`
-        : !toolContext?.apiStore
-          ? 'This run has no api_profile store, so it cannot write there.'
-          : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
+      const wayOut = !toolContext?.apiStore
+        ? 'This run has no api_profile store, so it cannot write there.'
+        : `To write there, set up a profile with api_setup, auth.type "oauth2" and auth.oauth.preset_id "${claimant.id}", then connect it with api_setup action "connect".`;
       blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname.replace(/\.+$/, '')} writes to ${claimant.label}, which goes through this engine's built-in "${claimant.id}" provider: it shows the user what lynox may do there and asks each write with what it sends. No api_profile on this host goes through it, so nothing was sent. ${wayOut}`);
     }
-    if (isWriteMethod(gatedMethod) && !isOwnerPrincipal(agent.principal)) {
-      const host = new URL(input.url).hostname.replace(/\.+$/, '');
-      if (presetOnHost.length > 0) {
-        // Whose connection it is decides the way forward. The owner's account: a task the owner
-        // approves runs with the owner's connection. This session's own: a task would run on a
-        // connection that stops working when the mandate ends, so the change goes to the owner.
-        const tag = principalTag(agent.principal);
-        const ownConnection = presetOnHost.every((p) => p?.created_by === tag && p?.oauth_grant?.connected_by === tag);
-        blockedVerbatim(ownConnection
-          ? `Blocked: ${gatedMethod} to ${host} writes to the account this session connected, and writing to a connected account is not open to this session. Nothing was sent. Tell the owner which change you would make there.`
-          : `Blocked: ${gatedMethod} to ${host} writes to an account the owner connected, which this session may not do. ` +
-            'Propose the change as a task instead (task_create); it runs once the owner approves it.');
-      }
-    }
-
     // A write to a connected account is shown with everything the request puts on the wire, as
     // the customer text says: the path and the query as sent (the query's values on the
     // instance, `queryBlock` below), the body, and no header of the request's own. So refused,
@@ -2737,8 +2845,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // the outbound-effect table names (`core/outbound-write.ts`), and any write in a mandate's
     // session — there the person who set the mandate up gives each approval, and the approval
     // is what protects the account against an injected instruction (PRD
-    // customer-granted-operator-access 4.11). A grant covers neither a table path nor, for a
-    // mandate, anything H2b refused above.
+    // customer-granted-operator-access 4.11). A grant covers neither a table path nor a write
+    // to a connected account, for the owner and a mandate alike (`contractGrantsWrite` below).
     //
     // An override of the same rank as the method (a POST that says PATCH) is gated as the
     // override, but a server that ignores it runs the method that is sent, and one that reads an
@@ -2767,12 +2875,21 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       !outboundEffect &&
       !connectedAccount &&
       named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
+    // The one place where a grant lets an unattended write through, so the one place that
+    // marks the call with it (`noteGrantLift`). A contract that names no accepted grant
+    // (handed in through `AgentConfig` by an embedder or a test) leaves no mark: the write
+    // still passes on the contract, only the record has nothing to name.
+    const liftedBy = contractGrantsWrite ? grantIdOf(contract) : undefined;
+    if (liftedBy !== undefined) noteGrantLift({ grantId: liftedBy, entry: 'v1' });
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
-    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
+    const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !graphqlMutates && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
+    // The approval key of a GraphQL read carries a marker in its method part, which `hostOfKey`
+    // (`untrusted-epoch.ts`) never reads, so the epoch carry is unchanged.
+    const approvalMethod = (m: string): string => (graphqlEndpoint ? `${m}:GRAPHQL` : m);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {
       const counters = agent.sessionCounters;
       const hostname = approvalHost;
-      const key = approvalKey(keyedMethod, hostname);
+      const key = approvalKey(approvalMethod(keyedMethod), hostname);
       const epoch = agent.approvalEpoch?.() ?? currentEpoch(counters);
       const batch = agent.approvalBatch?.();
       if (!(remembers && isApproved(counters, key, epoch))) {
@@ -2842,7 +2959,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // Re-read once it is this call's turn: the question before it may have answered it.
             if (remembers && isApproved(counters, key, epoch)) return true;
             const deniedHere = batch === undefined ? undefined : deniedInBatch.get(batch);
-            if (remembers && deniedHere !== undefined && named.some((m) => deniedHere.has(approvalKey(m, hostname)))) {
+            if (remembers && deniedHere !== undefined && named.some((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)))) {
               blockedVerbatim(`Blocked: outbound ${gatedMethod} to ${hostname} was not asked: a ${gatedMethod} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
@@ -2880,7 +2997,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
               let denied = deniedInBatch.get(batch);
               if (!denied) { denied = new Set(); deniedInBatch.set(batch, denied); }
               // Each write the request named, so a later request naming any of them is not asked.
-              for (const m of named) denied.add(approvalKey(m, hostname));
+              for (const m of named) denied.add(approvalKey(approvalMethod(m), hostname));
             }
             return allowed;
           }).finally(() => { if (shareKey !== undefined) pendingMap?.delete(shareKey); });
@@ -2982,7 +3099,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))),
         wallTimeout,
       ]);
       // The hosts that answered, for the answer's untrusted marker: every hop on one host lets
@@ -3193,8 +3310,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // choice between constants, not an interpolation: no part of the
             // field's value reaches the text. Keep it that way.
             wrapped += oauthFetchTokenWouldSwapDelegatedAccess(matchedProfile, mpStored !== null)
-              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own (Shopify\'s Admin API: `X-Shopify-Access-Token`). Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
-              : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (Shopify Dev Dashboard, TikTok, etc.) don't expose long-lived tokens there anymore.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own (Shopify\'s Admin API: `X-Shopify-Access-Token`). Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
+              ? `\n\n**[Agent reminder — OAuth2 401, and fetch_token is the WRONG move here]**\nThis URL maps to api_profile "${matchedProfile.id}". An exchange for it would replace a token somebody is relying on with an app-level one that can see different data, and the old access does not come back. Do NOT call api_setup fetch_token for it, and do not edit the profile to make the renewal pass: say that this connection needs re-authorizing and leave it to the person who owns it. The engine has written the details to its log.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf the connection was authorized moments ago and still gets 401, re-authorizing will not help either: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Then the profile needs `auth.header_name`; say so rather than setting it yourself.' : ''}`
+              : `\n\n**[Agent reminder — OAuth2 401 on a managed-OAuth api_profile]**\nThis URL maps to api_profile "${matchedProfile.id}" (auth.type=oauth2 with token_url configured). The vault's access_token is almost certainly expired. Recover with:\n  api_setup({ action: "fetch_token", id: "${matchedProfile.id}" })\nThat uses the stored client_id + client_secret to mint a fresh access_token via the OAuth grant — no user interaction required. Do NOT walk the user through "re-paste a token from the provider admin UI" — 2026-era providers (TikTok and others) don't expose long-lived tokens there anymore.${typeof matchedProfile.auth.header_name !== 'string' || matchedProfile.auth.header_name.toLowerCase() === 'authorization' ? '\nIf fetch_token already succeeded moments ago and this request still got 401, minting again will not help: the token went out as `Authorization: Bearer`, and some APIs want it in a header of their own. Check the API\'s docs and set `auth.header_name` on this profile.' : ''}`;
           }
         } catch {
           // Bad URL fell through earlier; nothing to do.
@@ -3257,6 +3374,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Ahead of `friendlyBlockMessage`, whose rewrite would turn this into a generic
       // refusal: here the write was sent and answered, and only its redirect was refused.
       if (err instanceof RedirectRefusedAfterWrite) blockedVerbatim(err.message);
+      if (err instanceof DelegatedHopRefused) blockedVerbatim(err.message);
       if (timedOut !== null) {
         // The note rides the timeout too — see `repairNote` above for why the silent path is
         // the one that matters here.
@@ -3299,6 +3417,9 @@ async function describeConnectedWrite(
   const context = presetId === undefined ? undefined : PRESET_WRITE_CONTEXT[presetId];
   if (context === undefined) return null;
   const origin = new URL(url).origin;
+  // A delegated session's reading is a read of its own, recorded before it is sent: its
+  // answer reaches the person through the question (PRD customer-granted-operator-access §3.9).
+  const recordRead = outwardReadRecorder(deps.agent, 'http_request:read-before-write');
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
@@ -3310,6 +3431,13 @@ async function describeConnectedWrite(
     const headers: Record<string, string> = { accept: 'application/json' };
     const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent, false);
     if (auth.refusal) throw new WriteContextRefused(auth.refusal);
+    if (recordRead !== null) {
+      try {
+        recordRead(httpTarget('GET', readUrl));
+      } catch {
+        throw new WriteContextRefused(`reading ${path} cannot be recorded in the instance's log right now`);
+      }
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WRITE_CONTEXT_READ_TIMEOUT_MS);
     try {

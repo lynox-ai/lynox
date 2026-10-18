@@ -84,7 +84,7 @@ describe('a mail that matches the forward patterns from a person is not left arc
     expect(moved.map((f) => f.id)).toEqual(expect.arrayContaining(['forwarded-thread-de-440', 'forwarded-thread-en-430']));
     expect(moved.filter((f) => f.expectedBucket === 'auto_handled').map((f) => f.id).sort()).toEqual([
       'forwarded-thread-de-442', 'forwarded-thread-de-450', 'forwarded-thread-de-452',
-      'forwarded-thread-en-434', 'forwarded-thread-en-445', 'forwarded-thread-en-458',
+      'forwarded-thread-en-445', 'forwarded-thread-en-458',
     ]);
   });
 });

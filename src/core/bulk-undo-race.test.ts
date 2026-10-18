@@ -50,7 +50,7 @@ async function haltedRunWithUndo(): Promise<{ runId: string; undoId: string }> {
     read: async (k) => ({ absent: false, value: state.get(k)! }),
     write: async (k, a) => { state.set(k, a.absent ? '' : String(a.value)); return 'ok'; },
   };
-  expect((await runBulkEffect(runId, 'bulk_apply', { ledger, writerFor: () => writer })).status).toBe('halted');
+  expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: () => writer })).status).toBe('halted');
   const undo = ledger.planUndo(runId);
   if (!undo.ok) throw new Error(undo.reason);
   return { runId, undoId: undo.status.id };
