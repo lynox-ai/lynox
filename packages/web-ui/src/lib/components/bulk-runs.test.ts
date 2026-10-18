@@ -218,10 +218,10 @@ describe('the bulk pages show supplied text only through bulkVisibleText', () =>
 	});
 });
 
-// A planned run that halted on a failure goes on from its page, with its own sentence for each
-// halt. Read from the i18n source, both languages, so a key
+// A run that halted goes on from its page, with its own sentence for each halt: a planned run
+// restarts, an approved one writes on. Read from the i18n source, both languages, so a key
 // the page asks for and the table lacks fails here instead of showing no sentence.
-describe('restarting a run that halted on a failure', () => {
+describe('going on from a run that halted', () => {
 	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
 	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
 	const de: Record<string, string> = {};
@@ -381,6 +381,7 @@ describe('restarting a run that halted on a failure', () => {
 		// Not writing on: a run at its probe has its own way on, a planned run restarts, an ended run does neither.
 		expect(bulkResumeKind(w('maxTargets', { probe: { key: 'k', fields: [] } }))).toBeNull();
 		expect(bulkResumeKind(w('unavailable', { phase: 'planned' }))).toBeNull();
+		expect(bulkResumeKind(w('unavailable', { phase: 'previewed' }))).toBeNull();
 		expect(bulkResumeKind(w('atomicRolledBack', { phase: 'aborted' }))).toBeNull();
 		expect(bulkResumeKind(w('unavailable', { haltKey: null }))).toBeNull();
 	});
@@ -417,6 +418,7 @@ describe('restarting a run that halted on a failure', () => {
 		expect(bulkResumeText(w('maxTargets', { maxTargets: 40 }), true, EN)?.cause).toBe('The run reached the approved maximum: 40 targets.');
 		expect(bulkResumeText(w('unauthorized'), true, EN)?.before).toBe('Open Settings → APIs and tap the chat icon next to the profile for shop.example.invalid to reconnect the access. If there is no profile, ask lynox in the chat to set up the access.');
 		expect(bulkResumeText(w('blocked'), false, DE)?.before).toBe('Trag shop.example.invalid in der Konfiguration deiner Instanz ein. Danach kannst du fortsetzen.');
+		expect(bulkResumeText(w('blocked'), null, DE)?.before).toBe(bulkHaltText(at('blocked'), true, DE)?.before);
 		expect(bulkResumeText(w('timeBudget'), true, DE)).toMatchObject({ before: null, soFar: null, allows: null });
 		// No way on past a changed run: no promise of what writing on keeps.
 		expect(bulkResumeText(w('checksum'), true, DE)).toEqual({ cause: 'Der Lauf hat sich seit deiner Freigabe geändert.', before: null, kept: null, soFar: null, allows: null });
@@ -446,6 +448,7 @@ describe('restarting a run that halted on a failure', () => {
 		// The limit at or above the open targets: the share cannot be passed.
 		expect(allows({ resumeOpen: 38, resumeTries: 38 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nur noch an, wenn drei Ziele in Folge scheitern.');
 		expect(allows({ resumeOpen: 50, resumeTries: 50 }, EN)).toBe('If you continue, the run only stops again if three targets in a row fail.');
+		expect(allows({ resumeOpen: 3, resumeTries: 3, failureLimit: 3 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nur noch an, wenn drei Ziele in Folge scheitern.');
 		expect(allows({ resumeOpen: 2, resumeTries: 2 }, DE)).toBe('Mit dem Weiterschreiben hält der Lauf nicht mehr wegen Fehlschlägen an. Es sind nur noch 2 Ziele übrig.');
 		expect(allows({ resumeOpen: 1, resumeTries: 1 }, EN)).toBe('If you continue, the run no longer stops because of failures. Only 1 target is left.');
 		// Bounded by the open targets, never by the maximum: a target can fail before it is sent to.
