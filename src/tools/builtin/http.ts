@@ -42,8 +42,10 @@ import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
-import { isShopifyAdminUrl, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
-import type { StorePass } from '../../core/store-pass.js';
+import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
+import { mintStorePass, STORE_CREDENTIAL_HEADERS, type StorePass } from '../../core/store-pass.js';
+import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
+import { timingSafeEqual } from 'node:crypto';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -702,6 +704,13 @@ interface AttachedAuth {
    * facts are settled only once the response is.
    */
   hint?: ((ctx: HintContext) => string) | undefined;
+  /**
+   * The store pass minted for this request (`core/store-pass.ts`): set only for a request to a
+   * Shopify store that passed every condition of {@link storePassPrecheck} and the binding and
+   * clearance steps at the end of the oauth2 branch. The caller hands it to the send, which
+   * refuses the store without it.
+   */
+  pass?: StorePass | undefined;
 }
 
 /** What a hint may only know once the response is back. */
@@ -1625,6 +1634,50 @@ function stampResolvedConnection(url: string, apiStore: NonNullable<ToolContext[
   noteCallConnection({ id: profile.id, createdAt });
 }
 
+/** Constant-time comparison of two hex digests. */
+function digestsEqual(a: string, b: string): boolean {
+  const x = Buffer.from(a, 'utf8');
+  const y = Buffer.from(b, 'utf8');
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/** Query parameter names that would carry a credential past the header the pass checks. */
+const QUERY_CREDENTIAL = /token|key|secret|password|passwd|auth|signature|session/i;
+
+/**
+ * The cheap conditions under which a request to a Shopify store may get a pass at all (Appendix
+ * B, B3 steps 1–5 and 6a), in that order; `null` when all hold. Reads no vault and asks nobody.
+ *
+ *  1. a provisioned managed instance (the control-plane env is there);
+ *  2. the shell-exec sidecar (`LYNOX_SHELL_EXEC_SOCKET`), which contains what a store returns;
+ *  3. exactly one profile on the host, of the store preset, whose own parameter derives exactly
+ *     this host (`presetStoreHost`);
+ *  4. no credential in the query;
+ *  5. no credential header the model wrote itself;
+ *  6a. no refusal of the control plane that still holds.
+ */
+function storePassPrecheck(url: string, headers: Record<string, string>, toolContext: ToolContext | undefined): string | null {
+  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return SHOPIFY_UNAVAILABLE;
+  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return SHOPIFY_UNAVAILABLE;
+  const apiStore = toolContext.apiStore;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return SHOPIFY_UNAVAILABLE; }
+  const host = normalizeHostForMatch(parsed.hostname);
+  const profile = apiStore?.getByHostname(parsed.hostname);
+  const preset = profile?.auth?.type === 'oauth2' ? OAUTH_PRESETS.get(profile.auth.oauth?.preset_id ?? '') : undefined;
+  if (profile === undefined || preset?.apiOnDerivedHost !== true || presetStoreHost(profile) !== host) {
+    return 'requests to a Shopify store go only through a store connected with api_setup action "connect" (one connection per store), and this request has none. Do not send the token yourself; ask the user to connect the store.';
+  }
+  for (const name of parsed.searchParams.keys()) {
+    if (QUERY_CREDENTIAL.test(name)) return 'a request to a Shopify store may not carry a credential in its address. Remove it; the engine attaches the store connection itself.';
+  }
+  for (const name of Object.keys(headers)) {
+    if (STORE_CREDENTIAL_HEADERS.has(name.toLowerCase())) return `a request to a Shopify store may not carry a credential header of its own (${shapedForLog(name, DERIVED_NAME_SHAPE, 60)}). Remove it; the engine attaches the store connection itself.`;
+  }
+  if (toolContext.exactClearance.blockedNow()) return SHOPIFY_UNAVAILABLE;
+  return null;
+}
+
 async function attachEngineManagedAuth(
   url: string,
   headers: Record<string, string>,
@@ -1637,7 +1690,15 @@ async function attachEngineManagedAuth(
   // before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
   // the request carries and whether or not a profile exists. `http_request`, the write-context
   // reads and a bulk run's requests all pass through here before they send.
-  if (isShopifyAdminUrl(url)) return { refusal: `Error: ${SHOPIFY_UNAVAILABLE}` };
+  // Whether this request goes to a Shopify store. Such a request goes out only under a store
+  // pass (B3): the cheap conditions are checked here, before the profiles, the vault and the
+  // `!apiStore || !vault` exit below; the binding and the control plane's clearance at the end
+  // of the oauth2 branch, after its cheaper refusals.
+  const toStore = isShopifyAdminUrl(url);
+  if (toStore) {
+    const early = storePassPrecheck(url, headers, toolContext);
+    if (early !== null) return { refusal: `Error: ${early}` };
+  }
   const vault = agent.secretStore;
   const apiStore = toolContext?.apiStore;
   if (apiStore) stampResolvedConnection(url, apiStore);
@@ -1842,7 +1903,11 @@ async function attachEngineManagedAuth(
       // question and not this change's to answer.
       const stored = secretStore.resolve(refreshSlot);
       const slotState = oauthRefreshSlotState(profile, refreshSlot, stored);
-      if (oauthProfileMayBeRenewedUnattended(profile, stored !== null)) {
+      // A store preset's token is never renewed here (B3): only the callback mints it, and it
+      // binds it to the store there. A renewal would replace a bound token with an unbound one.
+      if (attachPreset?.apiOnDerivedHost === true) {
+        process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+      } else if (oauthProfileMayBeRenewedUnattended(profile, stored !== null)) {
         await renewExpiringOAuthToken(profile.id, agent, oauthRenewalInputs(profile, stored), { apiStore, secretStore });
       } else {
         process.stderr.write(
@@ -1890,6 +1955,21 @@ async function attachEngineManagedAuth(
     // The vault value came back from a token endpoint; it enters a header here.
     if (/[\r\n\0]/.test(oauthValue)) {
       return { refusal: `Error: api_profile "${profile.id}" holds an access token containing CRLF/null — refusing to send it. Mint a new one with api_setup({ action: "fetch_token", id: "${profile.id}" }).` };
+    }
+    if (toStore) {
+      // Step 7: the token in the slot is the one the callback bound to this profile and store.
+      const storeHost = presetStoreHost(profile);
+      const origin = storeHost === null ? null : `https://${storeHost}`;
+      const bound = profile.oauth_grant?.store_binding;
+      const digest = origin === null ? null : toolContext?.storeBindingDigest?.(profile.id, origin, resolved) ?? null;
+      if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
+        return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
+      }
+      // Step 6b: the control plane's clearance, once per boot. It records the instance as one
+      // that holds a store connection, so it comes after every refusal above.
+      const clearance = await toolContext!.exactClearance!.ensure();
+      if (!clearance.ok) return { refusal: `Error: ${SHOPIFY_UNAVAILABLE}` };
+      return { ...put(oauthSlot, oauthValue), pass: mintStorePass(origin, oauthSlot, oauthValue) };
     }
     return put(oauthSlot, oauthValue);
   }
@@ -3120,7 +3200,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect')), auth.pass),
         wallTimeout,
       ]);
       // The hosts that answered, for the answer's untrusted marker: every hop on one host lets
@@ -3464,7 +3544,7 @@ async function describeConnectedWrite(
     try {
       const { response } = await fetchWithValidatedRedirects(
         readUrl, { method: 'GET', headers, signal: controller.signal }, { surface: 'full-control', ackHosts: deps.ackHosts }, deps.toolContext,
-        () => false, auth.slot, (v) => deps.agent.secretStore?.containsSecret(v) ?? false,
+        () => false, auth.slot, (v) => deps.agent.secretStore?.containsSecret(v) ?? false, undefined, auth.pass,
       );
       if (!response.ok) {
         const access = response.status === 401 || response.status === 403
@@ -3515,14 +3595,23 @@ export async function attachStoredCredential(
     principal: import('../../core/request-principal.js').RequestPrincipal;
     mandateEnds: ToolContext['mandateEnds'];
     secretReleases: ToolContext['secretReleases'];
+    /** For a request to a Shopify store: without both, it gets no pass and the send refuses it. */
+    exactClearance?: ToolContext['exactClearance'] | undefined;
+    storeBindingDigest?: ToolContext['storeBindingDigest'] | undefined;
   },
+  /** Receives the store pass minted for this request, which the caller hands to its send. */
+  out?: { pass?: StorePass | undefined } | undefined,
 ): Promise<boolean> {
   const auth = await attachEngineManagedAuth(
     url,
     headers,
-    { apiStore: stores.apiStore, mandateEnds: stores.mandateEnds, secretReleases: stores.secretReleases } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases'> as ToolContext,
+    {
+      apiStore: stores.apiStore, mandateEnds: stores.mandateEnds, secretReleases: stores.secretReleases,
+      exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
   );
+  if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
   return auth.slot !== undefined && auth.refusal === undefined;
 }

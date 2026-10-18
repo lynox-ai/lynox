@@ -407,6 +407,15 @@ export interface OAuthGrantRecord {
    */
   granted_scope?: string[] | undefined;
   /**
+   * The binding of this grant's access token to the profile and the store the provider signed
+   * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
+   * profile id, the store origin and the token. Written by the callback in the same save as the
+   * token, for a store preset only. A store request goes out only while the token in the slot
+   * still matches it: a token written into the slot any other way, copied to another profile or
+   * pointed at another store does not.
+   */
+  store_binding?: string | undefined;
+  /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —
    * every `api` profile carries one once the ledger is wired, an API-key profile included.

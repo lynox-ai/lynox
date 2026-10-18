@@ -1159,8 +1159,10 @@ export class Engine {
         isSet: () => db.exactMarkerSet(),
         set: () => { db.setExactMarker(); },
       });
+      this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
     } else {
       this._toolContext.exactClearance = null;
+      this._toolContext.storeBindingDigest = null;
     }
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto

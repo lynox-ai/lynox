@@ -10413,6 +10413,8 @@ export class LynoxHTTPApi {
       // The store the provider signed for: made here, after both checks, only, and asked again
       // before the token is stored.
       let storeCallback: VerifiedStoreCallback | undefined;
+      // Set when a store preset's token could not be bound (no vault key, or the grant was not saved).
+      let storeBindingFailed = false;
       if (preset?.callbackVerification === 'shopify-hmac') {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
         const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
@@ -10649,6 +10651,14 @@ export class LynoxHTTPApi {
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
           // What the token can do, as the provider says: a narrower grant is recorded as granted.
           if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
+          // A store preset's token is bound to this profile and the store the provider signed for,
+          // in the same save as the token (Appendix B, B4). No vault key, no binding: the store
+          // then refuses every request of this profile, and the page says so below.
+          if (storeCallback !== undefined) {
+            const binding = engine.getEngineDb()?.storeBindingDigest(signed.profileId, storeCallback.origin, accessToken) ?? null;
+            if (binding !== null) grantNext.store_binding = binding;
+            else storeBindingFailed = true;
+          }
           // This exchange's client and refresh token are the stamp, the same one
           // `fetch_token` writes after a good exchange. An exchange that returned
           // no refresh token leaves no stamp.
@@ -10677,6 +10687,7 @@ export class LynoxHTTPApi {
             process.stderr.write(
               `[lynox:oauth] tokens for api_profile "${signed.profileId}" are stored, but what this engine learned about them could not be recorded — its lifetime, its grant type, and what a delete would have to purge: ${saved.reason}\n`,
             );
+            if (storeCallback !== undefined) storeBindingFailed = true;
           }
         } else {
           // Deleted while the exchange was out. The tokens are already in the
@@ -10689,6 +10700,10 @@ export class LynoxHTTPApi {
         }
       } catch {
         sendOAuthHtml(res, 500, 'The authorization arrived but this engine could not finish storing it. The connection is incomplete — ask for a new link and try again.');
+        return;
+      }
+      if (storeBindingFailed) {
+        sendOAuthHtml(res, 500, 'The authorization arrived, but this engine could not bind it to the store, so lynox will not use this connection. Ask for a new link and try again.');
         return;
       }
       sendOAuthHtml(res, 200, 'Connected. You can close this tab and go back to the conversation.');

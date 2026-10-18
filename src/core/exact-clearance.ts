@@ -72,6 +72,14 @@ export class ExactClearance {
     return (this.deps.now ?? Date.now)();
   }
 
+  /**
+   * Whether a refusal from the last ask still holds (B3 step 6a): a request can then be refused
+   * before anything else is read for it. A cleared boot is never blocked.
+   */
+  blockedNow(): boolean {
+    return !this.cleared && this.now() < this.backoffUntil;
+  }
+
   /** Whether this boot is cleared. Asks the control plane once, then holds the answer (B6). */
   async ensure(): Promise<ExactClearanceResult> {
     if (this.cleared) return { ok: true };
