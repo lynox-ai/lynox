@@ -22,7 +22,7 @@ import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, i
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
@@ -2528,6 +2528,11 @@ ${draftJson}
           return `Error: profile "${input.id}" names the provider "${tokenPreset.id}", but its token endpoint cannot be derived from auth.oauth.preset_params. Correct them with api_setup update.`;
         }
         tokenUrl = derived.tokenUrl;
+        // A provider on the host it derives mints a token for the store the profile's base names
+        // and no other, as in the callback.
+        if (tokenPreset.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+          return `Error: profile "${input.id}" names the provider "${tokenPreset.id}", but its base_url is not https on the store its preset_params derive. Nothing was sent. Correct base_url or preset_params with api_setup update.`;
+        }
       }
       if (!oauth || !tokenUrl) {
         return `Error: profile "${input.id}" auth.oauth is missing token_url. Update the profile with the OAuth token endpoint (e.g. https://auth.example.com/oauth/token).`;
@@ -2570,7 +2575,8 @@ ${draftJson}
           : 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.';
         return `Error: profile "${input.id}" ${subject} ${next}`;
       }
-      const bodyFormat = oauth.body_format ?? 'form';
+      // A preset's token endpoint takes the body its provider documents, whatever the profile says.
+      const bodyFormat = tokenPreset ? presetTokenBodyFormat(tokenPreset, oauth.body_format) : oauth.body_format ?? 'form';
       const clientIdKey = oauth.client_id_key;
       const clientSecretKey = oauth.client_secret_key;
       if (!clientIdKey || !clientSecretKey) {

@@ -115,3 +115,43 @@ export function verifyShopifyCallback(
 
   return { ok: true, params };
 }
+
+/**
+ * A Shopify callback that passed {@link verifyShopifyCallback} and names the store of the profile
+ * it lands on. Made only by {@link bindShopifyCallback}. `origin` is `https://<shop>.myshopify.com`,
+ * lower case and without a trailing dot.
+ */
+export interface VerifiedStoreCallback {
+  readonly profileId: string;
+  readonly origin: string;
+}
+
+export type ShopifyCallbackBinding =
+  | { readonly ok: true; readonly binding: VerifiedStoreCallback; readonly code: string; readonly state: string }
+  | { readonly ok: false; readonly reason: Extract<ShopifyCallbackVerdict, { ok: false }>['reason'] | 'not-a-store-profile' | 'other-store' };
+
+/**
+ * Verify a Shopify callback and bind it to the profile it lands on: the signed `shop`, in lower
+ * case, has to be the host the profile's own parameter derives (`storeHost`, from
+ * `presetStoreHost`, `null` when the profile has none). The code and state the caller uses come
+ * from the signed values, not from a second parse of the query.
+ */
+export function bindShopifyCallback(
+  rawQuery: string,
+  clientSecret: string,
+  nowMs: number,
+  profileId: string,
+  storeHost: string | null,
+): ShopifyCallbackBinding {
+  const verdict = verifyShopifyCallback(rawQuery, clientSecret, nowMs);
+  if (!verdict.ok) return verdict;
+  if (storeHost === null) return { ok: false, reason: 'not-a-store-profile' };
+  const shop = (verdict.params.get('shop') ?? '').toLowerCase();
+  if (shop !== storeHost) return { ok: false, reason: 'other-store' };
+  return {
+    ok: true,
+    binding: { profileId, origin: `https://${shop}` },
+    code: verdict.params.get('code') ?? '',
+    state: verdict.params.get('state') ?? '',
+  };
+}
