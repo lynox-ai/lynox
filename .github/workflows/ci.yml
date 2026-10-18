@@ -150,8 +150,8 @@ jobs:
           file: Dockerfile
           push: false
           tags: lynox:ci-scan
-      # Same threshold as the release scan (release.yml). Unfixed CRITICALs are left out because
-      # no base-image bump can clear them; a check that fails without a remedy blocks every PR.
+      # Same threshold as the release, staging and canary scans (`ignore-unfixed`). Node packages
+      # stay covered without that filter by the osv gate in `test`, which reads pnpm-lock.yaml.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lynox:ci-scan
