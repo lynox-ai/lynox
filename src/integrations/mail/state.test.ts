@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MailStateDb } from './state.js';
+import { MailStateDb, MailStateDeltaCursorStore } from './state.js';
 import type { MailEnvelope } from './provider.js';
 
 let db: MailStateDb;
@@ -308,7 +308,7 @@ describe('MailStateDb — schema migration', () => {
     const row = internal.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
     // The current version reflects the number of entries in the MIGRATIONS array.
     // Bumping this is fine — it just tracks the expected head.
-    expect(row.v).toBe(17);
+    expect(row.v).toBe(18);
   });
 
   it('is idempotent — re-opening the same path does not error', () => {
@@ -521,7 +521,7 @@ describe('MailStateDb — migration v17 (claim a scheduled send)', () => {
     });
     fresh.close();
     const raw = new BetterSqlite3(path);
-    raw.exec('ALTER TABLE mail_scheduled DROP COLUMN sending_at; DELETE FROM schema_version WHERE version = 17;');
+    raw.exec('DROP TABLE mail_delta_cursors; DELETE FROM schema_version WHERE version = 18; ALTER TABLE mail_scheduled DROP COLUMN sending_at; DELETE FROM schema_version WHERE version = 17;');
     raw.close();
     return id;
   }
@@ -531,7 +531,7 @@ describe('MailStateDb — migration v17 (claim a scheduled send)', () => {
     const db = new MailStateDb({ path });
     try {
       const raw = (db as unknown as { db: BetterSqlite3.Database }).db;
-      expect((raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(17);
+      expect((raw.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(18);
       expect((raw.prepare("PRAGMA table_info('mail_scheduled')").all() as { name: string }[]).map((c) => c.name)).toContain('sending_at');
       expect(db.listDueScheduledSends().map((r) => r.id)).toEqual([id]);
     } finally {
@@ -610,7 +610,7 @@ describe('MailStateDb — migration v16 (retire inbox_drafts)', () => {
       const raw = (migrated as unknown as { db: BetterSqlite3.Database }).db;
       // Migration ran to the new head.
       const version = raw.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-      expect(version.v).toBe(17);
+      expect(version.v).toBe(18);
       // The table is gone.
       const drafts = raw
         .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = 'inbox_drafts'`)
@@ -905,5 +905,116 @@ describe('MailStateDb — sidebar context queries', () => {
 
     expect(list).toHaveLength(1);
     expect(list[0]?.reason).toBe('waiting on quote');
+  });
+});
+
+describe('MailStateDb — delta cursors (v18)', () => {
+  const ACCOUNT = {
+    id: 'm365-a', displayName: 'a', address: 'a@example.org', preset: 'custom' as const,
+    imap: { host: '', port: 0, secure: true }, smtp: { host: '', port: 0, secure: true },
+    authType: 'oauth_microsoft' as const, type: 'personal' as const,
+  };
+  const LINK = 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=one';
+
+  beforeEach(() => {
+    db.upsertAccount(ACCOUNT);
+    db.upsertAccount({ ...ACCOUNT, id: 'm365-b', address: 'b@example.org' });
+  });
+
+  it('has no cursor until one is set, then returns exactly what was set', () => {
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
+    db.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: '2099-01-01T09:30:00Z' });
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toEqual({ link: LINK, since: '2099-01-01T09:30:00Z' });
+  });
+
+  it('keeps one cursor per account and folder: a second set replaces it, the others stay', () => {
+    db.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
+    db.setDeltaCursor('m365-a', 'archive', { link: `${LINK}-archive`, since: 's2' });
+    db.setDeltaCursor('m365-b', 'inbox', { link: `${LINK}-b`, since: 's3' });
+    db.setDeltaCursor('m365-a', 'inbox', { link: `${LINK}-next`, since: 's4' });
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toEqual({ link: `${LINK}-next`, since: 's4' });
+    expect(db.getDeltaCursor('m365-a', 'archive')).toEqual({ link: `${LINK}-archive`, since: 's2' });
+    expect(db.getDeltaCursor('m365-b', 'inbox')).toEqual({ link: `${LINK}-b`, since: 's3' });
+  });
+
+  it('clears only the cursor it names', () => {
+    db.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
+    db.setDeltaCursor('m365-a', 'archive', { link: LINK, since: 's2' });
+    db.setDeltaCursor('m365-b', 'inbox', { link: LINK, since: 's3' });
+    db.clearDeltaCursor('m365-a', 'inbox');
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
+    expect(db.getDeltaCursor('m365-a', 'archive')).not.toBeNull();
+    expect(db.getDeltaCursor('m365-b', 'inbox')).not.toBeNull();
+  });
+
+  it('refuses a cursor for an account that has no row', () => {
+    expect(() => db.setDeltaCursor('no-such-account', 'inbox', { link: LINK, since: 's' })).toThrow(/FOREIGN KEY/i);
+  });
+
+  it('drops an account\'s cursors with the account, and only its own', () => {
+    db.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
+    db.setDeltaCursor('m365-b', 'inbox', { link: LINK, since: 's2' });
+    expect(db.deleteAccount('m365-a')).toBe(true);
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
+    expect(db.getDeltaCursor('m365-b', 'inbox')).not.toBeNull();
+  });
+
+  it('is wiped by deleteAllData', () => {
+    db.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
+    db.deleteAllData();
+    db.upsertAccount(ACCOUNT);
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
+  });
+
+  it('survives closing and reopening the file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mail-cursor-'));
+    try {
+      const path = join(dir, 'mail-state.db');
+      const first = new MailStateDb({ path });
+      first.upsertAccount(ACCOUNT);
+      first.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
+      first.close();
+      const second = new MailStateDb({ path });
+      try {
+        expect(second.getDeltaCursor('m365-a', 'inbox')).toEqual({ link: LINK, since: 's1' });
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('MailStateDeltaCursorStore reads, writes and clears through the same rows', () => {
+    const store = new MailStateDeltaCursorStore(db);
+    store.set('m365-a', 'inbox', { link: LINK, since: 's1' });
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toEqual({ link: LINK, since: 's1' });
+    db.setDeltaCursor('m365-a', 'inbox', { link: `${LINK}-next`, since: 's2' });
+    expect(store.get('m365-a', 'inbox')).toEqual({ link: `${LINK}-next`, since: 's2' });
+    store.clear('m365-a', 'inbox');
+    expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
+  });
+
+  it('a database at v17 gains the table on open, and its rows stay', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mail-cursor-v17-'));
+    try {
+      const path = join(dir, 'mail-state.db');
+      const fresh = new MailStateDb({ path });
+      fresh.upsertAccount(ACCOUNT);
+      fresh.close();
+      const raw = new BetterSqlite3(path);
+      raw.exec('DROP TABLE mail_delta_cursors; DELETE FROM schema_version WHERE version = 18;');
+      raw.close();
+      const migrated = new MailStateDb({ path });
+      try {
+        expect(migrated.getAccount('m365-a')?.address).toBe('a@example.org');
+        migrated.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
+        expect(migrated.getDeltaCursor('m365-a', 'inbox')).toEqual({ link: LINK, since: 's1' });
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -7,6 +7,10 @@ import {
   hasGraphScope,
 } from './oauth-graph.js';
 import { MailError, type MailAccountConfig, type MailEnvelope, type MailWatchEvent } from '../provider.js';
+import { MailStateDb, MailStateDeltaCursorStore } from '../state.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { MicrosoftAuth } from '../../microsoft/microsoft-auth.js';
 import type { HostPolicyContext } from '../../../core/network-guard.js';
 
@@ -696,6 +700,42 @@ describe('OAuthGraphProvider — watch over delta', () => {
     await provider.close();
     expect(events).toHaveLength(1);
     expect(fetchMock, 'eight intervals passed, one request').toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes after a restart from the cursor kept in mail-state.db, not at the watch time', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'graph-cursor-'));
+    const path = join(dir, 'mail-state.db');
+    try {
+      // Until the restart, the stored link fails, so the first run cannot move past it.
+      let restarted = false;
+      routes.push((url) => {
+        if (url.includes('/messages/delta?changeType=')) return json({ value: [graphMessage('n1')], '@odata.deltaLink': DELTA_1 });
+        if (url === DELTA_1) return restarted ? json({ value: [graphMessage('n2')], '@odata.deltaLink': DELTA_2 }) : graphError(503, 'ServiceUnavailable');
+        if (url === DELTA_2) return json({ value: [], '@odata.deltaLink': DELTA_2 });
+        return undefined;
+      });
+      const first = new MailStateDb({ path });
+      first.upsertAccount(makeAccount());
+      await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new MailStateDeltaCursorStore(first)), 1);
+      expect(first.getDeltaCursor('m365-user', 'inbox')?.link).toBe(DELTA_1);
+      first.close();
+
+      restarted = true;
+      const before = calls().length;
+      const second = new MailStateDb({ path });
+      try {
+        const events = await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new MailStateDeltaCursorStore(second)), 1);
+        const resumed = calls().slice(before).filter((c) => c.url.includes('/messages/delta'));
+        expect(resumed[0]!.url, 'the first request after the restart is the stored link').toBe(DELTA_1);
+        expect(resumed.some((c) => c.url.includes('changeType=')), 'no new start at the watch time').toBe(false);
+        expect((events[0] as { envelopes: MailEnvelope[] }).envelopes.map((e) => e.messageId)).toEqual(['<n2@example.com>']);
+        expect(second.getDeltaCursor('m365-user', 'inbox')?.link).toBe(DELTA_2);
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('a tick at its page cap parks the nextLink and resumes there', async () => {

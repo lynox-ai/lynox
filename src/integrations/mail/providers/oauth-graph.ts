@@ -7,10 +7,12 @@
 // ── Not wired yet ─────────────────────────────────────────────────────────
 //
 // Nothing constructs this provider: `mail/context.ts` has no `oauth_microsoft`
-// branch, and a test there holds that. The reason is the watch cursor. Its
-// only store today is `InMemoryDeltaCursorStore`, so a restart would begin a
-// new cursor at "now" and silently skip every message that arrived while the
-// process was down. The wiring and a persistent cursor store arrive together.
+// branch, and a test there holds that. The watch cursor was one reason: in
+// `InMemoryDeltaCursorStore`, a restart begins a new cursor at "now" and
+// silently skips every message that arrived while the process was down. The
+// persistent store exists now (`MailStateDeltaCursorStore`, `mail/state.ts`),
+// but the constructor still defaults to the in-memory one, so the wiring has
+// to pass the persistent store explicitly.
 //
 // ── What each call costs ──────────────────────────────────────────────────
 //
@@ -167,7 +169,7 @@ export interface DeltaCursor {
   readonly since: string;
 }
 
-/** Per account and folder. In memory today; a persistent store comes with the wiring. */
+/** Per account and folder. In memory, or in mail-state.db (`MailStateDeltaCursorStore`). */
 export interface DeltaCursorStore {
   get(accountId: string, folder: string): DeltaCursor | null;
   set(accountId: string, folder: string, cursor: DeltaCursor): void;
