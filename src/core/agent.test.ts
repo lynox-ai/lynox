@@ -2335,6 +2335,7 @@ describe('Agent', () => {
         expect(store.resolve).not.toHaveBeenCalled();
         expect(content).toContain('OAuth client secret of a built-in provider');
         expect(content).toContain('Settings → API Keys');
+        expect(content).toContain('Write the request without it.');
         expect(content).not.toMatch(/call `?ask_secret|reference it as/i);
       });
 
