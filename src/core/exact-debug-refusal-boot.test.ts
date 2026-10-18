@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
@@ -33,6 +33,7 @@ describe('Engine boot — an instance that holds the exact marker boots with its
     dirs.length = 0;
     _resetSdkLogQuieting();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     reloadConfig();
   });
 
@@ -62,6 +63,36 @@ describe('Engine boot — an instance that holds the exact marker boots with its
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     await boot();
+    expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
+    expect(process.env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED']).toBeUndefined();
+  });
+
+  it('engine.db does not open: the boot fails closed and the variables are gone', async () => {
+    const dir = freshDataDir('exact-nodb');
+    mkdirSync(join(dir, 'engine.db'));
+    setEnv('ANTHROPIC_LOG', 'debug');
+    setEnv('LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', '1');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const engine = await boot();
+    expect(engine.getToolContext().exactClearance).toBeNull();
+    expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
+    expect(process.env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED']).toBeUndefined();
+  });
+
+  it('the first clearance of a booted engine closes the debug paths (the hook is wired)', async () => {
+    freshDataDir('exact-first');
+    setEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'http://cp.invalid');
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'i-boot');
+    setEnv('LYNOX_HTTP_SECRET', 's');
+    setEnv('ANTHROPIC_LOG', 'debug');
+    setEnv('LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', '1');
+
+    const engine = await boot();
+    expect(process.env['ANTHROPIC_LOG']).toBe('debug');
+    vi.stubGlobal('fetch', (async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(await engine.getToolContext().exactClearance!.ensure()).toEqual({ ok: true });
     expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
     expect(process.env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED']).toBeUndefined();
   });

@@ -40,8 +40,11 @@ describe('isExactHeld', () => {
     expect(isExactHeld(m)).toBe(true);
   });
 
-  it('counts an unreadable marker, and no marker at all, as held', () => {
+  it('counts an unreadable marker as held', () => {
     expect(isExactHeld(memoryMarker({ readThrows: true }))).toBe(true);
+  });
+
+  it('counts no marker at all (engine.db did not open) as held', () => {
     expect(isExactHeld(null)).toBe(true);
   });
 });
@@ -125,6 +128,15 @@ describe('the SDK request log', () => {
     quietSdkLogs();
     const lines: string[] = [];
     await send(client('debug', lines));
+    expect(lines.filter((l) => l.startsWith('debug') || l.startsWith('info'))).toEqual([]);
+  });
+
+  it('refuseDebug quiets the clients that are already built', async () => {
+    const lines: string[] = [];
+    const c = client('debug', lines);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    refuseDebug({});
+    await send(c);
     expect(lines.filter((l) => l.startsWith('debug') || l.startsWith('info'))).toEqual([]);
   });
 
