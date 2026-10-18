@@ -7935,6 +7935,15 @@ describe('write approvals per method and host (270)', () => {
         expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: requests naming PATCH, POST to this host were denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
+
+      it('past three denied writes the rest are counted', async () => {
+        const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
+        const many = { url: 'https://h.example/a?_method=PUT&_method=PATCH&_method=MERGE&_method=PURGE', method: 'POST', body: '{}' };
+        await visible(many, agent);
+        const again = await visible(many, agent);
+        expect(again).toContain('Blocked: outbound POST (also naming MERGE, PATCH, PURGE and 1 more) to h.example was not asked: requests naming MERGE, PATCH, POST and 2 more to this host were denied earlier in this batch.');
+        expect(prompt).toHaveBeenCalledTimes(1);
+      });
     });
 
     it.each(shapes)('the call timed out, %s', async (_k, req, shown) => {
