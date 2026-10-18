@@ -423,7 +423,7 @@ const GRAPHQL_WRITE_OPERATION = /\b(?:mutation|subscription)\b/i;
 
 const GRAPHQL_BODY_KEYS = new Set(['query', 'operationName', 'variables', 'extensions']);
 
-const GRAPHQL_CONTENT_TYPE = /^\s*application\/json\s*(?:;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
+const GRAPHQL_CONTENT_TYPE = /^\s*application\/json\s*(?:;\s*charset\s*=\s*(?:"utf-8"|utf-8)\s*)?$/i;
 
 /**
  * Whether any object in a JSON text names one key twice, keys compared as decoded (`"query"` and

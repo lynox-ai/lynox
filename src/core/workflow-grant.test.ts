@@ -99,7 +99,7 @@ describe('the shape of a reviewed grant on a saved workflow', () => {
     ['POST', 'api.example.com', '/graphql'],
     ['PATCH', 'api.example.com', '/admin/api/2024-01/graphql.json'],
     ['PUT', 'graphql.example.com', '/v1/items'],
-  ])('refuses a %s to a GraphQL endpoint (%s%s) in the entry; a REST path on the same host is granted', (method, host, path) => {
+  ])('refuses a %s to a GraphQL endpoint (%s%s) in the entry; a REST path on a REST host is granted', (method, host, path) => {
     const built = buildReviewedContract({ method, host, paths: [path] }, [], {});
     expect(built).toEqual({ error: expect.stringContaining('is a GraphQL endpoint') });
     const rest = buildReviewedContract({ method, host: 'api.example.com', paths: ['/v1/items'] }, [], {});

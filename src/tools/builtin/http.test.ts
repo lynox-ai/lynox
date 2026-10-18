@@ -7639,7 +7639,7 @@ describe('write approvals per method and host (270)', () => {
       expect(rest).toContain('HTTP 200');
     });
 
-    it('an OPTIONS is a write here, so a GraphQL endpoint reads its body like a POST and refuses one it cannot read', async () => {
+    it('an OPTIONS is a write here, so a GraphQL endpoint holds it to the same check as a POST and refuses one without application/json', async () => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);
       const out = await visible({ url: GQL, method: 'OPTIONS', body: 'mutation{b}' }, agent270().agent);

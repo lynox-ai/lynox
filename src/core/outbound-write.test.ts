@@ -665,6 +665,7 @@ describe('isGraphqlEndpoint', () => {
     ['https://shop.example.com/admin/api/2024-01/graphql.json', true],
     ['https://api.example.com/GraphQL', true],
     ['https://graphql.example.com/v1/items', true],
+    ['https://graphqlx.example.com/v1/items', true],
     ['https://api.example.com/%2567raphql', true],
     ['https://api.example.com/%E0/graphql', true],
     ['not a url', true],
@@ -707,6 +708,7 @@ describe('graphqlWrite', () => {
     ['another media type', { 'Content-Type': 'application/graphql' }, '{ a }'],
     ['two Content-Type headers', { 'Content-Type': 'application/json', 'CONTENT-TYPE': 'application/json' }, body({ query: '{ a }' })],
     ['another charset', { 'Content-Type': 'application/json; charset=latin1' }, body({ query: '{ a }' })],
+    ['an unbalanced quote around the charset', { 'Content-Type': 'application/json; charset="utf-8' }, body({ query: '{ a }' })],
     ['no body', JSON_CT, undefined],
     ['a batch array', JSON_CT, `[${body({ query: '{ a }' })}]`],
     ['a body that is not JSON', JSON_CT, 'query=%7Ba%7D'],
@@ -729,7 +731,7 @@ describe('graphqlWrite', () => {
 
   it('a body nested far deeper than any request needs is read without throwing', () => {
     const deep = `{"query":"{ a }","variables":{"v":${'['.repeat(200_000)}${']'.repeat(200_000)}}}`;
-    expect(() => graphqlWrite(JSON_CT, deep)).not.toThrow();
+    expect(graphqlWrite(JSON_CT, deep)).toEqual({ mutates: false });
   });
 });
 
