@@ -555,10 +555,11 @@ const MIGRATIONS: string[] = [
 
   // v18: where a Microsoft Graph mailbox's watch resumes, per account and folder (the
   // `DeltaCursor` of `providers/oauth-graph.ts`): the next Graph link and the newest
-  // `receivedDateTime` seen. In memory it was lost on every restart, and the watch began again
+  // `receivedDateTime` seen. In memory it is lost on every restart, and the watch begins again
   // at "now", past everything that arrived while the process was down. It goes with its
   // account: deleting the account row deletes its cursors. One transaction, as v17, and
-  // `IF NOT EXISTS`, as v15: a table already there does not leave the file unopenable.
+  // `IF NOT EXISTS`, as v15: a table already there does not leave the file unopenable. Its
+  // shape is then not checked; this migration is the only thing that creates the table.
   `BEGIN;
    INSERT OR IGNORE INTO schema_version (version) VALUES (18);
    CREATE TABLE IF NOT EXISTS mail_delta_cursors (

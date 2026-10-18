@@ -156,7 +156,7 @@ describe('hasGraphScope', () => {
 
 describe('OAuthGraphProvider — list', () => {
   it('is one request with the envelope fields, and maps them', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push((url) => url.startsWith(`${ME}/mailFolders/inbox/messages?`)
       ? json({ value: [
         graphMessage('a', { isRead: true, flagged: true, attachments: true }),
@@ -194,14 +194,14 @@ describe('OAuthGraphProvider — list', () => {
   });
 
   it('puts since and unseenOnly into $filter', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [] }));
     await provider.list({ since: new Date('2026-10-01T00:00:00Z'), unseenOnly: true });
     expect(query(calls()[0]!.url)['$filter']).toBe('receivedDateTime ge 2026-10-01T00:00:00.000Z and isRead eq false');
   });
 
   it('maps well-known folder names and keeps a folder id, but refuses a dot-segment', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [] }));
     await provider.list({ folder: 'SENT' });
     await provider.list({ folder: 'AAMkAD-x_y=' });
@@ -212,7 +212,7 @@ describe('OAuthGraphProvider — list', () => {
   });
 
   it('caps the page at 100', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [] }));
     await provider.list({ limit: 5000 });
     expect(query(calls()[0]!.url)['$top']).toBe('100');
@@ -221,7 +221,7 @@ describe('OAuthGraphProvider — list', () => {
 
 describe('OAuthGraphProvider — search', () => {
   it('structured-only goes to $filter, receivedDateTime first, no $search', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [] }));
     await provider.search({
       before: new Date('2026-10-10T00:00:00Z'), flagged: true, hasAttachment: true, unseen: true,
@@ -233,7 +233,7 @@ describe('OAuthGraphProvider — search', () => {
   });
 
   it('free text goes to KQL $search, with quotes and backslashes taken out of the values', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [] }));
     await provider.search({ text: 'quarterly', from: 'alice@example.com', subject: 'report" OR x\\' });
     const q = query(calls()[0]!.url);
@@ -242,7 +242,7 @@ describe('OAuthGraphProvider — search', () => {
   });
 
   it('with text AND structured fields, filters here over a full page and cuts to the limit', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [
       graphMessage('read', { isRead: true }),
       graphMessage('old', { received: '2026-01-01T00:00:00Z' }),
@@ -256,7 +256,7 @@ describe('OAuthGraphProvider — search', () => {
   });
 
   it('a query whose free text is only quotes falls back to the filter path', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     routes.push(() => json({ value: [] }));
     await provider.search({ text: '""' });
     expect(query(calls()[0]!.url)['$search']).toBeUndefined();
@@ -265,13 +265,13 @@ describe('OAuthGraphProvider — search', () => {
 
 describe('OAuthGraphProvider — fetch', () => {
   it('throws not_found for a uid this session never handed out', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     await expect(provider.fetch({ uid: 7 })).rejects.toMatchObject({ code: 'not_found' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('reads body, headers and attachments; HTML goes through the hidden-text stripper', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const [env] = await listed(provider, ['m/1+x=']);
     routes.unshift((url) => {
       if (url.includes('/attachments?')) {
@@ -314,7 +314,7 @@ describe('OAuthGraphProvider — fetch', () => {
   });
 
   it('a text body is passed through and html stays undefined without includeHtml', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const [env] = await listed(provider, ['t1']);
     routes.unshift((url) => url.includes('/attachments?') ? json({ value: [] })
       : url.startsWith(`${ME}/messages/t1?`) ? json({ ...graphMessage('t1'), body: { contentType: 'text', content: 'Plain <b>as is</b>' } })
@@ -337,7 +337,7 @@ describe('OAuthGraphProvider — send', () => {
 
   it('posts base64 MIME as text/plain to /me/sendMail and returns the Message-ID it wrote', async () => {
     sendRoutes();
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const result = await provider.send({
       to: [{ address: 'bob@example.com' }],
       cc: [{ address: 'cc@example.com' }],
@@ -364,7 +364,7 @@ describe('OAuthGraphProvider — send', () => {
 
   it('refuses without Mail.Send and sends nothing', async () => {
     sendRoutes();
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ scopes: ['https://graph.microsoft.com/Mail.Read'] }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ scopes: ['https://graph.microsoft.com/Mail.Read'] }), new InMemoryDeltaCursorStore());
     await expect(provider.send({ to: [{ address: 'bob@example.com' }], subject: 'x', text: 'y' }))
       .rejects.toMatchObject({ code: 'unsupported' });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -372,14 +372,14 @@ describe('OAuthGraphProvider — send', () => {
 
   it('accepts the short scope form too — the control for the refusal above', async () => {
     sendRoutes();
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ scopes: ['Mail.Send'] }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ scopes: ['Mail.Send'] }), new InMemoryDeltaCursorStore());
     await expect(provider.send({ to: [{ address: 'bob@example.com' }], subject: 'x', text: 'y' })).resolves.toBeDefined();
   });
 
   it('From is the mailbox address /me reports, read once per token', async () => {
     sendRoutes({ mail: 'relinked@example.org' });
     let token = 'tok-1';
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ token: async () => token }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ token: async () => token }), new InMemoryDeltaCursorStore());
     expect(await provider.fromAddress()).toBe('relinked@example.org');
     await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'x', text: 'y' });
     const meCalls = (): number => calls().filter((c) => c.url.startsWith(`${ME}?`)).length;
@@ -393,7 +393,7 @@ describe('OAuthGraphProvider — send', () => {
 
   it('refuses a /me without a mailbox address', async () => {
     sendRoutes({ mail: null, userPrincipalName: 'user@example.org' });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     await expect(provider.send({ to: [{ address: 'bob@example.com' }], subject: 'x', text: 'y' }))
       .rejects.toThrow(/no mailbox address/);
     expect(calls().some((c) => c.url.endsWith('/sendMail'))).toBe(false);
@@ -402,7 +402,7 @@ describe('OAuthGraphProvider — send', () => {
   it('a 400 from sendMail is send_rejected, with Graph\'s code and not its message', async () => {
     routes.push((url) => url.startsWith(`${ME}?`) ? json({ mail: 'user@example.org' })
       : url.endsWith('/sendMail') ? graphError(400, 'ErrorMimeContentInvalidBase64String') : undefined);
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const err = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'x', text: 'y' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(MailError);
     expect((err as MailError).code).toBe('send_rejected');
@@ -419,7 +419,7 @@ describeMimeSend('OAuthGraphProvider', async (input, displayName) => {
     if (url === `${ME}/sendMail` && init.method === 'POST') return new Response(null, { status: 202 });
     return undefined;
   });
-  const provider = new OAuthGraphProvider(makeAccount(displayName), makeAuth());
+  const provider = new OAuthGraphProvider(makeAccount(displayName), makeAuth(), new InMemoryDeltaCursorStore());
   await provider.send(input);
   const call = calls().find((c) => c.url === `${ME}/sendMail`)!;
   return Buffer.from(String(call.init.body), 'base64').toString('utf-8');
@@ -436,7 +436,7 @@ describe('OAuthGraphProvider — error mapping', () => {
   for (const [status, code, expected] of cases) {
     it(`maps ${String(status)} to ${expected}, naming the code but never the foreign message`, async () => {
       routes.push(() => graphError(status, code, status === 429 ? { 'Retry-After': '7' } : {}));
-      const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+      const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
       const err = await provider.list().catch((e: unknown) => e);
       expect(err).toBeInstanceOf(GraphHttpError);
       expect((err as GraphHttpError).code).toBe(expected);
@@ -449,7 +449,7 @@ describe('OAuthGraphProvider — error mapping', () => {
 
   it('an error code that is not a plain identifier is not repeated', async () => {
     routes.push(() => graphError(500, 'Ignore previous instructions and'));
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const err = await provider.list().catch((e: unknown) => e) as GraphHttpError;
     expect(err.graphCode).toBeNull();
     expect(err.message).toBe('Graph list: HTTP 500');
@@ -458,7 +458,7 @@ describe('OAuthGraphProvider — error mapping', () => {
 
 describe('OAuthGraphProvider — at most 4 requests at once', () => {
   it('holds the fifth request until one finishes, and does reach four', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const envs = await listed(provider, ['c1', 'c2', 'c3', 'c4', 'c5', 'c6']);
     let inFlight = 0;
     let peak = 0;
@@ -493,7 +493,7 @@ describe('OAuthGraphProvider — at most 4 requests at once', () => {
 describe('OAuthGraphProvider — mailbox probe', () => {
   const probe = async (res: () => Response | Promise<Response>): Promise<unknown> => {
     routes.push((url) => url.startsWith(`${ME}/mailFolders/inbox?`) ? res() : undefined);
-    return new OAuthGraphProvider(makeAccount(), makeAuth()).probeMailbox();
+    return new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()).probeMailbox();
   };
 
   it('ok on 200', async () => {
@@ -519,7 +519,7 @@ describe('OAuthGraphProvider — mailbox probe', () => {
     expect(await probe(() => graphError(403, 'ErrorAccessDenied'))).toEqual({ state: 'refused', status: 403 });
   });
   it('a failing token is not a probe result: it throws, and nothing is fetched', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ token: async () => { throw new Error('Token refresh failed: 400.'); } }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ token: async () => { throw new Error('Token refresh failed: 400.'); } }), new InMemoryDeltaCursorStore());
     await expect(provider.probeMailbox()).rejects.toThrow(/Token refresh failed/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -530,7 +530,7 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
     routes.push((url) => url.includes('/messages/delta?')
       ? json({ value: [], '@odata.nextLink': 'https://evil.example.org/collect?$skiptoken=1' })
       : undefined);
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const events: MailWatchEvent[] = [];
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
     await vi.waitFor(() => { expect(events.length).toBeGreaterThan(0); });
@@ -552,7 +552,7 @@ describe('OAuthGraphProvider — links Graph hands back', () => {
     ]) {
       routes = [(url) => url.includes('/messages/delta?') ? json({ value: [], '@odata.deltaLink': bad }) : undefined];
       fetchMock.mockClear();
-      const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+      const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
       const events: MailWatchEvent[] = [];
       const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
       await vi.waitFor(() => { expect(events.length).toBeGreaterThan(0); });
@@ -600,7 +600,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
       if (url === DELTA_2) return json({ value: [], '@odata.deltaLink': DELTA_2 });
       return undefined;
     });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const events = await watchFor(provider, 3);
 
     const first = calls()[0]!;
@@ -622,7 +622,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
     routes.push((url) => url.includes('/messages/delta')
       ? json({ value: [graphMessage('same')], '@odata.deltaLink': DELTA_1 })
       : undefined);
-    const events = await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth()), 3);
+    const events = await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()), 3);
     expect(events.map((e) => e.type)).toEqual(['new', 'ok', 'ok']);
   });
 
@@ -631,7 +631,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
       ? json({ value: [graphMessage('retry-me')], '@odata.deltaLink': DELTA_1 })
       : url === DELTA_1 ? json({ value: [], '@odata.deltaLink': DELTA_1 }) : undefined);
     let failed = false;
-    const events = await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth()), 4, (e) => {
+    const events = await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()), 4, (e) => {
       if (e.type === 'new' && !failed) { failed = true; throw new Error('downstream down'); }
     });
     expect(events.map((e) => e.type)).toEqual(['new', 'error', 'new', 'ok']);
@@ -668,7 +668,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
 
   it('any other 4xx on the delta is an error event, not a restart', async () => {
     routes.push((url) => url.includes('/messages/delta') ? graphError(400, 'BadRequest') : undefined);
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     let errors = 0;
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { if (e.type === 'error') errors++; });
     await vi.waitFor(() => { expect(errors).toBeGreaterThanOrEqual(3); });
@@ -680,7 +680,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
 
   it('…while a lost cursor does cost the second request — the control for the line above', async () => {
     routes.push((url) => url.includes('/messages/delta') ? graphError(410, 'Gone') : undefined);
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     let errors = 0;
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { if (e.type === 'error') errors++; });
     await vi.waitFor(() => { expect(errors).toBeGreaterThanOrEqual(3); });
@@ -691,7 +691,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
 
   it('a 429 pauses the ticks for Retry-After', async () => {
     routes.push((url) => url.includes('/messages/delta') ? graphError(429, 'ApplicationThrottled', { 'Retry-After': '3600' }) : undefined);
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const events: MailWatchEvent[] = [];
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
     await vi.waitFor(() => { expect(events.length).toBe(1); });
@@ -738,6 +738,44 @@ describe('OAuthGraphProvider — watch over delta', () => {
     }
   });
 
+  it('after a restart, a lost stored link restarts from the stored since, not from the new watch time', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'graph-cursor-since-'));
+    const path = join(dir, 'mail-state.db');
+    const STORED_SINCE = '2099-01-01T09:30:00Z';
+    try {
+      let restarted = false;
+      routes.push((url) => {
+        if (url.includes('/messages/delta?changeType=')) {
+          return restarted
+            ? json({ value: [], '@odata.deltaLink': DELTA_2 })
+            : json({ value: [graphMessage('n1', { received: STORED_SINCE })], '@odata.deltaLink': DELTA_1 });
+        }
+        if (url === DELTA_1) return restarted ? graphError(410, 'Gone') : graphError(503, 'ServiceUnavailable');
+        if (url === DELTA_2) return json({ value: [], '@odata.deltaLink': DELTA_2 });
+        return undefined;
+      });
+      const first = new MailStateDb({ path });
+      first.upsertAccount(makeAccount());
+      await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new MailStateDeltaCursorStore(first)), 1);
+      expect(first.getDeltaCursor('m365-user', 'inbox')).toEqual({ link: DELTA_1, since: STORED_SINCE });
+      first.close();
+
+      restarted = true;
+      const before = calls().length;
+      const second = new MailStateDb({ path });
+      try {
+        await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new MailStateDeltaCursorStore(second)), 1);
+        const restart = calls().slice(before).find((c) => c.url.includes('/messages/delta?changeType='));
+        expect(restart, 'the lost link was restarted').toBeDefined();
+        expect(query(restart!.url)['$filter']).toBe(`receivedDateTime ge ${STORED_SINCE}`);
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a tick at its page cap parks the nextLink and resumes there', async () => {
     let page = 0;
     routes.push((url) => {
@@ -761,7 +799,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
       await new Promise<void>((r) => { release = r; });
       return json({ value: [graphMessage('late')], '@odata.deltaLink': DELTA_1 });
     });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const events: MailWatchEvent[] = [];
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
     await vi.waitFor(() => { expect(release).toBeDefined(); });
@@ -779,7 +817,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
       await new Promise<void>((r) => { release = r; });
       return json({ value: [], '@odata.deltaLink': DELTA_1 });
     });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const handle = await provider.watch({ intervalMs: 10 }, () => undefined);
     await vi.waitFor(() => { expect(release).toBeDefined(); });
     await new Promise((r) => setTimeout(r, 60));
@@ -804,7 +842,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
         if (url === DELTA_1) return json({ value: [], '@odata.deltaLink': DELTA_1 });
         return undefined;
       });
-      await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth()), 2);
+      await watchFor(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()), 2);
       const restart = calls().filter((c) => c.url.includes('/messages/delta?changeType='))[1]!;
       expect(query(restart.url)['$filter']).toBe('receivedDateTime ge 2099-01-01T09:30:00.500Z');
     } finally {
@@ -827,7 +865,7 @@ describe('OAuthGraphProvider — watch over delta', () => {
 
 describe('OAuthGraphProvider — close', () => {
   it('refuses every call after close and clears the uid map', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const [env] = await listed(provider, ['x']);
     await provider.close();
     await expect(provider.list()).rejects.toThrow('Provider closed');
@@ -866,7 +904,7 @@ describe('OAuthGraphProvider — review fixes', () => {
       if (url === D1) return json({ value: [], '@odata.deltaLink': D1 });
       return undefined;
     });
-    const events = await collect(new OAuthGraphProvider(makeAccount(), makeAuth()), 1);
+    const events = await collect(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()), 1);
     expect(ids(events[0])).toEqual(['<a@example.com>', '<b@example.com>']);
     // `a` is newer than the watch start; the restart still begins where the round did,
     // so nothing between the start and `a` on the unread pages is skipped.
@@ -889,7 +927,7 @@ describe('OAuthGraphProvider — review fixes', () => {
       return undefined;
     });
     // maxPerTick 1: the first page fills the tick, the nextLink is parked.
-    await collect(new OAuthGraphProvider(makeAccount(), makeAuth()), 2, 1);
+    await collect(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()), 2, 1);
     const firsts = calls().filter((c) => c.url.includes('/messages/delta?changeType=')).map((c) => query(c.url)['$filter']);
     expect(firsts.length).toBe(2);
     expect(firsts[1], 'the restart starts where the first round began, not at 10:00').toBe(firsts[0]);
@@ -902,7 +940,7 @@ describe('OAuthGraphProvider — review fixes', () => {
       n++;
       return json({ value: [graphMessage(`m${String(n)}`)], '@odata.nextLink': `${ME}/mailFolders/inbox/messages/delta?$skiptoken=${String(n)}` });
     });
-    const events = await collect(new OAuthGraphProvider(makeAccount(), makeAuth()), 1, 2);
+    const events = await collect(new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()), 1, 2);
     expect(ids(events[0])).toEqual(['<m1@example.com>', '<m2@example.com>']);
   });
 
@@ -912,7 +950,7 @@ describe('OAuthGraphProvider — review fixes', () => {
       const broken = new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('connection reset')); } });
       return new Response(broken, { status: 429, headers: { 'Retry-After': '3600' } });
     });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const events: MailWatchEvent[] = [];
     const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
     try {
@@ -935,7 +973,7 @@ describe('OAuthGraphProvider — review fixes', () => {
       await new Promise<void>((r) => { release = r; });
       return json({ value: [], '@odata.deltaLink': D1 });
     });
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const a = await provider.watch({ intervalMs: 10, folder: 'INBOX' }, () => undefined);
     const b = await provider.watch({ intervalMs: 10, folder: 'inbox' }, () => undefined);
     await vi.waitFor(() => { expect(release).toBeDefined(); });
@@ -959,7 +997,7 @@ describe('OAuthGraphProvider — review fixes', () => {
     ['an unknown policy value', policy('no-such-policy'), /unrecognised egress policy/],
   ] as const) {
     it(`the probe throws a host-policy refusal (${label}) instead of calling it transient`, async () => {
-      const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: ctx }));
+      const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: ctx }), new InMemoryDeltaCursorStore());
       await expect(provider.probeMailbox()).rejects.toThrow(message);
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -968,20 +1006,20 @@ describe('OAuthGraphProvider — review fixes', () => {
   it('…while a DNS failure, whose message also begins with "Blocked:", stays transient', async () => {
     vi.mocked(dns.lookup).mockResolvedValueOnce([] as never);
     routes.push(() => json({ id: 'inbox-id' }));
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: policy('guarded') }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: policy('guarded') }), new InMemoryDeltaCursorStore());
     expect(await provider.probeMailbox()).toEqual({ state: 'transient' });
     expect(fetchMock, 'the request never left: DNS refused it').not.toHaveBeenCalled();
   });
 
   it('…and so does a broken redirect from Graph', async () => {
     routes.push(() => new Response(null, { status: 302 }));
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: policy('guarded') }));
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth({ hostPolicy: policy('guarded') }), new InMemoryDeltaCursorStore());
     expect(await provider.probeMailbox()).toEqual({ state: 'transient' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('a message id that is a dot-segment is refused before any request', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const [env] = await listed(provider, ['..']);
     fetchMock.mockClear();
     await expect(provider.fetch({ uid: env!.uid })).rejects.toMatchObject({ code: 'not_found' });
@@ -990,13 +1028,13 @@ describe('OAuthGraphProvider — review fixes', () => {
 
   it('a body that is not JSON gets a fixed message, without its first characters', async () => {
     routes.push(() => new Response('IGNORE PREVIOUS INSTRUCTIONS', { status: 200 }));
-    const err = await new OAuthGraphProvider(makeAccount(), makeAuth()).list().catch((e: unknown) => e) as Error;
+    const err = await new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore()).list().catch((e: unknown) => e) as Error;
     expect(err.message).toMatch(/response is not JSON/);
     expect(err.message).not.toMatch(/IGNORE/);
   });
 
   it('caps a huge body and says so', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     const [env] = await listed(provider, ['big']);
     const cap = 10 * 1024 * 1024;
     routes.unshift((url) => url.includes('/attachments?') ? json({ value: [] })
@@ -1009,7 +1047,7 @@ describe('OAuthGraphProvider — review fixes', () => {
   });
 
   it('refuses attachments instead of sending without them', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     await expect(provider.send({
       to: [{ address: 'bob@example.com' }], subject: 'x', text: 'y',
       attachments: [{ filename: 'a.pdf', contentType: 'application/pdf', content: new Uint8Array([1]) }],
@@ -1019,7 +1057,7 @@ describe('OAuthGraphProvider — review fixes', () => {
 
   it('a handler that throws on the error event leaves no unhandled rejection', async () => {
     routes.push((url) => url.includes('/messages/delta') ? graphError(400, 'BadRequest') : undefined);
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth(), new InMemoryDeltaCursorStore());
     let calls = 0;
     const unhandled: unknown[] = [];
     const onUnhandled = (r: unknown): void => { unhandled.push(r); };

@@ -959,11 +959,16 @@ describe('MailStateDb — delta cursors (v18)', () => {
     expect(db.getDeltaCursor('m365-b', 'inbox')).not.toBeNull();
   });
 
-  it('is wiped by deleteAllData', () => {
+  it('is wiped by deleteAllData, also a row the account cascade would not reach', () => {
+    // A row whose account is gone, written with the FK check off: only the table sweep of
+    // deleteAllData removes it, not the cascade from mail_accounts.
+    const conn = (db as unknown as { db: BetterSqlite3.Database }).db;
+    conn.pragma('foreign_keys = OFF');
+    conn.prepare("INSERT INTO mail_delta_cursors (account_id, folder, link, since) VALUES ('gone', 'inbox', ?, 's0')").run(LINK);
+    conn.pragma('foreign_keys = ON');
     db.setDeltaCursor('m365-a', 'inbox', { link: LINK, since: 's1' });
     db.deleteAllData();
-    db.upsertAccount(ACCOUNT);
-    expect(db.getDeltaCursor('m365-a', 'inbox')).toBeNull();
+    expect((conn.prepare('SELECT COUNT(*) AS c FROM mail_delta_cursors').get() as { c: number }).c).toBe(0);
   });
 
   it('survives closing and reopening the file', () => {

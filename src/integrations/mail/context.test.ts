@@ -1232,11 +1232,11 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
   });
 });
 
-// The Graph provider exists but is not reachable yet. Its constructor defaults to the
-// in-memory cursor store, with which a wired provider would start a fresh cursor at "now"
-// after every restart and skip, without a word, all mail that arrived while the engine was
-// down. The persistent store (`MailStateDeltaCursorStore`) exists; the wiring has to pass it.
-// Until the wiring is written, an `oauth_microsoft` row builds nothing.
+// The Graph provider exists but is not reachable yet. Its constructor takes the cursor store
+// with no default; with the in-memory one, a wired provider would start a fresh cursor at
+// "now" after every restart and skip, without a word, all mail that arrived while the engine
+// was down. The wiring passes the persistent store (`MailStateDeltaCursorStore`). Until the
+// wiring is written, an `oauth_microsoft` row builds nothing.
 describe('MailContext — a Microsoft 365 row registers no provider yet', () => {
   it('builds nothing for an oauth_microsoft row, next to an IMAP row that does register', async () => {
     stateDb.upsertAccount({ ...GMAIL_ACCOUNT, id: 'm365-row', address: 'user@example.com', authType: 'oauth_microsoft' });
