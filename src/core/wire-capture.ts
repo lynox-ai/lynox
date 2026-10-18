@@ -238,9 +238,22 @@ export function provisionedCaptureAcknowledged(env: NodeJS.ProcessEnv = process.
   return (env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED'] ?? '') === '1';
 }
 
-/** Refuse when this is a provisioned instance AND no operator acknowledgement is present. */
+/**
+ * Closed for the rest of the process once the instance holds an exact connection
+ * (`exact-debug-refusal.ts`). Every capture surface checks it: the sinks here and the owner's
+ * `debug_wire_capture` snapshots (`RunHistory.insertWireSnapshot`), which the owner can arm at
+ * runtime and which no env variable gates.
+ */
+let wireCaptureClosed = false;
+export function closeWireCapture(): void { wireCaptureClosed = true; }
+export function isWireCaptureClosed(): boolean { return wireCaptureClosed; }
+/** @internal test-only */
+export function _resetWireCaptureClosed(): void { wireCaptureClosed = false; }
+
 let refusalAnnounced = false;
+/** Refuse when capture is closed, or this is a provisioned instance AND no operator acknowledgement is present. */
 function captureRefused(env: NodeJS.ProcessEnv): boolean {
+  if (wireCaptureClosed) return true;
   const refused = isProvisionedInstance(env) && !provisionedCaptureAcknowledged(env);
   // Say it once. An operator who armed the marker and sees nothing appear needs to be able to
   // tell "refused" from "wrong path" from "never armed" — and the default path moved in the

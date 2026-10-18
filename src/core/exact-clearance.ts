@@ -67,7 +67,15 @@ export class ExactClearance {
   constructor(
     private readonly cp: ExactControlPlane | null,
     private readonly marker: ExactMarker | null,
-    private readonly deps: { fetch?: typeof fetch; now?: () => number } = {},
+    private readonly deps: {
+      fetch?: typeof fetch;
+      now?: () => number;
+      /**
+       * Runs once the marker is set and before the boot counts as cleared, so before the first
+       * pass (S3, `exact-debug-refusal.ts`). It may not change the answer: a throw is swallowed.
+       */
+      onMarkerSet?: () => void;
+    } = {},
   ) {}
 
   private now(): number {
@@ -104,6 +112,11 @@ export class ExactClearance {
       // No marker, no pass (B7): the control plane holds the bit, the engine does not know it does.
       this.backoffUntil = this.now() + EXACT_ATTACH_BACKOFF_MS;
       return { ok: false, reason: 'marker_unwritable' };
+    }
+    try {
+      this.deps.onMarkerSet?.();
+    } catch {
+      // The refusal of the debug paths must not turn a granted clearance into a refused one.
     }
     this.cleared = true;
     return { ok: true };
