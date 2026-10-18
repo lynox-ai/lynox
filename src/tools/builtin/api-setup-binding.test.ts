@@ -389,6 +389,17 @@ describe('W-Question: the owner is asked with what is stored, and only then does
   });
 });
 
+describe('W-Port: the attach picks a profile by hostname, the binding is by origin', () => {
+  it('a request to another port of the bound host does not carry the secret; the base itself does', async () => {
+    const store = boot(reports());
+    expect(bindings()?.boundOf('REPORT_KEY')).toEqual(['https://reports.example']);
+    await get(store, 'https://reports.example:8443/v1/items');
+    expect(carried(vault['REPORT_KEY']!)).toBe(false);
+    await get(store, 'https://reports.example/v1/items');
+    expect(sent.filter((s) => s.auth === `Bearer ${vault['REPORT_KEY']!}`).map((s) => new URL(s.url).origin)).toEqual(['https://reports.example']);
+  });
+});
+
 describe('W-Normal: what was allowed keeps working', () => {
   it('a fetch_token of the owner\'s profile, then its token on its base', async () => {
     const store = boot(owner());
