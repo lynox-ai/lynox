@@ -136,14 +136,19 @@ export interface BulkRunStatus {
    *  run approved before this was recorded: its earlier passes are not known, so a page says
    *  "at least {@link failed}" instead. */
   failedOnce: number | null;
-  /** How many targets may fail in one pass before the failure-rate halt ({@link bulkFailureLimit}). */
+  /** How many targets may fail in one pass without the failure-rate halt; the next failure
+   *  halts it ({@link bulkFailureLimit}). */
   failureLimit: number;
   /** The targets a resume tries again: writing, not written, not taken back, and not failed on
    *  what they would send (`secret`). Every failure of the next pass is one of these, so it
-   *  bounds that pass's failures — the cap does not, a target can fail before it is sent to. */
+   *  bounds that pass's failures — the cap does not, a target can fail before it is sent to.
+   *  A bound, not a forecast: a target a dead loop claimed under {@link BULK_CLAIM_STALE_MS} ago
+   *  waits for a later pass. */
   resumeOpen: number;
-  /** Of {@link resumeOpen}, how many the next pass may send the write verb to under the cap
-   *  ({@link bulkWriteCap}). Below {@link resumeOpen} when the cap stops the pass first. */
+  /** Of {@link resumeOpen}, the most the next pass may send the write verb to under the run's
+   *  current cap ({@link bulkWriteCap}); a resume with a new maximum changes it. Fewer are sent
+   *  to when targets fail before the send or are found already written. Below
+   *  {@link resumeOpen} when the cap stops the pass first. */
   resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
@@ -596,7 +601,8 @@ export interface ApplyTarget {
 /** Changes that write. `unchanged` and `invalid` targets are never touched. */
 const WRITING_CHANGES = "('update','create','delete')";
 // The targets a resume tries again (`resume` clears every error but `secret`, `listPending`
-// then takes the unwritten ones that are not taken back). Under `change IN WRITING_CHANGES`.
+// then takes the unwritten ones that are not taken back), a target a live claim still holds
+// included. Under `change IN WRITING_CHANGES`.
 const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'secret'))";
 
 /**

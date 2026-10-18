@@ -774,8 +774,8 @@ describe('halt thresholds', () => {
     expect(halted.status).toBe('halted');
     expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 6 });
     expect(halted.summary).toContain('failed 6,');
-    // What the resume button shows: six failed so far; five may fail in the next pass; the fifty
-    // not written are what it tries.
+    // What the resume button shows: six failed so far; five may fail in the next pass and the
+    // sixth halts it; the fifty not written are what it tries.
     expect(ledger.getStatus(runId)).toMatchObject({ applied: 50, failedOnce: 6, failureLimit: 5, resumeOpen: 50, resumeTries: 50 });
     // The six now write; three later targets fail. Three of 100 is under 5 % for this pass —
     // the halt counts per pass — so the run finishes.
@@ -834,7 +834,7 @@ describe('halt thresholds', () => {
   });
 
   it('the failure limit the status shows is the one the halt keeps', async () => {
-    // 60 × 0.05 is 3.0000000000000004 in floating point: three may fail, the fourth halts.
+    // 60 × 0.05 is exactly 3: three may fail, the fourth halts.
     expect(bulkFailureLimit(60)).toBe(3);
     const scattered = ['k005', 'k020', 'k035', 'k050'];
     const under = recordMemoryRun(60);
@@ -1683,7 +1683,7 @@ describe('what a resume after a failure halt may still do', () => {
     };
   }
 
-  it('limit below the open targets: the next pass may fail up to the limit and halts past it', async () => {
+  it('limit below the open targets: the next pass halts on the failure past the limit', async () => {
     const { runId, initial } = recordMemoryRun(100);
     approve(runId);
     await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k010', 'k011', 'k012'] })));
@@ -1720,7 +1720,7 @@ describe('what a resume after a failure halt may still do', () => {
     expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null, failed: 3, failedOnce: 3 });
   });
 
-  it('under a cap, targets that fail before anything is sent are not bounded by it', async () => {
+  it('under a cap, a pass fails more targets than it may send to: failures before the send spend no place', async () => {
     // A maximum of 1, and three reads fail in a row: nothing was sent, so the cap is not spent,
     // and the pass fails three targets — more than the one it may still send to.
     const { runId, initial } = recordMemoryRun(40);
