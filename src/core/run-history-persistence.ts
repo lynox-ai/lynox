@@ -291,20 +291,25 @@ export function insertPipelineRun(db: Database.Database, params: {
   /** Slice C2: the saved-workflow id this run executed (null for ad-hoc/inline
    *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
   workflowId?: string | undefined;
+  /** 3f-1a: the accepted grant this run ran under (`workflow_grants.grant_id`), or none. */
+  grantId?: string | undefined;
+  /** 3f-1a: how a run under a grant was started (`schedule:…`, `library:…`, `nested:…`). */
+  startedVia?: string | undefined;
 }): void {
   // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a
   // NULL completed_at and is closed out by `updatePipelineRun` at finalize.
   // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
   // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, grant_id, started_via)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
     params.totalTokensIn ?? 0, params.totalTokensOut ?? 0,
     params.stepCount ?? 0, params.parentRunId ?? null, params.error ?? null,
     params.workflowId ?? null,
+    params.grantId ?? null, params.startedVia ?? null,
   );
 }
 

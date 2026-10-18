@@ -827,6 +827,8 @@ export async function runSavedWorkflow(
       // defaults) stop a runaway from inside the run.
       capabilityContract: grant.contract,
       isAcceptedParam,
+      // How it was started, written beside the contract's grant id on the run row.
+      startedVia: grant.contract !== undefined ? grant.startedVia : undefined,
       observeToolCall: collectWriteNotes(writeNotes),
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
@@ -854,7 +856,8 @@ export async function runSavedWorkflow(
       .map(o => ({ stepId: o.stepId, error: o.error, costUsd: o.costUsd }));
     return {
       ok: true, runId: state.runId, status: state.status, costUsd, stepErrors, error: state.error,
-      ...(grant.note !== null ? { grantNote: grant.note } : {}),
+      // The decision's note, or the runner's when it had to drop the contract (an unrecorded run).
+      ...(grant.note !== null ? { grantNote: grant.note } : state.grantNote !== undefined ? { grantNote: state.grantNote } : {}),
       ...(writeNotes.size > 0 ? { writeNotes: [...writeNotes] } : {}),
     };
   } catch (err: unknown) {

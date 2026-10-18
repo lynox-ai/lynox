@@ -105,7 +105,7 @@ describe('workflow run claim — the state space on a real history.db', () => {
     before.getDb().prepare('INSERT INTO workflow_run_claims (workflow_id, key, run_id) VALUES (?, ?, ?)').run('wf-2', 'k-2', 'run-shared');
     before.getDb().exec('DELETE FROM schema_version WHERE version > 55');
     // v57 to v59 run again with v56; take back what they added so they can.
-    before.getDb().exec('ALTER TABLE threads DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN hand_run; ALTER TABLE active_runs DROP COLUMN created_by; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id');
+    before.getDb().exec('ALTER TABLE threads DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN hand_run; ALTER TABLE active_runs DROP COLUMN created_by; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via');
     // Fixture guard: the damage really is present before the upgrade.
     before.markWorkflowRunStarted('run-shared');
     expect(before.readWorkflowRunClaim('wf-1', 'k-1')?.startedAt, 'fixture guard').not.toBeNull();
@@ -140,7 +140,7 @@ describe('workflow run claim — the state space on a real history.db', () => {
     ins.run('wf-late', 'k-late', 'run-shared', '2026-10-07T00:00:00.000Z'); // later rowid, PAID
     before.getDb().exec('DELETE FROM schema_version WHERE version > 55');
     // v57 to v59 run again with v56; take back what they added so they can.
-    before.getDb().exec('ALTER TABLE threads DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN hand_run; ALTER TABLE active_runs DROP COLUMN created_by; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id');
+    before.getDb().exec('ALTER TABLE threads DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN hand_run; ALTER TABLE active_runs DROP COLUMN created_by; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via');
     before.close();
 
     const after = new RunHistory(path);

@@ -1775,7 +1775,7 @@ describe('LynoxHTTPApi', () => {
         const origHistory = engineRef['getRunHistory'] as () => Record<string, unknown>;
         const history = origHistory();
         engineRef['getEngineDb'] = () => unkeyed;
-        engineRef['getRunHistory'] = () => ({ ...history, setWorkflowReviewedGrant: setGrant, deleteTrigger });
+        engineRef['getRunHistory'] = () => ({ ...history, acceptWorkflowReviewedGrant: setGrant, deleteTrigger });
         try { await test(); } finally { engineRef['getEngineDb'] = origDb; engineRef['getRunHistory'] = origHistory; }
       }
 
@@ -1859,8 +1859,12 @@ describe('LynoxHTTPApi', () => {
               body: JSON.stringify({ pipelineId: 'wf-sched', scheduleCron: CRON, params: VALUES, grant: { ...GRANT, checksum: await shownChecksum(), name: 'Ada' } }),
             });
             expect(res.status).toBe(201);
-            expect(setGrant).toHaveBeenCalledWith('wf-sched', expect.objectContaining({ origin: 'reviewed' }), expect.objectContaining({
-              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+            const grantId = expect.stringMatching(/^[0-9a-f-]{36}$/);
+            expect(setGrant).toHaveBeenCalledWith(expect.objectContaining({
+              grantId, workflowId: 'wf-sched', triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String),
+              contractJson: expect.stringContaining('"origin":"reviewed"'),
+            }), expect.objectContaining({
+              triggerId: 'sched-1', name: 'Ada', binding: 'unkeyed', by: expect.any(String), grantId,
             }), expect.any(String));
             expect(mockSetWorkflowConfirmedAt).not.toHaveBeenCalled(); // the grant write carries the confirm
             expect(mockForgetPipeline).toHaveBeenCalledWith('wf-sched');

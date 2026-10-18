@@ -85,6 +85,8 @@ export interface RunState {
   globalContext: Record<string, unknown>;
   outputs: Map<string, AgentOutput>;
   error?: string | undefined;
+  /** Why the run went on without the contract it was handed (a run under a grant it could not record). */
+  grantNote?: string | undefined;
 }
 
 export interface RunHooks {

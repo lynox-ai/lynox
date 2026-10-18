@@ -55,6 +55,24 @@ export interface StoredWorkflow {
   createdAt: string;
 }
 
+/** One accepted workflow grant, as `workflow_grants` holds it (engine.db v37). */
+export interface WorkflowGrantRow {
+  grantId: string;
+  workflowId: string;
+  /** The contract as the person was shown it. */
+  contractJson: string;
+  /** The auth origin of the accepting request (`ReviewedGrantStamp.by`). */
+  by: string;
+  name: string | null;
+  at: string;
+  checksum: string;
+  binding: 'keyed' | 'unkeyed';
+  triggerId: string;
+  cron: string;
+  boundParamsJson: string;
+  afterUntrusted: boolean;
+}
+
 /** Result of a content-schema migration pass (Move 1, PRD §4.1). */
 export interface ContentMigrationCounts {
   /** Rows examined. */
@@ -153,6 +171,50 @@ export class WorkflowStore {
       "UPDATE workflows SET definition_json = json_set(definition_json, '$.capabilityContract', json(?), '$.reviewedGrant', json(?), '$.confirmedAt', ?) WHERE id = ?",
     ).run(contractJson, stampJson, confirmedAt, id);
     return res.changes === 1;
+  }
+
+  /**
+   * Accept a reviewed grant: insert its `workflow_grants` row and write contract, stamp and
+   * confirm onto the workflow, in ONE transaction. Neither half stays without the other — no
+   * stamp naming a row that was never written, no row for a grant no workflow carries.
+   * `setReviewedGrant` reports a missing workflow by returning `false`, not by throwing, and a
+   * transaction commits whatever did not throw, so the `false` is turned into a throw inside
+   * it: otherwise the row would commit for a workflow deleted between the caller's read and
+   * this write. Returns `false` in that case, after the rollback; any other failure throws.
+   */
+  acceptReviewedGrant(row: WorkflowGrantRow, stampJson: string, confirmedAt: string): boolean {
+    const missing = new Error('workflow-grant: the workflow is gone');
+    try {
+      this.db.transaction(() => {
+        this.db.prepare(
+          `INSERT INTO workflow_grants (grant_id, workflow_id, contract_json, accepted_by, name, accepted_at, checksum, binding, trigger_id, cron, bound_params_json, after_untrusted)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          row.grantId, row.workflowId, row.contractJson, row.by, row.name, row.at,
+          row.checksum, row.binding, row.triggerId, row.cron, row.boundParamsJson, row.afterUntrusted ? 1 : 0,
+        );
+        if (!this.setReviewedGrant(row.workflowId, row.contractJson, stampJson, confirmedAt)) throw missing;
+      })();
+    } catch (err) {
+      if (err === missing) return false;
+      throw err;
+    }
+    return true;
+  }
+
+  /** The `workflow_grants` row with this id, or `undefined` when there is none. Never changes a row. */
+  getGrant(grantId: string): WorkflowGrantRow | undefined {
+    const r = this.db.prepare('SELECT * FROM workflow_grants WHERE grant_id = ?').get(grantId) as {
+      grant_id: string; workflow_id: string; contract_json: string; accepted_by: string; name: string | null;
+      accepted_at: string; checksum: string; binding: string; trigger_id: string; cron: string;
+      bound_params_json: string; after_untrusted: number;
+    } | undefined;
+    if (r === undefined) return undefined;
+    return {
+      grantId: r.grant_id, workflowId: r.workflow_id, contractJson: r.contract_json, by: r.accepted_by,
+      name: r.name, at: r.accepted_at, checksum: r.checksum, binding: r.binding === 'keyed' ? 'keyed' : 'unkeyed',
+      triggerId: r.trigger_id, cron: r.cron, boundParamsJson: r.bound_params_json, afterUntrusted: r.after_untrusted === 1,
+    };
   }
 
   /** Prefix-matched delete (mirrors legacy `deletePlannedPipeline`). */

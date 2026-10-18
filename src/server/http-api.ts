@@ -7639,7 +7639,7 @@ export class LynoxHTTPApi {
         // there was none, which would have dropped `origin` for every keyless call: the
         // cheapest way to lose a security decision is to make it the sibling of an optional one.
         result = await runGuardedSavedWorkflow(engine, claimWorkflowId, runParams, {
-          origin: { kind: 'library' },
+          origin: { kind: 'library', by: this._authOrigin.get(_req) ?? 'unknown' },
           ...(ownedRunId === undefined ? {} : {
             runId: ownedRunId,
             // The stamp that turns "nothing spent" into "spent". `runManifest` fires it before

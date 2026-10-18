@@ -2604,7 +2604,7 @@ export class WorkerLoop {
       seed: storedUntrustedCause(task.created_untrusted),
       // Which schedule fired: a workflow's write grant holds for the schedule it was
       // accepted with and for no other (`decideRunGrant`).
-      origin: { kind: 'schedule', triggerId: task.id },
+      origin: { kind: 'schedule', triggerId: task.id, byHand: isHandRunOf(task.id) },
       // Who started it by hand, when a request did: the workflow's steps get only the tools
       // that principal's lock allows (PRD §3.13 E4 — the build site is here, not a session).
       ...(starter ? { principal: starter } : {}),

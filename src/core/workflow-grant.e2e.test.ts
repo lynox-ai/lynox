@@ -43,6 +43,7 @@ import { taskCreateTool } from '../tools/builtin/task.js';
 import { getPipeline, _resetPipelineStore, forgetPipeline, storePipeline, runSavedWorkflow } from '../tools/builtin/pipeline.js';
 import { _resetTenantInvariantForTests, runGuardedSavedWorkflow } from './saved-workflow-runner.js';
 import { acceptWorkflowGrant, prepareWorkflowGrant } from './workflow-grant.js';
+import { runAsHandRun } from './hand-run-door.js';
 import type { IAgent, PlannedPipeline, ToolEntry, TriggerRecord } from '../types/index.js';
 import type { Engine } from './engine.js';
 
@@ -291,7 +292,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     const planned = saveWorkflow();
     accept(planned);
     mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
-    const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined, { origin: { kind: 'library' } });
+    const result = await runGuardedSavedWorkflow(engine(), planned.id, undefined, { origin: { kind: 'library', by: 'local' } });
     expect(result.ok).toBe(true);
     expect(posts().map((p) => p.url)).toEqual([TARGET]);
   });
@@ -369,7 +370,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('without values runs with the schedule\'s values, under the grant', async () => {
       grantedParamWorkflow();
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
-      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library' } });
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library', by: 'local' } });
       expect(result.grantNote).toBeUndefined();
       expect(posts().map((p) => p.url)).toEqual([TARGET]);
     });
@@ -377,7 +378,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('with another value for a parameter no constraint pins (task text only) runs without the grant', async () => {
       grantedParamWorkflow(true);
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
-      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', { week: '40', note: 'something else' }, { origin: { kind: 'library' } });
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', { week: '40', note: 'something else' }, { origin: { kind: 'library', by: 'local' } });
       expect(result.grantNote).toMatch(/other values than the ones the grant was accepted with/);
       expect(posts()).toEqual([]);
     });
@@ -385,7 +386,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     it('verify-done: a parameter in the task text, with the accepted values, runs under the grant and writes', async () => {
       grantedParamWorkflow(true);
       mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' })).mockResolvedValueOnce(endTurn('done'));
-      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library' } });
+      const result = await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library', by: 'local' } });
       expect(result.grantNote).toBeUndefined();
       expect(posts().map((p) => p.url)).toEqual([TARGET]);
     });
@@ -396,7 +397,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
         .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'GET' }, 'tu_read'))
         .mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '40' }, 'tu_post'))
         .mockResolvedValueOnce(endTurn('done'));
-      await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library' } });
+      await runGuardedSavedWorkflow(engine(), 'wf-vals', undefined, { origin: { kind: 'library', by: 'local' } });
       expect(sent.map((s) => s.method)).toEqual(['GET']);
     });
 
@@ -409,7 +410,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const ctx = engine().getToolContext();
       const result = await runSavedWorkflow('wf-vals', history, { api_key: 'test-key' }, hidden, {
         tools: ctx.tools, toolContext: ctx, memory: null,
-        decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden }),
+        decideGrant: () => ({ contract: wf.capabilityContract!, note: null, boundParams: hidden, startedVia: 'library:local' }),
       });
       expect(result.grantNote).toMatch(/holds a character that does not show as text/);
       expect(posts()).toEqual([]);
@@ -430,9 +431,140 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     const r = acceptWorkflowGrant(wf, { ...ENTRY, params: { week: '40' }, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: undefined, title: 't' }, 'local', { history, taskManager: tm, hasher: engineDb });
     expect(r.ok).toBe(true);
     forgetPipeline('wf-param');
-    const result = await runGuardedSavedWorkflow(engine(), 'wf-param', { week: '41' }, { origin: { kind: 'library' } });
+    const result = await runGuardedSavedWorkflow(engine(), 'wf-param', { week: '41' }, { origin: { kind: 'library', by: 'local' } });
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/week/);
     expect(posts()).toEqual([]);
+  });
+
+  describe('which grant a run ran under (3f-1a)', () => {
+    type GrantRowRaw = Record<string, unknown>;
+    const grantRows = (): GrantRowRaw[] =>
+      engineDb.getDb().prepare('SELECT * FROM workflow_grants ORDER BY rowid').all() as GrantRowRaw[];
+    const runRows = (): Array<{ id: string; parent_run_id: string | null; grant_id: string | null; started_via: string | null }> =>
+      history.getDb().prepare('SELECT id, parent_run_id, grant_id, started_via FROM pipeline_runs ORDER BY started_at, rowid').all() as Array<{ id: string; parent_run_id: string | null; grant_id: string | null; started_via: string | null }>;
+    const stampOf = (id: string) => { forgetPipeline(id); return getPipeline(id, history)!.reviewedGrant!; };
+
+    it('verify-done: two workflows defined alike get two rows, and accepting one again a third, leaving the two as they were', () => {
+      accept(saveWorkflow('wf-a'));
+      accept(saveWorkflow('wf-b'));
+      const before = grantRows();
+      expect(before).toHaveLength(2);
+      // Same contract, steps and schedule: the checksum is the same, the grant is not.
+      expect(before[0]!['checksum']).toBe(before[1]!['checksum']);
+      expect(before[0]!['grant_id']).not.toBe(before[1]!['grant_id']);
+      accept(getPipeline('wf-a', history)!);
+      const after = grantRows();
+      expect(after).toHaveLength(3);
+      expect(after.slice(0, 2)).toEqual(before);
+      // The stamp names the newest row; the row is the acceptance as shown.
+      expect(stampOf('wf-a').grantId).toBe(after[2]!['grant_id']);
+      expect(after[2]).toMatchObject({ workflow_id: 'wf-a', accepted_by: 'local', name: 'Ada', cron: CRON, bound_params_json: '{}', after_untrusted: 0 });
+    });
+
+    it('verify-done: a workflow deleted between reading and accepting leaves no row, no stamp and no schedule', () => {
+      const planned = saveWorkflow('wf-gone');
+      history.deletePlannedPipeline('wf-gone');
+      const shown = prepareWorkflowGrant(planned, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false }, engineDb);
+      if (!shown.ok) throw new Error(shown.error);
+      const r = acceptWorkflowGrant(planned, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: 'Ada', title: 'W' }, 'local', { history, taskManager: tm, hasher: engineDb });
+      expect(r).toMatchObject({ ok: false, status: 500 });
+      expect(grantRows()).toEqual([]);
+      expect(tm.listTriggers()).toEqual([]);
+    });
+
+    it('verify-done: a row that cannot be written leaves no stamp and no schedule', () => {
+      const planned = saveWorkflow('wf-norow');
+      engineDb.getDb().exec('DROP TABLE workflow_grants');
+      const shown = prepareWorkflowGrant(planned, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false }, engineDb);
+      if (!shown.ok) throw new Error(shown.error);
+      const r = acceptWorkflowGrant(planned, { ...ENTRY, params: {}, cron: CRON, afterUntrusted: false, checksum: shown.checksum, name: 'Ada', title: 'W' }, 'local', { history, taskManager: tm, hasher: engineDb });
+      expect(r).toMatchObject({ ok: false, status: 500 });
+      forgetPipeline('wf-norow');
+      expect(getPipeline('wf-norow', history)!.reviewedGrant).toBeUndefined();
+      expect(getPipeline('wf-norow', history)!.capabilityContract).toBeUndefined();
+      expect(tm.listTriggers()).toEqual([]);
+    });
+
+    it('a row stays byte for byte as written, through a later acceptance and through deleting its workflow', () => {
+      accept(saveWorkflow('wf-keep'));
+      const first = grantRows();
+      accept(getPipeline('wf-keep', history)!);
+      const both = grantRows();
+      expect(both[0]).toEqual(first[0]);
+      history.deletePlannedPipeline('wf-keep');
+      // A foreign key would have refused the delete, or deleted or changed the rows.
+      expect(getPipeline('wf-keep', history)).toBeUndefined();
+      expect(grantRows()).toEqual(both);
+    });
+
+    it('verify-done: a scheduled run records the grant and its schedule; the same workflow without a grant records neither', async () => {
+      const trigger = accept(saveWorkflow('wf-run'));
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('posted'));
+      await fire(trigger);
+      expect(posts()).toHaveLength(1);
+      const granted = runRows();
+      expect(granted).toHaveLength(1);
+      expect(granted[0]).toMatchObject({ grant_id: stampOf('wf-run').grantId, started_via: `schedule:${trigger.id}` });
+
+      const plain = saveWorkflow('wf-plain');
+      history.setWorkflowConfirmedAt(plain.id, '2026-10-01T00:00:00.000Z');
+      forgetPipeline(plain.id);
+      const t2 = tm.createPipelineTask({ title: 'Plain', pipelineId: plain.id, scheduleCron: CRON, pipelineParams: '{}' });
+      mockProcess.mockResolvedValueOnce(endTurn('nothing to do'));
+      await fire(t2);
+      const rows = runRows();
+      expect(rows).toHaveLength(2);
+      expect(rows[1]).toMatchObject({ grant_id: null, started_via: null });
+    });
+
+    it('a schedule run by hand records schedule-hand, a library start the auth origin', async () => {
+      const trigger = accept(saveWorkflow('wf-how'));
+      mockProcess.mockResolvedValueOnce(endTurn('done'));
+      await runAsHandRun(trigger.id, () => fire(trigger));
+      mockProcess.mockResolvedValueOnce(endTurn('done'));
+      const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { origin: { kind: 'library', by: 'cookie:0123abcd' } });
+      expect(lib.grantNote).toBeUndefined();
+      const grantId = stampOf('wf-how').grantId;
+      expect(runRows().map((r) => [r.grant_id, r.started_via])).toEqual([
+        [grantId, `schedule-hand:${trigger.id}`],
+        [grantId, 'library:cookie:0123abcd'],
+      ]);
+    });
+
+    it('verify-done: a run under a grant whose run row cannot be written does not write, and says why; with the row it does', async () => {
+      const trigger = accept(saveWorkflow('wf-unrecorded'));
+      const insert = vi.spyOn(history, 'insertPipelineRun').mockImplementationOnce(() => { throw new Error('SQLITE_FULL'); });
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+      const refused = await runGuardedSavedWorkflow(engine(), 'wf-unrecorded', undefined, { origin: { kind: 'library', by: 'local' } });
+      expect(posts()).toEqual([]);
+      expect(refused.grantNote).toMatch(/could not be recorded/);
+      // CONTROL: the same grant, the row written — the POST goes out.
+      insert.mockRestore();
+      mockProcess.mockResolvedValueOnce(toolUse('http_request', { url: TARGET, method: 'POST', body: '{}' })).mockResolvedValueOnce(endTurn('done'));
+      await fire(trigger);
+      expect(posts().map((p) => p.url)).toEqual([TARGET]);
+      expect(lastRun(trigger.id)).not.toMatch(/could not be recorded/);
+    });
+
+    it('verify-done: the reader tells found, missing and unavailable apart', () => {
+      accept(saveWorkflow('wf-read'));
+      const grantId = stampOf('wf-read').grantId!;
+      expect(history.readWorkflowGrant(grantId)).toMatchObject({ state: 'found', grant: { grantId, workflowId: 'wf-read', by: 'local', name: 'Ada' } });
+      expect(history.readWorkflowGrant('no-such-grant')).toEqual({ state: 'missing', grantId: 'no-such-grant' });
+      const bare = new RunHistory(join(dir, 'bare-history.db'));
+      try {
+        expect(bare.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
+      } finally { bare.close(); }
+      engineDb.close();
+      expect(history.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
+    });
+
+    it('the owner\'s erasure empties the grant rows (pinned, not a mutation target)', () => {
+      accept(saveWorkflow('wf-erase'));
+      expect(grantRows()).toHaveLength(1);
+      engineDb.deleteAllData();
+      expect(grantRows()).toEqual([]);
+    });
   });
 });

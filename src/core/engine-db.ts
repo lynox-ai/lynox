@@ -1139,6 +1139,32 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_targets ADD COLUMN judged_at TEXT;
    ALTER TABLE bulk_targets ADD COLUMN judge_claimed_at TEXT;
    ALTER TABLE bulk_targets ADD COLUMN judge_claim_token TEXT;`,
+
+  // v37: one row per accepted workflow grant (3f-1a), written once and never changed. The stamp
+  // on the workflow is overwritten by the next acceptance; this row is what still says which
+  // contract was shown, who accepted it, when, and for which schedule, after that. A run
+  // names its row by `grant_id` (history.db `pipeline_runs.grant_id`).
+  // ⚠ `workflow_id` is a soft reference, no `REFERENCES`: this file runs with foreign keys on,
+  // and a foreign key would either block deleting the workflow, or (CASCADE / SET NULL) delete
+  // or change a row that is meant never to change. The owner's erasure empties the table like
+  // every other (`deleteAllData` enumerates `sqlite_master`): the grant is the owner's
+  // configuration and goes with it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (37);
+   CREATE TABLE IF NOT EXISTS workflow_grants (
+     grant_id          TEXT PRIMARY KEY,
+     workflow_id       TEXT NOT NULL,
+     contract_json     TEXT NOT NULL,
+     accepted_by       TEXT NOT NULL,
+     name              TEXT,
+     accepted_at       TEXT NOT NULL,
+     checksum          TEXT NOT NULL,
+     binding           TEXT NOT NULL,
+     trigger_id        TEXT NOT NULL,
+     cron              TEXT NOT NULL,
+     bound_params_json TEXT NOT NULL,
+     after_untrusted   INTEGER NOT NULL
+   );
+   CREATE INDEX IF NOT EXISTS idx_workflow_grants_workflow ON workflow_grants(workflow_id);`,
 ];
 
 /**
