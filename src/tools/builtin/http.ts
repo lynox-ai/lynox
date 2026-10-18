@@ -887,8 +887,9 @@ export function oauthGrantIsUserDelegated(profile: {
  *   · `grant_type: 'refresh_token'` — presents the user's own grant back;
  *   · `grant_type: 'client_credentials'`, explicitly chosen, on a profile with
  *     no callback and no built-in preset behind it;
- *   · neither of those, no refresh token, and no callback behind it — the
- *     hand-built app-only profile this piece exists for, Shopify's shape.
+ *   · neither of those, no refresh token, and no callback or built-in preset
+ *     behind it — the hand-built app-only profile this piece exists for,
+ *     Shopify's shape.
  *
  * Refused:
  *   · anything `oauthGrantIsUserDelegated` marks (a callback, or a built-in
