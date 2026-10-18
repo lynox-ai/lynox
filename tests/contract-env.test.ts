@@ -33,6 +33,7 @@ import {
   type EnvRegistryRow,
   type EngineReadKind,
 } from '../src/contract/env-registry.js';
+import { CANONICAL_BILLING_TIERS } from '../src/contract/vocab.js';
 import { ENV_ALIASES, type CanonicalEnvName } from '../src/core/env.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -630,5 +631,69 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
 
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
     expect(pairProblems([...ENV_REGISTRY]), 'a pair descriptor is inert, incomplete or asymmetric').toEqual([]);
+  });
+});
+
+// `always` means "emitted for every provisioned tier" (EmitPolicy in env-registry.ts), and the
+// emit side's per-tier presence check reads `requiredForTier` — so an `always` row that names
+// fewer tiers, or none, drops that check for the missing tiers without anything failing.
+function tierScopeProblems(rows: readonly EnvRegistryRow[]): string[] {
+  const all = [...CANONICAL_BILLING_TIERS].sort();
+  const problems: string[] = [];
+  for (const row of rows) {
+    const tiers = [...new Set(row.requiredForTier ?? [])].sort();
+    if (row.emitPolicy === 'always' && tiers.join() !== all.join()) {
+      problems.push(`${row.name}: 'always' but requiredForTier is [${tiers.join(', ')}]`);
+    }
+    if (row.emitPolicy === 'tier' && tiers.length === 0) {
+      problems.push(`${row.name}: 'tier' without a tier`);
+    }
+  }
+  return problems;
+}
+
+describe('env-ABI: the emit policy and the tier scope agree', () => {
+  it('every always row requires every tier, and every tier row names one', () => {
+    expect(tierScopeProblems(ENV_REGISTRY)).toEqual([]);
+  });
+
+  it('the check rejects each broken shape (synthetic rows)', () => {
+    const base = { valueKind: 'opaque', engineConsumed: { kind: 'direct', readSite: 'x' } } as const;
+    const rows = [
+      { ...base, name: 'A_NONE', emitPolicy: 'always' },
+      { ...base, name: 'A_SOME', emitPolicy: 'always', requiredForTier: ['hosted'] },
+      { ...base, name: 'A_EMPTY', emitPolicy: 'always', requiredForTier: [] },
+      { ...base, name: 'T_NONE', emitPolicy: 'tier' },
+      { ...base, name: 'A_OK', emitPolicy: 'always', requiredForTier: [...CANONICAL_BILLING_TIERS] },
+      { ...base, name: 'T_OK', emitPolicy: 'tier', requiredForTier: ['managed'] },
+    ] as unknown as EnvRegistryRow[];
+    expect(tierScopeProblems(rows).map((p) => p.split(':')[0])).toEqual(['A_NONE', 'A_SOME', 'A_EMPTY', 'T_NONE']);
+  });
+});
+
+// A row whose name says it holds a credential must say so in `secret`: the env preview and
+// the vendored sweeps read that field, not the name (some engine-side redaction matches
+// names too, but nothing here may rely on that).
+const CREDENTIAL_NAME = /(_SECRET|_TOKEN|_KEY|_PASSWORD|_DSN)$/;
+function unredactedCredentials(rows: readonly EnvRegistryRow[]): string[] {
+  return rows.filter((r) => CREDENTIAL_NAME.test(r.name) && !r.secret).map((r) => r.name);
+}
+
+describe('env-ABI: credential-named rows are marked secret', () => {
+  it('the sweep sees the credential rows (guard against a silently-empty match)', () => {
+    expect(ENV_REGISTRY.filter((r) => CREDENTIAL_NAME.test(r.name)).length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('every credential-named row carries a secret stance', () => {
+    expect(unredactedCredentials(ENV_REGISTRY)).toEqual([]);
+  });
+
+  it('the check rejects a credential-named row without one (synthetic rows)', () => {
+    const base = { valueKind: 'opaque', emitPolicy: 'always', engineConsumed: { kind: 'direct', readSite: 'x' } } as const;
+    const rows = [
+      { ...base, name: 'X_SECRET' }, { ...base, name: 'X_TOKEN' }, { ...base, name: 'X_KEY' }, { ...base, name: 'X_PASSWORD' }, { ...base, name: 'X_DSN' },
+      { ...base, name: 'X_SECRET_OK', secret: { redact: 'exact-name' } }, { ...base, name: 'X_KEYS_DIR' },
+    ] as unknown as EnvRegistryRow[];
+    expect(unredactedCredentials(rows)).toEqual(['X_SECRET', 'X_TOKEN', 'X_KEY', 'X_PASSWORD', 'X_DSN']);
   });
 });
