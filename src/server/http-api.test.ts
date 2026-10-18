@@ -4987,7 +4987,8 @@ describe('LynoxHTTPApi', () => {
           for (const body of [{ bulk_runs_enabled: true }, { thinking_mode: 'adaptive', bulk_runs_enabled: true }]) {
             const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
             expect(res.status).toBe(403);
-            expect(await res.text()).toContain('bulk_runs_enabled');
+            // This route's own refusal, not the managed allowlist's, which also names the key.
+            expect(await res.text()).toContain('bulk_runs_enabled cannot be turned on');
           }
         } finally {
           vi.stubEnv('LYNOX_BILLING_TIER', '');

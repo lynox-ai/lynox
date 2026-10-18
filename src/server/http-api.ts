@@ -6963,9 +6963,10 @@ export class LynoxHTTPApi {
         }
       }
       // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
-      // save is refused rather than applied without the flag. Turning them off, leaving
-      // the key out, and re-sending a value already stored stay allowed, so an owner can
-      // always switch them off and save everything else.
+      // save is refused rather than applied without the flag. This check does not refuse
+      // turning them off, leaving the key out, or sending back a value already stored. On
+      // the managed pool tiers the lock gate below keeps the field locked as before, so
+      // there it can be neither turned on nor off.
       if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
         errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
         return;
