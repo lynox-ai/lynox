@@ -17,7 +17,7 @@
  * A profile without a mandate author gets the store itself, unchanged.
  */
 import type { SecretStoreLike } from '../types/index.js';
-import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, recordedWrites, refreshTokenKey, tokenSlotNames, vaultSlotBase } from './api-store.js';
+import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
 import { derivePresetEndpoints, OAUTH_PRESETS, type OAuthPreset } from './oauth-presets.js';
@@ -208,7 +208,7 @@ function slotParts(p: ApiProfile): Map<string, Set<SlotPart>> {
     add(accessTokenKey(p.id), 'derives');
     add(refreshTokenKey(p.id), 'derives');
   }
-  for (const w of recordedWrites(p)) add(w.name, 'wrote');
+  for (const name of writtenNames(p)) add(name, 'wrote');
   const refresh: unknown = auth?.oauth?.refresh_token_key;
   if (!oauth2) add(refresh, 'signs-in');
   else if (typeof refresh === 'string' && !parts.get(refresh)?.has('derives')) add(refresh, 'configures');
@@ -219,6 +219,11 @@ function slotParts(p: ApiProfile): Map<string, Set<SlotPart>> {
   else if (vaultKeys !== undefined && vaultKeys !== null) for (const i of [0, 1]) add((vaultKeys as Record<number, unknown>)[i], 'signs-in');
   for (const k of [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key]) add(k, 'signs-in');
   return parts;
+}
+
+/** Every vault name a profile derives, wrote, configures or signs in with: the names `slotConflicts` weighs. */
+export function slotNames(p: ApiProfile): string[] {
+  return [...slotParts(p).keys()];
 }
 
 /**
@@ -243,8 +248,7 @@ export interface SlotConflict {
  *   only the profile signing in goes (core#1874: the working connection stays);
  * - a profile that signs in with a name another configures: neither, since the configurer would
  *   post the credential as a refresh token and only the user can say whose the name is.
- * Which one of a pair reached the store first does not decide, except for two stored files with one
- * id: there the order decides which version is weighed. Two ids that collapse onto one vault
+ * Which one of a pair reached the store first does not decide. Two ids that collapse onto one vault
  * slot (`vaultSlotBase`) are decided where they always were, first come first served. A profile
  * whose names cannot be read loses; a comparison that throws is a conflict both lose.
  */
@@ -372,19 +376,22 @@ function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
  * - `exchange`: a refresh token, asked by the owner or by a profile sharing the grant, to the
  *   owner's token endpoint (the preset's, else `token_url`), compared whole;
  * - `client` and `other`: never.
- * A contested name goes nowhere. The stored profiles are read ({@link ApiStore.knownProfiles}),
- * so a profile the boot held back still counts as a claimant. Anything that throws while this
+ * A contested name goes nowhere, and so does a name a stored entry the boot could not read or
+ * register names ({@link ApiStore.unreadableHolds}): whose it is cannot be told. The stored
+ * profiles are read ({@link ApiStore.knownProfiles}), so a profile the boot held back still counts
+ * as a claimant. Anything that throws while this
  * is decided answers no. The owner's `base_url` not being a URL makes a request answer no;
  * another profile's unparsable `base_url` only keeps that profile out of a shared grant.
  */
 export function slotMayReach(
-  apiStore: Pick<ApiStore, 'knownProfiles' | 'get'>,
+  apiStore: Pick<ApiStore, 'knownProfiles' | 'get'> & Partial<Pick<ApiStore, 'unreadableHolds'>>,
   name: string,
   role: SlotRole,
   target: string | undefined,
   asker?: ApiProfile,
 ): boolean {
   try {
+    if (apiStore.unreadableHolds?.(name) === true) return false;
     const profiles = apiStore.knownProfiles();
     const grant = slotGrant(profiles, name);
     if (grant.kind === 'free') return true;

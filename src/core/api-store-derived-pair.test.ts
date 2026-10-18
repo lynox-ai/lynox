@@ -216,13 +216,15 @@ describe('ApiStore — the boot keeps the same profile of a derived-pair clash i
     return { store, loaded, stored: (id) => cs.get(id) !== undefined };
   };
 
-  it('counts a profile once although two files carry its id', () => {
-    // Only the directory can hold this: a connections row is keyed by its id.
+  it('registers neither of two files that carry one id', () => {
+    // Only the directory can hold this: a connections row is keyed by its id. Neither file is the
+    // stored profile, so the boot registers neither; both stay on disk.
     const dir = tmp('lynox-boot-dup-');
     for (const file of ['a.json', 'b.json']) writeFileSync(join(dir, file), JSON.stringify(oauth('shop-api')));
     const store = new ApiStore();
-    expect(store.loadFromDirectory(dir)).toBe(1);
-    expect(store.size).toBe(1);
+    expect(store.loadFromDirectory(dir)).toBe(0);
+    expect(store.size).toBe(0);
+    expect(existsSync(join(dir, 'a.json')) && existsSync(join(dir, 'b.json'))).toBe(true);
   });
 
   describe.each([['loadFromDirectory', fromDirectory], ['loadFromConnections', fromConnections]] as const)('through %s', (_loader, boot) => {

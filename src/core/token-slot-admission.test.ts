@@ -440,16 +440,17 @@ describe('admission: a profile whose vault names cannot be read', () => {
     expect(store.save(plain('odd', { type: 'bearer', vault_keys: ['X'] })).ok).toBe(true);
   });
 
-  it('a stored file whose id is not a string, held back at boot, refuses no save of a registered profile', () => {
-    // The file's id is an object: the boot holds it back for its id, and it stays among the stored
-    // profiles. Its names cannot be read, so it names nothing a save could be measured against.
+  it('a stored file whose id is not a string refuses no save of a registered profile that names none of its strings', () => {
+    // The file's id is an object: the boot does not read it as a profile, and it holds the strings
+    // it carries. The registered profile beside it names none of them, so its save goes through.
     const dir = tmp('lynox-admission-odd-id-');
     writeFileSync(join(dir, 'a.json'), JSON.stringify({ ...plain('x', { type: 'bearer', vault_keys: ['X_KEY'] }), id: { o: 1 } }));
     writeFileSync(join(dir, 'b.json'), JSON.stringify(oauth('shop')));
     const store = new ApiStore();
     store.loadFromDirectory(dir);
     expect(store.getAll().map((p) => p.id)).toEqual(['shop']);
-    expect(store.knownProfiles()).toHaveLength(2);
+    expect(store.knownProfiles()).toHaveLength(1);
+    expect(store.unreadableHolds('X_KEY')).toBe(true);
     const result = store.save({ ...store.get('shop')!, notes: ['n'] });
     expect(result, JSON.stringify(result)).toEqual({ ok: true, isNew: false });
     expect(store.get('shop')?.notes).toEqual(['n']);
