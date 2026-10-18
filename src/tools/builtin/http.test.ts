@@ -1627,7 +1627,7 @@ describe('httpRequestTool', () => {
           it.each([
             ['one write', 'https://api.bexio.com/2.0/contact', 'POST', 'Blocked: POST to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
             ['several writes', 'https://api.bexio.com/2.0/contact?_method=PUT', 'POST', 'Blocked: POST (also naming PUT) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
-            ['a GET that names a write', 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', 'Blocked: GET (also naming DELETE) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
+            ['a GET that names a write', 'https://api.bexio.com/2.0/contact?_method=DELETE', 'GET', 'Blocked: DELETE (sent as GET) to api.bexio.com writes to bexio, which goes through this engine\'s built-in "bexio" provider'],
           ])('a provider host without a profile, %s', async (_k, url, method, text) => {
             const { ApiStore } = await import('../../core/api-store.js');
             testCtx.apiStore = new ApiStore();
@@ -7297,8 +7297,8 @@ describe('write approvals per method and host (270)', () => {
       hostPatterns: ['h.example'], pathPatterns: ['/v1/*'], paramConstraints: {},
     },
   };
-  // The refusal names what is sent and the write the override names, as the question would.
-  const raisedRefusal = 'Blocked: outbound GET (also naming DELETE) to h.example requires user consent';
+  // The refusal names the write the override names first, and that a GET carries it: a grant needs the write, not the GET.
+  const raisedRefusal = 'Blocked: outbound DELETE (sent as GET) to h.example requires user consent';
 
   it.each(Object.keys(reviewedGets))('a reviewed grant for %s does not cover a GET whose override header raises it to DELETE; the plain GET goes out', async (grant) => {
     const contract = reviewedGets[grant]!;
@@ -7801,7 +7801,7 @@ describe('write approvals per method and host (270)', () => {
       ['one write', ONE, 'PATCH'],
       ['a POST that names PATCH', TWO, 'POST (also naming PATCH)'],
       ['a POST that names PATCH and PUT', THREE, 'POST (also naming PATCH, PUT)'],
-      ['a GET that names DELETE', GET_DELETE, 'GET (also naming DELETE)'],
+      ['a GET that names DELETE', GET_DELETE, 'DELETE (sent as GET)'],
     ] as const;
 
     it.each(shapes)('a header that re-targets the request, %s', async (_k, req, shown) => {
@@ -7843,6 +7843,20 @@ describe('write approvals per method and host (270)', () => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);
       const out = await visible(req, makeAgent());
+      expect(out).toContain(`Blocked: outbound ${shown} to h.example requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: ${shown} https://h.example/a.`);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // A GET that names two writes leads with both, and past three other writes the rest are
+    // counted, so the note keeps its URL inside the run report's cut (`collectWriteNotes`).
+    it.each([
+      ['a GET that names PATCH and PUT', { url: 'https://h.example/a?_method=PUT', method: 'GET', headers: OVERRIDE_PATCH }, 'PATCH, PUT (sent as GET)'],
+      ['a POST that names four other writes', { url: 'https://h.example/a?_method=PUT&_method=PATCH&_method=MERGE&_method=PURGE', method: 'POST', body: '{}' }, 'POST (also naming MERGE, PATCH, PURGE and 1 more)'],
+      ['a GET that names four writes', { url: 'https://h.example/a?_method=PUT&_method=PATCH&_method=MERGE&_method=PURGE', method: 'GET' }, 'MERGE, PATCH, PURGE and 1 more (sent as GET)'],
+    ] as const)('no interactive prompt, %s', async (_k, req, shown) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible(req as Req, makeAgent());
       expect(out).toContain(`Blocked: outbound ${shown} to h.example requires user consent but no interactive prompt is available (autonomous/background mode).\nNot granted for an unattended run: ${shown} https://h.example/a.`);
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -7918,7 +7932,7 @@ describe('write approvals per method and host (270)', () => {
         const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
         await visible(TWO, agent);
         const again = await visible({ url: 'https://h.example/a?_method=PATCH', method: 'PUT', headers: { 'X-HTTP-Method-Override': 'POST' }, body: '{}' }, agent);
-        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: a PATCH or POST to this host was denied earlier in this batch.');
+        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: requests naming PATCH, POST to this host were denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
     });
