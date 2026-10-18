@@ -703,6 +703,30 @@ describe('halt thresholds', () => {
     expect(out.summary).not.toContain(MARK);
   });
 
+  it('counts the targets failed now: after a resume and a second pass the counts never add up past the run', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    const fail = new Set(['k005', 'k015', 'k025', 'k035', 'k045', 'k055', 'k065']);
+    const { writer } = memory(initial, fail);
+    const halted = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(halted.status).toBe('halted');
+    expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 6 });
+    expect(halted.summary).toContain('failed 6,');
+    // The six now write; three later targets fail. Three of 100 is under 5 % for this pass —
+    // the halt counts per pass — so the run finishes.
+    fail.clear();
+    for (const k of ['k070', 'k080', 'k090']) fail.add(k);
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    const done = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(done.status).toBe('done');
+    const s = ledger.getStatus(runId)!;
+    expect([s.phase, s.applied, s.conflicts, s.failed]).toEqual(['done', 97, 0, 3]);
+    expect(s.applied + s.conflicts + s.failed).toBeLessThanOrEqual(s.total);
+    // The notice after the run and what the model reads say the same count.
+    expect(done.summary).toContain('Applied 97, failed 3, conflicts 0');
+    expect(await bulkStatusTool.handler({ run_id: runId }, agent())).toContain('Applied 97, failed 3, conflicts 0, undone 0.');
+  });
+
   it('halts once more than 5 % failed, scattered', async () => {
     const { runId, initial } = recordMemoryRun(100);
     approve(runId);

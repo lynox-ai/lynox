@@ -419,10 +419,18 @@ describe('applying an external run', () => {
       s.requests.length = 0;
       // One failure in three is over the failure-rate rule: the run halts at once.
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writer })).status).toBe('halted');
+      expect(ledger.getStatus(runId)!.failed).toBe(1);
       expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
-      expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writer })).status).toBe('done');
+      // The resume sets the halt's count back, but that target stays failed — and counted.
+      expect(ledger.getStatus(runId)!.failed).toBe(1);
+      const done = await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writer });
+      expect(done.status).toBe('done');
       expect([s.items.get('/products/1')!['price'], s.items.get('/products/2')!['price']]).toEqual(['15.00', '15.00']);
       expect(targetErrors(runId)).toEqual(['secret']);
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 2, failed: 1 });
+      expect(done.summary).toContain('Applied 2, failed 1,');
+      const agent = { toolContext: { bulkLedger: ledger } } as unknown as IAgent;
+      expect(await bulkStatusTool.handler({ run_id: runId }, agent)).toContain('Applied 2, failed 1, conflicts 0, undone 0.');
       expect(s.requests.filter((r) => r.path.includes(LOOKS_LIKE_A_KEY))).toEqual([]);
     } finally {
       restore();
