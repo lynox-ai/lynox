@@ -528,11 +528,9 @@ export function graphqlUrlWrites(url: string): boolean {
  * the writes that create or copy a draft (`copy`, `invoice`, `order`, `delivery` from a quote or
  * order), record an incoming payment (`kb_invoice/{id}/payment`), archive, reactivate or restore,
  * and the `actions` of bills and expenses, whose only action in the specification is
- * `DUPLICATE`. An order's `repetition` is held by {@link OUTBOUND_EFFECT_FIELDS}. NOT held by
- * either table: a payment in the body of a bill (`purchase/bills`, field `payment`) and an
- * employee's `iban` (`payroll/employees`, on create and on edit). On this host a connected
- * account asks for every write anyway, and a bulk run reaches only its measured forms (a
- * contact), so neither reaches them unasked; a write note still treats them as ordinary writes.
+ * `DUPLICATE`. An order's `repetition`, a payment in the body of a bill and an employee's `iban`
+ * and `email` are held from a bulk run by {@link OUTBOUND_EFFECT_FIELDS}; a write note still
+ * treats them as ordinary writes, and on this host a connected account asks for every write.
  */
 export const OUTBOUND_EFFECT_PATHS: readonly { readonly host: string; readonly segments: readonly string[] }[] = [
   {
@@ -554,10 +552,26 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   if (!entry) return false;
   const { path, ambiguous } = normalizeWritePath(parsed.pathname);
   if (ambiguous) return true;
-  // A segment matches as itself or followed by anything but a letter or digit (`send.json`,
-  // `send:x`, `send-`, `send,`): which of these a provider's router still reads as the action is
-  // not documented, so every such form counts. `sender` does not.
-  return path.split('/').some((segment) => entry.segments.some((s) => segment === s || (segment.startsWith(s) && /[^a-z0-9]/u.test(segment.charAt(s.length)))));
+  // A segment is cut into its runs of letters and digits, and it matches when consecutive runs,
+  // written together, spell an action without its separators: `send.json`, `send:x`, `_send`,
+  // `x.send`, `mark-as-sent`, `markAsSent`, `outgoing_payments`. Which of these a provider's
+  // router still reads as the action is not documented, so every such form counts. `sender`,
+  // `send2` and `resend` do not: a run is never cut. Spelling stops past the longest action, so a
+  // long segment costs linear time, not cubic.
+  const actions = new Set(entry.segments.map((s) => s.replace(/[^a-z0-9]/gu, '')));
+  const longest = Math.max(...[...actions].map((a) => a.length));
+  return path.split('/').some((segment) => {
+    const runs = segment.split(/[^a-z0-9]+/u);
+    for (let i = 0; i < runs.length; i++) {
+      let spelled = '';
+      for (let j = i; j < runs.length; j++) {
+        spelled += runs[j];
+        if (spelled.length > longest) break;
+        if (actions.has(spelled)) return true;
+      }
+    }
+    return false;
+  });
 }
 
 /** What a field of {@link OUTBOUND_EFFECT_FIELDS} sets off at the provider. */
@@ -598,6 +612,11 @@ export const OUTBOUND_EFFECT_FIELDS: readonly OutboundEffectField[] = [
   { path: WOO('webhooks'), fields: 'any', effect: 'data_to_third_party', says: 'a WooCommerce webhook decides where the shop sends its order and customer data' },
   { host: 'api.bexio.com', path: /^\/4\.0\/banking\/payments\/[^/]+$/, fields: 'any', effect: 'money', says: 'bexio pays this amount out on this date' },
   { host: 'api.bexio.com', path: /^\/2\.0\/kb_order\/\d+\/repetition$/, fields: 'any', effect: 'money', says: 'bexio invoices this order again on this schedule' },
+  // The specification does not say whether a bill's payment runs when the bill is created or
+  // when it is booked, nor what bexio does with an employee's email address; both count.
+  { host: 'api.bexio.com', path: /^\/4\.0\/purchase\/bills(?:\/[^/]+)?$/, fields: ['payment'], effect: 'money', says: 'bexio pays this bill: from which account, how much, when and to whom' },
+  { host: 'api.bexio.com', path: /^\/4\.0\/payroll\/employees(?:\/[^/]+)?$/, fields: ['iban'], effect: 'money', says: 'bexio payroll pays this employee\'s salary into this account' },
+  { host: 'api.bexio.com', path: /^\/4\.0\/payroll\/employees(?:\/[^/]+)?$/, fields: ['email'], effect: 'data_to_third_party', says: 'bexio payroll reaches this employee at this address' },
 ];
 
 /**

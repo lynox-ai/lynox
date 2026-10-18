@@ -377,12 +377,13 @@ describe('isOutboundEffectWrite', () => {
     ['POST', '/2.0/pr_project/1/archive', false],
     ['POST', '/4.0/purchase/bills/0b3e/actions', false],
     // Ordinary resources whose names share letters with an action at its length (`contact_group`
-    // has `_` where `reissue` ends): only a segment that STARTS with an action counts.
+    // has `_` where `reissue` ends): an action counts only as whole runs of letters and digits,
+    // and `pre_send.json` has `send` as one.
     ['POST', '/2.0/contact_group', false],
     ['POST', '/2.0/kb_invoice/1/kb_position_text', false],
     ['POST', '/2.0/client_service', false],
     ['POST', '/3.0/purchase_orders', false],
-    ['POST', '/2.0/kb_invoice/1/pre_send.json', false],
+    ['POST', '/2.0/kb_invoice/1/pre_send.json', true],
   ] as const)('bexio %s %s → %s', (method, path, want) => {
     expect(isOutboundEffectWrite(`https://api.bexio.com${path}`, method)).toBe(want);
   });
