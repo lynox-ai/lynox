@@ -470,6 +470,8 @@ describe('the preview effect', () => {
     const runId = planRun([0, 1, 2].map((i) => ({ target: url(i), after: { price: '1' } })));
     expect(ledger.recordReadFailure(runId, 0)).toBe('retry');
     expect(ledger.listUnread(runId)).toEqual([1, 2, 0]);
+    // A read to try again is not a failed write.
+    expect(ledger.getStatus(runId)!.failed).toBe(0);
     expect(ledger.recordRead(runId, 0, { before: { price: '2' } })).toBe(true);
     // The mark is gone, not only uncounted: a later apply skips any target holding an error.
     expect(ledger.getPreview(runId)[0]!.error).toBeNull();
@@ -479,6 +481,14 @@ describe('the preview effect', () => {
     expect(ledger.recordReadFailure(runId, 1)).toBeNull();
     ledger.halt(runId, BULK_HALT_REASONS.timeBudget);
     expect(ledger.recordReadFailure(runId, 2)).toBeNull();
+  });
+
+  it('a target the preview found redirecting is invalid, not a failed write', () => {
+    // `redirect` names both: a plan-time invalid reason and a write that was answered with one.
+    const runId = planRun([0, 1].map((i) => ({ target: url(i), after: { price: '1' } })));
+    expect(ledger.recordRead(runId, 0, { invalid: 'redirect' })).toBe(true);
+    const st = ledger.getStatus(runId)!;
+    expect([st.invalidReasons, st.failed]).toEqual([{ redirect: 1 }, 0]);
   });
 
   it('a halt from the worker keeps the reason a preview already set', () => {

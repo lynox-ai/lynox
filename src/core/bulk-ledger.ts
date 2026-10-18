@@ -129,6 +129,8 @@ export interface BulkRunStatus {
   changes: Record<BulkChange, number>;
   invalidReasons: Partial<Record<BulkInvalidReason, number>>;
   applied: number;
+  /** Targets whose write failed and that stand failed now. A resume tries them again, except
+   *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
@@ -236,6 +238,17 @@ export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_R
 /** Per-target failure codes. Fixed for the same reason as {@link BULK_HALT_REASONS}.
  *  `redirect`: an external target answered a write with a redirect, which is never followed. */
 export type BulkTargetError = 'conflict' | 'write_failed' | 'path_changed' | 'redirect' | 'secret';
+
+/** The target errors that are a failed write: every {@link BulkTargetError} but `conflict`,
+ *  which is not a failure (§3.5). Not `read_failed`, a read in planning that is tried again. */
+const WRITE_FAILURES = ['write_failed', 'path_changed', 'redirect', 'secret'] as const satisfies readonly BulkTargetError[];
+// A new target error must be placed here or in the exception above, or this does not compile.
+const writeFailuresComplete: [Exclude<BulkTargetError, 'conflict' | (typeof WRITE_FAILURES)[number]>] extends [never] ? true : false = true;
+void writeFailuresComplete;
+// Only on a target still to write: an invalid one carries its plan-time reason in the same
+// column, and `redirect` is a plan-time reason too; a written one is not failed, whatever a
+// loop that lost its claim recorded on it.
+const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')}))`;
 
 /** What an external target held right after the run wrote it, over the fields it wrote.
  *  `estimated`: the read-back failed and this is what was sent — an undo then finds a
@@ -523,6 +536,7 @@ export interface BulkRunForApply {
   maxTargets: number | null;
   expiresAt: string | null;
   applied: number;
+  /** Targets failed in this pass — what the failure-rate halt counts. A resume sets it back. */
   failed: number;
   haltReason: string | null;
   sourceRunId: string | null;
@@ -1105,13 +1119,15 @@ export class BulkLedger {
       `SELECT error, COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND change = 'invalid' GROUP BY error`,
     ).all(row.id) as { error: BulkInvalidReason; n: number }[]) invalidReasons[e.error] = e.n;
     const outcome = db.prepare(
-      `SELECT SUM(error = 'conflict') AS conflicts, SUM(undone_at IS NOT NULL) AS undone,
+      `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone,
          SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
-    ).get(row.id) as { conflicts: number | null; undone: number | null; unread: number | null };
+    ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; unread: number | null };
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
-      applied: row.targets_applied, failed: row.targets_failed,
+      // The targets failed now, read off the targets like the conflicts — not `targets_failed`,
+      // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
+      applied: row.targets_applied, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
