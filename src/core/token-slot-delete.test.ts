@@ -216,6 +216,61 @@ describe('deleting a profile whose written token an unreadable entry names', () 
     expect(await del(store, vault, 'shop', { promptUser: allow })).toMatch(/^Deleted API profile "shop"\./);
   });
 
+  it('names every token an entry holds, in the plural', async () => {
+    const { store } = boot([
+      oauth('shop', { SHOP_ACCESS_TOKEN: TOKEN, SHOP_REFRESH_TOKEN: value('shop', 'refresh') }),
+      { file: 'owner.json', raw: '{"id": "owner", "auth": {"vault_keys": ["SHOP_ACCESS_TOKEN", "SHOP_REFRESH_TOKEN"' },
+    ]);
+    const vault = vaultOf({ SHOP_ACCESS_TOKEN: TOKEN, SHOP_REFRESH_TOKEN: value('shop', 'refresh') });
+    expect(await del(store, vault, 'shop', { promptUser: allow })).toBe('Error: API profile "shop" was not deleted. Its sign-in wrote SHOP_ACCESS_TOKEN, SHOP_REFRESH_TOKEN, and the delete would have to remove those tokens with it, but a stored API profile that could not be read (file "owner.json", id "owner") names them too, so whose they are cannot be told. Nothing was changed. First delete "owner" with api_setup delete (it takes an id that is not registered), then delete "shop" again.');
+  });
+
+  it('weighs every entry: one that names nothing of the profile does not end the check', async () => {
+    const { store } = boot([
+      oauth('shop', { SHOP_ACCESS_TOKEN: TOKEN }),
+      { file: 'aaa.json', raw: '{"id": "aaa", "auth": {"vault_keys": ["SOMEONE_ELSES_KEY"' },
+      placeholder('owner.json'),
+    ]);
+    const vault = vaultOf({ SHOP_ACCESS_TOKEN: TOKEN });
+    expect(await del(store, vault, 'shop', { promptUser: allow })).toContain('(file "owner.json", id "owner") names it too');
+  });
+
+  it('an entry past the bounds of what is collected holds every recorded name', async () => {
+    const deep = { ...bearer('deep', 'DEEP_KEY'), description: '', extra: JSON.parse(`${'['.repeat(40)}"x"${']'.repeat(40)}`) as unknown };
+    const { store } = boot([oauth('shop', { SHOP_ACCESS_TOKEN: TOKEN }), deep as unknown as ApiProfile]);
+    expect(store.unreadableHolds('ANY_NAME_AT_ALL')).toBe(true);
+    const vault = vaultOf({ SHOP_ACCESS_TOKEN: TOKEN });
+    expect(await del(store, vault, 'shop', { promptUser: allow })).toContain('First delete "deep" with api_setup delete');
+    expect(vault.snapshot()).toEqual({ SHOP_ACCESS_TOKEN: TOKEN });
+  });
+
+  it('does not refuse for a token a mandate\'s consent wrote, and removes it', async () => {
+    const { store } = boot([
+      oauth('shop', {}, { oauth_grant: { connected_by: 'mandate:a@example.org', ...record({ SHOP_ACCESS_TOKEN: TOKEN }) } }),
+      placeholder('owner.json'),
+    ]);
+    expect(store.storedProfile('shop')).toBeDefined();
+    const vault = vaultOf({ SHOP_ACCESS_TOKEN: TOKEN });
+    expect(await del(store, vault, 'shop', { promptUser: allow })).toBe('Deleted API profile "shop". Removed the tokens its exchanges wrote: SHOP_ACCESS_TOKEN.');
+    expect(vault.snapshot()).toEqual({});
+  });
+
+  it('does not refuse for a protected name on the record', () => {
+    const { store } = boot([{ file: 'owner.json', raw: '{"id": "owner", "auth": {"vault_keys": ["GOOGLE_OAUTH_X_ACCESS_TOKEN"' }]);
+    const shop = oauth('shop', { GOOGLE_OAUTH_X_ACCESS_TOKEN: TOKEN });
+    expect(store.unreadableHolds('GOOGLE_OAUTH_X_ACCESS_TOKEN')).toBe(true);
+    expect(store.deleteRefusal(shop, vaultOf({ GOOGLE_OAUTH_X_ACCESS_TOKEN: TOKEN }))).toBeNull();
+  });
+
+  it('does not refuse when the vault cannot read the name, and does not throw', () => {
+    const { store } = boot([placeholder('owner.json')]);
+    const shop = oauth('shop', { SHOP_ACCESS_TOKEN: TOKEN });
+    const throwing = { ...vaultOf({}), resolve: (): string | null => { throw new Error('locked'); } };
+    expect(store.deleteRefusal(shop, throwing)).toBeNull();
+    // Control: a vault that reads the value written is refused.
+    expect(store.deleteRefusal(shop, vaultOf({ SHOP_ACCESS_TOKEN: TOKEN }))).toContain('was not deleted');
+  });
+
   // The check and the purge are not one step: an entry read in between is still weighed.
   it('keeps the token when an unreadable entry naming it appears between the check and the purge', async () => {
     const { store } = boot([oauth('shop', { SHOP_ACCESS_TOKEN: TOKEN })]);
@@ -259,6 +314,17 @@ describe('a token another stored profile records too', () => {
     expect(result.removed).toEqual(['SHARED_TOKEN']);
     expect(result.heldBySlotPartner).toEqual([]);
     expect(vault.snapshot()).toEqual({});
+  });
+
+  it('is removed when the other half of the pair records the same value under another name', () => {
+    const store = new ApiStore();
+    expect(store.register(oauth('x-y', { X_Y_OTHER: TOKEN }))).toBe(true);
+    const half = oauth('x_y', { X_Y_ACCESS_TOKEN: TOKEN });
+    store.register(half);
+    const vault = vaultOf({ X_Y_ACCESS_TOKEN: TOKEN });
+    const result = purgeRecordedTokens(store, half, vault);
+    expect(result.removed).toEqual(['X_Y_ACCESS_TOKEN']);
+    expect(result.heldBySlotPartner).toEqual([]);
   });
 
   it('is removed when the other half of the pair records another value under the name', () => {
@@ -309,9 +375,16 @@ describe('a refresh slot an oauth2 profile configures and nothing else names', (
     expect(slotMayReach(store, 'SHOP_RT', 'exchange', 'https://shop.example/oauth/token', store.get('shop'))).toBe(true);
   });
 
+  // A bearer profile reads no refresh slot, even under the name its id would derive one as.
   it('control: a name only a bearer profile configures is no token slot', () => {
     const store = new ApiStore();
-    expect(store.register(bearer('plain', 'PLAIN_KEY'))).toBe(true);
-    expect(slotMayReach(store, 'PLAIN_KEY', 'other', undefined)).toBe(true);
+    expect(store.register(bearer('plain', 'PLAIN_REFRESH_TOKEN'))).toBe(true);
+    expect(slotMayReach(store, 'PLAIN_REFRESH_TOKEN', 'other', undefined)).toBe(true);
+  });
+
+  it('control: another name the oauth2 profile configures is not made its token slot', () => {
+    const store = new ApiStore();
+    expect(store.register(shop())).toBe(true);
+    expect(slotMayReach(store, 'SHOP_CSECRET', 'other', undefined)).toBe(true);
   });
 });
