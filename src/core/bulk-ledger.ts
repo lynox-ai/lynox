@@ -132,6 +132,19 @@ export interface BulkRunStatus {
   /** Targets whose write failed and that stand failed now. A resume tries them again, except
    *  one that failed on what it would send (`secret`), which stays failed and stays counted. */
   failed: number;
+  /** Targets that failed in at least one pass, whether or not a later pass wrote them. Null for a
+   *  run approved before this was recorded: its earlier passes are not known, so a page says
+   *  "at least {@link failed}" instead. */
+  failedOnce: number | null;
+  /** How many targets may fail in one pass before the failure-rate halt ({@link bulkFailureLimit}). */
+  failureLimit: number;
+  /** The targets a resume tries again: writing, not written, not taken back, and not failed on
+   *  what they would send (`secret`). Every failure of the next pass is one of these, so it
+   *  bounds that pass's failures — the cap does not, a target can fail before it is sent to. */
+  resumeOpen: number;
+  /** Of {@link resumeOpen}, how many the next pass may send the write verb to under the cap
+   *  ({@link bulkWriteCap}). Below {@link resumeOpen} when the cap stops the pass first. */
+  resumeTries: number;
   /** Targets not written because they no longer held their expected state (§3.5). */
   conflicts: number;
   /** Applied targets taken back since — by an undo run, or an atomic run's rollback. */
@@ -249,6 +262,28 @@ void writeFailuresComplete;
 // column, and `redirect` is a plan-time reason too; a written one is not failed, whatever a
 // loop that lost its claim recorded on it.
 const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error IN (${WRITE_FAILURES.map((e) => `'${e}'`).join(', ')}))`;
+
+/** The failure-rate halt (PRD §3.4): a pass halts once more than this share of the run's
+ *  writing targets failed in it. */
+const HALT_FAILURE_SHARE = 0.05;
+
+/**
+ * How many targets may fail in one pass before the failure-rate halt: the halt fires on the
+ * next one. The one computation of it — the effect halts on it and the status shows it, so the
+ * number the owner reads is the halt's own, not a second copy of the arithmetic.
+ */
+export function bulkFailureLimit(writing: number): number {
+  return Math.floor(writing * HALT_FAILURE_SHARE);
+}
+
+/**
+ * The most different targets a pass may send the write verb to, or null for no bound: the
+ * approval's maximum, and one target while the run's probe does not hold. The one computation
+ * of it — the effect caps on it and the status counts the targets a resume may still send to.
+ */
+export function bulkWriteCap(maxTargets: number | null, probeHolds: boolean): number | null {
+  return probeHolds ? maxTargets : Math.min(maxTargets ?? 1, 1);
+}
 
 /** What an external target held right after the run wrote it, over the fields it wrote.
  *  `estimated`: the read-back failed and this is what was sent — an undo then finds a
@@ -560,6 +595,9 @@ export interface ApplyTarget {
 
 /** Changes that write. `unchanged` and `invalid` targets are never touched. */
 const WRITING_CHANGES = "('update','create','delete')";
+// The targets a resume tries again (`resume` clears every error but `secret`, `listPending`
+// then takes the unwritten ones that are not taken back). Under `change IN WRITING_CHANGES`.
+const RESUMABLE_SQL = "(applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'secret'))";
 
 /**
  * The source targets an undo takes back: applied and not taken back since — and, for an
@@ -1122,6 +1160,16 @@ export class BulkLedger {
       `SELECT SUM(error = 'conflict') AS conflicts, SUM(${WRITE_FAILED_SQL}) AS failed, SUM(undone_at IS NOT NULL) AS undone,
          SUM(change != 'invalid' AND before IS NULL) AS unread FROM bulk_targets WHERE run_id = ?`,
     ).get(row.id) as { conflicts: number | null; failed: number | null; undone: number | null; unread: number | null };
+    const pass = db.prepare(
+      `SELECT COUNT(*) AS writing, SUM(failed_once IS NULL) AS unknown, SUM(failed_once = 1) AS failedOnce,
+         SUM(${RESUMABLE_SQL}) AS open, SUM(${RESUMABLE_SQL} AND write_sent = 1) AS openSent
+       FROM bulk_targets WHERE run_id = ? AND change IN ${WRITING_CHANGES}`,
+    ).get(row.id) as { writing: number; unknown: number | null; failedOnce: number | null; open: number | null; openSent: number | null };
+    const open = pass.open ?? 0;
+    const openSent = pass.openSent ?? 0;
+    const cap = bulkWriteCap(row.max_targets, this.probeHolds(row));
+    // A target already sent to takes nothing from the cap; one never sent to takes a place.
+    const resumeTries = cap === null ? open : openSent + Math.min(open - openSent, Math.max(0, cap - this.sentCount(row.id)));
     return {
       id: row.id, createdAt: row.created_at, targetSystem: row.target_system, phase: row.phase, undo: row.undo,
       total: row.targets_total, unread: row.phase === 'planned' ? outcome.unread ?? 0 : 0, changes, invalidReasons,
@@ -1129,6 +1177,8 @@ export class BulkLedger {
       // the halt's count of this pass, which a resume sets back while a `secret` target stays failed.
       applied: row.targets_applied, failed: outcome.failed ?? 0,
       conflicts: outcome.conflicts ?? 0, undone: outcome.undone ?? 0,
+      failedOnce: (pass.unknown ?? 0) > 0 ? null : pass.failedOnce ?? 0,
+      failureLimit: bulkFailureLimit(pass.writing), resumeOpen: open, resumeTries,
       kind: row.kind, atomic: row.atomic === 1, sourceRunId: row.source_run_id,
       writeMethod: externalHostOf(row.target_system) === null ? null : parseContractMethods(row.contract_json),
       probeConfirmed: this.probeHolds(row),
@@ -2103,8 +2153,12 @@ export class BulkLedger {
     const db = this.engineDb.getDb();
     db.transaction(() => {
       const res = db.prepare(
-        'UPDATE bulk_targets SET error = ?, claimed_at = NULL WHERE run_id = ? AND seq = ? AND applied_at IS NULL',
-      ).run(error, runId, seq);
+        // `failed_once` stays NULL on a run approved before it was recorded: one known failure
+        // does not make its earlier passes known.
+        `UPDATE bulk_targets SET error = ?, claimed_at = NULL,
+           failed_once = CASE WHEN ? = 'conflict' OR failed_once IS NULL THEN failed_once ELSE 1 END
+         WHERE run_id = ? AND seq = ? AND applied_at IS NULL`,
+      ).run(error, error, runId, seq);
       if (res.changes === 1 && error !== 'conflict') {
         db.prepare('UPDATE bulk_runs SET targets_failed = targets_failed + 1 WHERE id = ?').run(runId);
       }
