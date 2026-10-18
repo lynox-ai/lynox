@@ -7,6 +7,7 @@ import type { NetworkPolicy } from '../types/index.js';
 import { isGuardedBaselineHost } from './llm/endpoint-allowlist.js';
 import { noteNetworkContact } from './call-connection.js';
 import { isShopifyAdminHost, SHOPIFY_UNAVAILABLE } from './shopify-host.js';
+import { storePassRefusal, type StorePass } from './store-pass.js';
 
 /**
  * Reject outbound network targets that point at private / reserved / loopback /
@@ -735,7 +736,7 @@ export function setPinnedTransportForTests(transport: PinnedTransport): () => vo
  * Does NOT follow redirects (use fetchWithPublicRedirects for that).
  * Aborts on init.signal; respects init.method/headers/body.
  */
-export async function fetchPinned(url: string, init: RequestInit = {}): Promise<Response> {
+export async function fetchPinned(url: string, init: RequestInit = {}, pass?: StorePass): Promise<Response> {
   // Before anything can fail: from here on, an error of the calling tool may carry what a
   // server sent (a status text, a TLS or DNS message), see `CallSlot.contactedNetwork`.
   noteNetworkContact();
@@ -754,7 +755,13 @@ export async function fetchPinned(url: string, init: RequestInit = {}): Promise<
   const hostHeaders = Object.entries(headers).filter(([h]) => h.toLowerCase() === 'host').map(([, v]) => v);
   const namesStore = (v: string): boolean => v.split(/[\s,/@]+/).some((piece) =>
     isShopifyAdminHost(piece) || isShopifyAdminHost(piece.replace(/:[^:\]]*$/, '')));
-  if (isShopifyAdminHost(parsed.hostname) || hostHeaders.some(namesStore)) {
+  const toStore = isShopifyAdminHost(parsed.hostname) || hostHeaders.some(namesStore);
+  if (pass !== undefined) {
+    // A store pass reaches its own store and nothing else (`store-pass.ts`), checked here on
+    // the URL as it is finally sent, on every hop.
+    const refusal = toStore ? storePassRefusal(parsed, headers, pass) : 'a store pass reaches only its own store';
+    if (refusal !== null) throw new Error(`Blocked: request to a Shopify store refused: ${refusal}. Do not retry it with changed headers or a changed address.`);
+  } else if (toStore) {
     throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
@@ -818,7 +825,7 @@ function appendIncomingHeaders(target: Headers, src: IncomingHttpHeaders): void 
 export async function fetchWithPublicRedirects(
   url: string,
   init: RequestInit = {},
-  opts: { maxRedirects?: number } = {},
+  opts: { maxRedirects?: number; pass?: StorePass } = {},
 ): Promise<Response> {
   const max = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
   let currentUrl = url;
@@ -839,7 +846,7 @@ export async function fetchWithPublicRedirects(
     } else {
       delete (hopInit as { body?: unknown }).body;
     }
-    const response = await fetchPinned(currentUrl, hopInit);
+    const response = await fetchPinned(currentUrl, hopInit, opts.pass);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
       return response;
