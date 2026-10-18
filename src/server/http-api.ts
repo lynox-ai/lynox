@@ -7170,15 +7170,6 @@ export class LynoxHTTPApi {
           return;
         }
       }
-      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
-      // save is refused rather than applied without the flag. This check does not refuse
-      // turning them off, leaving the key out, or sending back a value already stored. On
-      // the managed pool tiers the lock gate below keeps the field locked as before, so
-      // there it can be neither turned on nor off.
-      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
-        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
-        return;
-      }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
       // profile) is refused with its reason instead. Only a CHANGE is checked: the UI
