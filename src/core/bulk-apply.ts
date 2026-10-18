@@ -20,7 +20,7 @@ import type { DataStore } from './data-store.js';
 import type { BulkWriteEffect } from '../types/index.js';
 import { coercePlainColumnValue } from './data-store.js';
 import {
-  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, canonicalJson,
+  BULK_HALT_REASONS, BULK_TARGET_BUDGET_MS, bulkFailureLimit, bulkWriteCap, canonicalJson,
   type ActualImage, type ApplyTarget, type BeforeImage, type BulkHaltReason, type BulkLedger, type BulkRunForApply, type BulkTargetError,
 } from './bulk-ledger.js';
 import { BULK_MAX_TARGET_BYTES, BulkForeignFile, BulkLinkOnTheWay, bulkKeyRel, heldWorkspace, readBulkKey, resolveBulkFilePath } from './bulk-plan.js';
@@ -111,8 +111,8 @@ export interface BulkEffectOutcome {
 export const BULK_RETRY_DELAY_MS = 30_000;
 /** Floor of a run's time budget, whatever its size. */
 const MIN_RUN_BUDGET_MS = 60_000;
-/** Halt thresholds (PRD §3.4): whichever comes first. */
-const HALT_FAILURE_SHARE = 0.05;
+/** Halt thresholds (PRD §3.4): whichever comes first — this many failures in a row, or more
+ *  than {@link bulkFailureLimit} in the pass. */
 const HALT_CONSECUTIVE = 3;
 
 function sameImage(a: BeforeImage, b: BeforeImage): boolean {
@@ -266,7 +266,7 @@ async function applyRunEffect(
     // landed: a failed write may have reached its target. A retry of a target that already
     // had the verb sends it to no new one, so it is not refused here — and a target never sent
     // to is passed over rather than stopped in front of, so a later retry still runs.
-    const cap = probeCap === null ? current.maxTargets : Math.min(current.maxTargets ?? probeCap, probeCap);
+    const cap = bulkWriteCap(current.maxTargets, probeCap === null);
     if (cap !== null && ledger.sentCount(runId) >= cap && !ledger.wasSent(runId, seq)) {
       cappedOut = true;
       if (probeCap !== null && (current.maxTargets === null || current.maxTargets > probeCap)) cappedByProbe = true;
@@ -307,7 +307,7 @@ async function applyRunEffect(
       ledger.halt(runId, BULK_HALT_REASONS.consecutiveFailures);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.consecutiveFailures}.`) };
     }
-    if (failed > writingTotal * HALT_FAILURE_SHARE) {
+    if (failed > bulkFailureLimit(writingTotal)) {
       ledger.halt(runId, BULK_HALT_REASONS.failureRate);
       return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${BULK_HALT_REASONS.failureRate}.`) };
     }
