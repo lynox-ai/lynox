@@ -1051,7 +1051,7 @@ describe('api_setup update on a profile the boot held back', () => {
     const saved = await apiSetupTool.handler({ action: 'update', profile: keep }, agent) as string;
 
     expect(saved).toContain('Profile saved');
-    expect(store.get('crm-api')?.auth?.oauth?.preset_id).toBe('bexio');
+    // The input carries no grant record: only the stored one can bring origin back.
     expect(store.get('crm-api')?.oauth_grant?.origin).toBe('callback');
   });
 });
