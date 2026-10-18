@@ -122,9 +122,23 @@ describe('a retry of a run a contained chat started', () => {
     expect(await runWorkflowTool.handler({ workflow_id: ID, retry: true }, chat('chat-other'))).toContain('store order 1001');
     expect(mockRetryManifest).toHaveBeenCalledTimes(1);
     expect(threads.flags.get('chat-other')).toBe(1);
-    // A retry keeps the run's first chat as its origin: after one from the run's own chat, a
-    // third chat is still contained.
+    // After a retry from the run's own chat, a third chat is still contained.
     expect(await retry(chat('chat-shop'))).toContain('store order 1001');
+    expect(await retry(chat('chat-third'))).toContain('store order 1001');
+    expect(containment.isContained({ threadId: 'chat-third' })).toBe(true);
+    expect(threads.flags.get('chat-third')).toBe(1);
+  });
+
+  it('a chat that a retry contained becomes the origin: the next retry from a third chat is contained', async () => {
+    await firstRun('chat-shop'); // a chat that never reads the store
+    // The retry from chat-other re-runs a step that reads the store, which contains chat-other.
+    mockRetryManifest.mockImplementationOnce(async () => {
+      containment.contain({ kind: 'thread', id: 'chat-other' }, { kind: 'api', connectionId: 'shop-a' });
+      return runState('completed');
+    });
+    expect(await runWorkflowTool.handler({ workflow_id: ID, retry: true }, chat('chat-other'))).toContain('store order 1001');
+    expect(containment.isContained({ threadId: 'chat-shop' })).toBe(false);
+    // The retried state holds chat-other's store data, so a third chat reads it only contained.
     expect(await retry(chat('chat-third'))).toContain('store order 1001');
     expect(containment.isContained({ threadId: 'chat-third' })).toBe(true);
     expect(threads.flags.get('chat-third')).toBe(1);

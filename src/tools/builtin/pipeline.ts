@@ -35,8 +35,9 @@ const MAX_EXECUTED_STATES = 50;
 const pipelineStore = new Map<string, PlannedPipeline>();
 
 // Store last executed state per pipeline for retry
-// `originThreadId` is the chat the run was first started from. A retry hands that run's cached
-// outputs to whoever retries it, so a retry from another chat is a read of the run.
+// `originThreadId` is the chat whose run produced the state: the chat that started it, then the
+// last chat that retried it. A retry hands the state's cached outputs to whoever retries it, so a
+// retry from another chat is a read of the run.
 type ExecutedState = { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined; originThreadId?: string | undefined };
 const executedStates = new Map<string, ExecutedState>();
 
@@ -947,7 +948,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     // on its cached outputs and returns them here: this chat is contained too before any step
     // runs, or nothing runs.
     const origin = prev.originThreadId;
-    const reader = deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined;
+    const reader = (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined;
     const containment = deps.toolContext?.containment ?? null;
     if (origin !== undefined && origin !== reader && threadIsContained(containment, origin)) {
       try {
@@ -1012,7 +1013,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
       }));
 
-      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: origin });
+      // The retried state now holds what this chat's steps read as well as the cached outputs, so
+      // this chat is its origin from here on: it carries the first origin's rows if that one was
+      // contained, and its own if a re-run step contained it. Keeping the first origin would let
+      // the next retry from a third chat skip the check while this chat is contained.
+      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint, originThreadId: reader ?? origin });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
@@ -1105,7 +1110,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       chatOrigin: deps.parentAgent ? chatOriginOf(deps.parentAgent) : undefined,
     }));
 
-    recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined });
+    recordExecutedState(planned.id, { manifest, state, runTaint, originThreadId: (deps.parentAgent ? chatThreadOf(deps.parentAgent) : undefined) || undefined });
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
