@@ -4371,6 +4371,26 @@ describe('httpRequestTool', () => {
       expect(result).not.toContain('DOES hold a value');
     });
 
+    it('names the settings for a built-in provider\'s client secret, the same whether it is stored or not', async () => {
+      const texts: string[] = [];
+      // Both shapes that otherwise spell out the reference: a header and a query parameter.
+      for (const auth of [{ ...PRE_B64, vault_keys: ['SHOPIFY_CLIENT_SECRET'] }, { type: 'query', query_param: 'key', vault_keys: ['SHOPIFY_CLIENT_SECRET'] }])
+      for (const secrets of [{}, { SHOPIFY_CLIENT_SECRET: SECRET }]) {
+        const store = await storeWith(auth);
+        reply(401);
+        const result = await visible({ url: URL_ }, agentWith(store, secrets));
+        texts.push(result.slice(result.indexOf(REMINDER)));
+        expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+        expect(result).not.toContain('secret:SHOPIFY_CLIENT_SECRET');
+        expect(result).not.toContain('ask_secret({ name: "SHOPIFY_CLIENT_SECRET" })');
+      }
+      // Not looked up, so the reply cannot tell stored from not stored.
+      expect(resolved).not.toContain('SHOPIFY_CLIENT_SECRET');
+      expect(texts[0]).toBe(texts[1]);
+      expect(texts[2]).toBe(texts[3]);
+      expect(texts[2]).toContain('query parameter');
+    });
+
     it('a header the model DID set is not reported as missing, and no verdict is passed on its value', async () => {
       const store = await storeWith(PRE_B64);
       reply(401);

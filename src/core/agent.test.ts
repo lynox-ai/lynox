@@ -2334,15 +2334,19 @@ describe('Agent', () => {
         expect(store.resolveSecretRefs).not.toHaveBeenCalled();
         expect(store.resolve).not.toHaveBeenCalled();
         expect(content).toContain('OAuth client secret of a built-in provider');
-        expect(content).not.toMatch(/ask_secret|PUT /);
+        expect(content).toContain('Settings → API Keys');
+        expect(content).not.toMatch(/call `?ask_secret|reference it as/i);
       });
 
       it('refuses when the check itself fails', async () => {
         presetCheck.throws = true;
         try {
-          const { handler, store } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET' } });
+          const { handler, store, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET' } });
           expect(handler).not.toHaveBeenCalled();
           expect(store.resolve).not.toHaveBeenCalled();
+          // This refusal's own text: the turn's general error path refuses too, and would pass the two above.
+          expect(content).toContain('could not be checked, so they are refused');
+          expect(content).not.toContain('is the OAuth client secret of a built-in provider');
         } finally {
           presetCheck.throws = false;
         }

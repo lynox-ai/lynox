@@ -9,7 +9,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -2224,6 +2224,10 @@ function modelOwnedAuthHint(a: {
     ? `This profile names no vault key, so there is nothing to reference yet — add one via api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.`
     : isProtectedSecretWrite(key)
       ? `This profile names the protected secret "${label}" as its credential. Those belong to the platform or hold the tenant's own provider key, are never attached to an outbound request, and the engine will not look one up to tell you whether it is set. Use a credential the user supplied for this API.`
+      : isPresetClientSecretName(key)
+        // Neither referenced nor collected through the chat, so neither half below applies;
+        // and not looked up, so the answer is the same whether it is stored or not.
+        ? presetClientSecretGuidance(key)
       : a.secretStore.resolve(key)
         ? `The vault DOES hold a value under "${label}" — do NOT ask the user to supply or re-paste it, reference it as \`secret:${label}\`.`
         : `The vault has NO value under "${label}" — collect it with ask_secret({ name: "${label}" }), then retry.`;
@@ -2234,6 +2238,9 @@ function modelOwnedAuthHint(a: {
   // profile, and calling it deliberate would send the reader past the actual fault.
   const known = auth.type === 'query'
     || (auth.type === 'basic' && (auth.basic_format === undefined || auth.basic_format === 'pre_encoded_b64'));
+  // A built-in provider's client secret is not the model's to reference, so neither shape below
+  // tells it how to; `vault` above says where it goes instead.
+  const referable = key !== undefined && !isPresetClientSecretName(key);
   const shape = auth.type === 'basic'
     ? `auth.type="basic"${auth.basic_format === undefined ? ' with no basic_format recorded' : ` / basic_format="${safeToken(auth.basic_format) ?? '?'}"`}`
     : `auth.type="${safeToken(auth.type) ?? '?'}"`;
@@ -2245,7 +2252,7 @@ function modelOwnedAuthHint(a: {
     const param = safeToken(auth.query_param) ?? 'key';
     const carried = a.slotFilled
       ? `This request already carried a non-empty "${param}" in the query string, so the 401 points at the value rather than at a missing parameter.`
-      : `This request carried no usable "${param}" query parameter — nothing authenticated it.${key === undefined ? '' : ` Put it in the URL yourself: ?${param}=secret:${label ?? ''}.`}`;
+      : `This request carried no usable "${param}" query parameter — nothing authenticated it.${!referable ? '' : ` Put it in the URL yourself: ?${param}=secret:${label ?? ''}.`}`;
     return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
   }
 
@@ -2256,7 +2263,7 @@ function modelOwnedAuthHint(a: {
     ? `This request was redirected to a different origin, and ${slot} is stripped on such a hop — so a header you set did NOT reach the host that answered 401. Request the final URL directly before touching the credential.`
     : a.slotFilled
       ? `You set the ${slot} header on this request yourself; the engine neither added nor replaced it. Nothing here says the value is wrong — only that the engine is not the one supplying it.`
-      : `This request carried no usable ${slot} header — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${auth.type === 'basic' ? 'Basic ' : ''}secret:${label ?? ''}" }.`}`;
+      : `This request carried no usable ${slot} header — nothing authenticated it.${!referable ? '' : ` Set it yourself: headers: { "${slot}": "${auth.type === 'basic' ? 'Basic ' : ''}secret:${label ?? ''}" }.`}`;
   return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
 }
 

@@ -703,6 +703,22 @@ describe('api_setup connect — one answer per shape that can reach it', () => {
     expect(result).not.toContain('/api/oauth/connect/');
   });
 
+  it('A5b · sends the user to the settings, not the model to ask_secret, for a built-in provider\'s client secret', async () => {
+    const store = new ApiStore();
+    const base = shopProfile();
+    store.register(shopProfile({
+      auth: { ...base.auth, vault_keys: ['SHOP_CLIENT_ID', 'SHOPIFY_CLIENT_SECRET'], oauth: { ...base.auth.oauth!, client_secret_key: 'SHOPIFY_CLIENT_SECRET' } },
+    }));
+
+    // Both missing: the client id is still the model's to collect, the secret is not.
+    const result = await connect(agentWith(store, {}));
+
+    expect(result).toContain('Call ask_secret for SHOP_CLIENT_ID.');
+    expect(result).not.toMatch(/ask_secret for [^.]*SHOPIFY_CLIENT_SECRET/);
+    expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+    expect(result).not.toContain('/api/oauth/connect/');
+  });
+
   it('A6 · says a second authorization replaces the stored token', async () => {
     const store = new ApiStore();
     store.register(shopProfile({ oauth_grant: { origin: 'callback', state: 'connected' } }));

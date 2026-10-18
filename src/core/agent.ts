@@ -103,7 +103,7 @@ import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys } from './api-store.js';
 import { slotMayReach } from './profile-secret-view.js';
-import { isPresetClientSecretName } from './oauth-presets.js';
+import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
@@ -4341,22 +4341,27 @@ export class Agent implements IAgent {
             is_error: true,
           };
         }
-        // A built-in provider's client secret is the engine's to send, to that provider's token
-        // endpoint, never the model's: refused on the name for every principal and tool, before
-        // the vault is asked, with the names `extractSecretNames` read the input with — the same
-        // reading `resolveSecretRefs` resolves. A check that throws refuses.
-        const clientSecrets = secretNames.filter((n) => {
-          try {
-            return isPresetClientSecretName(n);
-          } catch {
-            return true;
-          }
-        });
+        // A `secret:` reference to a built-in provider's client secret is refused on the name, for
+        // every principal and tool, before the vault is asked, with the names `extractSecretNames`
+        // read the input with — the same reading `resolveSecretRefs` resolves. This covers
+        // references only: a profile that names the secret as its credential is attached by the
+        // http tool, and what that may reach is decided there. A check that throws refuses.
+        let clientSecrets: string[];
+        try {
+          clientSecrets = secretNames.filter((n) => isPresetClientSecretName(n));
+        } catch {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: annotateNonRetryable(`Secret(s) not available to tools: ${secretNames.map(n => `"${n}"`).join(', ')}. Whether they are the OAuth client secret of a built-in provider could not be checked, so they are refused. Write the request without them.`),
+            is_error: true,
+          };
+        }
         if (clientSecrets.length > 0) {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
-            content: annotateNonRetryable(`Secret(s) not available to tools: ${clientSecrets.map(n => `"${n}"`).join(', ')}. This is the OAuth client secret of a built-in provider: the engine sends it to that provider itself when it connects or renews an account, and it is entered in the provider's connection settings, not in a request. Write the request without it.`),
+            content: annotateNonRetryable(`Secret(s) not available to tools: ${clientSecrets.map(n => `"${n}"`).join(', ')}. ${clientSecrets.map(presetClientSecretGuidance).join(' ')} Write the request without them.`),
             is_error: true,
           };
         }

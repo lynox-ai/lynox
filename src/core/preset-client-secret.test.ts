@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OAUTH_PRESETS, isPresetClientSecretName, presetClientKeys, presetRegisterOf } from './oauth-presets.js';
+import { OAUTH_PRESETS, isPresetClientSecretName, presetClientKeys, presetClientSecretLookalike, presetRegisterOf } from './oauth-presets.js';
 import { SecretStore, isProtectedSecretWrite, resolveSecretRefsWith } from './secret-store.js';
 import type { SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
@@ -49,10 +49,24 @@ describe('isPresetClientSecretName', () => {
     expect(isPresetClientSecretName(name)).toBe(want);
   });
 
+  it.each([
+    ['SHOPIFY_CLIENT_SECRET', 'SHOPIFY_CLIENT_SECRET'],
+    ['SHOPIFY_CLIENTSECRET', 'SHOPIFY_CLIENT_SECRET'],
+    ['SHOPIFYCLIENT_SECRET', 'SHOPIFY_CLIENT_SECRET'],
+    ['bexio-client-secret', 'BEXIO_CLIENT_SECRET'],
+    ['SHOPIFY_CLIENT_SECRET_2', null],
+    ['SHOPIFY_CLIENT_ID', null],
+    ['FOO_CLIENT_SECRET', null],
+  ] as const)('a lookalike of %s is %s', (name, want) => {
+    expect(presetClientSecretLookalike(name)).toBe(want);
+  });
+
   it('follows the register it is given', () => {
     const register = presetRegisterOf([{ ...OAUTH_PRESETS.get('bexio')!, id: 'acme-books' }]);
     expect(isPresetClientSecretName('ACME_BOOKS_CLIENT_SECRET', register)).toBe(true);
     expect(isPresetClientSecretName('BEXIO_CLIENT_SECRET', register)).toBe(false);
+    expect(presetClientSecretLookalike('ACME_BOOKS_CLIENTSECRET', register)).toBe('ACME_BOOKS_CLIENT_SECRET');
+    expect(presetClientSecretLookalike('BEXIO_CLIENTSECRET', register)).toBeNull();
   });
 });
 
@@ -104,12 +118,16 @@ describe('ask_secret', () => {
   const agentWith = (promptSecret: ReturnType<typeof vi.fn>, secretStore?: SecretStore): IAgent =>
     ({ name: 't', model: 'm', memory: null, tools: [], onStream: null, promptSecret, ...(secretStore ? { secretStore } : {}) }) as unknown as IAgent;
 
-  it.each(['SHOPIFY_CLIENT_SECRET', 'BEXIO_CLIENT_SECRET'])('does not ask for %s, stored or not', async (name) => {
+  it.each([
+    ['SHOPIFY_CLIENT_SECRET', 'SHOPIFY_CLIENT_SECRET'],
+    ['BEXIO_CLIENT_SECRET', 'BEXIO_CLIENT_SECRET'],
+    ['SHOPIFY_CLIENTSECRET', 'SHOPIFY_CLIENT_SECRET'],
+  ])('does not ask for %s, stored or not, and names the place for %s', async (name, canonical) => {
     for (const store of [undefined, vaulted({ [name]: 'value-1234' })]) {
       const promptSecret = vi.fn().mockResolvedValue('saved');
       const result = await askSecretTool.handler({ name, prompt: 'Enter it' }, agentWith(promptSecret, store));
       expect(promptSecret).not.toHaveBeenCalled();
-      expect(result).toContain('OAuth client secret of a built-in provider');
+      expect(result).toContain(`Settings → API Keys, under exactly the name "${canonical}"`);
     }
   });
 

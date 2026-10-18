@@ -520,11 +520,12 @@ export function presetStoreHost(
 }
 
 /**
- * The vault names a built-in provider's OAuth client lives under: one pair per provider and
- * instance, derived from the preset's id the way a profile's token slots are derived from its own
- * (`BEXIO_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`). Every profile of one provider shares the pair, as
- * its accounts share the one app. Derived rather than chosen, so the names a model may never see
- * or ask for are known before any profile names them.
+ * The vault names a built-in provider's OAuth client is meant to live under: one pair per provider
+ * and instance, derived from the preset's id the way a profile's token slots are derived from its
+ * own (`BEXIO_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`). Derived rather than chosen, so the secret's name
+ * is known before any profile names it. Nothing here makes a profile use the pair: a profile still
+ * names its own `client_secret_key`, and one that names another name is not reached by the checks
+ * keyed on this one.
  */
 export function presetClientKeys(presetId: string): { readonly id: string; readonly secret: string } {
   const base = presetId.toUpperCase().replace(/-/g, '_');
@@ -538,6 +539,30 @@ export function presetClientKeys(presetId: string): { readonly id: string; reado
  */
 export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
   return register.ids().some((id) => presetClientKeys(id).secret === name);
+}
+
+/**
+ * The built-in provider's client secret `name` spells once case and everything but letters and
+ * digits are ignored (`SHOPIFY_CLIENTSECRET` → `SHOPIFY_CLIENT_SECRET`), or null. For a place that
+ * collects a value under a name the model picks: an exact-name refusal there is passed by writing
+ * the name a little differently.
+ */
+export function presetClientSecretLookalike(name: string, register: PresetRegister = OAUTH_PRESETS): string | null {
+  const fold = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  for (const id of register.ids()) {
+    const { secret } = presetClientKeys(id);
+    if (fold(secret) === fold(name)) return secret;
+  }
+  return null;
+}
+
+/**
+ * What the model is told about a built-in provider's client secret wherever it would otherwise be
+ * told to collect or reference a vault name: the user stores it in the settings, under that exact
+ * name, and the engine uses it from there.
+ */
+export function presetClientSecretGuidance(name: string): string {
+  return `"${name}" is the OAuth client secret of a built-in provider. The user stores it in lynox under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine uses it from there when it connects or renews the account.`;
 }
 
 /** The ids a profile may name, for a message that lists what exists. */
