@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OAUTH_PRESETS, derivePresetEndpoints, presetClaimsHost, presetNotFollowed, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
+import { OAUTH_PRESETS, derivePresetEndpoints, presetClaimsHost, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
 
 const shopify = OAUTH_PRESETS.get('shopify')!;
 const bexio = OAUTH_PRESETS.get('bexio')!;
@@ -46,6 +46,13 @@ describe('presetClaimsHost', () => {
     expect(presetClaimsHost(shopify, host)).toBe(want);
   });
 
+  it('claims no derived host for a template preset whose API is not on it', () => {
+    const tenant = { ...shopify, id: 'tenant', apiOnDerivedHost: undefined };
+    const register = presetRegisterOf([tenant]);
+    expect(presetClaimsHost(tenant, 'my-store.myshopify.com', register)).toBe(false);
+    expect(presetStoreHost(profile('https://my-store.myshopify.com', 'my-store', 'tenant'), register)).toBeNull();
+  });
+
   it('keeps a constant preset to its apiHosts', () => {
     expect(presetClaimsHost(bexio, 'api.bexio.com')).toBe(true);
     expect(presetClaimsHost(bexio, 'auth.bexio.com')).toBe(false);
@@ -64,6 +71,7 @@ describe('presetStoreHost', () => {
     ['http', profile('http://my-store.myshopify.com', 'my-store')],
     ['a port', profile('https://my-store.myshopify.com:8443', 'my-store')],
     ['credentials', profile('https://u:p@my-store.myshopify.com', 'my-store')],
+    ['a password alone', profile('https://:p@my-store.myshopify.com', 'my-store')],
     ['a trailing dot', profile('https://my-store.myshopify.com.', 'my-store')],
     ['a refused shop value', profile('https://My-Store.myshopify.com', 'My-Store')],
     ['no shop value', profile('https://my-store.myshopify.com', undefined)],
