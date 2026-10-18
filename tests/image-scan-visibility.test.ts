@@ -24,6 +24,7 @@ const dockerfile = readFileSync(resolve(repoRoot, 'Dockerfile'), 'utf8');
 type Step = { name?: string; uses?: string; run?: string; if?: unknown; 'continue-on-error'?: unknown; with?: Record<string, unknown> };
 type Job = { if?: unknown; 'continue-on-error'?: unknown; strategy?: { matrix?: { include?: { platform?: string }[] } }; steps?: Step[] };
 const release = parseYaml(readFileSync(resolve(repoRoot, '.github/workflows/release.yml'), 'utf8')) as { jobs: Record<string, Job> };
+const ci = parseYaml(readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8')) as { jobs: Record<string, Job> };
 
 /** The Dockerfile's shell text: comments dropped, continuations joined. */
 function shellText(text: string): string {
@@ -149,6 +150,32 @@ describe('the release scan', () => {
     expect(check?.run).toMatch(/if \[ "\$n" -eq 0 \]; then[\s\S]*exit 1/);
     for (const s of [list!, check!]) {
       expect(s.if).toBe(AMD64_ONLY);
+      expect(s['continue-on-error']).toBeUndefined();
+    }
+  });
+});
+
+describe('the pull-request scan (ci.yml docker-scan)', () => {
+  const steps = ci.jobs['docker-scan']?.steps ?? [];
+  const releaseSteps = Object.values(release.jobs).find((j) => (j.steps ?? []).some(isTrivy))?.steps ?? [];
+  const checkOf = (list: Step[]) => list.find((s) => (s.run ?? '').includes('trivy-packages.json'));
+  const listOf = (list: Step[]) => list.find((s) => isTrivy(s) && s.with?.['list-all-pkgs'] === true);
+
+  it('scans at the release threshold, with nothing switched off', () => {
+    const gates = steps.filter((s) => isTrivy(s) && s.with?.format === 'table');
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.with).toEqual({ 'image-ref': 'lynox:ci-scan', format: 'table', 'exit-code': 1, severity: 'CRITICAL', 'ignore-unfixed': true });
+    expect(gates[0]!.if).toBeUndefined();
+    expect(gates[0]!['continue-on-error']).toBeUndefined();
+  });
+
+  it('fails on zero OS packages with the same check the release runs', () => {
+    const list = listOf(steps);
+    const check = checkOf(steps);
+    expect(list?.with).toEqual({ ...listOf(releaseSteps)!.with, 'image-ref': 'lynox:ci-scan' });
+    expect(check?.run).toBe(checkOf(releaseSteps)!.run);
+    for (const s of [list!, check!]) {
+      expect(s.if).toBeUndefined();
       expect(s['continue-on-error']).toBeUndefined();
     }
   });
