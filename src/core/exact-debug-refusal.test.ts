@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { ExactClearance, type ExactMarker } from './exact-clearance.js';
-import { DEBUG_ENV_VARS, isExactHeld, refuseDebug } from './exact-debug-refusal.js';
+import { isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { withWireRules, quietSdkLogs, _resetSdkLogQuieting } from './llm-wire-rules.js';
 import { initDebugSubscriber, _resetDebugSubscriber } from './debug-subscriber.js';
 import { channels } from './observability.js';
@@ -92,10 +92,12 @@ describe('the hook in ExactClearance', () => {
 describe('refuseDebug', () => {
   it('removes every debug variable and reports names, never values', () => {
     const env: NodeJS.ProcessEnv = { KEEP: 'x' };
-    for (const v of DEBUG_ENV_VARS) env[v] = `value-of-${v}`;
+    // Spelled out, not read from DEBUG_ENV_VARS: a name dropped from the list must fail here.
+    const names = ['ANTHROPIC_LOG', 'LYNOX_DEBUG', 'LYNOX_DEBUG_FILE', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_DEBUG_WIRE_CAPTURE'];
+    for (const v of names) env[v] = `value-of-${v}`;
     const writes: string[] = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((s: string | Uint8Array) => { writes.push(String(s)); return true; });
-    expect(refuseDebug(env)).toEqual([...DEBUG_ENV_VARS]);
+    expect(refuseDebug(env)).toEqual(names);
     expect(env).toEqual({ KEEP: 'x' });
     expect(writes.join('')).toContain('ANTHROPIC_LOG');
     expect(writes.join('')).not.toContain('value-of-');
