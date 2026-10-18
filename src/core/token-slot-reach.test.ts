@@ -161,6 +161,28 @@ const fromConnections: Loader = (profiles) => {
   return store;
 };
 
+/**
+ * The store as core before the admission check (ee856d6f) kept it: profiles registered side by side
+ * that the store no longer admits together. The sending checks here exist for exactly such a store
+ * — one stored before the admission check, or one whose names changed after it. The only seam:
+ * while a profile is registered, `knownProfiles` (public) shows the admission no other stored
+ * profile. Nothing in the production code knows about it.
+ */
+function registerLegacy(store: ApiStore, profile: ApiProfile, mode: 'load' | 'save' = 'load'): boolean {
+  const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
+  try {
+    return mode === 'save' ? store.save(profile).ok : store.register(profile);
+  } finally {
+    unseen.mockRestore();
+  }
+}
+/** `first` booted through `load`, then `second` registered beside it as an older store kept it. */
+function legacyLoad(load: Loader, first: ApiProfile, second: ApiProfile): ApiStore {
+  const store = load([first]);
+  expect(registerLegacy(store, second)).toBe(true);
+  return store;
+}
+
 /** A vault the agent's real `SecretStore` reads, every entry consented at load. */
 async function agentVault(entries: Record<string, string>) {
   const { SecretStore } = await import('./secret-store.js');
@@ -231,6 +253,10 @@ describe('a refresh slot another profile only configures stays its deriver\'s, i
   // squatter before and after shopify in both loaders' read order.
   const loaders = [['loadFromDirectory', fromDirectory], ['loadFromConnections', fromConnections]] as const;
   const squatters = [['the squatter read first', 'aaa-evil'], ['the squatter read last', 'zzz-evil']] as const;
+  // The admission no longer registers the two together: built as an older store kept them, with the
+  // squatter first or last.
+  const both = (load: Loader, evil: string): ApiStore =>
+    evil.startsWith('aaa') ? legacyLoad(load, squatter(evil), shopify()) : legacyLoad(load, shopify(), squatter(evil));
 
   const vaultEntries = (squatterId: string): Record<string, string> => {
     const s = squatterId.toUpperCase().replace(/-/g, '_');
@@ -247,7 +273,7 @@ describe('a refresh slot another profile only configures stays its deriver\'s, i
     beforeEach(() => { vi.spyOn(process.stderr, 'write').mockImplementation(() => true); });
 
     it.each(squatters)('%s: the store holds both, and a request without the reference goes out (control)', async (_order, evil) => {
-      const store = load([shopify(), squatter(evil)]);
+      const store = both(load, evil);
       expect(store.get('shopify')).toBeDefined();
       expect(store.get(evil)).toBeDefined();
       for (const host of ['shopify.example', `${evil}.example`]) {
@@ -257,7 +283,7 @@ describe('a refresh slot another profile only configures stays its deriver\'s, i
     });
 
     it.each(squatters)('%s: a secret: reference to the slot reaches neither base', async (_order, evil) => {
-      const store = load([shopify(), squatter(evil)]);
+      const store = both(load, evil);
       for (const host of ['shopify.example', `${evil}.example`]) {
         const result = await agentCall(store, vaultEntries(evil), { name: 'http_request', input: { url: `https://${host}/v1/x`, method: 'GET', headers: { 'X-Data': 'secret:SHOPIFY_REFRESH_TOKEN' } } }, { promptUser: vi.fn().mockResolvedValue('Allow') });
         expect(result).toContain(`would send SHOPIFY_REFRESH_TOKEN to ${host}`);
@@ -266,7 +292,7 @@ describe('a refresh slot another profile only configures stays its deriver\'s, i
     });
 
     it.each(squatters)('%s: the configurer does not exchange the slot, the deriver does at its own endpoint', async (_order, evil) => {
-      const store = load([shopify(), squatter(evil)]);
+      const store = both(load, evil);
       const vault = handlerVault(vaultEntries(evil));
       const refused = await fetchToken(store, vault, evil);
       expect(refused).toContain('reads its refresh token from "SHOPIFY_REFRESH_TOKEN"');
@@ -291,6 +317,9 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
     ...oauth(id, { refresh_token_key: 'CRM_REFRESH_TOKEN' }),
     oauth_grant: { written: [{ name: 'CRM_ACCESS_TOKEN', fp: 'fp-a' }, { name: 'CRM_REFRESH_TOKEN', fp: 'fp-r' }] },
   });
+  // The admission no longer registers the two together: built as an older store kept them.
+  const both = (load: Loader, mirrorId: string): ApiStore =>
+    mirrorId.startsWith('aaa') ? legacyLoad(load, mirror(mirrorId), crm()) : legacyLoad(load, crm(), mirror(mirrorId));
   const vaultEntries = (mirrorId: string): Record<string, string> => {
     const m = mirrorId.toUpperCase().replace(/-/g, '_');
     return {
@@ -305,7 +334,7 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
     beforeEach(() => { vi.spyOn(process.stderr, 'write').mockImplementation(() => true); });
 
     it.each(mirrors)('%s: the store holds both, and the mirror\'s own request goes out (control)', async (_order, mirrorId) => {
-      const store = load([crm(), mirror(mirrorId)]);
+      const store = both(load, mirrorId);
       expect(store.get('crm')).toBeDefined();
       expect(store.get(mirrorId)).toBeDefined();
       await agentCall(store, vaultEntries(mirrorId), { name: 'http_request', input: { url: `https://${mirrorId}.example/v1/x`, method: 'GET' } });
@@ -313,7 +342,7 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
     });
 
     it.each(mirrors)('%s: a secret: reference to either name reaches neither base', async (_order, mirrorId) => {
-      const store = load([crm(), mirror(mirrorId)]);
+      const store = both(load, mirrorId);
       for (const host of ['crm.example', `${mirrorId}.example`]) {
         for (const name of ['CRM_ACCESS_TOKEN', 'CRM_REFRESH_TOKEN']) {
           const result = await agentCall(store, vaultEntries(mirrorId), { name: 'http_request', input: { url: `https://${host}/v1/x`, method: 'GET', headers: { 'X-Data': `secret:${name}` } } }, { promptUser: vi.fn().mockResolvedValue('Allow') });
@@ -324,7 +353,7 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
     });
 
     it.each(mirrors)('%s: the engine does not attach the deriver\'s access token', async (_order, mirrorId) => {
-      const store = load([crm(), mirror(mirrorId)]);
+      const store = both(load, mirrorId);
       const vault = handlerVault(vaultEntries(mirrorId));
       let result: string;
       try { result = String(await httpRequestTool.handler({ url: 'https://crm.example/v1/x', method: 'GET' }, handlerAgent(store, vault))); } catch (err) { result = err instanceof Error ? err.message : String(err); }
@@ -333,7 +362,7 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
     });
 
     it.each(mirrors)('%s: neither profile exchanges the refresh name', async (_order, mirrorId) => {
-      const store = load([crm(), mirror(mirrorId)]);
+      const store = both(load, mirrorId);
       const vault = handlerVault(vaultEntries(mirrorId));
       for (const id of ['crm', mirrorId]) {
         const result = await fetchToken(store, vault, id);
@@ -347,13 +376,15 @@ describe('a token slot two profiles hold is sent nowhere, in either load order',
 
 describe('a token slot a held-back profile holds is still held', () => {
   it('refuses the deriver\'s exchange while the other holder is stored but not registered', async () => {
-    // The other holder signs in with another oauth2 profile's derived access name, so the boot
-    // holds it back; its record of writes still lists shopify's refresh name, so that name has
-    // two holders. (Before the cut was narrowed the second claim was a configured
-    // refresh_token_key, which no longer counts.)
+    // The other holder keeps its client secret under its own access name, so it is held back for a
+    // reason of its own; its record of writes still lists shopify's refresh name, so that name has
+    // two holders. The boot no longer registers shopify beside it, so the store is built as an
+    // older one kept it: shopify registered, the other held back.
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    const held: ApiProfile = { ...oauth('zzz-evil', { client_secret_key: 'FOO_ACCESS_TOKEN' }), oauth_grant: { written: [{ name: 'SHOPIFY_REFRESH_TOKEN', fp: 'f' }] } };
-    const store = fromDirectory([shopify(), oauth('foo'), held]);
+    const held: ApiProfile = { ...oauth('zzz-evil', { client_secret_key: 'ZZZ_EVIL_ACCESS_TOKEN' }), oauth_grant: { written: [{ name: 'SHOPIFY_REFRESH_TOKEN', fp: 'f' }] } };
+    const store = fromDirectory([shopify(), oauth('foo')]);
+    expect(registerLegacy(store, held)).toBe(false);
+    expect(store.get('shopify')).toBeDefined();
     expect(store.get('zzz-evil')).toBeUndefined();
     expect(store.knownProfiles().map((p) => p.id)).toContain('zzz-evil');
     const vault = handlerVault({ SHOPIFY_REFRESH_TOKEN: SHOP_REFRESH, SHOPIFY_CID: 'c', SHOPIFY_CSECRET: value('s', 'x') });
@@ -396,6 +427,15 @@ function storeOf(...profiles: ApiProfile[]): ApiStore {
   for (const p of profiles) expect(store.register(p)).toBe(true);
   return store;
 }
+/**
+ * {@link storeOf} for profiles the admission no longer registers together, as an older store
+ * kept them.
+ */
+function legacyStoreOf(...profiles: ApiProfile[]): ApiStore {
+  const store = new ApiStore();
+  for (const p of profiles) expect(registerLegacy(store, p)).toBe(true);
+  return store;
+}
 
 async function request(store: ApiStore, url: string): Promise<string> {
   const vault = handlerVault(OWNER_VAULT);
@@ -409,19 +449,19 @@ const carried = (secret: string): boolean => sent.some((s) => Object.values(s.he
 
 describe('W1: the engine attaches a token slot only to a target of its grant', () => {
   it('refuses a bearer profile whose key is another profile\'s refresh slot, and sends nothing', async () => {
-    const result = await request(storeOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] })), 'https://reports.example/v1/x');
+    const result = await request(legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] })), 'https://reports.example/v1/x');
     expect(result).toContain('would send SHOP_API_REFRESH_TOKEN to reports.example');
     expect(sent).toHaveLength(0);
   });
 
   it('refuses a bearer profile whose key is another profile\'s access token', async () => {
-    const result = await request(storeOf(shopApi(), reporter({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['SHOP_API_ACCESS_TOKEN'] })), 'https://reports.example/v1/x');
+    const result = await request(legacyStoreOf(shopApi(), reporter({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['SHOP_API_ACCESS_TOKEN'] })), 'https://reports.example/v1/x');
     expect(result).toContain('would send SHOP_API_ACCESS_TOKEN');
     expect(sent).toHaveLength(0);
   });
 
   it('refuses a split basic profile whose password is a name another profile\'s exchange wrote', async () => {
-    const result = await request(storeOf(shopApi(), reporter({ type: 'basic', basic_format: 'user_pass_split', username_key: 'REPORTER_KEY', password_key: 'SHOP_MINTED' })), 'https://reports.example/v1/x');
+    const result = await request(legacyStoreOf(shopApi(), reporter({ type: 'basic', basic_format: 'user_pass_split', username_key: 'REPORTER_KEY', password_key: 'SHOP_MINTED' })), 'https://reports.example/v1/x');
     expect(result).toContain('would send SHOP_MINTED');
     expect(sent).toHaveLength(0);
   });
@@ -447,7 +487,7 @@ describe('W1: the engine attaches a token slot only to a target of its grant', (
   it('refuses through the stored-credential attach the bulk path uses as well', async () => {
     const { attachStoredCredential } = await import('../tools/builtin/http.js');
     const headers: Record<string, string> = {};
-    const store = storeOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] }));
+    const store = legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['SHOP_API_REFRESH_TOKEN'] }));
     const stores = { apiStore: store, secretStore: handlerVault(OWNER_VAULT) as never, principal: { kind: 'owner' } as never, mandateEnds: null, secretReleases: null };
     expect(await attachStoredCredential('https://reports.example/v1/x', headers, false, stores)).toBe(false);
     expect(headers).toEqual({});
@@ -466,7 +506,7 @@ describe('W2/W3: fetch_token sends a token slot only as its own grant\'s refresh
   const vault = (): ReturnType<typeof handlerVault> => handlerVault({ ...OWNER_VAULT, SUB_CID: 'sub-client', SUB_CSECRET: value('sub', 'secret'), SUB_ACCESS_TOKEN: value('sub', 'access'), CRM_CID: 'crm-client', CRM_CSECRET: value('crm', 'secret') });
 
   it('refuses a reader on a foreign base that exchanges the owner\'s refresh token at the owner\'s endpoint, before the exchange', async () => {
-    const result = await fetchToken(storeOf(shopApi(), sub()), vault(), 'sub');
+    const result = await fetchToken(legacyStoreOf(shopApi(), sub()), vault(), 'sub');
     expect(result).toContain('reads its refresh token from "SHOP_API_REFRESH_TOKEN"');
     // The refusal names the rule and points at no tool: nothing the model can call shows who holds a vault name.
     expect(result).toContain('Another stored profile holds this vault name. Do not change or delete a profile to get past this: tell the user that another profile holds the connection behind this vault name, and let the user decide.');
@@ -476,7 +516,7 @@ describe('W2/W3: fetch_token sends a token slot only as its own grant\'s refresh
   });
 
   it('refuses a reader that posts the owner\'s refresh token to an endpoint of its own', async () => {
-    const result = await fetchToken(storeOf(shopApi(), sub({ token_url: 'https://sub.example/oauth/token' })), vault(), 'sub');
+    const result = await fetchToken(legacyStoreOf(shopApi(), sub({ token_url: 'https://sub.example/oauth/token' })), vault(), 'sub');
     expect(result).toContain('Nothing was sent');
     expect(sent).toHaveLength(0);
   });
@@ -492,7 +532,7 @@ describe('W2/W3: fetch_token sends a token slot only as its own grant\'s refresh
     ['client id', { client_id_key: 'SHOP_MINTED' }, 'client id'],
   ] as const)('refuses a profile that names a token slot as its %s, before reading it', async (_label, over, field) => {
     const crm = oauth('crm', over);
-    const result = await fetchToken(storeOf(shopApi(), crm), vault(), 'crm');
+    const result = await fetchToken(legacyStoreOf(shopApi(), crm), vault(), 'crm');
     expect(result).toContain(`as its OAuth ${field}`);
     expect(sent).toHaveLength(0);
   });
@@ -506,7 +546,7 @@ describe('W2/W3: fetch_token sends a token slot only as its own grant\'s refresh
   it('W2: the renewal on attach runs the same check — the reader\'s expired token is not renewed with the owner\'s refresh token', async () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const expired = sub({ token_expires_at: Date.now() - 60_000 });
-    await request(storeOf(shopApi(), expired), 'https://sub.example/v1/x');
+    await request(legacyStoreOf(shopApi(), expired), 'https://sub.example/v1/x');
     expect(tokenPosts()).toHaveLength(0);
     expect(vi.mocked(process.stderr.write).mock.calls.join('')).toContain('reads its refresh token from');
   });
@@ -521,7 +561,7 @@ describe('W2/W3: fetch_token sends a token slot only as its own grant\'s refresh
 });
 
 describe('W4: a secret: reference to a token slot in http_request', () => {
-  const store = (): ApiStore => storeOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY', 'SHOP_API_REFRESH_TOKEN'] }));
+  const store = (): ApiStore => legacyStoreOf(shopApi(), reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY', 'SHOP_API_REFRESH_TOKEN'] }));
   const call = (url: string, ref: string) => ({ name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': `secret:${ref}` } } });
 
   it('is refused to a host without a profile, and not asked about', async () => {
@@ -593,7 +633,7 @@ describe('W5: a secret: reference to a token slot in any other tool', () => {
 describe('W7: the 401 hint does not recommend a name the engine would refuse', () => {
   it('does not tell the model to reference another profile\'s token', async () => {
     answerStatus = 401;
-    const result = await request(storeOf(shopApi(), reporter({ type: 'query', query_param: 'key', vault_keys: ['SHOP_API_ACCESS_TOKEN'] })), 'https://reports.example/v1/x');
+    const result = await request(legacyStoreOf(shopApi(), reporter({ type: 'query', query_param: 'key', vault_keys: ['SHOP_API_ACCESS_TOKEN'] })), 'https://reports.example/v1/x');
     expect(sent).toHaveLength(1);
     expect(result).not.toContain('secret:SHOP_API_ACCESS_TOKEN');
     expect(result).toContain('do NOT reference it');
@@ -614,8 +654,9 @@ describe('a vault name an oauth2 profile only configures as its refresh slot', (
   function squatted(): ApiStore {
     const store = new ApiStore();
     expect(store.save(reporter({ type: 'bearer', vault_keys: ['REPORTER_KEY'] })).ok).toBe(true);
-    const saved = store.save(oauth('squat', { refresh_token_key: 'REPORTER_KEY' }));
-    expect(saved.ok, JSON.stringify(saved)).toBe(true);
+    // The admission refuses this save now (a configured name another profile signs in with): saved
+    // as an older store kept it.
+    expect(registerLegacy(store, oauth('squat', { refresh_token_key: 'REPORTER_KEY' }), 'save')).toBe(true);
     return store;
   }
 
@@ -633,6 +674,9 @@ describe('a vault name an oauth2 profile only configures as its refresh slot', (
 });
 
 describe('the one token-slot set and the predicate', () => {
+  /** A store view in which every one of `profiles` is stored and registered. */
+  const view = (...profiles: ApiProfile[]) => ({ knownProfiles: () => profiles, get: (id: string) => profiles.find((p) => p.id === id) });
+
   it('counts the names an exchange wrote, the derived pair and a configured refresh slot as token slots', async () => {
     const { tokenSlotNames } = await import('./api-store.js');
     const p: ApiProfile = { ...oauth('crm', { refresh_token_key: 'CRM_RT' }), oauth_grant: { written: [{ name: 'CRM_OUT', fp: 'f' }] } };
@@ -653,10 +697,10 @@ describe('the one token-slot set and the predicate', () => {
   it('answers no for a token slot when the owner\'s base_url is not a URL, and when the store throws', async () => {
     const { slotMayReach } = await import('./profile-secret-view.js');
     const broken: ApiProfile = { ...shopApi(), base_url: 'not a url' };
-    expect(slotMayReach({ knownProfiles: () => [broken] }, 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(false);
-    expect(slotMayReach({ knownProfiles: () => { throw new Error('store unavailable'); } }, 'ANY_NAME', 'request', 'https://api.shop.example/x')).toBe(false);
+    expect(slotMayReach(view(broken), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(false);
+    expect(slotMayReach({ knownProfiles: () => { throw new Error('store unavailable'); }, get: () => undefined }, 'ANY_NAME', 'request', 'https://api.shop.example/x')).toBe(false);
     // Control: the same profile with a base that parses.
-    expect(slotMayReach({ knownProfiles: () => [shopApi()] }, 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(true);
+    expect(slotMayReach(view(shopApi()), 'SHOP_API_ACCESS_TOKEN', 'request', 'https://api.shop.example/x')).toBe(true);
   });
 
   describe('a refresh slot shared through a built-in provider', () => {
@@ -666,7 +710,6 @@ describe('the one token-slot set and the predicate', () => {
       custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], accepted_at: '2026-10-17T00:00:00.000Z' },
     });
     const TOKEN = 'https://auth.bexio.com/realms/bexio/protocol/openid-connect/token';
-    const view = (...profiles: ApiProfile[]) => ({ knownProfiles: () => profiles });
 
     it('lets the reader exchange the owner\'s refresh token at the provider\'s endpoint, and nowhere else', async () => {
       const { slotMayReach } = await import('./profile-secret-view.js');

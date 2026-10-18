@@ -50,7 +50,7 @@ describe('a grant is shared only between profiles whose provider derives the sam
   it('does not let a reader whose parameters derive another endpoint exchange the owner\'s refresh token', () => {
     const owner = tenanted('tn-a', 'alpha');
     const reader = tenanted('tn-b', 'beta', { refresh_token_key: 'TN_A_REFRESH_TOKEN' });
-    const store = { knownProfiles: () => [owner, reader] };
+    const store = { knownProfiles: () => [owner, reader], get: (id: string) => [owner, reader].find((p) => p.id === id) };
     // The fixture really does derive two endpoints, or this test proves nothing.
     expect(endpointOf('alpha')).not.toBe(endpointOf('beta'));
     expect(slotMayReach(store, 'TN_A_REFRESH_TOKEN', 'exchange', endpointOf('alpha'), reader)).toBe(false);
@@ -60,7 +60,25 @@ describe('a grant is shared only between profiles whose provider derives the sam
   it('control: a reader of the same tenant shares the grant and exchanges at the owner\'s endpoint', () => {
     const owner = tenanted('tn-a', 'alpha');
     const reader = tenanted('tn-b', 'alpha', { refresh_token_key: 'TN_A_REFRESH_TOKEN' });
-    const store = { knownProfiles: () => [owner, reader] };
+    const store = { knownProfiles: () => [owner, reader], get: (id: string) => [owner, reader].find((p) => p.id === id) };
     expect(slotMayReach(store, 'TN_A_REFRESH_TOKEN', 'exchange', endpointOf('alpha'), reader)).toBe(true);
+  });
+});
+
+describe('the admission shares a refresh slot only between profiles whose provider derives the same token endpoint', () => {
+  it('registers neither when the reader\'s parameters derive another endpoint, and both when they derive the same', async () => {
+    const { ApiStore } = await import('./api-store.js');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const apart = new ApiStore();
+    apart.register(tenanted('tn-a', 'alpha'));
+    apart.register(tenanted('tn-b', 'beta', { refresh_token_key: 'TN_A_REFRESH_TOKEN' }));
+    expect(apart.get('tn-a')).toBeUndefined();
+    expect(apart.get('tn-b')).toBeUndefined();
+    const together = new ApiStore();
+    together.register(tenanted('tn-a', 'alpha'));
+    together.register(tenanted('tn-b', 'alpha', { refresh_token_key: 'TN_A_REFRESH_TOKEN' }));
+    expect(together.get('tn-a')).toBeDefined();
+    expect(together.get('tn-b')).toBeDefined();
+    vi.restoreAllMocks();
   });
 });

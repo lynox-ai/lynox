@@ -151,9 +151,10 @@ describe('ApiStore — profiles the boot held back', () => {
       const saved = store.save(crm());
       expect(saved.ok).toBe(false);
       expect(saved.ok ? '' : saved.reason).toContain('api_profile "shop-api" is oauth2 and writes its tokens to SHOP_API_ACCESS_TOKEN, which api_profile "crm" signs in with');
-      // The boot keeps it in either order, as before this change: a held-back rival does not
-      // decide what the boot registers.
-      expect(store.register(crm(), 'load')).toBe(true);
+      // The boot refuses it too. Until the admission check it was registered here — a held-back
+      // rival did not decide what the boot registered; now every stored profile does, held back or
+      // not.
+      expect(store.register(crm(), 'load')).toBe(false);
     });
 
     it('control: the same profile is admitted once the oauth2 profile is removed', () => {
@@ -430,7 +431,13 @@ describe('ApiStore — profiles the boot held back', () => {
       vault.set('SHOP_PASSWORD', 'hunter2');
       expect(store.register(bearer('shop-a', 'sibling.example', 'SIBLING_KEY'), 'load')).toBe(true);
       expect(store.register(basic('shop_a', 'shop.example', 'SHOP_USER', 'SHOP_PASSWORD'), 'load')).toBe(false);
+      // The admission refuses this save now (a refresh slot another stored profile signs in with).
+      // The marking still has to hold for a store an older version kept, so the profile is saved as
+      // it was then: while `knownProfiles` shows the admission no other profile.
+      expect(store.save(crmOn('SHOP_PASSWORD')).ok).toBe(false);
+      const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
       expect(store.save(crmOn('SHOP_PASSWORD')).ok).toBe(true);
+      unseen.mockRestore();
       consent('crm', 'acc-B', 'ref-B');
       expect(foreignOf('crm')).toBeUndefined();
     });
@@ -450,12 +457,20 @@ describe('ApiStore — profiles the boot held back', () => {
       expect(() => store.save(corrected)).toThrow('disk full');
     };
 
-    it('a save whose write throws registers the previous version again, beside a held-back rival', () => {
-      expect(store.register(crm(), 'load')).toBe(true);
+    // Until the admission check the previous version was registered again beside the held-back
+    // rival. A held-back profile still claims its pair now, so the boot would hold the previous
+    // version back, and so does this: it stays stored, once, not in use. The store is built as an
+    // older version kept it: crm registered beside the held-back rival.
+    it('a save whose write throws holds the previous version back beside a held-back rival it loses to', () => {
       expect(store.register(shopOnOwnSlot(), 'load')).toBe(false);
+      const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
+      expect(store.register(crm(), 'load')).toBe(true);
+      unseen.mockRestore();
       failedSave();
-      expect(store.get('crm')?.auth?.password_key).toBe('SHOP_API_ACCESS_TOKEN');
-      expect(store.knownProfiles().filter((p) => p.id === 'crm')).toHaveLength(1);
+      expect(store.get('crm')).toBeUndefined();
+      const known = store.knownProfiles().filter((p) => p.id === 'crm');
+      expect(known).toHaveLength(1);
+      expect(known[0]!.auth?.password_key).toBe('SHOP_API_ACCESS_TOKEN');
     });
 
     it('control: without the held-back oauth2 profile the previous version is registered again', () => {

@@ -34,7 +34,7 @@ import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
-import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, slotMayReach, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
+import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
 import { newCorrelationId } from '../../core/audit-log.js';
 import { isPrivateIP } from '../../core/network-guard.js';
@@ -1357,6 +1357,29 @@ function persistGrant(
  * the fingerprint of the latest value is the only one a delete may match. One
  * exchange never writes a name twice: its output name may not be a refresh slot.
  */
+/**
+ * Empty `names` in the vault, and return those still not known to be empty. A name this view may
+ * not see, a protected name, a store with no delete, a delete that throws and a value still there
+ * afterwards all count as not emptied: the caller refuses then, so no answer here may be a guess.
+ */
+function emptyTokenSlots(store: SecretStoreLike | null | undefined, names: readonly string[]): string[] {
+  if (!store?.deleteSecret) return [...names];
+  const left: string[] = [];
+  for (const name of names) {
+    try {
+      if (isProtectedSecretWrite(name) || store.explainUnresolved?.(name) === 'out-of-scope') {
+        left.push(name);
+        continue;
+      }
+      store.deleteSecret(name);
+      if (store.resolve(name) !== null) left.push(name);
+    } catch {
+      left.push(name);
+    }
+  }
+  return left;
+}
+
 function mergeWrites(current: OAuthGrantRecord | undefined, writes: WrittenSecret[]): WrittenSecret[] {
   const rewritten = new Set(writes.map((w) => w.name));
   const kept = recordedWrites({ id: '', name: '', base_url: '', description: '', oauth_grant: current })
@@ -1844,10 +1867,12 @@ ${draftJson}
       }
       // `create` overwrites an existing id as well, so both ask. The author is the engine's
       // to record, never the input's: a mandate's save records the mandate.
-      const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.get(profile.id), profile.id);
+      // The stored version, registered or held back by the boot: an update of a held-back profile is
+      // still an update of what is stored.
+      const foreignSave = foreignProfileRefusal(agent, agent.toolContext?.apiStore?.storedProfile(profile.id), profile.id);
       if (foreignSave) return foreignSave;
       delete profile.created_by;
-      const prior = agent.toolContext?.apiStore?.get(profile.id);
+      const prior = agent.toolContext?.apiStore?.storedProfile(profile.id);
       // A save may not take a profile off the built-in provider it was set up with. A model
       // that wanted a write scope the preset refuses saved over a working read connection as
       // its own OAuth app; connect then refused that, and the user had neither. The answer
@@ -2062,7 +2087,9 @@ ${draftJson}
       // rides along unchanged, so a view → edit → update round trip neither trips
       // over it nor erases it. Discarding rather than refusing is deliberate: the
       // round trip would otherwise fail every time the model echoes the field back.
-      const storedGrant = agent.toolContext?.apiStore?.get(profile.id)?.oauth_grant;
+      // Held back included: otherwise its update dropped the record, and the names its exchanges
+      // wrote (`written`) were nobody's.
+      const storedGrant = agent.toolContext?.apiStore?.storedProfile(profile.id)?.oauth_grant;
       // Said in the reply when it mattered: a model that "cleared" a revocation by
       // echoing an edited record must not read a plain success and pass that on.
       const grantDiscarded = input.profile.oauth_grant !== undefined
@@ -2098,12 +2125,33 @@ ${draftJson}
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
+      // A reader of another profile's refresh slot whose update ends that or moves where its tokens
+      // go empties every token slot it holds first: what it exchanged is a token of the other
+      // profile's account. If they cannot be emptied, nothing is saved. Asked first whether the
+      // save would be refused at all, so a save refused for a reason known beforehand deletes
+      // nothing; emptied before the save, so a save that is still refused leaves it without tokens,
+      // never a moved one with them. Every reply after an emptying names what was emptied.
+      const cleared = slotsToClearBeforeSave(apiStore.storedProfile(profile.id), profile, apiStore.knownProfiles());
+      if (cleared.length > 0) {
+        const refusal = apiStore.saveRefusal(profile);
+        if (refusal !== null) return `Error: ${refusal} No token slot was emptied: ${cleared.join(', ')} ${cleared.length === 1 ? 'is' : 'are'} left as ${cleared.length === 1 ? 'it was' : 'they were'}.`;
+        const left = emptyTokenSlots(agent.secretStore, cleared);
+        if (left.length > 0) {
+          const emptied = cleared.filter((n) => !left.includes(n));
+          const done = emptied.length > 0 ? ` ${emptied.join(', ')} ${emptied.length === 1 ? 'was' : 'were'} emptied already and ${emptied.length === 1 ? 'is' : 'are'} empty now.` : ' None of them was emptied.';
+          return `Error: profile "${profile.id}" reads its refresh token from a token slot of another stored profile, and this update ends that or changes where its tokens go. The tokens it holds may belong to that other profile's account, so ${left.join(', ')} must be emptied first, and that was not possible here.${done} Nothing was saved. Ask the user to remove ${left.length === 1 ? 'that secret' : 'those secrets'} first, or to make this change.`;
+        }
+      }
       const saved = apiStore.save(profile, apisDir);
       // A refusal used to arrive here as `isNew`, so the tool answered "Created
       // … saved and activated immediately" for a profile that was never stored.
       // Fail-closed in effect, false-confident in report — and the only trace was
       // a stderr line no model ever reads.
-      if (!saved.ok) return `Error: ${saved.reason}`;
+      if (!saved.ok) {
+        return cleared.length > 0
+          ? `Error: ${saved.reason} The token slots it held were emptied before this refusal and are empty now: ${cleared.join(', ')}.`
+          : `Error: ${saved.reason}`;
+      }
       const isUpdate = !saved.isNew;
 
       const verb = isUpdate ? 'Updated' : 'Created';
@@ -2127,6 +2175,7 @@ ${draftJson}
         parts.push('Response shape: active');
       }
       parts.push('Profile saved and activated immediately.');
+      if (cleared.length > 0) parts.push(`It read another profile's refresh token, so the tokens it held were removed first (${cleared.join(', ')}); connect it again or fetch a token of its own.`);
       if (adopted !== undefined) {
         parts.push(adoptionNote(adopted, profile));
         // The profile is the owner's now and reads the vault unfiltered: what was asked for it,

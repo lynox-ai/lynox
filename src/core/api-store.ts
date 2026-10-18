@@ -22,7 +22,7 @@ import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
-import { credentialBearing } from './profile-secret-view.js';
+import { credentialBearing, slotConflicts, type SlotConflict } from './profile-secret-view.js';
 
 // ── Errors ──
 
@@ -778,55 +778,17 @@ export function clientSlotOnDerivedName(profile: ApiProfile): { field: 'client_i
 }
 
 /**
- * The names a profile signs in with: its basic pair and its OAuth client pair. A token is never
- * the right value for any of them. A `user_pass_split` basic profile without its own
- * `username_key`/`password_key` signs in with the first two `vault_keys` instead — the attach's
- * own precedence (`http.ts`) — so those count as it counts them. Not what any profile READS as
- * a token: other `vault_keys`, which it sends, and `refresh_token_key`, which it renews with.
- * Another profile may read this one's tokens through either on purpose — one account behind two
- * profiles — and that is sharing.
+ * The boot's sentence for a token-slot conflict between the arriving profile `x` and the stored
+ * `y`: who is not registered, and that nothing was deleted. One that signs in with another's token
+ * slot can be corrected on its own; for two claims on one slot only the user can say whose it is.
  */
-function signInNames(profile: ApiProfile): string[] {
-  const auth = profile.auth;
-  const names: unknown[] = [auth?.username_key, auth?.password_key, auth?.oauth?.client_id_key, auth?.oauth?.client_secret_key];
-  if (auth?.type === 'basic' && auth.basic_format === 'user_pass_split') {
-    const vaultKeys = auth.vault_keys as Record<number, unknown> | undefined | null;
-    if (auth.username_key === undefined || auth.username_key === null) names.push(vaultKeys?.[0]);
-    if (auth.password_key === undefined || auth.password_key === null) names.push(vaultKeys?.[1]);
+function notRegisteredAtBoot(c: SlotConflict, x: string, y: string): string {
+  const kept = 'Nothing was deleted: the stored profiles and the vault are left as they are.';
+  if (c.loser === 'both') {
+    return `${c.why} So neither profile "${x}" nor profile "${y}" is registered, and neither can be used. ${kept} Which of them the name belongs to is the user's to say; neither is registered until one of them is corrected.`;
   }
-  return names.filter((n): n is string => typeof n === 'string' && n.length > 0);
-}
-
-/**
- * Where an oauth2 profile's derived token pair meets a name another profile needs: a name it
- * signs in with ({@link signInNames}). Every exchange, renewal, connect and rotation writes the
- * derived pair, so such a name would be replaced by the next token, and that profile would sign
- * in with a token.
- *
- * Asked in both directions by default — `profile` as the one that derives the pair, and as the
- * one whose names meet another's pair — so the order in which two profiles arrive does not
- * decide. `asHolderOnly` asks only the second: whether `profile` signs in with a name another
- * profile's pair holds.
- */
-export function derivedPairCollision(profile: ApiProfile, others: Iterable<ApiProfile>, asHolderOnly = false): { holder: string; name: string; deriver: string } | null {
-  const pairOf = (p: ApiProfile): { access: string; refresh: string } | null =>
-    p.auth?.type === 'oauth2' ? { access: accessTokenKey(p.id), refresh: refreshTokenKey(p.id) } : null;
-  const meets = (deriver: ApiProfile, holder: ApiProfile): string | null => {
-    const pair = pairOf(deriver);
-    if (pair === null) return null;
-    const needs = new Set(signInNames(holder));
-    if (needs.has(pair.access)) return pair.access;
-    if (needs.has(pair.refresh)) return pair.refresh;
-    return null;
-  };
-  for (const other of others) {
-    if (other.id === profile.id) continue;
-    const own = asHolderOnly ? null : meets(profile, other);
-    if (own !== null) return { holder: other.id, name: own, deriver: profile.id };
-    const theirs = meets(other, profile);
-    if (theirs !== null) return { holder: profile.id, name: theirs, deriver: other.id };
-  }
-  return null;
+  const loser = c.loser === 'x' ? x : y;
+  return `${c.why} So profile "${loser}" is not registered and cannot be used. ${kept} To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
 }
 
 /** The hostname a profile maps to, or `null` for a `base_url` that does not parse. */
@@ -1176,6 +1138,12 @@ function nonTokenNames(profile: ApiProfile): string[] {
   return names;
 }
 
+/** A profile a loader read, and where from, for its log lines. */
+interface StoredRead {
+  readonly source: string;
+  readonly profile: ApiProfile;
+}
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
   /**
@@ -1183,13 +1151,19 @@ export class ApiStore {
    * unregistered by a profile loaded after them. They stay stored ("Nothing was deleted"), and
    * their names come back the moment they are corrected and admitted. The checks whether another
    * profile reads a name (credentials, purge, releases, mandate reads, client ids, connection
-   * tokens, the output of an exchange) and the save of a profile that is not registered read them
-   * through {@link knownProfiles}; otherwise a stored profile is invisible there, and the answer is
-   * "free" for a name that is not. The boot, a registered profile's own save, the host map and
-   * the grant reissues read registered profiles only. Not attached and not listed: {@link getAll}
+   * tokens, the output of an exchange), every admission's token-slot check and the save of a
+   * profile that is not registered read them through {@link knownProfiles}; otherwise a stored
+   * profile is invisible there, and the answer is "free" for a name that is not. The `vaultSlotBase`
+   * check of the boot and of a registered profile's own save, the host map and the grant reissues
+   * read registered profiles only. Not attached and not listed: {@link getAll}
    * stays the set of usable profiles.
    */
   private readonly heldBack = new Map<string, ApiProfile>();
+  /**
+   * Every profile a running boot read, set while its loader admits them (`_loadAll`). The boot
+   * decides token-slot admission over the whole persisted set, not over the profiles loaded so far.
+   */
+  private _bootSet: ReadonlyMap<string, ApiProfile> | null = null;
   /**
    * hostname → every profile id whose `base_url` is on that host. A set rather
    * than one id: with one id per host the map was last-write-wins, and the
@@ -1493,12 +1467,11 @@ export class ApiStore {
   loadFromDirectory(dir: string): number {
     if (!existsSync(dir)) return 0;
 
-    // Sorted: the slot guard is order-dependent (first id keeps the slot), so an
-    // unsorted read would let a restart hand a live token to the other profile of
-    // a colliding pair. The connections path is already ordered by created_at, id.
+    // Sorted: `vaultSlotBase` is still first come, first served (first id keeps the slot), so an
+    // unsorted read would let a restart hand a live token to the other profile of a colliding
+    // pair. The connections path is already ordered by created_at, id.
     const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
-    const loaded: string[] = [];
-
+    const read: StoredRead[] = [];
     for (const file of files) {
       try {
         const raw = readFileSync(join(dir, file), 'utf-8');
@@ -1507,17 +1480,12 @@ export class ApiStore {
           process.stderr.write(`[lynox:api-store] Skipping ${file}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        const migrated = migrateV1Profile(profile);
-        // Count registrations, not files: a refused profile is not in the store,
-        // and reporting it as loaded is the same false confidence the save path
-        // had. Counted at the end, because a profile read later can unregister one
-        // that landed earlier (see `_admit`).
-        if (this.register(migrated, 'load')) loaded.push(migrated.id);
+        read.push({ source: file, profile: migrateV1Profile(profile) });
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
-    return new Set(loaded.filter((id) => this.profiles.has(id))).size;
+    return this._loadAll(read);
   }
 
   /**
@@ -1527,23 +1495,51 @@ export class ApiStore {
    * truth) — mirrors {@link loadFromDirectory}'s validate-then-register loop.
    */
   loadFromConnections(store: ConnectionStore): number {
-    const loaded: string[] = [];
+    const read: StoredRead[] = [];
     for (const row of store.getByKind('api')) {
+      const source = `connection ${JSON.stringify(row.id)}`;
       try {
         const profile = connectionRowToProfile(row);
         if (!profile.id || !profile.name || !profile.base_url || !profile.description) {
           process.stderr.write(`[lynox:api-store] Skipping connection ${row.id}: missing required fields (id, name, base_url, description)\n`);
           continue;
         }
-        // Counted only when it landed and is still there at the end, as in
-        // `loadFromDirectory`: `register` refuses a slot collision or a protected
-        // derived slot, a later row can unregister an earlier one, and a count of
-        // the rows read would report a profile the store does not hold.
-        const migrated = migrateV1Profile(profile);
-        if (this.register(migrated, 'load')) loaded.push(migrated.id);
+        read.push({ source, profile: migrateV1Profile(profile) });
       } catch (err: unknown) {
-        process.stderr.write(`[lynox:api-store] Failed to load connection ${JSON.stringify(row.id)}: ${err instanceof Error ? err.message : String(err)}\n`);
+        process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
+    }
+    return this._loadAll(read);
+  }
+
+  /**
+   * The boot's second pass: admit every profile its loader read, each asked against all of them
+   * (`_bootSet`), so whether a profile is registered does not depend on whether its partner was
+   * read before it. Two stored files with one id are the exception: the set keeps one version per
+   * id, the later one read, so there the order decides which version the boot weighs. A row or file the first pass skipped (missing fields, unparsable) is in no
+   * set, and its names count as free. Counts registrations, not reads: a refused profile is not in
+   * the store, and a profile read later can unregister one that landed earlier (see `_admit`), so
+   * the count is taken at the end.
+   */
+  private _loadAll(read: readonly StoredRead[]): number {
+    const loaded: string[] = [];
+    const set = new Map([...this.knownProfiles(), ...read.map((r) => r.profile)].map((p) => [p.id, p]));
+    this._bootSet = set;
+    try {
+      // A profile registered before this boot answers to its set as well.
+      for (const registered of [...this.profiles.values()]) {
+        const lost = this._lossAgainst(registered, set.values());
+        if (lost !== null) this._holdBack(registered, lost);
+      }
+      for (const { source, profile } of read) {
+        try {
+          if (this.register(profile, 'load')) loaded.push(profile.id);
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox:api-store] Failed to load ${source}: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+    } finally {
+      this._bootSet = null;
     }
     return new Set(loaded.filter((id) => this.profiles.has(id))).size;
   }
@@ -1707,9 +1703,24 @@ export class ApiStore {
   /**
    * The body of {@link register}: `null` when the profile landed, otherwise the
    * reason it did not — so `save` can hand the actor the reason instead of
-   * reconstructing it after the fact.
+   * reconstructing it after the fact. With `dryRun` it only answers: every check runs, nothing
+   * is registered, and a save-mode check changes no state ({@link saveRefusal}).
    */
-  private _admit(profile: ApiProfile, mode: RegisterMode, wasRegistered = this.profiles.has(profile.id)): string | null {
+  private _admit(profile: ApiProfile, mode: RegisterMode, wasRegistered = this.profiles.has(profile.id), dryRun = false): string | null {
+    // Outside a boot (`register` one at a time), token-slot admission for the profiles already
+    // registered: each one the arriving profile makes lose leaves memory, as it would not have been
+    // registered had it been asked second. First, before any refusal of the arriving profile: one
+    // held back for a reason of its own still makes its partner lose, as it does in the boot. Only
+    // the registration goes: no `apisDir`, so `unregister` touches neither the file nor the row. A
+    // boot needs none of this: every profile it admits is asked against the whole set it read.
+    if (mode === 'load' && this._bootSet === null) {
+      for (const other of this.knownProfiles()) {
+        const registered = this.profiles.get(other.id);
+        if (other.id === profile.id || registered === undefined) continue;
+        const lost = slotConflicts(profile, registered).find((c) => c.loser !== 'x');
+        if (lost !== undefined) this._holdBack(registered, notRegisteredAtBoot(lost, profile.id, other.id));
+      }
+    }
     if (!PROFILE_ID_PATTERN.test(profile.id)) {
       // Refuse the id at the gate so the in-memory Map's invariant holds
       // — every key is a safe filename component. `unregister` can then
@@ -1772,36 +1783,32 @@ export class ApiStore {
       }
       return `profile "${profile.id}" keeps its OAuth ${what} under ${name}, the name its own tokens are written to — the first token would replace it. Nothing was saved. ${move}. ${left}`;
     }
-    // Nor may the derived pair meet a name ANOTHER profile signs in with — see
-    // `derivedPairCollision`. A save is asked both ways, so it does not matter which of the two
-    // arrived first. The boot asks only whether the arriving profile signs in with a name another
-    // profile's pair holds: what it refuses is always the profile signing in with those names,
-    // never the one whose pair they are, so a connection that works is not dropped at boot.
-    const clashOf = ({ holder, name, deriver }: { holder: string; name: string; deriver: string }): string =>
-      `api_profile "${deriver}" is oauth2 and writes its tokens to ${name}, which api_profile "${holder}" signs in with — the next token would replace it.`;
-    const notRegisteredAtBoot = (holder: string): string =>
-      `So profile "${holder}" is not registered and cannot be used. Nothing was deleted: the stored profile and the vault are left as they are. To use it again, store its credential under a name of its own, point the profile at that name, then save the corrected profile with api_setup update.`;
-    const collision = derivedPairCollision(profile, rivals, mode === 'load');
-    if (collision !== null) {
-      const { holder, deriver } = collision;
-      if (mode === 'load') return `${clashOf(collision)} ${notRegisteredAtBoot(holder)}`;
-      return `${clashOf(collision)} Nothing was saved. Point "${holder}" at a name of its own, or set "${deriver}" up under a different id.`;
-    }
-    // The boot's other order: the arriving profile is the one whose pair a profile loaded before
-    // it signs in with. That holder leaves memory, as it would not have been registered had it
-    // loaded second, so for one such pair the load order does not decide which of the two the
-    // boot keeps. Each arriving profile is asked against the profiles registered at that moment.
-    // Only the registration goes: no `apisDir`, so `unregister` touches neither the file nor the
-    // row. Placed after every refusal above, so a profile the boot refuses drops no one.
-    if (mode === 'load') {
-      for (let held = derivedPairCollision(profile, this.profiles.values()); held !== null; held = derivedPairCollision(profile, this.profiles.values())) {
-        const holder = this.profiles.get(held.holder);
-        if (holder === undefined || !this.unregister(held.holder)) break;
-        this.heldBack.set(holder.id, holder);
-        process.stderr.write(`[lynox:api-store] Skipping profile "${held.holder}": ${clashOf(held)} ${notRegisteredAtBoot(held.holder)}\n`);
+    // Token-slot admission: no vault name two stored profiles meet on in a way that cannot stand
+    // (`slotConflicts`). A save refuses the profile that arrives, never the one already stored,
+    // measured against every stored profile; a conflict its registered version already had is not
+    // new, so the save that keeps it (an exchange, a revocation, an edit) goes through. Only the
+    // registered version counts there: a held-back one was held back for exactly such a conflict.
+    // The boot asks every stored profile (`_admissionSet`), so who is registered depends on the
+    // pair, not on which of the two was read first. Two stored files with one id are the exception:
+    // the later one read is the one weighed, so there the order still decides. Another stored
+    // profile whose names cannot be read refuses no save here: it names nothing this save could be
+    // measured against, and it was held back on its own account. The arriving profile being
+    // unreadable still refuses it.
+    if (mode === 'save') {
+      const prev = this.profiles.get(profile.id);
+      const key = (c: SlotConflict): string => JSON.stringify([c.name, c.loser]);
+      for (const other of this.knownProfiles()) {
+        if (other.id === profile.id) continue;
+        const had = new Set(prev === undefined ? [] : slotConflicts(prev, other).filter((c) => c.name !== null).map(key));
+        const fresh = slotConflicts(profile, other).find((c) => !(c.name === null && c.loser === 'y') && !had.has(key(c)));
+        if (fresh !== undefined) {
+          return `${fresh.why} Nothing was saved. Save "${profile.id}" under a different id or with a vault name of its own, or ask the user what to do; "${other.id}" is not this save's to change or delete.`;
+        }
       }
+    } else {
+      const lost = this._lossAgainst(profile, this._admissionSet());
+      if (lost !== null) return lost;
     }
-
     const hostname = hostOf(profile);
     const previous = this.profiles.get(profile.id);
     // One profile per host, because `http_request` has no profile parameter: the
@@ -1818,6 +1825,7 @@ export class ApiStore {
         return `api_profile "${holder}" already maps to ${hostname}. http_request picks the profile by hostname, so a second profile on the same host would make it ambiguous which credential a request carries. Nothing was saved. Ask the user whether "${holder}" should be updated instead.`;
       }
     }
+    if (dryRun) return null;
 
     // Re-registering starts from a released host. That is what lets a profile
     // that MOVED stop holding its old host: without it the old host kept pointing
@@ -1998,8 +2006,8 @@ export class ApiStore {
       // Back in 'load' mode: the profile was just deleted, so a 'save' admit would count it as
       // joining its own host and refuse it whenever a conflict the boot kept leaves another
       // profile there — dropping it from memory and leaving the other one sole holder.
-      // It unregisters no one: a save refuses a derived-pair clash in both directions, so no
-      // registered profile signs in with a name from `prev`'s pair.
+      // It unregisters no one: `prev` was registered beside every registered profile, and a save
+      // refuses the arriving profile on any token-slot conflict it did not already have.
       if (prev && this._admit(prev, 'load') !== null) this.heldBack.set(prev.id, prev);
       // A held-back profile whose corrected save failed is still stored as it was.
       if (!prev && heldBefore) this.heldBack.set(heldBefore.id, heldBefore);
@@ -2008,9 +2016,7 @@ export class ApiStore {
   }
 
   private _persist(profile: ApiProfile, apisDir: string | undefined, isNew: boolean): { ok: true; isNew: boolean } | { ok: false; reason: string } {
-    const other = this._otherKindAt(profile.id);
-    if (other !== null) return { ok: false, reason: `A ${other} connection already uses the id "${profile.id}". Save this API under another id.` };
-    const refusal = this._admit(profile, 'save');
+    const refusal = this._saveAdmit(profile, false);
     if (refusal !== null) return { ok: false, reason: refusal };
     if (this.connStore) {
       this._writeRow(profile);
@@ -2019,6 +2025,22 @@ export class ApiStore {
       writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
     }
     return { ok: true, isNew };
+  }
+
+  /**
+   * Why {@link save} would refuse `profile`, asked without saving or registering anything: the
+   * checks `save` itself runs, through the same code. `null` when it would be stored. For a
+   * caller that must do something irreversible only once the save is known to go through. What
+   * `save` adds to the record (the grant id and fingerprints) is none of what these checks read.
+   */
+  saveRefusal(profile: ApiProfile): string | null {
+    return this._saveAdmit(profile, true);
+  }
+
+  private _saveAdmit(profile: ApiProfile, dryRun: boolean): string | null {
+    const other = this._otherKindAt(profile.id);
+    if (other !== null) return `A ${other} connection already uses the id "${profile.id}". Save this API under another id.`;
+    return this._admit(profile, 'save', this.profiles.has(profile.id), dryRun);
   }
 
   /**
@@ -2129,6 +2151,36 @@ export class ApiStore {
   /** Get a profile by ID. */
   get(id: string): ApiProfile | undefined {
     return this.profiles.get(id);
+  }
+
+  /** The stored version of `id`: the registered one, else the one the boot held back. */
+  storedProfile(id: string): ApiProfile | undefined {
+    return this.profiles.get(id) ?? this.heldBack.get(id);
+  }
+
+  /**
+   * The stored profiles a load-mode admission is asked against: the running boot's whole set,
+   * or, outside a boot, every stored profile ({@link knownProfiles}).
+   */
+  private _admissionSet(): ApiProfile[] {
+    return this._bootSet === null ? this.knownProfiles() : [...this._bootSet.values()];
+  }
+
+  /** The boot's refusal of `profile` for a slot conflict it loses against one of `set`, or null. */
+  private _lossAgainst(profile: ApiProfile, set: Iterable<ApiProfile>): string | null {
+    for (const other of set) {
+      if (other.id === profile.id) continue;
+      const lost = slotConflicts(profile, other).find((c) => c.loser !== 'y');
+      if (lost !== undefined) return notRegisteredAtBoot(lost, profile.id, other.id);
+    }
+    return null;
+  }
+
+  /** Take a registered profile out of use, keep it as stored, and say why on the operator line. */
+  private _holdBack(profile: ApiProfile, why: string): void {
+    if (!this.unregister(profile.id)) return;
+    this.heldBack.set(profile.id, profile);
+    process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": ${why}\n`);
   }
 
   /**

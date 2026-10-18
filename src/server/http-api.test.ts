@@ -4359,7 +4359,9 @@ describe('LynoxHTTPApi', () => {
         custom_endpoint_ack: { accepted: true, hosts: ['api.bexio.com', 'auth.bexio.com'], redirect_hosts: ['auth.bexio.com'], accepted_at: '2026-10-08T00:00:00.000Z' },
         ...(author === undefined ? {} : { created_by: author }),
       });
-      for (const other of opts.others ?? []) store.register(other);
+      // Every `others` here names the connection's token slot: the admission holds it back now,
+      // still stored, and the checks read stored profiles.
+      for (const other of opts.others ?? []) expect(store.register(other)).toBe(false);
       mockGetApiStore.mockReturnValue(store);
       mockSecretResolve.mockImplementation((n: string) => (n === 'BOOKS_CLIENT_ID' ? 'client-id-stored' : n === 'BOOKS_CLIENT_SECRET' ? 'client-secret-stored' : null));
       const presets = await vi.importActual<typeof import('../core/oauth-presets.js')>('../core/oauth-presets.js');
@@ -15374,13 +15376,18 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   describe('a token slot named as the client credentials', () => {
     // `shop-api`'s exchanges wrote SHOP_MINTED: a token of that connection, which never goes to
     // a token endpoint as a client id or secret, this one's included.
+    // The admission no longer registers a profile that signs in with another's token beside it:
+    // the owner is registered as an older store kept it, while `knownProfiles` shows the admission
+    // no other profile. The callback's own check is the one under test.
     async function withOwner(oauthExtra: Record<string, unknown>): Promise<string> {
       const { cookie, store } = await arrange({ oauthExtra });
+      const unseen = vi.spyOn(store, 'knownProfiles').mockReturnValue([]);
       expect(store.register({
         id: 'shop-api', name: 'Shop', base_url: 'https://api.shop.example/v1', description: 'Shop',
         auth: { type: 'oauth2', oauth: { token_url: 'https://api.shop.example/oauth/token', client_id_key: 'SHOP_CID', client_secret_key: 'SHOP_CSECRET' } },
         oauth_grant: { written: [{ name: 'SHOP_MINTED', fp: 'fp-minted' }] },
       })).toBe(true);
+      unseen.mockRestore();
       mockExchangeToken.mockClear();
       return cookie;
     }
@@ -15554,14 +15561,17 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
       const { accessTokenKey } = await import('../core/api-store.js');
       const { cookie, store } = await arrange({ by: { tag: TAG, mandateId: MID } });
       store.register({ ...store.get(PROFILE)!, created_by: TAG });
-      // Set up by the owner while the mandate's human was on the provider's page.
-      store.register({
+      // Set up by the owner while the mandate's human was on the provider's page. The admission
+      // holds it back now; it is still stored, and the check reads stored profiles.
+      expect(store.register({
         id: 'crm-pat', name: 'CRM PAT', base_url: 'https://crm.example/v1', description: 'd',
         auth: { type: 'bearer', vault_keys: [accessTokenKey(PROFILE)] },
-      });
+      })).toBe(false);
+      expect(store.knownProfiles().map((p) => p.id)).toContain('crm-pat');
       mockExchangeToken.mockClear();
       const res = await complete(cookie);
       expect(res.status).toBe(409);
+      expect(await res.text()).toContain('can no longer be completed for the session that started it');
       expect(mockExchangeToken).not.toHaveBeenCalled();
       expect(mockSecretSet).not.toHaveBeenCalled();
     });
