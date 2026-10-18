@@ -31,6 +31,7 @@ import { accessTokenKey, ApiStore, type ApiProfile } from '../../core/api-store.
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { ExactClearance } from '../../core/exact-clearance.js';
 import { EngineDb } from '../../core/engine-db.js';
+import { BulkLedger } from '../../core/bulk-ledger.js';
 import { Containment } from '../../core/containment.js';
 import { createToolContext, type ToolContext } from '../../core/tool-context.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
@@ -244,6 +245,21 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
     expect(r.pass).toBeDefined();
     expect(minted.sawContained).toEqual([true]);
     expect(containedRows()).toEqual([{ container_kind: 'bulk_run', container_id: 'run-1', kind: 'api', connection_id: 'shop-acme' }]);
+    expect(skipSet).toEqual([]);
+  });
+
+  it('a run planned in a clean chat that then reads the store contains the run and leaves the chat clean', async () => {
+    // The rule is read at the run's insert: a contained planning chat passes its containment
+    // on, but what the run reads later does not flow back into the chat (its summary and its
+    // notifications carry counts and fixed text only), so the chat is not contained by it.
+    const run = new BulkLedger(engineDb).recordDryRun({
+      createdBy: 'chat-clean', planningThread: 'chat-clean', principal: OWNER_PRINCIPAL, targetSystem: 'workspace', scope: 'mem',
+      targets: [{ key: 'k0', before: { absent: false, value: 'v0' }, after: 'w0' }],
+    });
+    expect(containment.isContained({ bulkRunId: run.id })).toBe(false);
+    expect((await attach(run.id)).attached).toBe(true);
+    expect(containment.isContained({ bulkRunId: run.id })).toBe(true);
+    expect(containment.isContained({ threadId: 'chat-clean' })).toBe(false);
     expect(skipSet).toEqual([]);
   });
 
