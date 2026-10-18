@@ -196,7 +196,7 @@ export type ExactAttachResponse =
  * `true` does: `"true"`, `1`, a missing field or a malformed body are refusals.
  */
 export function isExactAttachCleared(body: unknown): boolean {
-  return typeof body === 'object' && body !== null && (body as { ok?: unknown }).ok === true;
+  return ownDataField(body, 'ok') === true;
 }
 
 /**
@@ -205,9 +205,20 @@ export function isExactAttachCleared(body: unknown): boolean {
  * not an object) is `null`, no statement, and must leave the engine's view as it was.
  */
 export function readExactHeld(body: unknown): boolean | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const value = (body as { exact_held?: unknown }).exact_held;
+  const value = ownDataField(body, 'exact_held');
   return typeof value === 'boolean' ? value : null;
+}
+
+/**
+ * The value of `key` when `body` is a plain (non-array) object that carries it as its
+ * OWN data property; otherwise `undefined`. A parsed JSON body always qualifies; what is
+ * refused is an inherited value (a polluted `Object.prototype`) or a getter, so neither
+ * can turn a refusal into a clearance.
+ */
+function ownDataField(body: unknown, key: string): unknown {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(body, key);
+  return descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
 }
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===

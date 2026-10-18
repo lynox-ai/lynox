@@ -46,6 +46,27 @@ describe('isExactAttachCleared', () => {
   });
 });
 
+describe('only an own data property speaks', () => {
+  it('ignores an inherited value, a getter, and an array carrying the field', () => {
+    const inherited = Object.create({ ok: true, exact_held: false }) as object;
+    const getters = {
+      get ok() { return true; },
+      get exact_held() { return false; },
+    };
+    const array = Object.assign([], { ok: true, exact_held: false });
+    for (const body of [inherited, getters, array]) {
+      expect(isExactAttachCleared(body)).toBe(false);
+      expect(readExactHeld(body)).toBeNull();
+    }
+  });
+
+  it('reads a parsed body, including one with a "__proto__" key', () => {
+    expect(isExactAttachCleared(JSON.parse('{"ok":true}'))).toBe(true);
+    expect(readExactHeld(JSON.parse('{"exact_held":false}'))).toBe(false);
+    expect(isExactAttachCleared(JSON.parse('{"__proto__":{"ok":true}}'))).toBe(false);
+  });
+});
+
 describe('readExactHeld', () => {
   it('reads both booleans as statements', () => {
     expect(readExactHeld({ exact_held: true })).toBe(true);
