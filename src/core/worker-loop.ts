@@ -1651,7 +1651,8 @@ export class WorkerLoop {
     const clientFor = external ? await this.bulkClientFactory() : (): null => null;
     const { namedTarget, newCorrelationId } = await import('./audit-log.js');
     const { externalHostOf } = await import('./bulk-ledger.js');
-    const trailTools = { namedTarget, newCorrelationId, externalHostOf };
+    const { tokenEndpointHost } = await import('./profile-secret-view.js');
+    const trailTools = { namedTarget, newCorrelationId, externalHostOf, tokenEndpointHost };
     // Read only for an external run, like the client: a local run writes no trail.
     const auditLog = external ? this.engine.getAuditLog() : null;
     const apiStore = external ? this.engine.getApiStore() : null;
@@ -3039,25 +3040,22 @@ function bulkReadRecorder(
 export function bulkRunTrail(
   run: import('./bulk-ledger.js').BulkRunForApply,
   auditLog: import('./audit-log.js').AuditLog | null,
-  apiStore: { getByHostname(host: string): { auth?: { oauth?: { token_url?: string | undefined } | undefined } | undefined } | undefined } | null,
+  apiStore: { getByHostname(host: string): import('./api-store.js').ApiProfile | undefined } | null,
   tools: {
     namedTarget: typeof import('./audit-log.js').namedTarget;
     newCorrelationId: typeof import('./audit-log.js').newCorrelationId;
     externalHostOf: typeof import('./bulk-ledger.js').externalHostOf;
+    tokenEndpointHost: typeof import('./profile-secret-view.js').tokenEndpointHost;
   },
 ): import('./bulk-apply.js').BulkRunTrail | null {
   const planner = run.delegatedPlanner;
   const host = tools.externalHostOf(run.targetSystem);
   if (planner === null || isOwnerPrincipal(planner) || host === null) return null;
-  // A run's request renews an expiring OAuth token at the profile's token URL
-  // (`attachStoredCredential`): that host is named before the call too.
-  const tokenUrl = apiStore?.getByHostname(host)?.auth?.oauth?.token_url;
-  let tokenHost: string | undefined;
-  try {
-    tokenHost = tokenUrl === undefined ? undefined : new URL(tokenUrl).hostname;
-  } catch {
-    tokenHost = 'unreadable';
-  }
+  // A run's request renews an expiring OAuth token of the host's profile
+  // (`attachStoredCredential`, which picks the profile by this hostname too): the host it is
+  // renewed at is named before the call, resolved as the renewal resolves it.
+  const profile = apiStore?.getByHostname(host);
+  const tokenHost = profile === undefined ? undefined : tools.tokenEndpointHost(profile);
   const named: ReadonlyArray<readonly [string, string | number | undefined]> = [['host', host], ['token_host', tokenHost], ['approved_by', 'owner']];
   const action = run.kind === 'undo' ? 'bulk:undo' : 'bulk:apply';
   const correlationId = tools.newCorrelationId();

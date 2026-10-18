@@ -172,7 +172,10 @@ export async function runBulkEffect(runId: string, effect: BulkEffect, deps: Bul
   } finally {
     const o = opened as { trail: BulkRunTrail; applied: number; failed: number } | null;
     if (o !== null) {
-      const after = deps.ledger.getRunForApply(runId);
+      // The counts are read here, where the ledger may already be failing: a read that throws
+      // must neither drop the row nor turn a finished call into an error.
+      let after: { applied: number; failed: number } | undefined;
+      try { after = deps.ledger.getRunForApply(runId) ?? undefined; } catch { after = undefined; }
       o.trail.end(outcome?.status ?? 'error', (after?.applied ?? o.applied) - o.applied, (after?.failed ?? o.failed) - o.failed);
     }
   }

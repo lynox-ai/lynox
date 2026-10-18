@@ -1494,6 +1494,33 @@ describe('the trail of one call of a run', () => {
     expect(second.events, 'its own pair, with the two it wrote').toEqual(['begin', 'end done 2 0']);
   });
 
+  it('writes the row after and keeps the outcome when the ledger cannot be read for the counts', async () => {
+    // The finally's read of the counts is the effect's last read of the run: count the reads of
+    // a clean call first, then make exactly that one throw on a second, identical call.
+    const countReads = async (throwAt: number | null): Promise<{ reads: number; out: Awaited<ReturnType<typeof runBulkEffect>>; t: ReturnType<typeof trail> }> => {
+      const { runId, initial } = recordMemoryRun(1);
+      approve(runId);
+      let reads = 0;
+      const proxied = new Proxy(ledger, {
+        get(target, prop, receiver) {
+          if (prop === 'getRunForApply') {
+            return (id: string) => { reads++; if (reads === throwAt) throw new Error('database is locked'); return target.getRunForApply(id); };
+          }
+          const v: unknown = Reflect.get(target, prop, receiver);
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      const t = trail();
+      const out = await runBulkEffect(runId, 'bulk_apply', { ...effectDeps(memory(initial).writer), ledger: proxied, trailFor: () => t.trail });
+      return { reads, out, t };
+    };
+    const clean = await countReads(null);
+    expect(clean.t.events).toEqual(['begin', 'end done 1 0']);
+    const failing = await countReads(clean.reads);
+    expect(failing.out.status, 'a finished call stays finished').toBe('done');
+    expect(failing.t.events, 'the row after is written, with the counts it could not read as nothing').toEqual(['begin', 'end done 0 0']);
+  });
+
   it('control: with no trail the same run writes as before', async () => {
     const { runId, initial } = recordMemoryRun(2);
     approve(runId);

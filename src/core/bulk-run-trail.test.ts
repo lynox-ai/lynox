@@ -3,10 +3,12 @@ import { bulkRunTrail } from './worker-loop.js';
 import { namedTarget, newCorrelationId, type AuditEntry } from './audit-log.js';
 import { externalHostOf, type BulkRunForApply } from './bulk-ledger.js';
 import { OWNER_PRINCIPAL, type RequestPrincipal } from './request-principal.js';
+import { tokenEndpointHost } from './profile-secret-view.js';
+import type { ApiProfile } from './api-store.js';
 
 // PRD customer-granted-operator-access §3.9: a bulk run a delegated session planned writes outside
 // the instance as the owner's, on the owner's approval; the trail names who planned it.
-const tools = { namedTarget, newCorrelationId, externalHostOf };
+const tools = { namedTarget, newCorrelationId, externalHostOf, tokenEndpointHost };
 const HELPER: RequestPrincipal = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'grant-1' };
 
 function run(over: Partial<BulkRunForApply> = {}): BulkRunForApply {
@@ -49,14 +51,19 @@ describe('bulkRunTrail', () => {
     expect(l.rows[0]!.action).toBe('bulk:undo');
   });
 
-  it('names the host a token for the run\'s host is renewed at, and never the token URL\'s path', () => {
+  // The host is resolved as the renewal resolves it (`attachStoredCredential` → `fetch_token`):
+  // a built-in provider's derived endpoint, not a stored `token_url`, which is display only there.
+  const oauth = (o: Record<string, unknown>): ApiProfile =>
+    ({ id: 'shop', name: 'Shop', base_url: 'https://shop.example.com/', auth: { type: 'oauth2', oauth: o } }) as unknown as ApiProfile;
+  it.each([
+    ['a token URL of its own', oauth({ token_url: 'https://auth.example.com/oauth/token?client=x' }), 'auth.example.com'],
+    ['a built-in provider, no token URL stored', oauth({ preset_id: 'bexio' }), 'auth.bexio.com'],
+    ['a built-in provider with another token URL written in', oauth({ preset_id: 'bexio', token_url: 'https://elsewhere.example.com/token' }), 'auth.bexio.com'],
+    ['a token URL that is not one', oauth({ token_url: 'not a url' }), undefined],
+  ] as const)('names the host a token is renewed at, for %s, and never the path', (_case, profile, tokenHost) => {
     const l = log();
-    const store = { getByHostname: (h: string) => (h === 'shop.example.com' ? { auth: { oauth: { token_url: 'https://auth.example.com/oauth/token?client=x' } } } : undefined) };
-    bulkRunTrail(run(), l as never, store, tools)!.begin();
-    expect(l.rows[0]!.target).toBe('host=shop.example.com token_host=auth.example.com approved_by=owner');
-    const bad = { getByHostname: () => ({ auth: { oauth: { token_url: 'not a url' } } }) };
-    bulkRunTrail(run(), l as never, bad, tools)!.begin();
-    expect(l.rows[1]!.target).toBe('host=shop.example.com token_host=unreadable approved_by=owner');
+    bulkRunTrail(run(), l as never, { getByHostname: (h: string) => (h === 'shop.example.com' ? profile : undefined) }, tools)!.begin();
+    expect(l.rows[0]!.target).toBe(`host=shop.example.com${tokenHost === undefined ? '' : ` token_host=${tokenHost}`} approved_by=owner`);
   });
 
   it('throws from the row before when it cannot be written; the row after never throws', () => {
