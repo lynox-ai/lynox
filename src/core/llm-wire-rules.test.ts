@@ -295,7 +295,9 @@ function messagesUrlHost(line: string, at: number, source: string): string | nul
   if (open < 0) return null;
   const head = line.slice(open + 1, at);
   let base: string | null;
-  const ref = /^\$\{(\w+)\}/.exec(head);
+  // `${NAME}` counts only when the host cannot continue after it: `/` or the end of the head.
+  // `${GO}.evil.com`, `${GO}@other` and `${GO}${more}` stay unresolved.
+  const ref = /^\$\{(\w+)\}(?=\/|$)/.exec(head);
   if (ref !== null) base = resolveConst(ref[1]!, source);
   else if (/^https?:\/\//.test(head)) {
     const origin = /^https?:\/\/[^/]*/.exec(head)![0];
@@ -337,6 +339,13 @@ describe('a /messages URL on a non-LLM host is skipped only when its host resolv
   });
   it('still catches a line with a Graph URL and a second, non-Graph one', () => {
     expect(skipsAsNonLlmHost('a(`${ME}/messages`); b(`${baseUrl}/messages`, {', `${graph}const baseUrl = 'https://api.anthropic.com/v1';\n`)).toBe(false);
+  });
+  it('reads the host only from a constant the URL continues with a path after', () => {
+    const origin = "const GO = 'https://graph.microsoft.com';\n";
+    expect(skipsAsNonLlmHost('get(`${GO}/v1.0/me/messages`)', origin)).toBe(true);
+    expect(skipsAsNonLlmHost('fetch(`${GO}.evil.com/v1/messages`, {', origin)).toBe(false);
+    expect(skipsAsNonLlmHost('fetch(`${GO}@api.anthropic.com/v1/messages`, {', origin)).toBe(false);
+    expect(skipsAsNonLlmHost('fetch(`${GO}${suffix}/v1/messages`, {', origin)).toBe(false);
   });
   it('still catches a host that only starts like a listed one', () => {
     expect(skipsAsNonLlmHost('fetch(`https://graph.microsoft.com.example.net/v1/messages`, {', '')).toBe(false);
