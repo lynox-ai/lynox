@@ -11,7 +11,7 @@ import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
 import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
-import { newCorrelationId } from '../../core/audit-log.js';
+import { delegatedRedirects, httpTarget, newCorrelationId, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
 import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
@@ -315,6 +315,12 @@ export async function fetchWithValidatedRedirects(
   // paths to the origin the agent trusts, which it will then call WITH the
   // credentials that origin's api_profile carries. `response.url` cannot serve
   // here: fetchPinned constructs its Responses, so that field is always empty.
+  //
+  // Called for every redirect hop the guards above let through, with the method it is about to
+  // be requested with, before it is requested. What it throws stops the call there: a delegated
+  // session's reader records each hop it follows as a read of its own, and does not follow a
+  // hop it cannot record (`outwardReadRecorder`).
+  onRedirect?: ((nextUrl: string, method: string) => void) | undefined,
 ): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
   let currentUrl = url;
   // Every host the request reached, the final one included: an answer counts as the approved
@@ -385,6 +391,7 @@ export async function fetchWithValidatedRedirects(
       }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
+    onRedirect?.(nextUrl, method);
     currentUrl = nextUrl;
   }
 
@@ -2320,6 +2327,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
     return method === 'GET' || method === 'HEAD' ? null : method;
   },
+  // The same method read the other way round: a GET or HEAD reads at the URL, host and path.
+  outwardRead: (input) => {
+    const method = effectiveWriteMethod(input.method ?? 'GET', input.headers ?? {}, input.url, gateBodyReadings(input.body, input.headers ?? {})) ?? 'OVERRIDE';
+    return method === 'GET' || method === 'HEAD' ? httpTarget(method, input.url) : null;
+  },
   definition: {
     name: 'http_request',
     // The cap is stated HERE because the model cannot plan around a limit it only
@@ -3044,7 +3056,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             }
           : undefined;
       const { response, finalUrl: finalRequestUrl, hosts: answeredHosts } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot, (v) => agent.secretStore?.containsSecret(v) ?? false, delegatedRedirects(outwardReadRecorder(agent, 'http_request:redirect'))),
         wallTimeout,
       ]);
       // The hosts that answered, for the answer's untrusted marker: every hop on one host lets
@@ -3361,6 +3373,9 @@ async function describeConnectedWrite(
   const context = presetId === undefined ? undefined : PRESET_WRITE_CONTEXT[presetId];
   if (context === undefined) return null;
   const origin = new URL(url).origin;
+  // A delegated session's reading is a read of its own, recorded before it is sent: its
+  // answer reaches the person through the question (PRD customer-granted-operator-access §3.9).
+  const recordRead = outwardReadRecorder(deps.agent, 'http_request:read-before-write');
   const read: PresetRead = async (path) => {
     // Each reading is a request of this session, charged against the same budget.
     const counters = deps.agent.sessionCounters;
@@ -3372,6 +3387,13 @@ async function describeConnectedWrite(
     const headers: Record<string, string> = { accept: 'application/json' };
     const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent, false);
     if (auth.refusal) throw new WriteContextRefused(auth.refusal);
+    if (recordRead !== null) {
+      try {
+        recordRead(httpTarget('GET', readUrl));
+      } catch {
+        throw new WriteContextRefused(`reading ${path} cannot be recorded in the instance's log right now`);
+      }
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), WRITE_CONTEXT_READ_TIMEOUT_MS);
     try {

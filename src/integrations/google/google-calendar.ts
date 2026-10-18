@@ -8,6 +8,7 @@ import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv, joinPrompts } from '../../core/prompt-value.js';
 import { googleFetch } from '../../core/connector-egress.js';
 import { isInputRequired } from '../../core/input-required.js';
+import { namedTarget } from '../../core/audit-log.js';
 
 // === Types ===
 
@@ -140,6 +141,12 @@ const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event',
 export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<CalendarInput> {
   return {
     outwardWrite: (input) => (CALENDAR_WRITE_ACTIONS.has(input.action) ? input.action : null),
+    // Which calendars were read, never what they hold.
+    outwardRead: (input) => {
+      if (input.action === 'list_events') return `list_events ${namedTarget([['calendar', input.calendar_id ?? 'primary']])}`;
+      if (input.action === 'free_busy') return `free_busy ${namedTarget([['calendars', (input.calendars ?? []).join(',')]])}`.trimEnd();
+      return null;
+    },
     destructive: {
       mode: 'external',
       check: (input) => {

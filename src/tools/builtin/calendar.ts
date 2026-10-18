@@ -23,6 +23,7 @@ import { parseIcsEvents, DEFAULT_MAX_EVENTS, type CalendarEvent } from '../../in
 import { fetchIcsFeed } from '../../integrations/calendar/fetch.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { namedTarget, outwardReadRecorder } from '../../core/audit-log.js';
 
 /** Vault-name prefix for a calendar feed. The label after it is what the operator sees. */
 export const CALENDAR_FEED_PREFIX = 'CALENDAR_FEED_';
@@ -125,6 +126,9 @@ function renderWhen(e: CalendarEvent): string {
 }
 
 export const calendarReadTool: ToolEntry<CalendarReadInput> = {
+  // Which calendar by its label, never its address: the address is the credential. Each feed's
+  // host is recorded as it is read.
+  outwardRead: (input) => namedTarget([['calendar', input.calendar ?? 'all']]),
   definition: {
     name: 'calendar_read',
     description:
@@ -181,10 +185,11 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
     // Concurrently: each feed costs up to a 20 s timeout, and reading two calendars is a normal
     // setup. `allSettled` because one unreachable feed must not lose the other's appointments —
     // that is the same reason the failures are reported instead of thrown.
+    const record = outwardReadRecorder(agent, 'calendar_read:feed');
     const results = await Promise.allSettled(selected.map(async label => {
       const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);
       if (!url) throw new Error('no address stored');
-      const feed = await fetchIcsFeed(url, agent.toolContext);
+      const feed = await fetchIcsFeed(url, agent.toolContext, record ? (host) => { record(namedTarget([['calendar', label], ['host', host]])); } : undefined);
       const parsed = parseIcsEvents(feed.ics, { from, to, maxEvents: DEFAULT_MAX_EVENTS });
       return { label, feed, parsed };
     }));

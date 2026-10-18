@@ -111,7 +111,7 @@ import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
 import { OWNER_PRINCIPAL, isOwnerPrincipal } from './request-principal.js';
-import { AUDIT_UNAVAILABLE, httpTarget, newCorrelationId } from './audit-log.js';
+import { AUDIT_UNAVAILABLE, AUDIT_UNAVAILABLE_READ, httpTarget, newCorrelationId, outwardReadRecorder } from './audit-log.js';
 import type { AuditLog, AuditPhase } from './audit-log.js';
 import type { RequestPrincipal } from './request-principal.js';
 import { toolLockFor } from './mandate-tool-lock.js';
@@ -4098,6 +4098,27 @@ export class Agent implements IAgent {
   }
 
   /**
+   * The actor trail's `read` row for a mandate's call that reads outside the instance
+   * (`ToolEntry.outwardRead`). `true` when the call may run: the owner's call, a call that
+   * reads nothing outside, or one whose row was written. `false` when the row cannot be
+   * written — no trail store, or the insert threw — and the call must not run. Like the
+   * write's row it is built from `tc.input`, before any secret was resolved into it, and it
+   * names the target only: never what came back, never a query or a search text.
+   */
+  private _recordOutwardRead(tc: BetaToolUseBlock, tool: ToolEntry): boolean {
+    const record = outwardReadRecorder(this, `${tc.name}:read`);
+    if (record === null) return true;
+    const target = tool.outwardRead ? tool.outwardRead(tc.input as never) : null;
+    if (target === null) return true;
+    try {
+      record(target);
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * The actor trail's `attempt` row for a mandate's outward write (`ToolEntry.outwardWrite`),
    * or `null` when there is nothing to record: the owner's call, or a call that writes
    * nothing outside. Only the owner is exempt, so a principal kind added later is recorded
@@ -4418,6 +4439,12 @@ export class Agent implements IAgent {
     // not run unrecorded (PRD customer-granted-operator-access §3.13 "Verbundene Konten").
     // After every gate the dispatch itself holds; the gates inside the handler come later,
     // which is why the outcome is a second row and not part of this one.
+    // What it reads outside is recorded the same way, first: a write that reads before it
+    // writes (a reply reads the mail it answers) gets both rows, and a call refused here
+    // leaves no write attempt behind.
+    if (!this._recordOutwardRead(tc, tool)) {
+      return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE_READ, is_error: true };
+    }
     const trail = this._beginOutwardTrail(tc, tool);
     if (trail === 'refused') {
       return { type: 'tool_result', tool_use_id: tc.id, content: AUDIT_UNAVAILABLE, is_error: true };

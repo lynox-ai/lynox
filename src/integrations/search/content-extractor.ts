@@ -53,6 +53,7 @@ export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefine
 async function fetchWithRedirects(
   url: string,
   ctx?: ToolContext | undefined,
+  onRedirect?: ((nextUrl: string, method: string) => void) | undefined,
 ): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
@@ -71,6 +72,8 @@ async function fetchWithRedirects(
     if (!location) throw new Error(`Redirect without location header (${response.status})`);
     if (i === MAX_REDIRECTS) throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
     currentUrl = new URL(location, currentUrl).toString();
+    // Before the hop is requested: what it throws stops the read (`delegatedRedirects`).
+    onRedirect?.(currentUrl, 'GET');
   }
   throw new Error('Redirect handling failed');
 }
@@ -143,10 +146,15 @@ function isMarkupContentType(contentType: string): boolean {
   return isHtmlContentType(ct) || ct.includes('html') || ct.includes('xml');
 }
 
-export async function extractContent(url: string, maxChars?: number, ctx?: ToolContext | undefined): Promise<ExtractedContent> {
+export async function extractContent(
+  url: string,
+  maxChars?: number,
+  ctx?: ToolContext | undefined,
+  onRedirect?: ((nextUrl: string, method: string) => void) | undefined,
+): Promise<ExtractedContent> {
   const limit = maxChars ?? DEFAULT_MAX_CHARS;
 
-  const { response, finalUrl } = await fetchWithRedirects(url, ctx);
+  const { response, finalUrl } = await fetchWithRedirects(url, ctx, onRedirect);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${response.statusText}`);
   }

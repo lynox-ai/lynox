@@ -15,6 +15,7 @@ import { MailError } from '../provider.js';
 import { cleanBody } from '../triage/body-clean.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
 import { oneBlockLine } from '../block-line.js';
+import { namedTarget } from '../../../core/audit-log.js';
 
 interface MailReadInput {
   account?: string | undefined;
@@ -31,6 +32,8 @@ interface MailReadInput {
 
 export function createMailReadTool(registry: MailRegistry): ToolEntry<MailReadInput> {
   return {
+    // Which message of which mailbox, never what it says.
+    outwardRead: (input) => namedTarget([['account', input.account], ['folder', input.folder], ['uid', input.uid]]),
     definition: {
       name: 'mail_read',
       description:

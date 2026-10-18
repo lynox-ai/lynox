@@ -15,7 +15,7 @@
  */
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import type { RequestPrincipal } from './request-principal.js';
+import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js';
 import { oneLineForLog } from './profile-value-shape.js';
 import { maskSecretPatterns } from './secret-store.js';
 
@@ -189,5 +189,70 @@ export function requestPathTarget(pathname: string, identifiers: ReadonlyArray<r
   return query === '' ? path : `${path}?${query}`;
 }
 
+/**
+ * What a read row names as its target when the target is not a URL: an account, a folder, a
+ * document id, written as `name=value` pairs in the order given, an absent value left out.
+ * Each value is the actor's text, so it is masked for secret shapes and escaped where it could
+ * shape the row — a value cannot add a pair or pose as a query. Only identifiers belong here,
+ * never content and never a search text.
+ */
+export function namedTarget(pairs: ReadonlyArray<readonly [string, string | number | undefined]>): string {
+  return pairs
+    .filter((p): p is readonly [string, string | number] => p[1] !== undefined && p[1] !== '')
+    .map(([name, value]) => `${name}=${escapeForRow(maskSecretPatterns(String(value), { includeGeneric: true }))}`)
+    .join(' ');
+}
+
 /** The fixed text a mandate's act gets when its trail cannot be written. */
 export const AUDIT_UNAVAILABLE = 'Refused: this act cannot be recorded in the instance\'s log right now, and in this session nothing that writes outside the instance runs unrecorded. Nothing was sent.';
+
+/** The fixed text a mandate's read gets when its row cannot be written. */
+export const AUDIT_UNAVAILABLE_READ = 'Refused: this read cannot be recorded in the instance\'s log right now, and in this session nothing outside the instance is read unrecorded. Nothing was read.';
+
+/** Thrown by an outward-read recorder whose row could not be written: the read must not happen. */
+export class OutwardReadUnrecorded extends Error {
+  constructor() { super(AUDIT_UNAVAILABLE_READ); this.name = 'OutwardReadUnrecorded'; }
+}
+
+/**
+ * Records a read outside the instance in the actor trail as a `read` row, for a principal
+ * that is not the owner (PRD customer-granted-operator-access §3.9). `null` for the owner,
+ * whose reads leave no row. The recorder takes the target — host and path, an action,
+ * never content, never a query — and throws `OutwardReadUnrecorded` when the row cannot be
+ * written, so the read it stands before does not happen.
+ */
+export function outwardReadRecorder(
+  by: { readonly principal: RequestPrincipal; readonly currentRunId?: string | undefined; readonly toolContext?: { readonly auditLog: AuditLog | null } | undefined },
+  action: string,
+): ((target: string) => void) | null {
+  if (isOwnerPrincipal(by.principal)) return null;
+  // Who reads and in which run are fixed now: a session resets `principal` per run.
+  const principal = by.principal;
+  const runId = by.currentRunId;
+  const log = by.toolContext?.auditLog ?? null;
+  return (target) => {
+    if (log === null) throw new OutwardReadUnrecorded();
+    try {
+      log.record({ principal, correlationId: newCorrelationId(), action, target, phase: 'read', runId });
+    } catch {
+      throw new OutwardReadUnrecorded();
+    }
+  };
+}
+
+/**
+ * The `onRedirect` of a delegated session's call: each hop it follows is a read of its own,
+ * recorded as one before it is requested (PRD customer-granted-operator-access §3.9). A hop
+ * that keeps a write method is not followed in such a session — a 307/308 means the write
+ * did not happen where it was asked, and the session writes only where its write's row
+ * points. `undefined` for the owner, whose hops are not recorded.
+ */
+export function delegatedRedirects(record: ((target: string) => void) | null): ((nextUrl: string, method: string) => void) | undefined {
+  if (record === null) return undefined;
+  return (nextUrl, method) => {
+    if (method !== 'GET' && method !== 'HEAD') {
+      throw new Error(`Blocked: a redirect that keeps the ${method} is not followed in a delegated session. Nothing was written at ${new URL(nextUrl).hostname}.`);
+    }
+    record(httpTarget(method, nextUrl));
+  };
+}
