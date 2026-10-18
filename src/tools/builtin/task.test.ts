@@ -1050,7 +1050,7 @@ describe('Task Tools', () => {
       expect(halted).toContain('last run HALTED AS PLANNED, waiting for the owner to continue it');
       expect(halted).not.toContain('FAILED');
       const interrupted = triggerDetailLine({ last_run_status: 'interrupted', last_run_result: 'The engine stopped while this run was in progress.' });
-      expect(interrupted).toContain('last run INTERRUPTED (the engine stopped mid-run; not run again)');
+      expect(interrupted).toContain('last run INTERRUPTED (the engine stopped mid-run; it was not resumed)');
       expect(interrupted).not.toContain('FAILED');
       // A word the table does not know still reads FAILED: the fallback errs loud.
       expect(triggerDetailLine({ last_run_status: 'timeout', last_run_result: 'x' })).toContain('last run FAILED');

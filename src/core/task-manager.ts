@@ -928,7 +928,7 @@ export class TaskManager {
    * than this one and is filed as its own. No migration.
    *
    * `'halted'` is a run that stopped where its approval told it to — a bulk run at its
-   * approved maximum, or at the one target it may write before its probe holds. It is
+   * approved maximum, with no failed write. It is
    * scheduled exactly like a stop (no retry, a one-shot is `completed`, a cron keeps its
    * status) for the same reason: the run did what was asked and waits for the owner, and
    * the owner's resume re-arms the trigger. Recorded as `failed`, it was a failure the owner

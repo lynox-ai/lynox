@@ -1607,6 +1607,9 @@ describe('an unmeasured write form', () => {
       const out = await runBulkEffect(wide, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(client({ contract: mintBulkContract(HOST, [woo('3'), woo('4')]) })) });
       expect(out.status).toBe('halted');
       expect(ledger.getStatus(wide)!.haltReason).toBe(BULK_HALT_REASONS.probeRequired);
+      // Approved for two, held to one because the probe stopped holding: not the approval's
+      // bound, so not a planned halt.
+      expect(out.planned).toBeUndefined();
       expect([s.items.get(`${WOO_KIND}3`)!['price'], s.items.get(`${WOO_KIND}4`)!['price']].sort()).toEqual(['12.00', '15.00']);
     } finally {
       restore();

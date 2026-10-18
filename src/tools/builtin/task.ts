@@ -52,7 +52,7 @@ const FAILURE_REASON_CHARS = 300;
 const ENDED_LABEL: ReadonlyMap<string, string> = new Map([
   ['stopped', 'STOPPED BY ITS OWNER'],
   ['halted', 'HALTED AS PLANNED, waiting for the owner to continue it'],
-  ['interrupted', 'INTERRUPTED (the engine stopped mid-run; not run again)'],
+  ['interrupted', 'INTERRUPTED (the engine stopped mid-run; it was not resumed)'],
 ]);
 
 /** How much of the stored parameter set is rendered. Shorter than the reason:

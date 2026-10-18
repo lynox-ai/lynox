@@ -404,7 +404,11 @@ describe('approval checks (§7 g)', () => {
     approve(runId, { maxTargets: 3 });
     const mem = memory(initial, new Set(['k000']));
     const { writer, writes } = counting(mem.writer);
-    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('halted');
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(out.status).toBe('halted');
+    // Under the failure thresholds, yet a write failed: not the planned halt, a failure the
+    // owner must see.
+    expect(out.planned).toBeUndefined();
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
     expect([...writes.keys()]).toEqual(['k000', 'k001', 'k002']);
   });
