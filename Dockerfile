@@ -162,9 +162,9 @@ RUN ldconfig
 # packages from it. Without it a scan reports zero OS packages, which reads like a
 # clean image and is a blind one. The tools go; the record of what is installed stays.
 # Perl is removed through dpkg first, so the database no longer lists it. (It still
-# lists apt, dpkg and bash, whose files the chain below deletes: a scan then reports
-# packages that are gone, which fails a release, not passes it.) Its own RUN, because
-# the chain below ends in `|| true`.
+# lists apt, dpkg and bash, whose binaries the chain below deletes: a stale entry can
+# only add findings, so it errs toward failing a release, never toward passing one.)
+# Its own RUN, because the chain below ends in `|| true`.
 RUN dpkg --purge --force-remove-essential --force-depends perl-base
 RUN \
     rm -rf /usr/bin/apt-get /usr/bin/apt /usr/bin/dpkg /usr/bin/dpkg-* \
