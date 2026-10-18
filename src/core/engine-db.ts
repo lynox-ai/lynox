@@ -1184,14 +1184,25 @@ const MIGRATIONS: string[] = [
      first_ok_at TEXT NOT NULL
    );`,
 
-  // v39: which containers (a chat thread, a bulk run) a store connection's credential was
+  // v39: whether a bulk target failed in any pass of its run (`failed_once`, 1 once it has).
+  // `targets_failed` counts one pass and a resume sets it back; this is never set back, so a
+  // page can show how many targets failed over all passes before the owner lets the run go on.
+  // A run approved before this version may have had passes nobody recorded: its targets keep
+  // NULL, and the status then reports no total rather than one made up. A run not yet approved
+  // has written nothing and starts at 0, like a new one.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (39);
+   ALTER TABLE bulk_targets ADD COLUMN failed_once INTEGER DEFAULT 0;
+   UPDATE bulk_targets SET failed_once = NULL
+     WHERE run_id IN (SELECT id FROM bulk_runs WHERE approved_at IS NOT NULL);`,
+
+  // v40: which containers (a chat thread, a bulk run) a store connection's credential was
   // attached for (`containment.ts`). One row per container and connection, written before the
   // request it governs and never changed: the trigger refuses every UPDATE, so `first_at` is
   // the first attach's. Nothing in the code deletes a row; only the owner's erasure empties the
   // table (`deleteAllData` enumerates every table), and the threads and runs go with it then.
   // ⚠ `container_id` is a soft reference: threads live in history.db, and a bulk run's row is
   // written before its `bulk_runs` row in the same transaction.
-  `INSERT OR IGNORE INTO schema_version (version) VALUES (39);
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (40);
    CREATE TABLE IF NOT EXISTS contained (
      container_kind TEXT NOT NULL CHECK (container_kind IN ('thread', 'bulk_run')),
      container_id   TEXT NOT NULL,

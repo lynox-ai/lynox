@@ -1,5 +1,5 @@
 /**
- * The containment record (`containment.ts`, engine.db v39): its table on a fresh and on an
+ * The containment record (`containment.ts`, engine.db v40): its table on a fresh and on an
  * upgraded database, written once and never changed, read fail-closed; a bulk run contained in
  * the transaction that inserts it, from its planning chat or from the run it undoes; and the
  * memory guards and the end-of-turn capture that read it.
@@ -42,24 +42,24 @@ afterEach(() => {
 const rows = (db: Database.Database = engineDb.getDb()): { container_kind: string; container_id: string; kind: string; connection_id: string }[] =>
   db.prepare('SELECT container_kind, container_id, kind, connection_id FROM contained ORDER BY container_kind, container_id, connection_id').all() as never;
 
-describe('the contained table (v39)', () => {
+describe('the contained table (v40)', () => {
   it('exists on a fresh database', () => {
     expect(rows()).toEqual([]);
     containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
     expect(rows()).toEqual([{ container_kind: 'thread', container_id: 't1', kind: 'api', connection_id: 'shop-acme' }]);
   });
 
-  it('is created on a database upgraded from v38, which keeps its rows', () => {
+  it('is created on a database upgraded from v39, which keeps its rows', () => {
     const path = join(dir, 'old.db');
     new EngineDb(path, '').close();
     const raw = new Database(path);
-    raw.exec(`DELETE FROM schema_version WHERE version >= 39; DROP TRIGGER contained_written_once; DROP TABLE contained;
+    raw.exec(`DELETE FROM schema_version WHERE version >= 40; DROP TRIGGER contained_written_once; DROP TABLE contained;
       INSERT INTO exact_marker (id, first_ok_at) VALUES (1, '2026-10-01 00:00:00');`);
     expect(raw.prepare("SELECT name FROM sqlite_master WHERE name = 'contained'").get()).toBeUndefined();
     raw.close();
     const e = new EngineDb(path, '');
     try {
-      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(39);
+      expect((e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v).toBe(40);
       expect(e.exactMarkerSet()).toBe(true);
       const c = new Containment(e.getDb());
       c.contain({ kind: 'bulk_run', id: 'r1' }, { kind: 'api', connectionId: 'shop-acme' });

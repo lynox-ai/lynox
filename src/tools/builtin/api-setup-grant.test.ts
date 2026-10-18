@@ -1005,6 +1005,69 @@ describe('fetch_token — a refused scope', () => {
   });
 });
 
+// A profile the boot held back is stored but not registered: `get()` does not return it. An
+// update with its id must still see its preset and its grant, or the save would mint a fresh
+// profile with neither mark of a user's consent, and `fetch_token` would post client_credentials
+// with the user's access slot as its target.
+describe('api_setup update on a profile the boot held back', () => {
+  const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
+  /** The bexio profile the callback connected, as the callback leaves it: no grant type. */
+  const connected = (clientSecretKey: string): ApiProfile => {
+    const base = crmProfile({ oauth_grant: { origin: 'callback', state: 'no-refresh' }, custom_endpoint_ack: ACK2 });
+    const oauth = { ...base.auth!.oauth!, preset_id: 'bexio', client_secret_key: clientSecretKey };
+    delete oauth.grant_type;
+    return { ...base, auth: { ...base.auth!, vault_keys: ['CRM_CLIENT_ID', clientSecretKey], oauth } };
+  };
+  /** Another profile whose exchange wrote CRM_MINTED: a profile naming it as client secret is held back. */
+  const minter = (): ApiProfile => ({
+    ...crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'minted' }) } }),
+    id: 'minter', base_url: 'https://minter.example/v1', custom_endpoint_ack: { ...ACK, hosts: ['minter.example'] },
+  });
+  /** The update: no preset, no grant record, an app-only grant and a client secret of its own. */
+  const update = (): ApiProfile => crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials');
+
+  const setup = () => {
+    const store = new ApiStore();
+    expect(store.register(minter())).toBe(true);
+    expect(store.register(connected('CRM_MINTED'))).toBe(false);
+    expect(store.get('crm-api')).toBeUndefined();
+    expect(store.storedProfile('crm-api')?.oauth_grant?.origin).toBe('callback');
+    const vault = makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_MINTED: 'minted', [ACCESS]: 'user-token' });
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'app-token', expires_in: 86399 }));
+    return { store, vault, spy, agent: makeAgent(store, vault, async () => 'Allow') };
+  };
+
+  it('is refused for dropping the preset, keeps the stored record, and a following fetch_token sends nothing', async () => {
+    const { store, vault, spy, agent } = setup();
+    const before = JSON.stringify(store.storedProfile('crm-api'));
+
+    const saved = await apiSetupTool.handler({ action: 'update', profile: update() }, agent) as string;
+
+    expect(saved).toContain('is set up through the built-in "bexio" provider');
+    expect(saved).toContain('Nothing was saved.');
+    expect(JSON.stringify(store.storedProfile('crm-api'))).toBe(before);
+    expect(store.get('crm-api')).toBeUndefined();
+
+    await fetchToken(agent);
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(vault.peek(ACCESS)).toBe('user-token');
+  });
+
+  it('keeps the callback grant when the update keeps the preset', async () => {
+    const { store, agent } = setup();
+    // The same profile, its client secret moved off the minted name, and no grant record in the input.
+    const keep = connected('CRM_CLIENT_SECRET');
+    delete keep.oauth_grant;
+
+    const saved = await apiSetupTool.handler({ action: 'update', profile: keep }, agent) as string;
+
+    expect(saved).toContain('Profile saved');
+    // The input carries no grant record: only the stored one can bring origin back.
+    expect(store.get('crm-api')?.oauth_grant?.origin).toBe('callback');
+  });
+});
+
 describe('fetch_token — which host the rate limit counts against', () => {
   const bexio = (): ApiProfile => {
     const base = crmProfile({ rate_limit: { requests_per_hour: 1 }, custom_endpoint_ack: { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] } });

@@ -1161,7 +1161,7 @@ export class Engine {
         set: () => { db.setExactMarker(); },
       });
       this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
-      // And which threads and bulk runs a store connection was attached for (v39).
+      // And which threads and bulk runs a store connection was attached for (v40).
       this._toolContext.containment = new Containment(db.getDb());
     } else {
       this._toolContext.exactClearance = null;

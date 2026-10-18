@@ -177,7 +177,7 @@ describe('the trigger run lease across a restart', () => {
 
   // MUTATION: in WorkerLoop.tick, treat `interrupted` like `claimed` (drop the
   // `RESUMES_AFTER_LOSS` branch) → B dispatches a second agent turn.
-  it('a lapsed lease of a lost agent run is recorded as interrupted, not run again — and the live run that lost it still runs once', async () => {
+  it('a lapsed lease of a lost agent run is recorded as interrupted, not resumed — and the live run that lost it still runs once', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(T0);
     const dir = newDir();
@@ -191,12 +191,22 @@ describe('the trigger run lease across a restart', () => {
     // same row a live run leaves whose event loop was blocked past the lease.
     vi.setSystemTime(T0 + 16 * MIN);
     const b = boot(dir);
+    b.router.hasChannels.mockReturnValue(true);
     expect(b.manager.getDueTriggers().map((t) => t.id)).toEqual(['trg-1']);
     await b.loop.tick();
     await new Promise((r) => setImmediate(r));
     expect(b.dispatches()).toBe(0);
+    // Announced as what it is: high priority, because the run did not finish, but under its
+    // own mark rather than the ✗ of a tool's or provider's failure.
+    await vi.waitFor(() => expect(b.router.notify).toHaveBeenCalledTimes(1));
+    expect(b.router.notify).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/^⚠ /) as unknown as string, priority: 'high',
+    }));
     const settled = b.manager.getTrigger('trg-1')!;
-    expect(settled.last_run_status).toBe('failed');
+    // Its own word, so the owner can tell it from a tool's or provider's failure — and the
+    // schedule's status still `failed`, because the run did not finish.
+    expect(settled.last_run_status).toBe('interrupted');
+    expect(settled.status).toBe('failed');
     expect(settled.last_run_result).toMatch(/engine stopped while this run was in progress/);
     // Scheduled like any failed cron run: its next occurrence, not now.
     expect(Date.parse(settled.next_run_at!)).toBeGreaterThan(T0 + 16 * MIN);

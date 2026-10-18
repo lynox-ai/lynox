@@ -1043,6 +1043,19 @@ describe('Task Tools', () => {
       })).toContain('NO NEXT RUN');
     });
 
+    it('a HALTED and an INTERRUPTED run carry their own label, not FAILED', () => {
+      // A halt at the approved maximum waits for the owner; an interrupted run is one the
+      // engine lost. Read as FAILED, the model goes looking for a cause to repair.
+      const halted = triggerDetailLine({ last_run_status: 'halted', last_run_result: 'Bulk run halted: the approved maximum number of targets is reached.' });
+      expect(halted).toContain('last run HALTED AS PLANNED, waiting for the owner to continue it');
+      expect(halted).not.toContain('FAILED');
+      const interrupted = triggerDetailLine({ last_run_status: 'interrupted', last_run_result: 'The engine stopped while this run was in progress.' });
+      expect(interrupted).toContain('last run INTERRUPTED (the engine stopped mid-run; it was not resumed)');
+      expect(interrupted).not.toContain('FAILED');
+      // A word the table does not know still reads FAILED: the fallback errs loud.
+      expect(triggerDetailLine({ last_run_status: 'timeout', last_run_result: 'x' })).toContain('last run FAILED');
+    });
+
     it('the target workflow is named whenever the schedule has one', () => {
       // The workflow id is what a repair has to PRESERVE — it is how its
       // definition is found. Shown on every schedule that has one, not only on

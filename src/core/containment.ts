@@ -5,7 +5,7 @@ import { isProvisionedInstance } from './wire-capture.js';
 
 /**
  * Containment: the record of which containers a store connection's credential was attached
- * for, in engine.db's `contained` table (v39).
+ * for, in engine.db's `contained` table (v40).
  *
  * A container is a chat thread or a bulk run. It becomes contained for a connection when the
  * credential funnel (`tools/builtin/http.ts`) mints the request pass for that connection on its

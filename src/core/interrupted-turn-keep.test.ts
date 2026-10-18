@@ -59,7 +59,7 @@ const probeTool: ToolEntry = {
   handler: (input: unknown) => handler(input) as Promise<string>,
 };
 
-const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'ANTHROPIC_API_KEY', 'LYNOX_MANAGED_INSTANCE_ID'] as const;
+const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'ANTHROPIC_API_KEY', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_EMBEDDING_PROVIDER'] as const;
 const saved = new Map<string, string | undefined>();
 const dirs: string[] = [];
 const engines: Engine[] = [];
@@ -75,6 +75,12 @@ async function boot(): Promise<Engine> {
   for (const k of ENV_KEYS) setEnv(k, undefined);
   setEnv('LYNOX_DATA_DIR', dir);
   setEnv('ANTHROPIC_API_KEY', 'test-key-not-real');
+  // The run's retrieval embeds the question before the first provider call. With the default
+  // ONNX provider that first embed downloads a model and starts an ONNX session: about ten
+  // seconds in a fresh process (measured 10.2–11.7 s, six runs), against the ten seconds
+  // `untilCalls` waits, and a network call in a test that needs none. The local provider
+  // embeds without either; retrieval is not what these tests are about.
+  setEnv('LYNOX_EMBEDDING_PROVIDER', 'local');
   reloadConfig();
   const engine = new Engine({} as LynoxConfig);
   engines.push(engine);

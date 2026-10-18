@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { EngineDb } from './engine-db.js';
 import { DataStore } from './data-store.js';
-import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS } from './bulk-ledger.js';
+import { BulkLedger, BULK_CLAIM_STALE_MS, BULK_HALT_REASONS, bulkFailureLimit } from './bulk-ledger.js';
 import type { PlannedTarget } from './bulk-ledger.js';
-import { bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
+import { BulkSecretError, bulkWriterFor, runBulkEffect, workspaceWriter, type BulkRunTrail, type TargetWriter } from './bulk-apply.js';
 import { TriggerStore } from './trigger-store.js';
 import { deriveSourceEffect } from './task-manager.js';
 import { WorkerLoop } from './worker-loop.js';
@@ -257,6 +257,60 @@ describe('approval → trigger → worker effect → handler (§7 b)', () => {
   });
 });
 
+/** Run one tick of a real WorkerLoop over a memory run; returns what it recorded and announced. */
+async function tickMemoryRun(runId: string, writer: TargetWriter): Promise<{ status: string; notes: Array<{ title: string; priority: string }> }> {
+  const triggers = new TriggerStore(engineDb);
+  const recordTaskRun = vi.fn((_id: string, _r: string, _status: string) => false);
+  const notify = vi.fn(async (_n: { title: string; priority: string }) => {});
+  const engine = {
+    getTaskManager: () => ({ getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+      claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers), recordTaskRun }),
+    getBulkLedger: () => ledger,
+    getDataStore: () => store,
+    getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+    getUserConfig: () => ({}),
+  } as unknown as Engine;
+  const mod = await import('./bulk-apply.js');
+  const spy = vi.spyOn(mod, 'bulkWriterFor').mockReturnValue(writer);
+  try {
+    const loop = new WorkerLoop(engine, { hasChannels: () => true, notify } as unknown as NotificationRouter, 60_000);
+    await loop.tick();
+    await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled(), { timeout: 10_000 });
+  } finally {
+    spy.mockRestore();
+  }
+  expect(recordTaskRun).toHaveBeenCalledTimes(1);
+  return { status: recordTaskRun.mock.calls[0]![2], notes: notify.mock.calls.map((c) => c[0]) };
+}
+
+// A run that stops at its approved maximum did what it was told and waits for the owner. As
+// `failed` with a high-priority ✗ it was a failure the owner learned to read past — right
+// next to the real ones, which a failure halt still is.
+describe('a planned halt is not a failure', () => {
+  it('a run at its approved maximum is recorded `halted` and announced without ✗, at normal priority', async () => {
+    const { runId, initial } = recordMemoryRun(4);
+    approve(runId, { maxTargets: 2 });
+    const out = await tickMemoryRun(runId, memory(initial).writer);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
+    expect(out.status).toBe('halted');
+    expect(out.notes).toHaveLength(1);
+    expect(out.notes[0]!.priority).toBe('normal');
+    expect(out.notes[0]!.title.startsWith('\u23F8 ')).toBe(true);
+  });
+
+  it('a failure halt is still recorded `failed` and announced with ✗ at high priority', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    const out = await tickMemoryRun(runId, memory(initial, new Set(['k010', 'k011', 'k012'])).writer);
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.consecutiveFailures);
+    expect(out.status).toBe('failed');
+    expect(out.notes).toHaveLength(1);
+    expect(out.notes[0]!.priority).toBe('high');
+    expect(out.notes[0]!.title.startsWith('\u2717 ')).toBe(true);
+  });
+});
+
 describe('the effect can only come from the approval (§7 b, the derivation property)', () => {
   // MUTATION: map any task_type onto `bulk_apply` in deriveSourceEffect → this fails.
   it('no create-path intent derives a bulk effect', () => {
@@ -339,6 +393,8 @@ describe('approval checks (§7 g)', () => {
     const { writer, state } = memory(initial);
     const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
     expect(out.status).toBe('halted');
+    // The run did what its approval said: a planned halt, which the trigger records as one.
+    expect(out.planned).toBe(true);
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
     expect([...state.values()].filter((v) => v.startsWith('w'))).toHaveLength(3);
   });
@@ -348,7 +404,11 @@ describe('approval checks (§7 g)', () => {
     approve(runId, { maxTargets: 3 });
     const mem = memory(initial, new Set(['k000']));
     const { writer, writes } = counting(mem.writer);
-    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('halted');
+    const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
+    expect(out.status).toBe('halted');
+    // Under the failure thresholds, yet a write failed: not the planned halt, a failure the
+    // owner must see.
+    expect(out.planned).toBeUndefined();
     expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.maxTargets);
     expect([...writes.keys()]).toEqual(['k000', 'k001', 'k002']);
   });
@@ -698,6 +758,8 @@ describe('halt thresholds', () => {
     const { writer } = memory(initial, new Set(['k010', 'k011', 'k012']));
     const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(writer));
     expect(out.status).toBe('halted');
+    // A failure halt is not a planned one: it stays a failure for the owner.
+    expect(out.planned).toBeUndefined();
     const s = ledger.getStatus(runId)!;
     expect([s.haltReason, s.applied, s.failed, s.phase]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 10, 3, 'writing']);
     expect(out.summary).not.toContain(MARK);
@@ -712,6 +774,9 @@ describe('halt thresholds', () => {
     expect(halted.status).toBe('halted');
     expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 6 });
     expect(halted.summary).toContain('failed 6,');
+    // What the resume button shows: six failed so far; five may fail in the next pass and the
+    // sixth halts it; the fifty not written are what it tries.
+    expect(ledger.getStatus(runId)).toMatchObject({ applied: 50, failedOnce: 6, failureLimit: 5, resumeOpen: 50, resumeTries: 50 });
     // The six now write; three later targets fail. Three of 100 is under 5 % for this pass —
     // the halt counts per pass — so the run finishes.
     fail.clear();
@@ -721,6 +786,8 @@ describe('halt thresholds', () => {
     expect(done.status).toBe('done');
     const s = ledger.getStatus(runId)!;
     expect([s.phase, s.applied, s.conflicts, s.failed]).toEqual(['done', 97, 0, 3]);
+    // Over both passes: the six of the first, written since, and the three of the second.
+    expect(s.failedOnce).toBe(9);
     expect(s.applied + s.conflicts + s.failed).toBeLessThanOrEqual(s.total);
     // The notice after the run and what the model reads say the same count.
     expect(done.summary).toContain('Applied 97, failed 3, conflicts 0');
@@ -763,6 +830,42 @@ describe('halt thresholds', () => {
     expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(writer))).status).toBe('done');
     const s = ledger.getStatus(runId)!;
     expect([s.haltReason, s.failed, s.conflicts, s.applied]).toEqual([null, 3, 1, 96]);
+    expect(s.failedOnce, 'a conflict is not a failure').toBe(3);
+  });
+
+  it('the failure limit the status shows is the one the halt keeps', async () => {
+    // 60 × 0.05 is exactly 3: three may fail, the fourth halts.
+    expect(bulkFailureLimit(60)).toBe(3);
+    const scattered = ['k005', 'k020', 'k035', 'k050'];
+    const under = recordMemoryRun(60);
+    approve(under.runId);
+    const three = await runBulkEffect(under.runId, 'bulk_apply', effectDeps(memory(under.initial, new Set(scattered.slice(0, 3))).writer));
+    expect([three.status, ledger.getStatus(under.runId)!.failureLimit, ledger.getStatus(under.runId)!.failed]).toEqual(['done', 3, 3]);
+    const over = recordMemoryRun(60);
+    approve(over.runId);
+    expect((await runBulkEffect(over.runId, 'bulk_apply', effectDeps(memory(over.initial, new Set(scattered)).writer))).status).toBe('halted');
+    const s = ledger.getStatus(over.runId)!;
+    expect([s.haltReason, s.failed]).toEqual([BULK_HALT_REASONS.failureRate, s.failureLimit + 1]);
+    // 30 × 0.05 is 1.5: one may fail, the second halts — rounded, the status would say two.
+    const half = recordMemoryRun(30);
+    approve(half.runId);
+    await runBulkEffect(half.runId, 'bulk_apply', effectDeps(memory(half.initial, new Set(['k005', 'k020'])).writer));
+    expect(ledger.getStatus(half.runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 2, failureLimit: 1 });
+  });
+
+  it('a run approved before failures were recorded per target has no total', async () => {
+    const { runId, initial } = recordMemoryRun(20);
+    approve(runId);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial, new Set(['k004'])).writer))).status).toBe('done');
+    expect(ledger.getStatus(runId)!.failedOnce).toBe(1);
+    // As the migration leaves an approved run: unknown on its targets.
+    engineDb.getDb().prepare('UPDATE bulk_targets SET failed_once = NULL WHERE run_id = ? AND seq = 4').run(runId);
+    expect(ledger.getStatus(runId)!.failedOnce).toBeNull();
+    // One failure recorded now does not make the earlier passes known.
+    // k004 is still to write, so the record lands.
+    ledger.recordFailed(runId, 4, 'write_failed');
+    expect(engineDb.getDb().prepare('SELECT failed_once AS f FROM bulk_targets WHERE run_id = ? AND seq = 4').get(runId)).toEqual({ f: null });
+    expect(ledger.getStatus(runId)!.failedOnce).toBeNull();
   });
 
   it('resume arms the trigger again, after a halt ended it', async () => {
@@ -1560,5 +1663,82 @@ describe('the trail of one call of a run', () => {
     approve(runId);
     const out = await runBulkEffect(runId, 'bulk_apply', effectDeps(memory(initial).writer));
     expect(out.status).toBe('done');
+  });
+});
+
+describe('what a resume after a failure halt may still do', () => {
+  /** A memory writer whose read fails for `readFail` (before anything is sent) and whose write
+   *  fails for `fail`, or for `secret` on what it would send. */
+  function failing(initial: Record<string, string>, f: { fail?: string[]; readFail?: string[]; secret?: string[] }): TargetWriter {
+    const inner = memory(initial, new Set(f.fail ?? [])).writer;
+    return {
+      async read(key, fields) {
+        if (f.readFail?.includes(key)) throw new Error(`read ${MARK}`);
+        return inner.read(key, fields);
+      },
+      async write(key, after, onSend) {
+        if (f.secret?.includes(key)) throw new BulkSecretError();
+        return inner.write(key, after, onSend);
+      },
+    };
+  }
+
+  it('limit below the open targets: the next pass halts on the failure past the limit', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k010', 'k011', 'k012'] })));
+    const s = ledger.getStatus(runId)!;
+    expect([s.haltReason, s.failureLimit, s.resumeOpen]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 5, 90]);
+    expect(s.failureLimit).toBeLessThan(s.resumeOpen);
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    const six = ['k020', 'k030', 'k040', 'k050', 'k060', 'k070'];
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: six })))).status).toBe('halted');
+    expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 6 });
+  });
+
+  it('limit at least the open targets, three or more open: only three in a row stop the next pass', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k096', 'k097', 'k098'] })));
+    const s = ledger.getStatus(runId)!;
+    expect([s.haltReason, s.failureLimit, s.resumeOpen]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 5, 4]);
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    // All four fail: the share cannot be passed, three in a row still halt.
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k096', 'k097', 'k098', 'k099'] })));
+    expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.consecutiveFailures);
+  });
+
+  it('fewer than three open: the next pass does not stop for its failures', async () => {
+    const { runId, initial } = recordMemoryRun(100);
+    approve(runId);
+    // The secret target stays failed through the resume, so two are left open.
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { secret: ['k097'], fail: ['k098', 'k099'] })));
+    const s = ledger.getStatus(runId)!;
+    expect([s.haltReason, s.failureLimit, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 5, 2, 2]);
+    expect(ledger.resume(runId, { checksum: ledger.computeChecksum(runId)! }).ok).toBe(true);
+    expect((await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k098', 'k099'] })))).status).toBe('done');
+    expect(ledger.getStatus(runId)).toMatchObject({ phase: 'done', haltReason: null, failed: 3, failedOnce: 3 });
+  });
+
+  it('under a cap, a pass fails more targets than it may send to: failures before the send spend no place', async () => {
+    // A maximum of 1, and three reads fail in a row: nothing was sent, so the cap is not spent,
+    // and the pass fails three targets — more than the one it may still send to.
+    const { runId, initial } = recordMemoryRun(40);
+    approve(runId, { maxTargets: 1 });
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { readFail: ['k000', 'k001', 'k002'] })));
+    const s = ledger.getStatus(runId)!;
+    expect([s.haltReason, s.failed, s.failureLimit, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 3, 2, 40, 1]);
+    expect(s.failed).toBeGreaterThan(s.resumeTries);
+  });
+
+  it('under a cap, a target already sent to takes no place from it', async () => {
+    const { runId, initial } = recordMemoryRun(40);
+    approve(runId, { maxTargets: 3 });
+    // The write is sent and fails: write_sent marks it, so a retry sends to no new target.
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k001'] })));
+    const s = ledger.getStatus(runId)!;
+    // k000 and k002 written, k001 sent and failed: the cap of 3 is spent, and of the 38 open
+    // only k001 may still be sent to.
+    expect([s.haltReason, s.applied, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.maxTargets, 2, 38, 1]);
   });
 });

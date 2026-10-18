@@ -150,12 +150,35 @@ jobs:
           file: Dockerfile
           push: false
           tags: lynox:ci-scan
+      # Same threshold as the release, staging and canary scans (`ignore-unfixed`). Node packages
+      # stay covered without that filter by the osv gate in `test`, which reads pnpm-lock.yaml.
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lynox:ci-scan
           format: table
           exit-code: 1
           severity: CRITICAL
+          ignore-unfixed: true
+      # A scan that cannot see the OS packages passes the step above; this one fails on that.
+      # The same pair runs in release.yml, so a pull request shows what the release will see.
+      - name: List what the scan saw
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: lynox:ci-scan
+          format: json
+          output: trivy-packages.json
+          list-all-pkgs: true
+          scanners: vuln
+          exit-code: '0'
+      - name: The scan saw the OS packages
+        run: |
+          set -euo pipefail
+          n=$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' trivy-packages.json)
+          echo "OS packages the scan saw: $n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::the image scan saw no OS packages, so it could not judge them. Is /var/lib/dpkg removed in the Dockerfile?" >&2
+            exit 1
+          fi
 
   # Live IMAPS/SMTPS integration tests against a real GreenMail container.
   # In the `test` job above these silently skip (describe.skipIf when the TCP
