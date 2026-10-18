@@ -8,6 +8,7 @@ import { apiSetupTool } from './api-setup.js';
 import { ApiStore, type ApiProfile } from '../../core/api-store.js';
 import { releaseBinding } from '../../core/profile-secret-view.js';
 import { OAUTH_PRESETS } from '../../core/oauth-presets.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 let mockLynoxDir: string;
 vi.mock('../../core/config.js', () => ({ getLynoxDir: () => mockLynoxDir }));
@@ -143,7 +144,7 @@ function agentWith(store: ApiStore, secrets: Record<string, string> = { SHOP_CLI
         return JSON.parse(text.replace(/\bsecret:([A-Z_][A-Z0-9_]*)\b/g, (m, name: string) => secrets[name] ?? m)) as unknown;
       },
     },
-    toolContext: { apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
+    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [], streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null, hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false },
   } as never;
 }
 
@@ -490,16 +491,28 @@ describe('the save asks about being sent somewhere, not only about data', () => 
     expect(ack?.hosts).toEqual([]);
   });
 
-  it('stores the profile without the acceptance when nobody can be asked', async () => {
-    // The half that has nothing to leak at save time. Sharing one answer with
-    // the egress half made a background run unable to create ANY preset OAuth
-    // profile — a refusal nobody asked for. The profile is stored; what it does
-    // not get is an acceptance nobody gave.
+  it('stores nothing when nobody can be asked where the client secret may go', async () => {
+    // The redirect half alone would store the profile without its acceptance. But the profile
+    // names a client secret that is bound nowhere yet, and only a person widens where a secret
+    // may go: a background create of a preset profile is refused, and nothing is stored.
     const store = new ApiStore();
     const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
 
-    expect(reply).toContain('Created');
-    expect(reply).toContain('WITHOUT the acceptance');
+    expect(reply).toContain('Blocked');
+    expect(reply).toContain('SHOP_CLIENT_SECRET');
+    expect(store.get('shop-api')).toBeUndefined();
+  });
+
+  it('stores a re-save without the acceptance when nobody can be asked and the secret is already bound', async () => {
+    // The half that has nothing to leak at save time: once the secret may go to the profile's
+    // destinations, a background save stores the profile, without an acceptance nobody gave.
+    const store = new ApiStore();
+    await saveVetted(async () => 'allow', store);
+    expect(store.get('shop-api')?.custom_endpoint_ack?.redirect_hosts).toEqual(['api.openai.com']);
+    const { reply } = await saveVetted(async () => 'allow', store, /* withPrompt */ false);
+
+    expect(reply).toContain('Updated');
+    expect(reply).toContain('acceptance for sending the user to the provider was REMOVED');
     expect(store.get('shop-api')?.custom_endpoint_ack).toBeUndefined();
   });
 

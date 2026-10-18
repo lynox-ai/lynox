@@ -25,6 +25,7 @@ import { EngineDb } from '../../core/engine-db.js';
 import { ConnectionStore } from '../../core/connection-store.js';
 import { tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 import { httpRequestTool, oauthRenewalBackoffSizeForTests, resetOAuthRenewalBackoffForTests, OAUTH_RENEWAL_BACKOFF_MS, HTTP_HARD_CAP_MS, HTTP_WALL_GRACE_MS } from './http.js';
 
 let mockLynoxDir: string;
@@ -192,6 +193,7 @@ function makeAgent(
       dailyRateLimit: Infinity,
       isolationEnvOverride: undefined,
       isolationMinimalEnv: false,
+      vaultNameBindings: bindingsAsMigrated(apiStore),
       ...(releases === 'all' ? releasedEverywhere(apiStore, principal) : { secretReleases: null, mandateEnds: null }),
     },
   } as never;
@@ -2225,8 +2227,8 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   it('cannot be used to delete an unrelated secret by creating and deleting a profile of the same name', async () => {
     const store = new ApiStore();
     const vault = makeVault({ GITHUB_ACCESS_TOKEN: 'the-users-github-token' });
-    const agent = makeAgent(store, vault);
-    // A host on the private LAN saves with no confirmation prompt.
+    // A host on the private LAN needs no acceptance; the one question left is where X_KEY may go.
+    const agent = makeAgent(store, vault, async () => 'Allow');
     await apiSetupTool.handler({ action: 'create', profile: {
       id: 'github', name: 'x', base_url: 'https://x.local/api', description: 'x',
       auth: { type: 'bearer', vault_keys: ['X_KEY'] },
@@ -3877,7 +3879,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
       'https://api.crm.example/v1/contacts',
       headers,
       false,
-      { apiStore, secretStore: makeVault(SEED) as never },
+      { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never,
       { bulkRunId: 'run-1' },
     );
 
@@ -3903,7 +3905,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never }, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.crm.example/v1/contacts', headers, false, { apiStore, secretStore: makeVault(SEED) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached).toBe(sent);
     expect(headers['X-Pay-900'] !== undefined).toBe(sent);
   });
@@ -3921,7 +3923,7 @@ describe('the two properties the comments claim, which nothing was checking', ()
     stubBoth();
     const { attachStoredCredential } = await import('./http.js');
     const headers: Record<string, string> = {};
-    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never }, { bulkRunId: 'run-1' });
+    const attached = await attachStoredCredential('https://api.bexio.com/2.0/contact', headers, write, { apiStore, secretStore: makeVault({ ...SEED, BEXIO_PAT: 'pat-value' }) as never, vaultNameBindings: bindingsAsMigrated(apiStore) } as never, { bulkRunId: 'run-1' });
     expect(attached).toBe(sent);
     expect(headers['Authorization'] === 'Bearer pat-value').toBe(sent);
   });

@@ -44,6 +44,7 @@ import type { NotificationRouter } from './notification-router.js';
 import { detectSecretInContent } from '../tools/builtin/http.js';
 import { bulkStatusTool } from '../tools/builtin/bulk.js';
 import type { IAgent } from '../types/index.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 /**
  * Build plan B, the write half (§1.4, §2.3–§2.4, §4 F5/F7): an approved external run is
@@ -799,7 +800,7 @@ describe('applying an external run', () => {
         getDataStore: () => null,
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
-        getToolContext: () => createToolContext({}),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
@@ -851,7 +852,7 @@ describe('applying an external run', () => {
         getDataStore: () => null,
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
-        getToolContext: () => createToolContext({}),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
         getAuditLog: () => ({ record: (e: (typeof recs)[number]) => { sentAtRecord.push(s.requests.length); recs.push(e); } }),
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
@@ -908,7 +909,7 @@ describe('applying an external run', () => {
         getDataStore: () => null,
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
-        getToolContext: () => createToolContext({}),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
@@ -961,7 +962,7 @@ describe('applying an external run', () => {
         getDataStore: () => null,
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
-        getToolContext: () => createToolContext({}),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
@@ -1712,7 +1713,7 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
         isEnvironmentSecret: (): boolean => false,
         listNames: (): string[] => ['BEXIO_PAT'],
       };
-      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => createToolContext({}), getAuditLog: () => null };
+      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(store) }), getAuditLog: () => null };
       const factory = await (WorkerLoop.prototype as unknown as {
         bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null) => ExternalClient | null>;
       }).bulkClientFactory.call({ engine });
@@ -1752,7 +1753,7 @@ describe('the worker attaches a run\'s credential by the method it sends', () =>
         isEnvironmentSecret: (): boolean => false,
         listNames: (): string[] => ['SHOP_TOKEN'],
       };
-      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => createToolContext({}), getAuditLog: () => null };
+      const engine = { getApiStore: () => store, getSecretStore: () => vault, getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(store) }), getAuditLog: () => null };
       const factory = await (WorkerLoop.prototype as unknown as {
         bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null) => ExternalClient | null>;
       }).bulkClientFactory.call({ engine });

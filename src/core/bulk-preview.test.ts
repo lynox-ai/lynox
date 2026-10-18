@@ -27,6 +27,7 @@ import { detectSecretInContent } from '../tools/builtin/http.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { IAgent } from '../types/index.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 /**
  * Build plan B, the read half (§2, §3, §6): an external bulk run is planned without a
@@ -766,7 +767,7 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     getBulkLedger: () => ledger,
     getApiStore: () => apiStore,
     getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? token : null) }),
-    getToolContext: () => createToolContext({}),
+    getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
     getAuditLog: () => opts.auditLog ?? null,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
@@ -843,7 +844,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         getBulkLedger: () => ledger,
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
-        getToolContext: () => createToolContext({}),
+        getToolContext: () => ({ ...createToolContext({}), vaultNameBindings: bindingsAsMigrated(apiStore) }),
         getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),

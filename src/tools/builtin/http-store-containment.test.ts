@@ -37,6 +37,7 @@ import { createToolContext, type ToolContext } from '../../core/tool-context.js'
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { attachStoredCredential, httpRequestTool } from './http.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
 const URL_OK = `${ORIGIN}/admin/api/2025-10/shop.json`;
@@ -97,6 +98,7 @@ beforeEach(() => {
   );
   ctx.storeBindingDigest = bind;
   ctx.containment = containment;
+  ctx.vaultNameBindings = bindingsAsMigrated(store);
   ctx.threadStore = {
     getThread: (id: string) => ({ id, skip_extraction: skipSet.includes(id) ? 1 : 0 }),
     updateThread: (id: string, u: { skip_extraction?: boolean }) => { if (u.skip_extraction === true) skipSet.push(id); },
@@ -258,6 +260,7 @@ describe('a bulk run\'s request (attachStoredCredential)', () => {
       principal: OWNER_PRINCIPAL, mandateEnds: null, secretReleases: null,
       exactClearance: ctx.exactClearance, storeBindingDigest: ctx.storeBindingDigest,
       containment: over.containment === undefined ? containment : over.containment,
+      vaultNameBindings: ctx.vaultNameBindings,
     }, { bulkRunId: runId }, out as never);
     return { attached, pass: out.pass };
   };

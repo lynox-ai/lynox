@@ -13,7 +13,7 @@ import { OAUTH_PRESETS, isPresetClientSecretName, presetClientSecretGuidance, pr
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
-import { requestMatchesBase, secretsForProfile, slotMayReach, withheldFrom, withheldText } from '../../core/profile-secret-view.js';
+import { requestMatchesBase, secretsForProfile, slotMayReach, unboundName, unboundNameText, withheldFrom, withheldText, type BindingCtx } from '../../core/profile-secret-view.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -1875,6 +1875,13 @@ async function attachEngineManagedAuth(
     releases: requestMatchesBase(profile, url) ? toolContext?.secretReleases ?? null : null,
   };
   const secretStore = secretsForProfile(vault, profile, apiStore, readCtx);
+  // Where the profile's own secrets may go: the destinations each is bound to, and those of the
+  // releases that stand for this reader. The attach never widens one.
+  const bindCtx: BindingCtx = { bindings: toolContext?.vaultNameBindings ?? null, store: vault, read: readCtx };
+  /** The first of `names` this profile may not send to `url` as a secret of its own, if any. A name
+   *  the profile's view withholds is left to the withheld answer below, which says why. */
+  const unboundOf = (names: ReadonlyArray<string | undefined>): string | undefined =>
+    unboundName(apiStore, names.filter((n) => typeof n !== 'string' || withheldFrom(vault, profile, apiStore, [n], readCtx).length === 0), profile, url, 'request', bindCtx);
 
   /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
   const put = (name: string, value: string): AttachedAuth => {
@@ -1886,7 +1893,7 @@ async function attachEngineManagedAuth(
   };
   /** The first of `names` that holds a token this request may not carry to `url`, if any. */
   const slotOffGrant = (names: ReadonlyArray<string | undefined>): string | undefined =>
-    names.find((n): n is string => typeof n === 'string' && !slotMayReach(apiStore, n, 'request', url, profile));
+    names.find((n): n is string => typeof n === 'string' && !slotMayReach(apiStore, n, 'request', url, profile, bindCtx));
 
   // The engine is about to hand a stored credential to this host, so the host must
   // be vetted or carry a recorded human acceptance. `isVettedEgressHost`, not
@@ -2102,6 +2109,8 @@ async function attachEngineManagedAuth(
     }
     const offGrant = slotOffGrant([userKey, passKey]);
     if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    const unbound = unboundOf([userKey, passKey]);
+    if (unbound !== undefined) return { refusal: `Error: ${unboundNameText(unbound, profile.id)}` };
     const user = secretStore.resolve(userKey);
     const pass = secretStore.resolve(passKey);
     // Truthiness, not a null check: an EMPTY vault value would ship
@@ -2128,7 +2137,7 @@ async function attachEngineManagedAuth(
     // knows (a JWT, `ghp_…`, `sk-…`) it blocks the request to the very host the
     // operator authorised. bexio issues JWTs, so `bearer` there had NO working path.
     //
-    // Below this line every exit is a `hint`, not a `refusal`, except the two that
+    // Below this line every exit is a `hint`, not a `refusal`, except the three that
     // catch a profile reaching for something it may not have.
     const tokenKey = auth.vault_keys?.[0];
     if (!tokenKey) {
@@ -2148,6 +2157,11 @@ async function attachEngineManagedAuth(
     }
     const offGrant = slotOffGrant([tokenKey]);
     if (offGrant !== undefined) return { refusal: slotReachRefusal(profile.id, offGrant, hostname) };
+    // Refused, not hinted: a name the profile may not send here must not go by a `secret:`
+    // reference either, and the hint below would invite one.
+    // Over plain http nothing is attached anyway, and the hint below says so.
+    const unbound = url.toLowerCase().startsWith('https://') ? unboundOf([tokenKey]) : undefined;
+    if (unbound !== undefined) return { refusal: `Error: ${unboundNameText(unbound, profile.id)}` };
     if (!hostVetted) {
       return { hint: () => `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
     }
@@ -2204,7 +2218,7 @@ async function attachEngineManagedAuth(
       slotFilled: filled,
       crossOriginRedirect: ctx.crossOriginRedirect,
       secretStore,
-      mayReference: (name) => slotMayReach(apiStore, name, 'request', url, profile),
+      mayReference: (name) => slotMayReach(apiStore, name, 'request', url, profile, bindCtx),
     }),
   };
 }
@@ -3710,6 +3724,8 @@ export async function attachStoredCredential(
     /** For a request to a Shopify store: where its run is recorded as contained. Without it the
      *  request is refused. */
     containment?: ToolContext['containment'] | undefined;
+    /** Where each vault secret may go; without it no secret of a profile's own is attached. */
+    vaultNameBindings: ToolContext['vaultNameBindings'];
   },
   /** The bulk run this request is for. The agent below is built by hand and has no thread, so
    *  the run is the container a request to a store is contained under (`core/containment.ts`). */
@@ -3724,9 +3740,10 @@ export async function attachStoredCredential(
       apiStore: stores.apiStore, mandateEnds: stores.mandateEnds, secretReleases: stores.secretReleases,
       exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
       containment: stores.containment ?? null,
+      vaultNameBindings: stores.vaultNameBindings,
       // A bulk run is not a chat: nothing of a thread is written for it.
       threadStore: null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore'> as ToolContext,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore' | 'vaultNameBindings'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
     { bulkRunId: container.bulkRunId },

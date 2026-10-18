@@ -68,6 +68,7 @@ import { createToolContext } from './tool-context.js';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { httpRequestTool } from '../tools/builtin/http.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -482,6 +483,7 @@ describe('the predicate: a request carries only a registered owner\'s access tok
   async function reference(store: ApiStore, name: string, url: string): Promise<string> {
     const ctx = createToolContext({});
     (ctx as { apiStore: unknown }).apiStore = store;
+    ctx.vaultNameBindings = bindingsAsMigrated(store);
     mockProcess.mockReset();
     mockProcess
       .mockResolvedValueOnce({ content: [{ type: 'tool_use' as const, id: 'tu_1', name: 'http_request', input: { url, method: 'GET', headers: { 'X-Data': `secret:${name}` } } }], stop_reason: 'tool_use', usage: { input_tokens: 10, output_tokens: 5 } })
@@ -556,7 +558,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
       secretStore: vault,
       promptUser: async () => 'Allow',
       getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
-      toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+      toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
   }
   const update = (store: ApiStore, vault: Vault, profile: ApiProfile): Promise<string> =>
@@ -597,6 +599,7 @@ describe('an update that ends sharing empties the reader\'s token slots before i
     expect(await update(store, vault, bexio('bexio-b', {}, 'https://bexio-b.example/v1'))).toContain('Updated API profile');
     const ctx = createToolContext({});
     (ctx as { apiStore: unknown }).apiStore = store;
+    ctx.vaultNameBindings = bindingsAsMigrated(store);
     const { SecretStore } = await import('./secret-store.js');
     // bexio-b has connected on its own since: an access token of its own lets the request through
     // the attach, so only the emptied name can keep the reference from going out.
@@ -796,7 +799,7 @@ describe('an update of a profile the boot held back', () => {
       secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
       promptUser: async () => 'Allow',
       getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
-      toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+      toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
     } as never;
     const fixed = complete(oauth('held'));
     const result = await apiSetupTool.handler({ action: 'update', profile: fixed }, agent) as string;
@@ -809,7 +812,7 @@ describe('an update of a profile the boot held back', () => {
     secretStore: { resolve: () => null, resolveSecretRefs: (i: unknown) => i, listNames: () => [] },
     promptUser: async () => 'Allow',
     getAvailableTools: () => [{ definition: { name: 'api_setup' } }],
-    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   }) as never;
 
   it('is refused for a mandate that did not write it, as a registered one is', async () => {

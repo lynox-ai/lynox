@@ -27,6 +27,7 @@ import { slotMayReach } from './profile-secret-view.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
 const value = (...parts: string[]): string => parts.join('-');
@@ -145,7 +146,7 @@ function handlerAgent(store: ApiStore, vault: ReturnType<typeof handlerVault>, p
     sessionCounters: { httpRequests: 0 },
     secretStore: vault,
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
-    toolContext: { apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
+    toolContext: { vaultNameBindings: bindingsAsMigrated(store), apiStore: store, secretReleases: null, mandateEnds: null, userConfig: {}, tools: [], allowedWildcards: [], hourlyRateLimit: Infinity, dailyRateLimit: Infinity },
   } as never;
 }
 const OWNER_VAULT = { OWNER_REFRESH_TOKEN: value('owner', 'refresh'), OWNER_ACCESS_TOKEN: value('owner', 'access'), SUB_CID: 'sub-client', SUB_CSECRET: value('sub', 'secret') };

@@ -11,6 +11,7 @@ import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { ExactClearance, type ExactMarker } from '../../core/exact-clearance.js';
 import { isStorePass, type StorePass } from '../../core/store-pass.js';
 import { attachStoredCredential } from './http.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 const ORIGIN = 'https://acme.myshopify.com';
 const URL_OK = `${ORIGIN}/admin/api/2025-10/shop.json`;
@@ -67,6 +68,7 @@ async function attach(url: string, profiles: ApiProfile[], opts: {
     // The containment record is the subject of `http-store-containment.test.ts`; here it only
     // has to accept the write.
     containment: { contain: () => undefined, isContained: () => false } as never,
+    vaultNameBindings: bindingsAsMigrated(store),
   }, { bulkRunId: 'run-1' }, out);
   return { attached, pass: out.pass, headers, read };
 }
@@ -94,6 +96,23 @@ describe('a request that meets every condition', () => {
     expect(r.pass!.headerName).toBe('x-shopify-access-token');
     expect(r.headers['X-Shopify-Access-Token']).toBe(TOKEN);
     expect(cpCalls).toBe(1);
+  });
+});
+
+describe('the store pass and the vault-name binding together', () => {
+  it('a store token minted with a client secret that is not bound to the store gets no pass, reads no token and asks nobody', async () => {
+    // A second profile on another host names the same client secret: the name is contested, the
+    // boot binds it nowhere, and a token minted with it goes nowhere either.
+    const other = {
+      id: 'other', name: 'other', base_url: 'https://other.example/v1', description: 'other',
+      auth: { type: 'bearer', vault_keys: ['S_CSECRET'] },
+      custom_endpoint_ack: { accepted: true, hosts: ['other.example'], accepted_at: '2026-10-18T00:00:00.000Z' },
+    } as ApiProfile;
+    const r = await attach(URL_OK, [shopProfile(), other]);
+    expect(r.attached).toBe(false);
+    expect(r.pass).toBeUndefined();
+    expect(r.read).not.toContain(accessTokenKey('shop-acme'));
+    expect(cpCalls).toBe(0);
   });
 });
 

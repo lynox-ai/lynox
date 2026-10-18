@@ -6,6 +6,7 @@ import { exchangeToken, isTokenEndpointRefused, vetTokenEndpoint } from '../../c
 import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { attachStoredCredential } from './http.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // The Shopify preset adds a way to connect a store, and the store stays closed until a pass for
 // it exists: a connected preset profile, its own store and its own token endpoint are refused at
@@ -32,7 +33,7 @@ describe('a connected Shopify preset profile is still refused', () => {
     const attached = await attachStoredCredential(`${STORE}/admin/api/2025-10/shop.json`, headers, false, {
       apiStore: store,
       secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'shpat-value' : null) } as never,
-      principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
+      principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
     }, { bulkRunId: 'run-1' });
     expect(attached).toBe(false);
     expect(headers).toEqual({});

@@ -22,6 +22,7 @@ import { setPinnedTransportForTests } from './network-guard.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
 import { resetOAuthRenewalBackoffForTests } from '../tools/builtin/http.js';
 import type { SecretStoreLike } from '../types/index.js';
+import { bindingsAsMigrated } from '../../tests/helpers/vault-bindings.js';
 
 /**
  * A profile the boot read but did not register is still stored, and its names are its own again
@@ -352,7 +353,7 @@ describe('ApiStore — profiles the boot held back', () => {
         apiStore, dataStore: null, taskManager: null, knowledgeLayer: null, runHistory: null, userConfig: {}, tools: [],
         streamHandler: null, networkPolicy: undefined, allowedHosts: undefined, allowedWildcards: [], rateLimitProvider: null,
         hourlyRateLimit: Infinity, dailyRateLimit: Infinity, isolationEnvOverride: undefined, isolationMinimalEnv: false,
-        secretReleases: null, mandateEnds: null,
+        secretReleases: null, mandateEnds: null, vaultNameBindings: bindingsAsMigrated(apiStore),
       },
     }) as never;
     const storeWithHeldFeed = (): ApiStore => {

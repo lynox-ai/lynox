@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { OAuthPreset } from '../../core/oauth-presets.js';
+import { bindingsAsMigrated } from '../../../tests/helpers/vault-bindings.js';
 
 // The header a built-in provider names for its token is checked like a profile's: a name that is
 // not a header, or one that reshapes the request, carries nothing; `Authorization` stays Bearer.
@@ -34,7 +35,7 @@ async function headersFor(presetId: string): Promise<Record<string, string>> {
   await attachStoredCredential(`https://${host}/x`, headers, false, {
     apiStore: store,
     secretStore: { resolve: (n: string) => (n === accessTokenKey(profile.id) ? 'tok-value' : null) } as never,
-    principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
+    principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined, vaultNameBindings: bindingsAsMigrated(store),
   }, { bulkRunId: 'run-1' });
   return headers;
 }

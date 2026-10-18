@@ -31,6 +31,7 @@ import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
 import { SecretReleases } from './secret-releases.js';
+import { migrateVaultNameBindings, VaultNameBindings } from './vault-name-bindings.js';
 import { connectionTokenAllowed } from './profile-secret-view.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
@@ -1171,6 +1172,8 @@ export class Engine {
       // No engine.db, no readable marker: fail-closed.
       if (isExactHeld(null)) refuseDebug();
     }
+    // And where each of the owner's vault secrets may go (v41).
+    this._toolContext.vaultNameBindings = this.engineDb ? new VaultNameBindings(this.engineDb.getDb()) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -1636,6 +1639,17 @@ export class Engine {
       // memory, and GET /api/api-profiles keeps returning [] until the next
       // engine restart re-projects it.
       this._toolContext.apiStore = this._apiStore;
+      // Once per database, after every stored profile is known: each vault secret whose profiles
+      // agree on where it goes is bound there. A failure leaves the names unbound, which refuses
+      // their sends rather than letting them go anywhere, and the next boot tries again.
+      const bindings = this._toolContext.vaultNameBindings;
+      if (bindings) {
+        try {
+          migrateVaultNameBindings(bindings, this._apiStore);
+        } catch (err: unknown) {
+          process.stderr.write(`[lynox:vault-bindings] Migration failed, retried next boot: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
       // From here on a token of a connection whose mandate has ended is not handed out, to anyone.
       this.secretStore?.setResolveGuard((name) => connectionTokenAllowed(this._apiStore, this._mandateEnds, name));
       if (loaded > 0) {
@@ -2508,6 +2522,7 @@ export class Engine {
   }
   /** The owner's releases of vault names to profiles a mandate wrote, or null without engine.db. */
   getSecretReleases(): SecretReleases | null { return this._toolContext.secretReleases; }
+  getVaultNameBindings(): VaultNameBindings | null { return this._toolContext.vaultNameBindings; }
   /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
   getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
