@@ -24,7 +24,7 @@ import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revok
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
 import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
-import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
 import { callForStructuredJson, extractionSpendOf, BudgetError, ExtractShapeError, SchemaValueError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
@@ -2498,6 +2498,26 @@ ${draftJson}
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';
+      // ⛔ A grant a USER gave is never renewed as an app-level one. A connected profile whose
+      // last consent came back without a refresh token has no `grant_type` (the callback clears
+      // it), so the line above falls back to `client_credentials` — and a provider that grants
+      // that to an app in the store's own organisation (Shopify) would swap the user's delegated
+      // token for an app token with other scopes, silently. Which grants count as a user's is
+      // decided in one place (`oauthGrantIsUserDelegated`, `http.ts`).
+      if (grantType === 'client_credentials' && oauthGrantIsUserDelegated(profile)) {
+        // Three shapes reach this, and each gets its own sentence. A preset profile that was
+        // never connected has no user's authorization yet, so it is not told it has one; and
+        // `connect` runs only for a built-in preset, so a profile without one is not sent there.
+        // Only a built-in preset's id is named: it equals one of ours, while any other value is
+        // model-authored and is not repeated back (the same rule as the save path's note).
+        const subject = profile.oauth_grant?.origin === 'callback' || tokenPreset === undefined
+          ? `was authorized by a user${tokenPreset !== undefined ? ` through the "${tokenPreset.id}" provider` : ''}, and it declares no refresh_token grant to renew that authorization with. Nothing was sent: requesting an app-level token instead would replace the user's authorization with a different one.`
+          : `connects through the "${tokenPreset.id}" provider, which issues its tokens only through a user's authorization, and it declares no refresh_token grant. Nothing was sent: fetch_token does not request an app-level token for it.`;
+        const next = tokenPreset !== undefined
+          ? 'Call api_setup with action "connect" for this profile and show the user the link.'
+          : 'This connection needs re-authorizing by the person who owns it: say so, and do not edit the profile to make the exchange pass.';
+        return `Error: profile "${input.id}" ${subject} ${next}`;
+      }
       const bodyFormat = oauth.body_format ?? 'form';
       const clientIdKey = oauth.client_id_key;
       const clientSecretKey = oauth.client_secret_key;

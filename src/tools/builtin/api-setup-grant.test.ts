@@ -792,6 +792,89 @@ describe('fetch_token — a profile connected through a provider preset', () => 
   });
 });
 
+describe('fetch_token — a grant a user gave is never renewed as an app token', () => {
+  const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
+  const withPreset = (p: ApiProfile, presetId = 'bexio'): ApiProfile =>
+    ({ ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: presetId, scope: 'contact_show' } } });
+  /** What the callback leaves when the consent came back without a refresh token: no `grant_type`. */
+  const withoutGrantType = (p: ApiProfile): ApiProfile => {
+    const oauth = { ...p.auth!.oauth! };
+    delete oauth.grant_type;
+    return { ...p, auth: { ...p.auth!, oauth } };
+  };
+  const CALLBACK = { oauth_grant: { origin: 'callback' as const, state: 'no-refresh' as const } };
+  const VAULT = { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' };
+  // The three sentences a refusal can pick from, and the two next steps.
+  const AUTHORIZED = 'was authorized by a user';
+  const PRESET_ONLY = 'connects through the "bexio" provider, which issues its tokens only through a user\'s authorization';
+  const CONNECT = 'action "connect"';
+  const OWNER = 'needs re-authorizing by the person who owns it';
+  const refused: { name: string; profile: ApiProfile; says: string; next: string; notSays: readonly string[] }[] = [
+    // Never connected: a preset profile created and sent to fetch_token (the attach says
+    // "Mint one first with: api_setup fetch_token" for any oauth2 profile without a token).
+    { name: 'a preset profile never connected, client_credentials named', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials')), says: PRESET_ONLY, next: CONNECT, notSays: [AUTHORIZED, OWNER] },
+    // The file the callback left, back in the store without its grant record.
+    { name: 'a preset profile with no grant type and no grant record', profile: withPreset(withoutGrantType(crmProfile({ custom_endpoint_ack: ACK2 }))), says: PRESET_ONLY, next: CONNECT, notSays: [AUTHORIZED, OWNER] },
+    { name: 'a preset profile the callback connected', profile: withPreset(withoutGrantType(crmProfile({ ...CALLBACK, custom_endpoint_ack: ACK2 }))), says: `${AUTHORIZED} through the "bexio" provider`, next: CONNECT, notSays: [PRESET_ONLY, OWNER] },
+    // `connect` runs only for a built-in preset, so these two are not sent there.
+    { name: 'a profile the callback connected, no preset', profile: withoutGrantType(crmProfile(CALLBACK)), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT] },
+    { name: 'a profile the callback connected, naming a preset this engine does not know', profile: withPreset(withoutGrantType(crmProfile(CALLBACK)), 'not-a-provider'), says: `${AUTHORIZED}, and`, next: OWNER, notSays: [PRESET_ONLY, CONNECT, 'not-a-provider'] },
+  ];
+
+  for (const r of refused) {
+    it(`refuses client_credentials for ${r.name}, before anything is sent`, async () => {
+      const store = new ApiStore();
+      expect(store.register(r.profile)).toBe(true);
+      const before = JSON.stringify(store.get('crm-api'));
+      const vault = makeVault(VAULT);
+      const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'app-token', expires_in: 86399 }));
+
+      const result = await fetchToken(makeAgent(store, vault));
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(result).toContain(r.says);
+      expect(result).toContain('declares no refresh_token grant');
+      expect(result).toContain(r.next);
+      for (const other of r.notSays) expect(result).not.toContain(other);
+      expect(result).not.toContain('secret-1');
+      expect(JSON.stringify(store.get('crm-api'))).toBe(before);
+      expect(vault.peek(ACCESS)).toBeUndefined();
+    });
+  }
+
+  it('still renews an app-only profile that carries the grant record of an earlier fetch_token', async () => {
+    // The record this handler writes after every exchange: names it wrote, and who connected.
+    // A refusal keyed on "has an oauth_grant" would stop exactly this profile's second token.
+    const store = new ApiStore();
+    expect(store.register(crmProfile({ oauth_grant: { written: [{ name: ACCESS, fp: tokenFingerprint('old-token') }], connected_by: 'owner' } }, 'client_credentials'))).toBe(true);
+    const vault = makeVault({ ...VAULT, [ACCESS]: 'old-token' });
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', expires_in: 86399 }));
+
+    const result = await fetchToken(makeAgent(store, vault));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const body = new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body));
+    expect(body.get('grant_type')).toBe('client_credentials');
+    expect(result).not.toContain(AUTHORIZED);
+    expect(vault.peek(ACCESS)).toBe('new-token');
+  });
+
+  it('still renews an app-only profile that names a preset this engine does not know', async () => {
+    // The save keeps such an id and only notes it; `connect` refuses the profile. Reading it
+    // as a user's consent would leave the profile with no way to a token at all.
+    const store = new ApiStore();
+    expect(store.register(withPreset(crmProfile({}, 'client_credentials'), 'not-a-provider'))).toBe(true);
+    const vault = makeVault(VAULT);
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'new-token', expires_in: 86399 }));
+
+    await fetchToken(makeAgent(store, vault));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(new URLSearchParams(String((spy.mock.calls[0]![1] as RequestInit).body)).get('grant_type')).toBe('client_credentials');
+    expect(vault.peek(ACCESS)).toBe('new-token');
+  });
+});
+
 describe('fetch_token — a refused scope', () => {
   const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
   const withPreset = (p: ApiProfile, extra: Record<string, unknown> = {}): ApiProfile =>
@@ -806,8 +889,9 @@ describe('fetch_token — a refused scope', () => {
    */
   const states: { name: string; profile: ApiProfile; vault: Record<string, string>; grant: string }[] = [
     { name: 'connected, refresh token presented', profile: withPreset(crmProfile({ oauth_grant: stamp('client-1', 'rt-1'), custom_endpoint_ack: ACK2 })), vault: STANDARD_VAULT, grant: 'refresh_token' },
-    { name: 'never connected, client credentials', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }, 'client_credentials')), vault: STANDARD_VAULT, grant: 'client_credentials' },
-    { name: 'last consent returned no refresh token', profile: withPreset(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-0'), origin: 'callback', state: 'no-refresh' }, custom_endpoint_ack: ACK2 }, 'client_credentials')), vault: { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' }, grant: 'client_credentials' },
+    // A preset profile on `client_credentials` (never connected, or a last consent without a
+    // refresh token) does not reach a scope refusal any more: fetch_token refuses it before
+    // anything is sent (the describe further up).
     { name: 'refresh token read from its own slot', profile: withPreset(crmProfile({ custom_endpoint_ack: ACK2 }), { refresh_token_key: 'CRM_OWN_REFRESH' }), vault: { CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1', CRM_OWN_REFRESH: 'rt-1' }, grant: 'refresh_token' },
   ];
 
@@ -2618,6 +2702,33 @@ describe('who may have a token renewed on their behalf', () => {
   });
 });
 
+describe('the 401 reminder: would fetch_token swap a user\'s access?', () => {
+  // The reminder tells the model to run `fetch_token`. For a grant a user gave,
+  // `fetch_token` now refuses, so the reminder must not send the model there.
+  it('says yes for a preset profile and for a callback-authorized one', async () => {
+    const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: { preset_id: 'bexio' } } }, false)).toBe(true);
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: {} }, oauth_grant: { origin: 'callback' } }, false)).toBe(true);
+  });
+
+  it('says no for an app-only profile, with or without a grant record', async () => {
+    const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
+    // `fetch_token` writes `oauth_grant` itself after each exchange; that record
+    // carries no origin and must not read as a user's consent.
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: {} } }, false)).toBe(false);
+    expect(oauthFetchTokenWouldSwapDelegatedAccess(
+      { auth: { oauth: { grant_type: 'client_credentials' } }, oauth_grant: {} },
+      false,
+    )).toBe(false);
+  });
+
+  it('says no for a preset id this engine does not know', async () => {
+    const { oauthFetchTokenWouldSwapDelegatedAccess } = await import('./http.js');
+    // `connect` refuses such a profile, so "re-authorize" would be advice nobody can follow.
+    expect(oauthFetchTokenWouldSwapDelegatedAccess({ auth: { oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(false);
+  });
+});
+
 describe('which profiles may be renewed unattended', () => {
   /**
    * The second predicate, asserted directly. It answers a different question
@@ -2678,6 +2789,31 @@ describe('which profiles may be renewed unattended', () => {
       { auth: { oauth: { grant_type: 'client_credentials' } }, oauth_grant: { origin: 'callback' } },
       false,
     )).toBe(false);
+  });
+
+  it('refuses a preset profile with no refresh token, even without a callback record', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // A preset exists for the authorization-code flow, so its access token is a
+    // user's. Without its grant record (a profile file that re-entered the store)
+    // nothing else says so, and by the grant-type rule alone this is the
+    // client-credentials shape the gate permits.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { preset_id: 'bexio' } } }, false)).toBe(false);
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: { preset_id: 'bexio', grant_type: 'client_credentials' } } },
+      false,
+    )).toBe(false);
+    // A preset id this engine does not know marks nothing: the profile is app-only.
+    expect(oauthProfileMayBeRenewedUnattended({ auth: { oauth: { preset_id: 'not-a-provider' } } }, false)).toBe(true);
+  });
+
+  it('permits a preset profile that carries the refresh_token grant', async () => {
+    const { oauthProfileMayBeRenewedUnattended } = await import('./http.js');
+    // The preset refuses the client-credentials swap, not the renewal: a preset
+    // whose consent returned a refresh token renews by it, unattended.
+    expect(oauthProfileMayBeRenewedUnattended(
+      { auth: { oauth: { preset_id: 'bexio', grant_type: 'refresh_token' } }, oauth_grant: { origin: 'callback' } },
+      true,
+    )).toBe(true);
   });
 
   it('permits a callback-authorized profile once it carries the refresh_token grant', async () => {
