@@ -844,10 +844,11 @@ export function mayRenewOAuthUnattended(agent: import('../../types/index.js').IA
  * Did a USER give this grant, so that an app-level token would replace their consent?
  *
  * Two marks, either suffices: `oauth_grant.origin === 'callback'` (only the callback
- * writes it; an incoming value is discarded on update) and a BUILT-IN preset
- * (`auth.oauth.preset_id` that `OAUTH_PRESETS` knows): every built-in preset is an
- * authorization-code flow, and the preset also marks a profile that re-entered the store
- * without its grant record (a JSON in the apis directory).
+ * writes it; an incoming value is discarded on create and update) and a BUILT-IN preset
+ * (`auth.oauth.preset_id` that `OAUTH_PRESETS` knows): the built-in presets are
+ * authorization-code flows, and the preset also marks a profile that re-entered the store
+ * without its grant record (a JSON in the apis directory). A preset whose provider issues
+ * app tokens would be refused here too, so adding one means revisiting this.
  *
  * ⚠ Known presets only. A profile may be saved naming a provider this engine does not have
  * (the save only notes it), and `connect` refuses such a profile — so reading any
@@ -884,13 +885,14 @@ export function oauthGrantIsUserDelegated(profile: {
  *
  * Allowed, because neither can be that swap:
  *   · `grant_type: 'refresh_token'` — presents the user's own grant back;
- *   · `grant_type: 'client_credentials'`, explicitly chosen;
+ *   · `grant_type: 'client_credentials'`, explicitly chosen, on a profile with
+ *     no callback and no built-in preset behind it;
  *   · neither of those, no refresh token, and no callback behind it — the
  *     hand-built app-only profile this piece exists for, Shopify's shape.
  *
  * Refused:
- *   · anything whose `oauth_grant.origin` is `callback` and that is not a
- *     refresh-token grant;
+ *   · anything `oauthGrantIsUserDelegated` marks (a callback, or a built-in
+ *     preset) that is not a refresh-token grant;
  *   · a stored refresh token with no explicit `grant_type` — the older,
  *     hand-configured version of the same ambiguity.
  *
