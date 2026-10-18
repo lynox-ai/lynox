@@ -9228,11 +9228,38 @@ describe('LynoxHTTPApi', () => {
       bulkLedger.setPhase(id, ['approved'], 'writing');
       expect(bulkLedger.claimTarget(id, 0)).toBe(true);
       bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 0, 'written');
+      // Still writing, not stopped: confirming would be refused, so nothing is offered.
+      expect(await probeOf()).toBeNull();
       bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
       // The written target, and only the field the write changed — not the one sent unchanged.
       expect(await probeOf()).toEqual({ key: keys[0], fields: ['price'] });
       expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(200);
       expect(await probeOf()).toBeNull();
+    });
+
+    it('offers no probe for a target found already holding its value, and names the halt and what an undo takes back', async () => {
+      const host = 'shop.example.com';
+      const keys = [1, 2].map((i) => `https://${host}/products/${String(i)}`);
+      const planned = bulkLedger.recordExternalPlan({ createdBy: 't', principal: OWNER_PRINCIPAL, host, targets: keys.map((key) => ({ key, after: { price: '1' } })), contract: mintBulkContract(host, keys) });
+      if (!planned.ok) throw new Error('not planned');
+      const id = planned.status.id;
+      bulkLedger.resumePreview(id);
+      for (const seq of [0, 1]) bulkLedger.recordRead(id, seq, { before: { price: '2' } });
+      bulkLedger.finishPreview(id);
+      expect(bulkLedger.approve(id, { checksum: bulkLedger.computeChecksum(id)!, maxTargets: 1, unmeasuredConfirmed: true }).ok).toBe(true);
+      bulkLedger.setPhase(id, ['approved'], 'writing');
+      const runOf = async (): Promise<{ probe: unknown; haltKey: unknown; undoable: unknown }> => (await (await jsonFetch(`/api/bulk/runs/${id}`)).json()) as { probe: unknown; haltKey: unknown; undoable: unknown };
+      expect(await runOf()).toMatchObject({ haltKey: null, undoable: 0 });
+      // The first write went out and no answer came: it may have landed, so an undo takes it.
+      expect(bulkLedger.claimTarget(id, 0)).toBe(true);
+      bulkLedger.markSent(id, 0);
+      bulkLedger.recordFailed(id, 0, 'write_failed');
+      // The second was found holding its value already: applied, but not written.
+      expect(bulkLedger.claimTarget(id, 1)).toBe(true);
+      bulkLedger.recordApplied({ id, kind: 'apply', sourceRunId: null }, 1, 'already');
+      bulkLedger.halt(id, BULK_HALT_REASONS.maxTargets);
+      expect(await runOf()).toMatchObject({ probe: null, haltKey: 'maxTargets', undoable: 2 });
+      expect((await jsonFetch(`/api/bulk/runs/${id}/confirm-probe`, { method: 'POST', body: '{}' })).status).toBe(409);
     });
 
     it('says when a run that stands still is picked up again, for the read and for the write trigger', async () => {

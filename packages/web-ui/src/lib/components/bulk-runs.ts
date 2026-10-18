@@ -30,6 +30,8 @@ export interface BulkRun {
 	probeConfirmed: boolean;
 	writeForm: 'measured' | 'unmeasured' | null;
 	haltReason: string | null;
+	/** The halt by name (a key of core's BULK_HALT_REASONS); the surface words its sentences on it. */
+	haltKey: string | null;
 	costUsd: number;
 	costCapUsd: number | null;
 	judge: { tier: string; unjudged: number } | null;
@@ -42,6 +44,8 @@ export interface BulkRunDetailData extends BulkRun {
 	judgeModel: string | null;
 	resumesAt: string | null;
 	probe: { key: string; fields: string[] } | null;
+	/** Targets an undo would take back now, a failed external write that may have landed included. */
+	undoable: number;
 }
 
 export type TargetDiff =
@@ -82,9 +86,23 @@ export function bulkWriting(run: Pick<BulkRun, 'changes'>): number {
 	return run.changes.update + run.changes.create + run.changes.delete;
 }
 
-/** Whether the run stands at its probe: an external run that wrote one target and waits. */
+/** Whether the run stands at its probe: an external run that wrote one target and halted.
+ *  The server names a probe only where confirming it can succeed. A run that finished is not
+ *  at its probe: it has nothing left to write. */
 export function bulkAtProbe(run: Pick<BulkRunDetailData, 'probe' | 'haltReason' | 'phase'>): boolean {
-	return run.probe !== null && run.haltReason !== null && (run.phase === 'approved' || run.phase === 'writing' || run.phase === 'done');
+	return run.probe !== null && run.haltReason !== null && run.phase === 'writing';
+}
+
+/** Whether a planned run waits for the owner to start it, rather than having halted on a failure. */
+export function bulkWaitsForStart(run: Pick<BulkRun, 'phase' | 'haltKey'>): boolean {
+	return run.phase === 'planned' && (run.haltKey === 'awaitingStart' || run.haltKey === 'listed');
+}
+
+/** Whether the run can be taken back now: an apply run that stopped, has something an undo
+ *  would take back, and is not at its probe (that has its own way back). */
+export function bulkCanUndo(run: Pick<BulkRunDetailData, 'kind' | 'phase' | 'haltReason' | 'undoable' | 'probe'>): boolean {
+	if (run.kind !== 'apply' || run.undoable <= 0 || bulkAtProbe(run)) return false;
+	return run.phase === 'done' || run.phase === 'aborted' || (run.phase === 'writing' && run.haltReason !== null);
 }
 
 export const BULK_STEPS = ['planned', 'preview', 'approval', 'probe', 'run', 'done'] as const;

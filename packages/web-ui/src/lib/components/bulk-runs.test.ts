@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkHostOf, bulkLabel, bulkStep, bulkSystemName, bulkValueText, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkHostOf, bulkLabel, bulkStep, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
@@ -41,6 +41,28 @@ describe('bulk run helpers', () => {
 		expect(bulkAtProbe(probeState({ probe, haltReason: null, phase: 'writing' }))).toBe(false);
 		expect(bulkAtProbe(probeState({ probe: null, haltReason: 'x', phase: 'writing' }))).toBe(false);
 		expect(bulkAtProbe(probeState({ probe, haltReason: 'x', phase: 'previewed' }))).toBe(false);
+		// A run that finished has nothing left to write after its probe.
+		expect(bulkAtProbe(probeState({ probe, haltReason: 'x', phase: 'done' }))).toBe(false);
+	});
+
+	it('waits for a start only on the halts that wait for one, not on a failed read', () => {
+		expect(bulkWaitsForStart({ phase: 'planned', haltKey: 'awaitingStart' })).toBe(true);
+		expect(bulkWaitsForStart({ phase: 'planned', haltKey: 'listed' })).toBe(true);
+		expect(bulkWaitsForStart({ phase: 'planned', haltKey: 'listUnreadable' })).toBe(false);
+		expect(bulkWaitsForStart({ phase: 'writing', haltKey: 'awaitingStart' })).toBe(false);
+	});
+
+	it('offers an undo for what an undo would take back, a failed external write included', () => {
+		const stopped = { kind: 'apply' as const, phase: 'writing' as const, haltReason: 'x', probe: null };
+		// Nothing applied, but a write that went out and failed may have landed.
+		expect(bulkCanUndo({ ...stopped, undoable: 1 })).toBe(true);
+		expect(bulkCanUndo({ ...stopped, undoable: 0 })).toBe(false);
+		expect(bulkCanUndo({ ...stopped, phase: 'writing', haltReason: null, undoable: 1 })).toBe(false);
+		expect(bulkCanUndo({ ...stopped, phase: 'done', haltReason: null, undoable: 1 })).toBe(true);
+		expect(bulkCanUndo({ ...stopped, phase: 'aborted', haltReason: null, undoable: 1 })).toBe(true);
+		expect(bulkCanUndo({ ...stopped, kind: 'undo', undoable: 1 })).toBe(false);
+		// At its probe the run has its own way back.
+		expect(bulkCanUndo({ ...stopped, probe: { key: 'k', fields: [] }, undoable: 1 })).toBe(false);
 	});
 
 	it('places a run on its step', () => {

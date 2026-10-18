@@ -55,6 +55,16 @@ describe('WorkerLoop.resumesAt', () => {
     expect(loop.resumesAt(triggerId, now)).toBeNull();
   });
 
+  it('draws the line at two missed renewals, not one and not three', () => {
+    const now = Date.now();
+    const below = harness();
+    leaseByOther(below.manager, below.triggerId, now, 1.5 * HEARTBEAT);
+    expect(below.loop.resumesAt(below.triggerId, now)).toBeNull();
+    const above = harness();
+    const until = leaseByOther(above.manager, above.triggerId, now, 2.5 * HEARTBEAT);
+    expect(above.loop.resumesAt(above.triggerId, now)).toBe(until);
+  });
+
   it('is null for a lease this loop holds — its run is running', async () => {
     const { loop, manager, triggerId } = harness();
     const now = Date.now();

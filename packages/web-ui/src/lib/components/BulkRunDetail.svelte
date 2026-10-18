@@ -9,7 +9,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkHostOf, bulkLabel, bulkStep, bulkSystemName, bulkValueText, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkHostOf, bulkLabel, bulkStep, bulkSystemName, bulkValueText, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -45,19 +45,31 @@
 		});
 	}
 
+	/** A page of the run's targets. A failed fetch throws: an empty page would read as a run
+	 *  with fewer targets than the approval covers. */
 	async function loadTargets(offset: number, limit: number): Promise<BulkTarget[]> {
 		const r = await json<{ targets?: BulkTarget[] }>(`/bulk/runs/${encodeURIComponent(runId)}/targets?offset=${offset}&limit=${limit}`);
-		return r.ok ? (r.body.targets ?? []) : [];
+		if (!r.ok || !Array.isArray(r.body.targets)) throw new Error('targets');
+		return r.body.targets;
 	}
 
-	/** Every target an undo deletes — the entries its source created, listed in full (F3). */
-	async function loadCreates(total: number): Promise<BulkTarget[]> {
+	/** Every target from `offset` on, page by page (the route serves at most PAGE at once). */
+	async function loadFrom(offset: number, total: number): Promise<BulkTarget[]> {
 		const out: BulkTarget[] = [];
-		for (let offset = 0; offset < total; offset += PAGE) {
-			const page = await loadTargets(offset, PAGE);
-			out.push(...page.filter((x) => x.change === 'delete'));
+		for (let at = offset; at < total; at += PAGE) {
+			const page = await loadTargets(at, PAGE);
+			out.push(...page);
 			if (page.length < PAGE) break;
 		}
+		return out;
+	}
+
+	/** Every target an undo deletes — the entries its source created, listed in full. The
+	 *  approval deletes all of them, so a list shorter than the run's own count is not shown
+	 *  as the whole: it fails, and approving waits for a page that lists them all. */
+	async function loadCreates(r: BulkRunDetailData): Promise<BulkTarget[]> {
+		const out = (await loadFrom(0, r.total)).filter((x) => x.change === 'delete');
+		if (out.length !== r.changes.delete) throw new Error('creates');
 		return out;
 	}
 
@@ -67,9 +79,13 @@
 		try {
 			const r = await json<BulkRunDetailData>(`/bulk/runs/${encodeURIComponent(runId)}`);
 			if (!r.ok) { error = t('common.load_failed'); loading = false; return; }
+			// The run is shown only with its targets: a page that could not load them all shows
+			// the error, never a run whose approval covers more than it lists.
+			const shown = await loadTargets(0, FIRST_PAGE);
+			const deleted = r.body.kind === 'undo' ? await loadCreates(r.body) : [];
 			run = r.body;
-			targets = await loadTargets(0, FIRST_PAGE);
-			creates = run.kind === 'undo' ? await loadCreates(run.total) : [];
+			targets = shown;
+			creates = deleted;
 			maxTargets = Math.max(1, bulkWriting(run));
 			unmeasuredOk = false;
 			probeOk = false;
@@ -80,7 +96,12 @@
 	}
 
 	async function showMore(): Promise<void> {
-		targets = [...targets, ...(await loadTargets(targets.length, PAGE))];
+		if (!run) return;
+		try {
+			targets = [...targets, ...(await loadFrom(targets.length, run.total))];
+		} catch {
+			actionError = t('common.load_failed');
+		}
 	}
 
 	async function act(fn: () => Promise<string | null>): Promise<void> {
@@ -155,8 +176,7 @@
 	// The unmeasured note in English is the engine's own sentence; German is the approved translation.
 	const unmeasuredNote = $derived(getLocale() === 'de' || !run?.writeFormNote ? t('bulk.approve.unmeasured_note') : run.writeFormNote);
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
-	const canUndo = $derived(run !== null && run.kind === 'apply' && !atProbe && run.applied - run.undone > 0
-		&& (run.phase === 'done' || run.phase === 'aborted' || ((run.phase === 'writing' || run.phase === 'approved') && run.haltReason !== null)));
+	const canUndo = $derived(run !== null && bulkCanUndo(run));
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -192,14 +212,14 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t('bulk.head.halted')}</dt>
-					<dd>{atProbe ? t('bulk.halted_after_probe') : run.haltReason}</dd>
+					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : run.haltReason}</dd>
 				{/if}
 			</dl>
 
 			{#if run.resumesAt}
 				<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{tf('bulk.resumes_at', { time: when(run.resumesAt) })}</p>
 			{/if}
-			{#if run.phase === 'planned' && run.haltReason !== null}
+			{#if run.phase === 'planned' && run.haltKey === 'awaitingStart'}
 				<p class="text-sm text-text-muted">{t('bulk.awaiting_start')}</p>
 			{/if}
 			{#if run.conflicts > 0}
@@ -283,7 +303,9 @@
 			{:else if atProbe && run.probe}
 				<div class="space-y-3 border-t border-border pt-4">
 					<h2 class="text-sm font-medium">{t('bulk.probe.title')}</h2>
-					<p class="text-sm">{tf('bulk.probe.explain', { target: run.probe.key, provider, field: run.probe.fields.join(', ') })}</p>
+					<p class="text-sm">{run.probe.fields.length > 0
+						? tf('bulk.probe.explain', { target: run.probe.key, provider, field: run.probe.fields.join(', ') })
+						: tf('bulk.probe.explain_whole', { target: run.probe.key, provider })}</p>
 					<label class="flex gap-2 items-start text-sm">
 						<input type="checkbox" bind:checked={probeOk} class="mt-1" />
 						<span>{tf('bulk.probe.confirm', { provider })}{run.writeForm === 'measured' ? ` ${tf('bulk.probe.confirm_measured', { provider })}` : ''}</span>
@@ -303,16 +325,16 @@
 					<h2 class="text-sm font-medium">{t('bulk.undo.approve_title')}</h2>
 					<!-- The targets that get a value back; the entries the source created are listed apart. -->
 					<p class="text-sm">{tf('bulk.undo.approve_explain', { n: String(run.changes.update + run.changes.create) })}</p>
-					{#if creates.length > 0}
+					{#if run.changes.delete > 0}
 						<div class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
-							<p>{tf('bulk.undo.creates', { k: String(creates.length) })}</p>
+							<p>{tf('bulk.undo.creates', { k: String(run.changes.delete) })}</p>
 							<ul class="list-disc pl-5 mt-1">
 								{#each creates as c (c.seq)}<li><code class="text-xs break-all">{c.key}</code></li>{/each}
 							</ul>
 						</div>
 					{/if}
 					<div class="flex flex-wrap gap-2">
-						<button type="button" class={btnPrimary} disabled={busy} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
+						<button type="button" class={btnPrimary} disabled={busy || creates.length !== run.changes.delete} onclick={approveUndo}>{t('bulk.undo.approve')}</button>
 						<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 					</div>
 				</div>

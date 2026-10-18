@@ -15,7 +15,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import BulkRunDetail from './BulkRunDetail.svelte';
-	import { bulkLabel, bulkSystemName, type BulkRun } from './bulk-runs.js';
+	import { bulkLabel, bulkSystemName, bulkWaitsForStart, type BulkRun } from './bulk-runs.js';
 
 	interface MergeRun {
 		id: string;
@@ -133,8 +133,8 @@
 									</td>
 									<td class="py-2 pr-3 hidden sm:table-cell">{bulkSystemName(run.targetSystem, i18n)}</td>
 									<td class="py-2 pr-3">
-										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && run.phase !== 'planned' ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
-											{t(`bulk.phase.${run.phase}`)}{run.haltReason && run.phase !== 'planned' ? ` ${t('bulk.halted_suffix')}` : ''}
+										<span class="{chipClass} whitespace-nowrap {run.phase === 'done' ? 'bg-success/15 text-success' : run.haltReason && !bulkWaitsForStart(run) ? 'bg-warning/15 text-warning' : 'bg-bg-muted text-text-muted'}">
+											{t(`bulk.phase.${run.phase}`)}{run.haltReason && !bulkWaitsForStart(run) ? ` ${t('bulk.halted_suffix')}` : ''}
 										</span>
 										{#if run.writeForm === 'unmeasured'}
 											<span class="{chipClass} whitespace-nowrap bg-warning/15 text-warning">{t('bulk.unmeasured_chip')}</span>

@@ -101,7 +101,7 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_UNKEYED_CHECKSUM_NOTE, externalHostOf } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { bulkPreviewTriggerId } from '../core/trigger-store.js';
@@ -8333,8 +8333,14 @@ export class LynoxHTTPApi {
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
-    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed' }>(status: T): T & { checksumNote?: string } =>
-      status.checksumBinding === 'unkeyed' ? { ...status, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : status;
+    /** Which halt a run stands at, by name: the owner's page words its own sentences on the
+     *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkHaltKey = (haltReason: string | null): string | null =>
+      haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
+    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
+      const named = { ...status, haltKey: bulkHaltKey(status.haltReason) };
+      return status.checksumBinding === 'unkeyed' ? { ...named, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : named;
+    };
     /** When a run that stands still is picked up again, from the lease of the trigger it runs
      *  under (the read phase's, or the write phase's); null when nothing waits on a lease. */
     const bulkResumesAt = (runId: string): string | null => {
@@ -8344,12 +8350,17 @@ export class LynoxHTTPApi {
     };
     /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
     const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
-      if (status.kind !== 'apply' || status.probeConfirmed || status.applied !== 1 || externalHostOf(status.targetSystem) === null) return null;
-      const written = ledger.listAppliedDesc(status.id)[0];
+      // Offered only where confirm-probe can succeed: a target found already holding its
+      // value was not written, and a run still writing has not stopped at its probe.
+      if (status.probeConfirmed) return null;
+      const key = ledger.probeKey(status.id);
+      const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
       if (!written) return null;
-      const before = written.expected.absent ? {} : (written.expected.value as Record<string, unknown> | null) ?? {};
-      const after = written.after.absent ? {} : (written.after.value as Record<string, unknown> | null) ?? {};
-      const fields = Object.keys(after).filter((f) => JSON.stringify(after[f]) !== JSON.stringify(before[f]));
+      const fieldsOf = (image: { absent: boolean; value?: unknown }): Record<string, unknown> =>
+        !image.absent && image.value !== null && typeof image.value === 'object' && !Array.isArray(image.value) ? image.value as Record<string, unknown> : {};
+      const before = fieldsOf(written.expected);
+      const after = fieldsOf(written.after);
+      const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
       return { key: written.key, fields };
     };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
@@ -8424,6 +8435,9 @@ export class LynoxHTTPApi {
         // The one target an external run wrote before its probe is confirmed: what the owner
         // opens at the provider, and the fields the write changed there.
         probe: bulkProbeOf(status, ledger),
+        // What an undo would take back now; for an external run that includes a failed write,
+        // which may have landed although its answer never came back.
+        undoable: ledger.countUndoable(status.id),
       });
     }, READS));
 
