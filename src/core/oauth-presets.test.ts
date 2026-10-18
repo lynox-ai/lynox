@@ -51,7 +51,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       'The set of providers changed. Adding one makes the redirect flow reach a new site: decide it first, give the '
       + 'entry its source, enumerate its allowed scopes (never "everything but"), and check that every model-visible '
       + 'message about a revoked grant still sends a preset profile to `api_setup connect`, not to a pasted token.',
-    ).toEqual(['bexio']);
+    ).toEqual(['bexio', 'shopify']);
   });
 
   it('hands out no map, so no cast can add a provider at runtime', () => {
@@ -71,7 +71,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     expect(() => {
       (OAUTH_PRESETS as unknown as Record<string, unknown>)['evil'] = { id: 'evil' };
     }).toThrow();
-    expect(presetIds()).toEqual(['bexio']);
+    expect(presetIds()).toEqual(['bexio', 'shopify']);
   });
 
   it('exports no way to register a preset at runtime', async () => {
@@ -85,7 +85,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     expect(Object.keys(module).sort()).toEqual(
       // `presetScopeRequest`, `presetScopeNeedUnmet` and `presetNotFollowed` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
       // So are `presetScopeParam`, `presetTokenHeaderName` and `presetTokenBodyFormat`: each reads one field of a preset it is handed.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetNotFollowed', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
+      // And `presetClaimsHost` and `presetStoreHost`: they derive a host from a preset and a profile.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetClaimsHost', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
     );
   });
 
@@ -93,7 +94,7 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     // The seam is a parameter. Passing one must not reach the shipped register
     // — otherwise a test would widen production.
     expect(presetIds(REGISTER)).toEqual(['example-constant', 'example-shop']);
-    expect(presetIds()).toEqual(['bexio']);
+    expect(presetIds()).toEqual(['bexio', 'shopify']);
   });
 });
 
@@ -479,12 +480,13 @@ describe('what a preset says about the request shape, and what a preset that say
     expect(presetTokenBodyFormat(bexio, 'json')).toBe('json');
   });
 
-  // A tripwire: the change that gives a shipped preset one of these also wires its consumer,
-  // and removes this test.
-  it('ships no preset that sets any of the four yet', () => {
-    for (const id of OAUTH_PRESETS.ids()) {
-      const preset = OAUTH_PRESETS.get(id);
-      expect([preset?.scopeSeparator, preset?.tokenHeaderName, preset?.tokenBodyFormat, preset?.callbackVerification]).toEqual([undefined, undefined, undefined, undefined]);
-    }
+  it('gives the shipped Shopify preset commas, its own token header, a form body and the HMAC check', () => {
+    const shopify = OAUTH_PRESETS.get('shopify');
+    expect(shopify).toBeDefined();
+    if (!shopify) return;
+    expect(presetScopeParam(shopify, ['read_products', 'read_orders'])).toBe('read_products,read_orders');
+    expect(presetTokenHeaderName(shopify)).toBe('X-Shopify-Access-Token');
+    expect(presetTokenBodyFormat(shopify, 'json')).toBe('form');
+    expect(shopify.callbackVerification).toBe('shopify-hmac');
   });
 });
