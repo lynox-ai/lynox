@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // A profile the boot held back is stored, and it is the owner's: a mandate session may neither
-// save over it nor delete it, the same as a registered one. The author check reads the stored
+// save over it nor delete it. The author check reads the stored
 // profile, registered or held back; it runs before anything else a save or a delete does, so a
 // refused call leaves the stored record and the vault as they were. Through both real loaders and
 // `api_setup`.
@@ -71,8 +71,7 @@ const crm = (): ApiProfile => ({
 });
 /**
  * `reader`, oauth2 on its own host, reading the refresh slot `crm` derives: the boot holds it
- * back. Its exchange wrote its own access token. An update that moves its base would empty every
- * token slot it holds before the save — the step a refused save must never reach.
+ * back. Its exchange wrote its own access token.
  */
 const reader = (over: Partial<ApiProfile> = {}): ApiProfile => ({
   id: 'reader', name: 'reader', base_url: 'https://reader.example/v1', description: 'reader',
@@ -141,8 +140,16 @@ function call(store: ApiStore, vault: ReturnType<typeof vaultOf>, input: Record<
 }
 
 const REFUSED = 'Error: API profile "reader" was not set up in this session\'s name, so this session may not change or delete it. Nothing was changed. Ask the owner to make the change.';
-/** The mandate's edit: the same profile moved to another base, which would empty its token slots first. */
-const moved = (): ApiProfile => ({ ...reader(), base_url: 'https://elsewhere.example/v1', custom_endpoint_ack: ackFor('elsewhere.example') });
+/**
+ * The mandate's edit: its own sign-in instead of the owner's refresh slot, on another base. A save
+ * that gets past the author check goes through, and since it ends the reading it empties the token
+ * slot `reader` holds first: the vault and the stored record both change (the control below).
+ */
+const moved = (): ApiProfile => reader({
+  base_url: 'https://elsewhere.example/v1',
+  custom_endpoint_ack: ackFor('elsewhere.example'),
+  auth: { type: 'oauth2', vault_keys: ['READER_CID', 'READER_CSECRET'], oauth: { token_url: 'https://elsewhere.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'READER_CID', client_secret_key: 'READER_CSECRET' } },
+});
 
 describe.each(loaders)('a profile of the owner the boot held back, through %s', (_loader, boot) => {
   const setup = () => {
@@ -176,17 +183,18 @@ describe.each(loaders)('control: a profile of the mandate the boot held back, th
   const setup = () => {
     const booted = boot([crm(), reader({ created_by: MANDATE_TAG })]);
     expect(booted.store.get('reader')).toBeUndefined();
+    expect(booted.store.storedProfile('reader')).toBeDefined();
     return { ...booted, before: booted.stored(), vault: vaultOf(VAULT), asked: vi.fn(async () => 'Allow') };
   };
 
-  it('the mandate saves over it', async () => {
-    const { store, stored, before } = setup();
-    // Its own sign-in instead of the owner's refresh slot: the edit that lets the boot admit it.
-    const own = reader({ created_by: MANDATE_TAG, auth: { type: 'oauth2', vault_keys: ['READER_CID', 'READER_CSECRET'], oauth: { token_url: 'https://reader.example/oauth/token', grant_type: 'refresh_token', client_id_key: 'READER_CID', client_secret_key: 'READER_CSECRET' } } });
-    const result = await call(store, vaultOf(VAULT), { action: 'update', profile: own }, vi.fn(async () => 'Allow'));
-    expect(result).toContain('Profile saved and activated immediately');
-    expect(store.get('reader')).toBeDefined();
+  // The same payload the refused tests send: past the author check it is saved, and the vault and
+  // the stored record change, so their equality asserts above carry weight.
+  it.each(['create', 'update'] as const)('the mandate\'s %s over it goes through and empties what it held', async (action) => {
+    const { store, stored, before, vault, asked } = setup();
+    expect(await call(store, vault, { action, profile: moved() }, asked)).toContain('Profile saved and activated immediately');
+    expect(store.get('reader')?.base_url).toBe('https://elsewhere.example/v1');
     expect(stored()).not.toBe(before);
+    expect(vault.snapshot()).toEqual({ CRM_REFRESH_TOKEN: VAULT.CRM_REFRESH_TOKEN });
   });
 
   it('the mandate deletes it, asked', async () => {
