@@ -442,8 +442,8 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     type GrantRowRaw = Record<string, unknown>;
     const grantRows = (): GrantRowRaw[] =>
       engineDb.getDb().prepare('SELECT * FROM workflow_grants ORDER BY rowid').all() as GrantRowRaw[];
-    const runRows = (): Array<{ id: string; parent_run_id: string | null; grant_id: string | null; started_via: string | null }> =>
-      history.getDb().prepare('SELECT id, parent_run_id, grant_id, started_via FROM pipeline_runs ORDER BY started_at, rowid').all() as Array<{ id: string; parent_run_id: string | null; grant_id: string | null; started_via: string | null }>;
+    const runRows = (): Array<{ id: string; parent_run_id: string | null; workflow_grant_id: string | null; started_via: string | null }> =>
+      history.getDb().prepare('SELECT id, parent_run_id, workflow_grant_id, started_via FROM pipeline_runs ORDER BY started_at, rowid').all() as Array<{ id: string; parent_run_id: string | null; workflow_grant_id: string | null; started_via: string | null }>;
     const stampOf = (id: string) => { forgetPipeline(id); return getPipeline(id, history)!.reviewedGrant!; };
 
     it('verify-done: two workflows defined alike get two rows, and accepting one again a third, leaving the two as they were', () => {
@@ -453,13 +453,13 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       expect(before).toHaveLength(2);
       // Same contract, steps and schedule: the checksum is the same, the grant is not.
       expect(before[0]!['checksum']).toBe(before[1]!['checksum']);
-      expect(before[0]!['grant_id']).not.toBe(before[1]!['grant_id']);
+      expect(before[0]!['id']).not.toBe(before[1]!['id']);
       accept(getPipeline('wf-a', history)!);
       const after = grantRows();
       expect(after).toHaveLength(3);
       expect(after.slice(0, 2)).toEqual(before);
       // The stamp names the newest row; the row is the acceptance as shown.
-      expect(stampOf('wf-a').grantId).toBe(after[2]!['grant_id']);
+      expect(stampOf('wf-a').grantId).toBe(after[2]!['id']);
       expect(after[2]).toMatchObject({ workflow_id: 'wf-a', accepted_by: 'local', name: 'Ada', cron: CRON, bound_params_json: '{}', after_untrusted: 0 });
     });
 
@@ -506,7 +506,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       expect(posts()).toHaveLength(1);
       const granted = runRows();
       expect(granted).toHaveLength(1);
-      expect(granted[0]).toMatchObject({ grant_id: stampOf('wf-run').grantId, started_via: `schedule:${trigger.id}` });
+      expect(granted[0]).toMatchObject({ workflow_grant_id: stampOf('wf-run').grantId, started_via: `schedule:${trigger.id}` });
 
       const plain = saveWorkflow('wf-plain');
       history.setWorkflowConfirmedAt(plain.id, '2026-10-01T00:00:00.000Z');
@@ -516,7 +516,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       await fire(t2);
       const rows = runRows();
       expect(rows).toHaveLength(2);
-      expect(rows[1]).toMatchObject({ grant_id: null, started_via: null });
+      expect(rows[1]).toMatchObject({ workflow_grant_id: null, started_via: null });
     });
 
     it('a schedule the owner runs with "Run now" records schedule-hand, a library start the auth origin', async () => {
@@ -531,7 +531,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const lib = await runGuardedSavedWorkflow(engine(), 'wf-how', undefined, { origin: { kind: 'library', by: 'cookie:0123abcd' } });
       expect(lib.grantNote).toBeUndefined();
       const grantId = stampOf('wf-how').grantId;
-      expect(runRows().map((r) => [r.grant_id, r.started_via])).toEqual([
+      expect(runRows().map((r) => [r.workflow_grant_id, r.started_via])).toEqual([
         [grantId, `schedule-hand:${trigger.id}`],
         [grantId, 'library:cookie:0123abcd'],
       ]);
@@ -571,7 +571,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
         expect(bare.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
       } finally { bare.close(); }
       // A row whose binding is neither value is unreadable, not unkeyed.
-      engineDb.getDb().prepare("UPDATE workflow_grants SET binding = 'garbled' WHERE grant_id = ?").run(grantId);
+      engineDb.getDb().prepare("UPDATE workflow_grants SET binding = 'garbled' WHERE id = ?").run(grantId);
       expect(history.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
       engineDb.close();
       expect(history.readWorkflowGrant(grantId)).toEqual({ state: 'unavailable', grantId });
@@ -586,7 +586,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
       const read = history.getPipelineRun(r.runId!) as Record<string, unknown>;
       expect(read['id']).toBe(r.runId);
       expect(read).not.toHaveProperty('started_via');
-      expect(read).not.toHaveProperty('grant_id');
+      expect(read).not.toHaveProperty('workflow_grant_id');
     });
 
     it('the owner\'s erasure empties the grant rows (pinned, not a mutation target)', () => {

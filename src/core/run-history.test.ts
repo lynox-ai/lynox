@@ -2576,7 +2576,7 @@ describe('RunHistory', () => {
         CREATE TABLE IF NOT EXISTS active_runs (run_id TEXT PRIMARY KEY);
         -- and tasks (created v1, rebuilt v42); v58 ALTERs it (created_by). Minimal stub.
         CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
-        -- and pipeline_runs (created v7); v63 ALTERs it (grant_id, started_via). Minimal stub.
+        -- and pipeline_runs (created v7); v63 ALTERs it (workflow_grant_id, started_via). Minimal stub.
         CREATE TABLE IF NOT EXISTS pipeline_runs (id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
@@ -2901,7 +2901,7 @@ describe('history.db v58 — who created a to-do', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.insertTask({ id: 'old1', title: 'kept' });
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 58; ALTER TABLE tasks DROP COLUMN created_by; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
     before.close();
 
     const after = new RunHistory(path);
@@ -2923,7 +2923,7 @@ describe('history.db v59 — why a question was closed', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 59; ALTER TABLE pending_prompts DROP COLUMN closed_reason; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
     before.close();
 
     const after = new RunHistory(path);
@@ -2945,7 +2945,7 @@ describe('history.db v60 — which mandate asked a question', () => {
     const path = join(dir, 'history.db');
     const before = new RunHistory(path);
     before.getDb().prepare("INSERT INTO pending_prompts (id, session_id, prompt_type, question, expires_at, created_by) VALUES ('p-old', 's1', 'ask_user', 'q', '2099-01-01T00:00:00.000Z', 'mandate:old@example.org')").run();
-    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
+    before.getDb().exec('DELETE FROM schema_version WHERE version >= 60; ALTER TABLE pending_prompts DROP COLUMN mandate_id; ALTER TABLE pipeline_runs DROP COLUMN workflow_grant_id; ALTER TABLE pipeline_runs DROP COLUMN started_via;');
     before.close();
 
     const after = new RunHistory(path);

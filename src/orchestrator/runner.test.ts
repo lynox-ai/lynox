@@ -1569,7 +1569,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     const STEP: Manifest = { ...MANIFEST, context: { params: { month: 'okt' } }, agents: [{ id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'post the report for {{params.month}}' }] };
     const taskHanded = (call = 0): string => (mockSpawnInline.mock.calls[call]![0] as { task: string }).task;
     const NESTED: Manifest = { ...MANIFEST, agents: [{ id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] }] };
-    const rows = (h: RunHistory) => h.getDb().prepare('SELECT id, parent_run_id, grant_id, started_via FROM pipeline_runs ORDER BY started_at, rowid').all() as Array<{ id: string; parent_run_id: string | null; grant_id: string | null; started_via: string | null }>;
+    const rows = (h: RunHistory) => h.getDb().prepare('SELECT id, parent_run_id, workflow_grant_id, started_via FROM pipeline_runs ORDER BY started_at, rowid').all() as Array<{ id: string; parent_run_id: string | null; workflow_grant_id: string | null; started_via: string | null }>;
     // spawnInline's capabilityContract is the 10th positional argument (index 9).
     const contractHanded = (call = 0): CapabilityContract | undefined => mockSpawnInline.mock.calls[call]![9] as CapabilityContract | undefined;
 
@@ -1579,8 +1579,8 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
         mockSpawnInline.mockClear();
         const state = await runManifest(NESTED, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: granted, startedVia: 'schedule:t-1' });
         const [outer, inner] = rows(h);
-        expect(outer).toMatchObject({ id: state.runId, parent_run_id: null, grant_id: 'grant-7', started_via: 'schedule:t-1' });
-        expect(inner).toMatchObject({ parent_run_id: state.runId, grant_id: 'grant-7', started_via: `nested:${state.runId}` });
+        expect(outer).toMatchObject({ id: state.runId, parent_run_id: null, workflow_grant_id: 'grant-7', started_via: 'schedule:t-1' });
+        expect(inner).toMatchObject({ parent_run_id: state.runId, workflow_grant_id: 'grant-7', started_via: `nested:${state.runId}` });
         // …and its step got the contract, still naming the grant.
         expect(grantIdOf(contractHanded())).toBe('grant-7');
       } finally { h.close(); cleanup(); }
@@ -1590,7 +1590,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
       const { h, cleanup } = tmpHistory();
       try {
         await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, startedVia: 'schedule:t-1' });
-        expect(rows(h)).toEqual([expect.objectContaining({ grant_id: null, started_via: null })]);
+        expect(rows(h)).toEqual([expect.objectContaining({ workflow_grant_id: null, started_via: null })]);
       } finally { h.close(); cleanup(); }
     });
 
@@ -1622,7 +1622,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
         mockSpawnInline.mockClear();
         await runManifest(NESTED, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: granted, isAcceptedParam: () => true });
         // The inner run was recorded, without a grant, and its step got no contract.
-        expect(rows(h)).toEqual([expect.objectContaining({ grant_id: null, started_via: null })]);
+        expect(rows(h)).toEqual([expect.objectContaining({ workflow_grant_id: null, started_via: null })]);
         expect(contractHanded()).toBeUndefined();
       } finally { h.close(); cleanup(); }
     });
@@ -1634,7 +1634,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
         const state = await runManifest(STEP, CONFIG, { parentTools: tools, runHistory: h, capabilityContract: CONTRACT });
         expect(contractHanded()).toBeUndefined();
         expect(state.grantNote).toMatch(/names no accepted grant/);
-        expect(rows(h)).toEqual([expect.objectContaining({ grant_id: null })]);
+        expect(rows(h)).toEqual([expect.objectContaining({ workflow_grant_id: null })]);
       } finally { h.close(); cleanup(); }
     });
 

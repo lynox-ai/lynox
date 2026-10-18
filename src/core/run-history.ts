@@ -1471,7 +1471,7 @@ const MIGRATIONS: string[] = [
    );
    CREATE INDEX IF NOT EXISTS idx_bulk_cost_days_created ON bulk_cost_days(created_at);`,
   // v63: under which accepted grant a pipeline run ran, and how it was started (3f-1a).
-  // `grant_id` names the engine.db `workflow_grants` row — a soft reference across files, so a
+  // `workflow_grant_id` names the engine.db `workflow_grants` row (its `id`) — a soft reference across files, so a
   // run can outlive its row (an erasure takes both files; a backup can catch them at different
   // times) and the reader says so (`readWorkflowGrant` → `missing`). A nested pipeline carries
   // its parent's id, because it runs under the parent's contract. `started_via`:
@@ -1479,7 +1479,7 @@ const MIGRATIONS: string[] = [
   // hand), `library:<auth origin>` (Run in the library), `nested:<parent run id>`. Both NULL on
   // every run without a grant and on every older row.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (63);
-   ALTER TABLE pipeline_runs ADD COLUMN grant_id TEXT;
+   ALTER TABLE pipeline_runs ADD COLUMN workflow_grant_id TEXT;
    ALTER TABLE pipeline_runs ADD COLUMN started_via TEXT;`,
 ];
 

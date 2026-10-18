@@ -127,7 +127,7 @@ export function liftsAfterUntrusted(contract: CapabilityContract): boolean {
  */
 const GRANT_ID: unique symbol = Symbol('capabilityContract.grantId');
 
-/** A copy of `contract` that names the accepted grant `grantId` (`workflow_grants.grant_id`). */
+/** A copy of `contract` that names the accepted grant `grantId` (`workflow_grants.id`). */
 export function withGrantId(contract: CapabilityContract, grantId: string): CapabilityContract {
   return Object.freeze({ ...contract, [GRANT_ID]: grantId });
 }

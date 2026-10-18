@@ -291,7 +291,7 @@ export function insertPipelineRun(db: Database.Database, params: {
   /** Slice C2: the saved-workflow id this run executed (null for ad-hoc/inline
    *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
   workflowId?: string | undefined;
-  /** 3f-1a: the accepted grant this run ran under (`workflow_grants.grant_id`), or none. */
+  /** 3f-1a: the accepted grant this run ran under (`workflow_grants.id`), or none. */
   grantId?: string | undefined;
   /** 3f-1a: how a run under a grant was started (`schedule:…`, `library:…`, `nested:…`). */
   startedVia?: string | undefined;
@@ -301,7 +301,7 @@ export function insertPipelineRun(db: Database.Database, params: {
   // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
   // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, grant_id, started_via)
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, workflow_grant_id, started_via)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
@@ -411,7 +411,7 @@ export function getPipelineRun(db: Database.Database, id: string): {
   // never 'planned'.
   const likePattern = `${id.replace(/[\\%_]/g, '\\$&')}%`;
   // The columns of the declared type, not `*`: `GET /api/workflows/:id` sends this row as it is,
-  // and a column added later (`grant_id`, `started_via` — the latter holds the starting request's
+  // and a column added later (`workflow_grant_id`, `started_via` — the latter holds the starting request's
   // auth-origin label) must not reach that response because nobody listed it.
   return db.prepare(
     "SELECT id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, started_at, completed_at FROM pipeline_runs WHERE (id = ? OR id LIKE ? ESCAPE '\\') AND status != 'planned'"

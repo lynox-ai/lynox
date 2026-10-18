@@ -195,7 +195,7 @@ export class WorkflowStore {
     try {
       this.db.transaction(() => {
         this.db.prepare(
-          `INSERT INTO workflow_grants (grant_id, workflow_id, contract_json, accepted_by, name, accepted_at, checksum, binding, trigger_id, cron, bound_params_json, after_untrusted)
+          `INSERT INTO workflow_grants (id, workflow_id, contract_json, accepted_by, name, accepted_at, checksum, binding, trigger_id, cron, bound_params_json, after_untrusted)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           row.grantId, row.workflowId, row.contractJson, row.by, row.name, row.at,
@@ -212,14 +212,14 @@ export class WorkflowStore {
 
   /** The `workflow_grants` row with this id, or `undefined` when there is none. Never changes a row. */
   getGrant(grantId: string): WorkflowGrantRow | undefined {
-    const r = this.db.prepare('SELECT * FROM workflow_grants WHERE grant_id = ?').get(grantId) as {
-      grant_id: string; workflow_id: string; contract_json: string; accepted_by: string; name: string | null;
+    const r = this.db.prepare('SELECT * FROM workflow_grants WHERE id = ?').get(grantId) as {
+      id: string; workflow_id: string; contract_json: string; accepted_by: string; name: string | null;
       accepted_at: string; checksum: string; binding: string; trigger_id: string; cron: string;
       bound_params_json: string; after_untrusted: number;
     } | undefined;
     if (r === undefined) return undefined;
     return {
-      grantId: r.grant_id, workflowId: r.workflow_id, contractJson: r.contract_json, by: r.accepted_by,
+      grantId: r.id, workflowId: r.workflow_id, contractJson: r.contract_json, by: r.accepted_by,
       name: r.name, at: r.accepted_at, checksum: r.checksum, binding: bindingOf(r.binding),
       triggerId: r.trigger_id, cron: r.cron, boundParamsJson: r.bound_params_json, afterUntrusted: r.after_untrusted === 1,
     };

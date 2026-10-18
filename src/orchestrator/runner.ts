@@ -130,7 +130,7 @@ export interface RunManifestOptions {
   /**
    * How a run under an accepted grant was started (`startedVia` of its origin, which
    * `runGuardedSavedWorkflow` hands to `runSavedWorkflow`), written to
-   * `pipeline_runs.started_via` beside the contract's `grant_id`. Top-level only: a nested
+   * `pipeline_runs.started_via` beside the contract's grant (`workflow_grant_id`). Top-level only: a nested
    * pipeline writes `nested:<parent run id>` instead. Ignored when the run carries no grant.
    */
   startedVia?: string | undefined;
