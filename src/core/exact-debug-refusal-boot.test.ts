@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
@@ -98,6 +98,33 @@ describe('Engine boot — an instance that holds the exact marker boots with its
     expect(await engine.getToolContext().exactClearance!.ensure()).toEqual({ ok: true });
     expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
     expect(process.env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED']).toBeUndefined();
+  });
+
+  it('a data dir rolled back to before the marker: closed again before the next clearance resolves', async () => {
+    const dir = freshDataDir('exact-rollback');
+    const db = new EngineDb();
+    db.close();
+    copyFileSync(join(dir, 'engine.db'), join(dir, 'engine.db.before'));
+    const held = new EngineDb();
+    held.setExactMarker();
+    held.close();
+    copyFileSync(join(dir, 'engine.db.before'), join(dir, 'engine.db'));
+    setEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'http://cp.invalid');
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'i-boot');
+    setEnv('LYNOX_HTTP_SECRET', 's');
+    setEnv('ANTHROPIC_LOG', 'debug');
+
+    const engine = await boot();
+    // The rolled-back file holds no marker, so the boot leaves the variable alone ...
+    expect(process.env['ANTHROPIC_LOG']).toBe('debug');
+    vi.stubGlobal('fetch', (async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const clearance = engine.getToolContext().exactClearance!;
+    // ... and a store pass is minted only after `ensure()` resolves ok: by then it is gone.
+    const result = await clearance.ensure();
+    expect(result).toEqual({ ok: true });
+    expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
+    expect(clearance.blockedNow()).toBe(false);
   });
 
   it('no marker: the variables stay (the refusal keys on the marker, not on the boot)', async () => {
