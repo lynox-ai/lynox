@@ -37,7 +37,8 @@ export interface JudgeRule {
   rule: string;
   /** The verdict's shape over F, normalised by {@link normalizeJudgeRule}. */
   schema: ExtractSchema;
-  /** The model tier the judge runs on. Default `fast`. */
+  /** The tier that places the judge's call: which provider serves it, and the gate and booking.
+   *  The model is set per provider (`JUDGE_MODELS`), not by the tier. Default `fast`. */
   tier: ModelTier;
 }
 
@@ -172,8 +173,9 @@ export function judgeAfterBound(schema: ExtractSchema): number {
  * Output tokens a verdict call may take: the verdict's byte bound plus room for the tool call
  * around it — a token is at least one byte, so this is never too few below the cap — and at most
  * 8000. A reply cut off anyway is refused (`refuseCutOff`), never recorded: the bound decides
- * how useful a large schema is, not whether a verdict is whole. The run's worst-case cost check
- * counts this many output tokens.
+ * how useful a large schema is, not whether a verdict is whole. A judge model that thinks before
+ * it answers gets room on top (`judgeOutputBudget`); the call and the run's worst-case cost check
+ * count that budget.
  */
 export function judgeMaxOutputTokens(schema: ExtractSchema): number {
   return Math.min(8_000, Math.max(256, judgeAfterBound(schema) + 128));

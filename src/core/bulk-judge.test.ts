@@ -11,13 +11,13 @@ import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
 import { bulkPlanTool, bulkStatusTool } from '../tools/builtin/bulk.js';
 import { setTenantWorkspace, clearTenantWorkspace } from './workspace.js';
 import { dataStoreColumns } from './bulk-plan.js';
-import { judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
+import { judgeMaxOutputTokens, judgeTemplate, normalizeJudgeRule } from './bulk-judge-rule.js';
 import {
   BudgetError, CutOffError, ExtractShapeError, SchemaValueError, attachExtractionSpend, type callForStructuredJson,
 } from './llm-helper.js';
-import { runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
+import { JUDGE_MODELS, runBulkJudge, judgeErrorForTracker, classifyCallFailure, judgeWorstCaseUsd, JUDGE_CLAIM_STALE_MS, JUDGE_TOOL_OVERHEAD_TOKENS, type BulkJudgeDeps } from './bulk-judge.js';
 import { getPricing } from './pricing.js';
-import type { IAgent, MemoryScopeRef } from '../types/index.js';
+import { modelCapability, type IAgent, type MemoryScopeRef } from '../types/index.js';
 import { createManagedHook } from './managed-hook.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
 import type { LynoxHooks } from './engine.js';
@@ -92,7 +92,7 @@ function start(runId: string, cap = 1, supersedes?: string): ReturnType<BulkLedg
 type Call = typeof callForStructuredJson;
 interface Harness {
   deps: BulkJudgeDeps;
-  calls: { user: string; system: string; maxRetries: number | undefined }[];
+  calls: { user: string; system: string; maxRetries: number | undefined; model: string; maxOutputTokens: number | undefined }[];
   reports: { runId: string; costUsd: number }[];
   booked: { runId: string; costUsd: number; tokensIn: number; tokensOut: number }[];
   captured: Error[];
@@ -103,7 +103,10 @@ function harness(answer: (user: string, n: number) => Promise<{ data: Record<str
   const h: Harness = { calls: [], reports: [], booked: [], captured: [], deps: undefined as unknown as BulkJudgeDeps };
   let gates = 0;
   const call = (async (opts: Parameters<Call>[0]) => {
-    h.calls.push({ user: opts.user, system: opts.system ?? '', maxRetries: (opts as { maxRetries?: number }).maxRetries });
+    h.calls.push({
+      user: opts.user, system: opts.system ?? '', maxRetries: (opts as { maxRetries?: number }).maxRetries,
+      model: opts.model, maxOutputTokens: opts.maxOutputTokens,
+    });
     const r = await answer(opts.user, h.calls.length);
     return { data: r.data, inputTokens: 100, outputTokens: 10, costUsd: r.costUsd, modelId: 'claude-haiku-4-5' };
   }) as unknown as Call;
@@ -243,6 +246,23 @@ describe('runBulkJudge over data-store rows', () => {
     expect(s.phase).toBe('previewed');
     const checksum = ledger.computeChecksum(id)!;
     expect(ledger.approve(id, { checksum, approvedBy: 'test' }).ok).toBe(true);
+  });
+
+  it('calls the resolved judge model, with a budget a thinking-only model answers within', async () => {
+    const id = await plan(['A'], { rule: 'Pick a label.', schema: { title: { type: 'string', enum: ['short', 'long'] } } });
+    expect(start(id).ok).toBe(true);
+    const fireworks = JUDGE_MODELS.fireworks;
+    const h = harness(() => ({ data: { title: 'short' }, costUsd: 0.01 }), {
+      resolveModel: (tier) => ({ tier, modelId: fireworks, client: {} as Anthropic }),
+    });
+    await runBulkJudge(id, h.deps);
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0]!.model).toBe(fireworks);
+    // The small schema's own bound is inside the model's silent region; the call is above it.
+    expect(judgeMaxOutputTokens(ledger.getJudgeRuleForOwner(id)!.schema))
+      .toBeLessThanOrEqual(modelCapability(fireworks)!.thinkingOnly!.emptyAtOrBelow);
+    expect(h.calls[0]!.maxOutputTokens).toBeGreaterThan(modelCapability(fireworks)!.thinkingOnly!.emptyAtOrBelow);
+    expect(ledger.getStatus(id)!.phase).toBe('previewed');
   });
 
   it('a row that is gone is invalid not_found, without a call', async () => {

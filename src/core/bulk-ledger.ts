@@ -227,7 +227,7 @@ export const BULK_HALT_REASONS = {
   costCap: 'the run reached the model spend limit set at its start',
   spendLimit: 'the daily or monthly spending limit is reached',
   creditRefused: 'the model call was refused: no credit, or the control plane could not be reached',
-  judgeModel: 'no model the operator allows can judge this run',
+  judgeModel: 'the provider or endpoint that serves this run has no judge model, or the operator does not allow it',
 } as const;
 export type BulkHaltReason = (typeof BULK_HALT_REASONS)[keyof typeof BULK_HALT_REASONS];
 
