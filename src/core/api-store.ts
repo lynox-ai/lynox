@@ -914,7 +914,7 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
   const heldByUnreadable: string[] = [];
   const heldBySlotPartner: string[] = [];
   // The other half of a `-`/`_` pair, the one case where two stored profiles hold one slot.
-  const slotPartners = store.knownProfiles().filter((o) => typeof o.id === 'string' && o.id !== profile.id && vaultSlotBase(o.id) === vaultSlotBase(profile.id));
+  const slotPartners = store.knownProfiles().filter((o) => o.id !== profile.id && vaultSlotBase(o.id) === vaultSlotBase(profile.id));
   for (const w of recordedWrites(profile)) {
     if (isProtectedSecretWrite(w.name)) continue;
     // A store that cannot READ the name cannot judge whether this profile wrote

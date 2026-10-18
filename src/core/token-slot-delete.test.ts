@@ -440,6 +440,16 @@ describe('a refresh slot an oauth2 profile configures and nothing else names', (
     expect(slotMayReach(store, 'SHOP_RT', 'exchange', 'https://shop.example/oauth/token', store.get('shop'))).toBe(true);
   });
 
+  // Owned only when it is the one name of one profile: a second profile naming it leaves it free,
+  // whichever of the two is stored first (the order `token-slot-reach.test.ts` does not cover).
+  it('control: a second profile naming it leaves it free, with the oauth2 profile stored first', () => {
+    const store = new ApiStore();
+    expect(store.register(shop())).toBe(true);
+    store.register(bearer('reader', 'SHOP_RT'));
+    expect(store.knownProfiles().map((p) => p.id)).toEqual(['shop', 'reader']);
+    expect(slotMayReach(store, 'SHOP_RT', 'request', 'https://reader.example/v1/x', store.storedProfile('reader'))).toBe(true);
+  });
+
   // A bearer profile reads no refresh slot, even under the name its id would derive one as.
   it('control: a name only a bearer profile configures is no token slot', () => {
     const store = new ApiStore();
