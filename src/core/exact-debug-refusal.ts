@@ -15,6 +15,7 @@ import type { ExactMarker } from './exact-clearance.js';
 import { stopDebugSubscriber } from './debug-subscriber.js';
 import { quietSdkLogs } from './llm-wire-rules.js';
 import { closeWireCapture } from './wire-capture.js';
+import { refuseErrorReporting } from './error-reporting.js';
 
 /**
  * The variables that open a debug path:
@@ -23,7 +24,9 @@ import { closeWireCapture } from './wire-capture.js';
  *  - `LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED`: wire capture on a provisioned instance;
  *  - `LYNOX_DEBUG_WIRE_CAPTURE`: the env form of the owner's `debug_wire_capture` setting.
  *    The setting itself is merged into the config at boot and can be switched on at runtime,
- *    so removing the variable is not enough: `closeWireCapture()` refuses the snapshots.
+ *    so removing the variable is not enough: `closeWireCapture()` refuses the snapshots;
+ *  - `LYNOX_BUGSINK_DSN`: error reporting. The client is built at boot and the user config can
+ *    carry a DSN as well, so `refuseErrorReporting()` closes the client and refuses any re-init.
  */
 export const DEBUG_ENV_VARS: readonly string[] = Object.freeze([
   'ANTHROPIC_LOG',
@@ -31,6 +34,7 @@ export const DEBUG_ENV_VARS: readonly string[] = Object.freeze([
   'LYNOX_DEBUG_FILE',
   'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED',
   'LYNOX_DEBUG_WIRE_CAPTURE',
+  'LYNOX_BUGSINK_DSN',
 ]);
 
 /**
@@ -49,7 +53,7 @@ export function isExactHeld(marker: ExactMarker | null): boolean {
 /**
  * Close the debug paths for the rest of the process: remove the variables, stop the debug
  * subscriber, turn the SDK's request log down on every live and future client, close every
- * wire capture. Reports the
+ * wire capture, stop error reporting. Reports the
  * names it removed, never their values. Idempotent; returns the names removed by this call.
  */
 export function refuseDebug(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -58,6 +62,7 @@ export function refuseDebug(env: NodeJS.ProcessEnv = process.env): string[] {
   stopDebugSubscriber();
   quietSdkLogs();
   closeWireCapture();
+  refuseErrorReporting();
   if (removed.length > 0) {
     process.stderr.write(`[lynox] exact connection held: debug paths are off; removed ${removed.join(', ')}\n`);
   }

@@ -7,6 +7,7 @@ import { EngineDb } from './engine-db.js';
 import { reloadConfig } from './config.js';
 import { _resetSdkLogQuieting } from './llm-wire-rules.js';
 import { _resetWireCaptureClosed } from './wire-capture.js';
+import { isErrorReportingEnabled, isErrorReportingRefused, shutdownErrorReporting, _resetForTesting as _resetErrorReporting } from './error-reporting.js';
 import type { LynoxConfig } from '../types/index.js';
 
 /**
@@ -19,7 +20,7 @@ import type { LynoxConfig } from '../types/index.js';
 describe('Engine boot — an instance that holds the exact marker boots with its debug paths off', { timeout: 30_000 }, () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
-  const ENV_KEYS = ['LYNOX_DATA_DIR', 'ANTHROPIC_LOG', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET'] as const;
+  const ENV_KEYS = ['LYNOX_DATA_DIR', 'ANTHROPIC_LOG', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_MANAGED_CONTROL_PLANE_URL', 'LYNOX_HTTP_SECRET', 'LYNOX_BUGSINK_DSN'] as const;
   const saved = new Map<string, string | undefined>();
   const setEnv = (key: string, value: string | undefined): void => {
     if (!saved.has(key)) saved.set(key, process.env[key]);
@@ -35,6 +36,8 @@ describe('Engine boot — an instance that holds the exact marker boots with its
     dirs.length = 0;
     _resetSdkLogQuieting();
     _resetWireCaptureClosed();
+    await shutdownErrorReporting();
+    _resetErrorReporting();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     reloadConfig();
@@ -125,6 +128,29 @@ describe('Engine boot — an instance that holds the exact marker boots with its
     expect(result).toEqual({ ok: true });
     expect(process.env['ANTHROPIC_LOG']).toBeUndefined();
     expect(clearance.blockedNow()).toBe(false);
+  });
+
+  it('error reporting: on without the marker, off and refused with it', async () => {
+    const dsn = 'https://key@bugs.example.invalid/1';
+    freshDataDir('exact-bugsink-free');
+    setEnv('LYNOX_BUGSINK_DSN', dsn);
+    await boot();
+    expect(isErrorReportingEnabled()).toBe(true);
+    expect(process.env['LYNOX_BUGSINK_DSN']).toBe(dsn);
+    for (const e of engines.splice(0)) await e.shutdown();
+    await shutdownErrorReporting();
+    _resetErrorReporting();
+
+    freshDataDir('exact-bugsink-held');
+    const db = new EngineDb();
+    db.setExactMarker();
+    db.close();
+    setEnv('LYNOX_BUGSINK_DSN', dsn);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await boot();
+    expect(isErrorReportingEnabled()).toBe(false);
+    expect(isErrorReportingRefused()).toBe(true);
+    expect(process.env['LYNOX_BUGSINK_DSN']).toBeUndefined();
   });
 
   it('no marker: the variables stay (the refusal keys on the marker, not on the boot)', async () => {

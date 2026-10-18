@@ -128,6 +128,13 @@ function maskDeep(value: unknown, depth = 0): unknown {
 
 let _initialized = false;
 let _enabled = false;
+/**
+ * Set for good once the instance holds an exact connection (`exact-debug-refusal.ts`). From then
+ * on nothing is reported: every capture returns early, `beforeSend` drops whatever an SDK
+ * integration still hands it, and no later init (a config reload, the privacy toggle) brings
+ * the client back.
+ */
+let _refused = false;
 
 // Cached module reference to avoid repeated dynamic imports in hot paths
 let _sentry: typeof import('@sentry/node') | null = null;
@@ -144,6 +151,7 @@ const SAFE_CONTEXT_KEYS = new Set([
  * Returns true if error reporting was activated.
  */
 export async function initErrorReporting(dsn?: string | undefined): Promise<boolean> {
+  if (_refused) return false;
   if (_initialized) return _enabled;
   _initialized = true;
 
@@ -175,6 +183,9 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       tracesSampleRate: 0,     // No performance tracing (cost + PII)
       attachStacktrace: true,
       maxBreadcrumbs: 50,
+      // A client report tells Bugsink how many events were dropped and why. After a refusal
+      // (`refuseErrorReporting`) nothing may leave, a count included.
+      sendClientReports: false,
       // Explicit, because the SDK's defaults collect everything (v11 turned all of
       // these on). Measured on 11.1.0 with the defaults: the client IP arrived as
       // `user.ip_address`, and incoming request bodies were captured. `beforeSend`
@@ -214,6 +225,8 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       },
 
       beforeSend(event) {
+        // Refused after this client was built: drop, whether or not the close below got through.
+        if (_refused) return null;
         // Strip request bodies (may contain user prompts) AND the three fields
         // that carry credentials outright. The @sentry/node http integration is
         // on by default and attaches headers, cookies and the query string; the
@@ -420,6 +433,32 @@ export async function shutdownErrorReporting(): Promise<void> {
   _sentry = null;
 }
 
+/**
+ * Stop error reporting for the rest of the process and refuse any later init. Synchronous, so
+ * nothing captured after this call is sent: captures return early from here on, and the client
+ * is closed in the background. A close that fails changes nothing, because `beforeSend` drops
+ * every event once this has run. Queued events are from before the refusal.
+ */
+export function refuseErrorReporting(): void {
+  _refused = true;
+  _enabled = false;
+  uninstallGlobalHandlers();
+  const sentry = _sentry;
+  _sentry = null;
+  if (sentry) {
+    try {
+      void sentry.close(2000).catch(() => { /* beforeSend drops whatever is left */ });
+    } catch {
+      // the same: beforeSend drops whatever is left
+    }
+  }
+}
+
+/** Whether error reporting has been refused for this process. */
+export function isErrorReportingRefused(): boolean {
+  return _refused;
+}
+
 /** Whether Bugsink error reporting is currently active. */
 export function isErrorReportingEnabled(): boolean {
   return _enabled;
@@ -427,6 +466,7 @@ export function isErrorReportingEnabled(): boolean {
 
 /** @internal Reset state for testing. */
 export function _resetForTesting(): void {
+  _refused = false;
   _initialized = false;
   _enabled = false;
   _sentry = null;
