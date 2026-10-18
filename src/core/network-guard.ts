@@ -747,8 +747,10 @@ export async function fetchPinned(url: string, init: RequestInit = {}): Promise<
   // A Shopify store gets no request from this engine for now (`shopify-host.ts`). Here, where every
   // pinned request and every redirect hop is sent, by the URL and by a Host header a caller set,
   // which names the server that answers whatever the URL says.
-  const hostHeader = Object.entries(headers).find(([h]) => h.toLowerCase() === 'host')?.[1];
-  if (isShopifyAdminHost(parsed.hostname) || (hostHeader !== undefined && isShopifyAdminHost(hostHeader.trim().replace(/:\d*$/, '')))) {
+  // Every host-named key counts: a plain object can carry `Host` and `host` side by side, and the
+  // transport sends the last one. The port is cut whatever follows the colon.
+  const hostHeaders = Object.entries(headers).filter(([h]) => h.toLowerCase() === 'host').map(([, v]) => v);
+  if (isShopifyAdminHost(parsed.hostname) || hostHeaders.some((v) => isShopifyAdminHost(v.trim().replace(/:[^:\]]*$/, '')))) {
     throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');

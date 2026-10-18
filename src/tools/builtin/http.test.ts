@@ -7496,7 +7496,7 @@ describe('requests to a Shopify store are refused', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     // Control: the same request to another host goes out.
     const control = await sent(OTHER, extra);
-    expect(control.out).not.toContain('Shopify cannot be connected');
+    expect(control.out).not.toContain('Shopify is temporarily unavailable');
     expect(control.fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -7519,25 +7519,28 @@ describe('requests to a Shopify store are refused', () => {
     expect(refused.fetchMock).toHaveBeenCalledTimes(1);
     expect(lastPinnedInputs.map((i) => new URL(i.url).hostname)).toEqual(['shop.commerce.example']);
     const control = await run('https://other.commerce.example/products.json');
-    expect(await control.out).not.toContain('Shopify cannot be connected');
+    expect(await control.out).not.toContain('Shopify is temporarily unavailable');
     expect(control.fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it.each([
-    ['shop.myshopify.com', true],
-    ['SHOP.myshopify.com.:443', true],
-    ['other.commerce.example', false],
-  ] as const)('a Host header of %s on a read: refused %s', async (host, refused) => {
+    [{ Host: 'shop.myshopify.com' }, true],
+    [{ host: 'SHOP.myshopify.com.:443' }, true],
+    [{ HOST: '  shop.myshopify.com  ' }, true],
+    [{ Host: 'shop.myshopify.com:x' }, true],
+    [{ Host: 'other.commerce.example', host: 'shop.myshopify.com' }, true],
+    [{ Host: 'other.commerce.example' }, false],
+  ] as const)('Host headers %o on a read: refused %s', async (hostHeaders, refused) => {
     const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
     mockDnsPublic();
     const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' }));
     vi.stubGlobal('fetch', fetchMock);
-    const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { Host: host } }, makeAgent());
+    const out = visible({ url: 'https://shop.commerce.example/products.json', method: 'GET', headers: { ...hostHeaders } }, makeAgent());
     if (refused) {
       await expect(out).rejects.toThrow(SHOPIFY_UNAVAILABLE);
       expect(fetchMock).not.toHaveBeenCalled();
     } else {
-      expect(await out).not.toContain('Shopify cannot be connected');
+      expect(await out).not.toContain('Shopify is temporarily unavailable');
       expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   });

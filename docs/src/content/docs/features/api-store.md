@@ -24,7 +24,7 @@ This page documents what's supported today and the curated catalog of free publi
 
 If an API requires the browser-redirect OAuth flow (the user clicks a button, gets redirected to the provider, and the provider POSTs a code back to your app's callback URL), lynox can't bootstrap it today. This includes most consumer-grade SaaS auth (Google Workspace user-context, Microsoft 365, Slack user-context, Twitter/X, Reddit). Server-to-server OAuth flows like Auth0 machine-to-machine work fine because they don't involve a user redirect.
 
-Shopify cannot be connected at the moment: lynox refuses requests to Shopify stores (`*.myshopify.com`) while it reworks how Shopify connections are set up.
+Shopify is temporarily unavailable: lynox refuses requests to Shopify stores (`*.myshopify.com`), public store pages included, while it reworks how Shopify connections are set up.
 
 ## Curated suggestions
 

@@ -779,7 +779,7 @@ describe('a secret: reference in a request to a Shopify store', () => {
   it('control: to another host it is asked about, and sent once allowed', async () => {
     const promptUser = vi.fn().mockResolvedValue('Allow');
     const result = await agentCall(storeOf(), { STORE_KEY: value('store', 'key') }, call('https://shop.commerce.example/admin/api/2026-10/shop.json'), { promptUser });
-    expect(result).not.toContain('Shopify cannot be connected');
+    expect(result).not.toContain('Shopify is temporarily unavailable');
     expect(promptUser).toHaveBeenCalledTimes(1);
     expect(sent).toHaveLength(1);
   });
