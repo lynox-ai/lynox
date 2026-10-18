@@ -858,7 +858,7 @@ export function unboundName(
  * `ask_secret` or a new value: a new value is not a new destination.
  */
 export function unboundNameText(name: string, profileId: string): string {
-  return `the vault secret "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" is not allowed to go where api_profile "${profileId}" would send it, so nothing was sent. A vault secret goes only to the destinations its owner allowed for it. To allow this one, the owner has to save the profile in an interactive session and confirm the new destination when asked; storing the value again does not change where it may go.`;
+  return `"${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" is not allowed to go where the profile "${profileId}" would send it. Nothing was sent. To allow it, save the profile "${profileId}" again in the chat and answer the question. Storing the key again does not change where it may go.`;
 }
 
 /**

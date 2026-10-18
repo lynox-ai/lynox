@@ -1548,13 +1548,15 @@ async function askBindingGrowth(agent: IAgent, profile: ApiProfile, act: 'saved'
   if (needs.some(({ name, bound }) => [name, ...bound, ...dest].some(hasInvisibleCharacters))) {
     return { refusal: `Blocked: profile "${profile.id}" names a vault secret or a destination with characters that cannot be shown to the owner, so the owner cannot be asked about it. ${nothing}` };
   }
-  if (!agent.promptUser) {
-    return { refusal: `Blocked: profile "${profile.id}" would send the vault secret(s) ${shown} to destinations the owner has not allowed for ${needs.length === 1 ? 'it' : 'them'}, and no one can be asked in this run (autonomous/background mode). ${nothing} The owner has to save this profile in an interactive session and confirm the new destinations.` };
+  // An autonomous run may still carry a prompt channel; the question is the owner's act, so only
+  // a run someone is watching may ask it (the same rule as a mandate's release).
+  if (agent.autonomy === 'autonomous' || !agent.promptUser) {
+    return { refusal: `Blocked: ${nothing} The profile "${profile.id}" would send ${shown} to addresses that are not allowed for ${needs.length === 1 ? 'it' : 'them'}, and no one can be asked in this run. To allow it, save the profile again in the chat and answer the question.` };
   }
   const grow: Array<{ name: string; endpoints: string[] }> = [];
   for (const { name, bound } of needs) {
     if (agent.runSignal?.aborted) return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the run was stopped before the owner could be asked.` };
-    const answer = await agent.promptUser(bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e))), ['Allow', 'Deny', '\x00']);
+    const answer = await agent.promptUser(pv`${bindingQuestion(name, bound, dest.filter((e) => !bound.includes(e)))}`, ['Allow', 'Deny', '\x00']);
     if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
       return { refusal: `Blocked: profile "${profile.id}" was not ${act} — the owner did not allow "${shapedForLog(name, DERIVED_NAME_SHAPE, 80)}" to go to its destinations.` };
     }

@@ -10410,7 +10410,7 @@ export class LynoxHTTPApi {
       const bindCtx = { bindings: engine.getVaultNameBindings(), store: vaultNow, read: readCtx };
       const clientNames = [oauth.client_id_key, oauth.client_secret_key].filter((n): n is string => typeof n === 'string' && (vaultNow === null || withheldFrom(vaultNow, profile, apiStore, [n], readCtx).length === 0));
       if (unboundName(apiStore, clientNames, profile, endpoints.tokenUrl, 'client', bindCtx) !== undefined) {
-        sendOAuthHtml(res, 409, 'This connection would send a stored secret somewhere its owner has not allowed it to go. Nothing was changed. The owner can allow it by saving the profile again in a session where they are asked.');
+        sendOAuthHtml(res, 409, 'Nothing was changed. This connection would send a stored key to an address it is not allowed to go to. The owner of this instance can allow it: save the profile again in the chat and answer the question that appears.');
         return;
       }
 

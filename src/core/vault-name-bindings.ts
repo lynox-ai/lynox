@@ -170,11 +170,12 @@ export function hasInvisibleCharacters(value: string): boolean {
  * stored and validated state: the vault name from the profile being saved, `bound` from the
  * stored binding, `added` from {@link credentialEndpoints} of that profile.
  *
- * Customer-visible copy: the wording is pending review by the business owner.
+ * Customer-visible copy, approved by the business owner.
  */
 export function bindingQuestion(name: string, bound: readonly string[], added: readonly string[]): PromptText {
-  const now = bound.length === 0
-    ? pv`The vault secret ${name} is not tied to any destination yet.`
-    : pv`The vault secret ${name} is sent only to: ${bound.join(', ')}.`;
-  return pv`${now}\n\nSaving this profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to go there as well?`;
+  const deny = 'If you deny, the profile is not saved.';
+  if (bound.length === 0) {
+    return pv`${name} is stored in your vault and is not yet limited to any address.\n\nThis profile would send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there? From then on it goes only to the addresses you have allowed.\n\n${deny}`;
+  }
+  return pv`${name} is sent only to: ${bound.join(', ')}.\n\nThis profile would also send it to: ${added.join(', ')}.\n\nAllow ${name} to be sent there as well?\n\n${deny}`;
 }

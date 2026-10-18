@@ -3872,21 +3872,21 @@ export class Agent implements IAgent {
       // Any other vault secret goes by its binding, never by which profile happens to name it on
       // this host: a profile on another host can name the owner's secret as well.
       const silent = new Set<string>();
-      const foreign: string[] = [];
+      const boundElsewhere: string[] = [];
       const contested: string[] = [];
       for (const n of secretNames) {
         if (isTokenSlot(n)) { if (tokenBound.has(n)) silent.add(n); continue; }
         const bound = apiStore ? boundCtx(apiStore, n, bindCtx) : new Set(bindCtx.bindings?.boundOf(n) ?? []);
         if (bound.has(origin)) silent.add(n);
-        else if (bound.size > 0) foreign.push(n);
+        else if (bound.size > 0) boundElsewhere.push(n);
         else if (apiStore && isContestedName(apiStore, n)) contested.push(n);
       }
-      const these = (names: string[]) => (names.length === 1 ? 'it' : 'them');
-      if (foreign.length > 0) {
-        return refuse(`Blocked: tool "http_request" would send ${foreign.join(', ')} to ${origin}, where ${foreign.length === 1 ? 'that vault secret is' : 'those vault secrets are'} not allowed to go. A vault secret goes only to the destinations its owner allowed for it. To allow this one, the owner has to save the api_profile for ${host} in an interactive session and confirm the new destination when asked; storing the value again does not change where it may go.`);
+      const is = (names: string[]) => (names.length === 1 ? 'is' : 'are');
+      if (boundElsewhere.length > 0) {
+        return refuse(`Blocked: ${boundElsewhere.join(', ')} ${is(boundElsewhere)} not allowed to go to ${origin}. Nothing was sent. To allow it, save the profile for ${host} again in the chat and answer the question. Storing the key again does not change where it may go.`);
       }
       if (contested.length > 0) {
-        return refuse(`Blocked: tool "http_request" would send ${contested.join(', ')} to ${origin}, and stored api_profiles send ${these(contested)} to different destinations, so where ${these(contested)} may go cannot be told. The owner has to save the api_profile that should use ${these(contested)} in an interactive session and confirm when asked.`);
+        return refuse(`Blocked: ${contested.join(', ')} ${is(contested)} used by profiles that send ${contested.length === 1 ? 'it' : 'them'} to different addresses, so where ${contested.length === 1 ? 'it' : 'they'} may go is not settled yet. Nothing was sent. To allow it, save the profile that should use it again in the chat and answer the question.`);
       }
       const approved = (counters.approvedSecretDestinations ??= new Set<string>());
       const key = (n: string) => `${n}\u0000${origin}`;

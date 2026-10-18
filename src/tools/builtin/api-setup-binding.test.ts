@@ -107,11 +107,12 @@ function confirm(name: string, endpoints: string[]): void {
 type Ask = (q: string | PromptText) => Promise<string>;
 
 /** Answers the acceptance of a host yes, and the question where a vault secret may go no. */
-const allowHostsDenySecrets: Ask = async (q) => (/to go there as well/.test(flattenPrompt(q)) ? 'Deny' : 'Allow');
+const allowHostsDenySecrets: Ask = async (q) => (/to be sent there/.test(flattenPrompt(q)) ? 'Deny' : 'Allow');
 
-function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown; releases?: SecretReleases | null; ends?: unknown } = {}): never {
+function agentOf(store: ApiStore, opts: { promptUser?: Ask; principal?: unknown; releases?: SecretReleases | null; ends?: unknown; autonomy?: string } = {}): never {
   return {
     principal: opts.principal ?? { kind: 'owner' },
+    ...(opts.autonomy ? { autonomy: opts.autonomy } : {}),
     sessionCounters: { httpRequests: 0 },
     ...(opts.promptUser ? { promptUser: opts.promptUser } : {}),
     secretStore: {
@@ -372,6 +373,19 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store)));
     expect(out).toContain('REPORT_KEY');
     expect(store.get('crm2')).toBeUndefined();
+  });
+
+  it('refuses the save, without asking, in an autonomous run that could still prompt', async () => {
+    const store = boot(reports());
+    const asked: string[] = [];
+    const p = { ...bearerOn('crm2', 'crm2.example', 'REPORT_KEY'), ...extra };
+    delete (p as Partial<ApiProfile>).custom_endpoint_ack;
+    const ask: Ask = async (q) => { asked.push(flattenPrompt(q)); return 'Allow'; };
+    const out = String(await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { promptUser: ask, autonomy: 'autonomous' })));
+    expect(out).toContain('no one can be asked');
+    expect(store.get('crm2')).toBeUndefined();
+    expect(asked.some((q) => q.includes('REPORT_KEY'))).toBe(false);
+    expect(bindings()?.boundOf('REPORT_KEY')).not.toContain('https://crm2.example');
   });
 });
 
