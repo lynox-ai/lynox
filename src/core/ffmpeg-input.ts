@@ -4,10 +4,10 @@
  * (ffprobe: before the file), because both are input options.
  *
  * ffmpeg chooses the demuxer by content, whatever the file is called, and some demuxers read
- * a LIST of further files or URLs: HLS, DASH, IMF, ffconcat, image sequences. Measured on the
- * image's ffmpeg (5.1): its own defaults already refuse the forms tried (an HLS playlist with
- * an `http` segment, one with a local file as segment, an ffconcat with an absolute path).
- * These arguments make that hold independently of the ffmpeg version and its defaults:
+ * a LIST of further files or URLs: HLS, DASH, IMF, ffconcat, image sequences. What such a list
+ * may reach depends on the ffmpeg version and its defaults; HLS, for one, admits a local
+ * segment whose extension is on its `allowed_extensions` list. These arguments refuse every
+ * list-reading form, independently of the version and its defaults:
  *   - `-protocol_whitelist file,pipe` — no network protocol, nested or not;
  *   - `-format_whitelist` — only single-file containers and codecs, so no list-reading
  *     demuxer is ever chosen.
