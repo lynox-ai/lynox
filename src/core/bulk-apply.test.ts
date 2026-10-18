@@ -1729,6 +1729,8 @@ describe('what a resume after a failure halt may still do', () => {
     const s = ledger.getStatus(runId)!;
     expect([s.haltReason, s.failed, s.failureLimit, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.consecutiveFailures, 3, 2, 40, 1]);
     expect(s.failed).toBeGreaterThan(s.resumeTries);
+    // Nothing can have reached a target.
+    expect([s.applied, s.sent]).toEqual([0, 0]);
   });
 
   it('under a cap, a target already sent to takes no place from it', async () => {
@@ -1742,5 +1744,15 @@ describe('what a resume after a failure halt may still do', () => {
     expect([s.haltReason, s.applied, s.resumeOpen, s.resumeTries]).toEqual([BULK_HALT_REASONS.maxTargets, 2, 38, 1]);
     // The maximum the halt names, which writing on has to go above.
     expect(s.maxTargets).toBe(3);
+    // Two written and one sent to: three may have received the write.
+    expect(s.sent).toBe(3);
+  });
+
+  it('counts a target sent to and failed as one that may have received the write, with none written', async () => {
+    const { runId, initial } = recordMemoryRun(40);
+    approve(runId, { maxTargets: 1 });
+    await runBulkEffect(runId, 'bulk_apply', effectDeps(failing(initial, { fail: ['k000'] })));
+    const s = ledger.getStatus(runId)!;
+    expect([s.haltReason, s.applied, s.failed, s.sent]).toEqual([BULK_HALT_REASONS.maxTargets, 0, 1, 1]);
   });
 });

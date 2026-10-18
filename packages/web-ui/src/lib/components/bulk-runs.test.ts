@@ -368,7 +368,7 @@ describe('going on from a run that halted', () => {
 	const w = (haltKey: string, o: Partial<BulkRunDetailData> = {}) => ({
 		phase: 'writing' as BulkRunDetailData['phase'], haltKey, haltReason: 'x', probe: null, targetSystem: 'http:shop.example.invalid',
 		probeConfirmed: true, changes: { update: 1000, create: 0, delete: 0, unchanged: 0, invalid: 0 },
-		maxTargets: 1000, applied: 550, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
+		maxTargets: 1000, sent: 600, failed: 51, failedOnce: 70, failureLimit: 50, resumeOpen: 398, resumeTries: 398, ...o,
 	});
 	const WRITE_ON = ['runUnrecorded', 'unavailable', 'timeBudget', 'stoppedByOwner', 'unrecorded', 'unauthorized', 'credential', 'blocked', 'expired', 'failureRate', 'consecutiveFailures'];
 
@@ -446,9 +446,11 @@ describe('going on from a run that halted', () => {
 		expect(bulkResumeText(w('timeBudget', { resumeTries: 4 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht die übrigen Ziele bis zur freigegebenen Höchstzahl, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
 		// At its maximum the run writes on under the new one the owner types.
 		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum, including the failed ones. Targets whose content lynox may not send are left out.');
-		// With nothing written yet, nothing stays and nothing is tried again.
-		expect(bulkResumeText(w('expired', { phase: 'approved', applied: 0 }), true, DE)?.kept).toBe('Bisher ist noch nichts geschrieben. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
-		expect(bulkResumeText(w('unavailable', { applied: 0, resumeTries: 4 }), true, EN)?.kept).toBe('Nothing has been written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out.');
+		// A write sent and failed may have reached its target: that is not "nothing written".
+		expect(bulkResumeText(w('consecutiveFailures', { sent: 3 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		// With nothing sent to any target, nothing stays and nothing is tried again.
+		expect(bulkResumeText(w('expired', { phase: 'approved', sent: 0 }), true, DE)?.kept).toBe('Bisher ist noch nichts geschrieben. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		expect(bulkResumeText(w('unavailable', { sent: 0, resumeTries: 4 }), true, EN)?.kept).toBe('Nothing has been written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out.');
 	});
 
 	it('counts the targets failed so far, as at least the ones failed now on a run from before the count', () => {
