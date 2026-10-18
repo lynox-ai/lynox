@@ -24,6 +24,7 @@ import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
+import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
 import { MandateEnds } from './mandate-ends.js';
@@ -1150,6 +1151,19 @@ export class Engine {
     this._toolContext.mandateEnds = this._mandateEnds;
     // And the owner's releases of vault names to profiles a mandate wrote (v27).
     this._toolContext.secretReleases = this.engineDb ? new SecretReleases(this.engineDb.getDb()) : null;
+    // The exact (Shopify) clearance: asked of the control plane once per boot, recorded in
+    // engine.db's marker (v38). Not provisioned (no managed env) means it never clears.
+    if (this.engineDb) {
+      const db = this.engineDb;
+      this._toolContext.exactClearance = new ExactClearance(controlPlaneFromEnv(), {
+        isSet: () => db.exactMarkerSet(),
+        set: () => { db.setExactMarker(); },
+      });
+      this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
+    } else {
+      this._toolContext.exactClearance = null;
+      this._toolContext.storeBindingDigest = null;
+    }
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -2366,7 +2380,10 @@ export class Engine {
     // tracking). Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE.
     if (readEnvAlias('LYNOX_BILLING_TIER')) {
       const { createManagedHook } = await import('./managed-hook.js');
-      this.registerHooks(createManagedHook());
+      const clearance = this._toolContext.exactClearance;
+      this.registerHooks(createManagedHook({
+        onExactHeld: (held) => { void clearance?.reassert(held); },
+      }));
     }
 
     // Fire orchestrator lifecycle hooks (for Pro extensions)

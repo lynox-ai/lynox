@@ -86,6 +86,10 @@ export interface ToolContext {
   /** Which of the owner's vault names a profile a mandate wrote may read (`secret-releases.ts`).
    *  Null when engine.db is unavailable; then no release exists and such a profile reads none. */
   secretReleases: import('./secret-releases.js').SecretReleases | null;
+  /** The control plane's exact (Shopify) clearance for this boot (`exact-clearance.ts`). `null` without engine.db. */
+  exactClearance: import('./exact-clearance.js').ExactClearance | null;
+  /** `EngineDb.storeBindingDigest`, for the store pass's binding check. `null` without engine.db. */
+  storeBindingDigest: ((profileId: string, origin: string, value: string) => string | null) | null;
 
   // ── Artifact Store ──
   artifactStore: import('./artifact-store.js').ArtifactStore | null;
@@ -138,6 +142,8 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     auditLog: null,
     mandateEnds: null,
     secretReleases: null,
+    exactClearance: null,
+    storeBindingDigest: null,
     artifactStore: null,
     bulkLedger: null,
     isolationEnvOverride: undefined,

@@ -24,6 +24,7 @@ import type { BulkInvalidReason } from './bulk-ledger.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { contractGrants } from '../tools/permission-guard.js';
 import { assertHostPolicy, fetchPinned, type HostPolicyContext } from './network-guard.js';
+import type { StorePass } from './store-pass.js';
 import { urlScanForms } from './url-scan-forms.js';
 import { BulkRedirectError, BulkSecretError, BulkWriterHalt, type TargetWriter } from './bulk-apply.js';
 import { isMailProviderTarget } from './bulk-mail-targets.js';
@@ -309,7 +310,8 @@ export interface ExternalClientDeps {
   /** Hosts a human accepted, consulted only under the `guarded` policy. */
   ackHosts: ReadonlySet<string> | undefined;
   /** Attaches the host's stored credential into `headers`; true only when it did. */
-  attach: (url: string, headers: Record<string, string>, method: string) => Promise<boolean>;
+  /** `out.pass` receives the store pass of a request to a Shopify store, which the send then carries. */
+  attach: (url: string, headers: Record<string, string>, method: string, out?: { pass?: StorePass | undefined }) => Promise<boolean>;
   /** The profile's own rate limit: null when a request may go, else it may not. */
   rateLimit: (hostname: string) => string | null;
   /**
@@ -402,7 +404,8 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
     const readBeforeAttach = gateReading(method, headers, url, payload);
     // The method a server acts on, as the contract was checked: a GET that names a write method
     // in its query is a write to the attach as well.
-    if (!(await deps.attach(url, headers, gated))) return { kind: 'no_credential' };
+    const attached: { pass?: StorePass | undefined } = {};
+    if (!(await deps.attach(url, headers, gated, attached))) return { kind: 'no_credential' };
     if (gateReading(method, headers, url, payload) !== readBeforeAttach) return { kind: 'no_credential' };
     if (deps.rateLimit(hostname) !== null) return { kind: 'rate_limited' };
     // Last before it leaves, so the row stands for a request that is sent.
@@ -415,7 +418,7 @@ export function externalClient(deps: ExternalClientDeps): ExternalClient {
       res = await fetchPinned(url, {
         method, headers, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         ...(payload !== undefined ? { body: payload } : {}),
-      });
+      }, attached.pass);
     } catch (err: unknown) {
       if (err instanceof Error && err.message.startsWith('Blocked:')) return { kind: 'blocked' };
       return { kind: 'failed' };

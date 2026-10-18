@@ -600,6 +600,18 @@ describe('fetch_token — a revocation verdict and the way back', () => {
     expect(grant?.minted_for).toBe(tokenFingerprint('rt-new'));
   });
 
+  it('a successful exchange drops a store binding: the token it wrote is not the one a store callback bound', async () => {
+    const store = new ApiStore();
+    store.register(crmProfile({ oauth_grant: { ...stamp('client-1', 'rt-1'), origin: 'callback', store_binding: 'f'.repeat(64) } }));
+    tokenEndpoint(200, JSON.stringify({ access_token: 'at-new', expires_in: 3600 }));
+
+    expect(await fetchToken(makeAgent(store, vaultWithRefresh()))).toContain('Token exchange OK');
+    const grant = store.get('crm-api')?.oauth_grant;
+    expect(grant?.store_binding).toBeUndefined();
+    // The rest of the record stays.
+    expect(grant?.origin).toBe('callback');
+  });
+
   // A profile loaded from a FILE is not re-validated, so whatever its JSON holds is
   // what the refusal is built from — and the model reads that refusal as the engine
   // speaking. Both profile-controlled values reach it only in the shape they claim.

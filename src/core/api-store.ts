@@ -20,6 +20,7 @@ import { EngineDb } from './engine-db.js';
 import { isProtectedSecretWrite } from './secret-store.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { OAUTH_PRESETS, presetScopeRequest } from './oauth-presets.js';
+import { isShopifyAdminUrl } from './shopify-host.js';
 import type { SecretStoreLike } from '../types/index.js';
 import { MANDATE_TAG_PREFIX, isMandateTag } from './request-principal.js';
 import { credentialBearing, slotConflicts, slotNames, type SlotConflict } from './profile-secret-view.js';
@@ -406,6 +407,15 @@ export interface OAuthGrantRecord {
    * the answer named none: then nothing is known beyond what was asked.
    */
   granted_scope?: string[] | undefined;
+  /**
+   * The binding of this grant's access token to the profile and the store the provider signed
+   * for (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B4): `EngineDb.storeBindingDigest` over the
+   * profile id, the store origin and the token. Written by the callback in the same save as the
+   * token, for a store preset only. A store request goes out only while the token in the slot
+   * still matches it: a token written into the slot any other way, copied to another profile or
+   * pointed at another store does not.
+   */
+  store_binding?: string | undefined;
   /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —
@@ -1742,6 +1752,97 @@ export class ApiStore {
    * skipped rather than aborting the pass. Opens and closes its own EngineDb
    * handle. Returns how many connections were re-gated.
    */
+  /**
+   * After a migration import (PRD-SHOPIFY-CONTAINMENT-ERASURE Appendix B, B10): every store
+   * connection (the store preset, or a profile whose base is a Shopify store) loses its binding
+   * and its record of what an exchange wrote, in `connections` and in the flat `apis/*.json`.
+   * Returns the ids, whose derived token slots the caller removes from the vault: a binding
+   * made under the source's vault key would not hold here, and a token without one reaches no
+   * store, so the customer connects each store again. Keyed on the preset or the host, never on
+   * `presetStoreHost`: a profile whose base was changed away from its store is stripped too.
+   * The client pair stays. Independent of the managed re-gate: a self-hosted import is a move
+   * under another vault key just the same.
+   *
+   * `out.written` receives what the stripped records say an exchange wrote (a named refresh slot
+   * among them), name and fingerprint: with the record gone, deleting the profile later would no
+   * longer remove them, so the caller removes each one whose value still has that fingerprint, as
+   * `purgeRecordedTokens` would. `out.inUse` names every slot a profile that is not stripped
+   * reads (`collectVaultKeys`, its derived token pair included): the caller leaves those, derived
+   * or recorded, so a `-`/`_` partner or a profile that names the same slot keeps its credential.
+   * As in `purgeRecordedTokens`, a store a mandate connected is the exception for what its
+   * exchanges wrote: a kept profile that names such a slot does not hold it (naming another
+   * profile's slot is how a mandate's token would outlive its connection), so such entries come
+   * back with `forced`. A kept `-`/`_` partner still holds its own derived pair.
+   * A row or flat file that does not parse is skipped: the boot parses it the same way and does
+   * not load it either.
+   */
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: (WrittenSecret & { forced: boolean })[]; inUse: string[] }): string[] {
+    const ids = new Set<string>();
+    const written: (WrittenSecret & { forced: boolean })[] = [];
+    const inUse = new Set<string>();
+    const partnerPairs = new Set<string>();
+    const noteKept = (p: ApiProfile): void => {
+      for (const k of collectVaultKeys(p)) inUse.add(k);
+      partnerPairs.add(accessTokenKey(p.id)); partnerPairs.add(refreshTokenKey(p.id));
+    };
+    const noteWritten = (p: ApiProfile): void => {
+      const grant = p.oauth_grant;
+      const forced = isMandateConnection(p);
+      for (const w of Array.isArray(grant?.written) ? grant.written : []) {
+        const { name, fp } = w as { name?: unknown; fp?: unknown };
+        if (typeof name === 'string' && typeof fp === 'string') written.push({ name, fp, forced });
+      }
+    };
+    const isStore = (p: { base_url?: unknown; auth?: unknown }): boolean => {
+      const presetId = (p.auth as { oauth?: { preset_id?: unknown } } | undefined)?.oauth?.preset_id;
+      if (typeof presetId === 'string' && OAUTH_PRESETS.get(presetId)?.apiOnDerivedHost === true) return true;
+      return typeof p.base_url === 'string' && isShopifyAdminUrl(p.base_url);
+    };
+    const stripGrant = (grant: OAuthGrantRecord | undefined): OAuthGrantRecord | undefined => {
+      if (grant === undefined) return undefined;
+      const { store_binding: _b, written: _w, ...rest } = grant;
+      return rest;
+    };
+    if (engineDbPath !== null && existsSync(engineDbPath)) {
+      const engine = new EngineDb(engineDbPath, vaultKey);
+      try {
+        const store = new ConnectionStore(engine);
+        for (const row of store.getByKind('api')) {
+          let profile: ApiProfile;
+          try { profile = connectionRowToProfile(row); } catch { continue; }
+          if (!isStore(profile)) { noteKept(profile); continue; }
+          ids.add(profile.id);
+          noteWritten(profile);
+          const grant = stripGrant(profile.oauth_grant);
+          store.upsert(profileToConnectionRow(grant === undefined ? profile : { ...profile, oauth_grant: grant }));
+        }
+      } finally {
+        engine.close();
+      }
+    }
+    if (existsSync(apisDir)) {
+      for (const file of readdirSync(apisDir)) {
+        if (!file.endsWith('.json')) continue;
+        const path = join(apisDir, file);
+        let profile: Record<string, unknown> & { id?: unknown; oauth_grant?: OAuthGrantRecord | undefined };
+        try { profile = JSON.parse(readFileSync(path, 'utf-8')) as typeof profile; } catch { continue; }
+        if (typeof profile.id !== 'string') continue;
+        if (!isStore({ base_url: profile['base_url'], auth: profile['auth'] })) {
+          noteKept(profile as unknown as ApiProfile);
+          continue;
+        }
+        ids.add(profile.id);
+        noteWritten(profile as unknown as ApiProfile);
+        if (profile.oauth_grant !== undefined) {
+          profile.oauth_grant = stripGrant(profile.oauth_grant);
+          writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
+        }
+      }
+    }
+    if (out !== undefined) { out.written = written.map((w) => ({ ...w, forced: w.forced && !partnerPairs.has(w.name) })); out.inUse = [...inUse].sort(); }
+    return [...ids].sort();
+  }
+
   static regateMigratedApiConnections(engineDbPath: string, vaultKey: string): number {
     const engine = new EngineDb(engineDbPath, vaultKey);
     try {

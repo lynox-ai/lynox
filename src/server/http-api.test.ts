@@ -15473,12 +15473,22 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
 
   let dataDir = '';
   let previousDataDir: string | undefined;
+  // engine.db's binding digest (`EngineDb.storeBindingDigest`), stubbed: the callback writes what
+  // it returns into the grant, in the same save as the token (Appendix B, B4).
+  const bindingOf = (id: string, origin: string, value: string): string => `bind:${id}|${origin}|${value}`;
+  let bindingDigest: ((id: string, origin: string, value: string) => string | null) | null = bindingOf;
+  let origGetEngineDb: unknown;
+  const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
   beforeEach(() => {
     previousDataDir = process.env['LYNOX_DATA_DIR'];
     dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-shopify-'));
     process.env['LYNOX_DATA_DIR'] = dataDir;
+    bindingDigest = bindingOf;
+    origGetEngineDb = engineRef()['getEngineDb'];
+    engineRef()['getEngineDb'] = () => (bindingDigest === null ? null : { storeBindingDigest: bindingDigest });
   });
   afterEach(() => {
+    engineRef()['getEngineDb'] = origGetEngineDb;
     if (previousDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
     else process.env['LYNOX_DATA_DIR'] = previousDataDir;
     if (dataDir !== '') rmSync(dataDir, { recursive: true, force: true });
@@ -15523,6 +15533,32 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect(req.bodyFormat).toBe('form');
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
     expect(store.get(PROFILE)?.oauth_grant?.origin).toBe('callback');
+  });
+
+  it('binds the token to the profile and the store the provider signed for, in the same save (B4)', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    const { cookie, store } = await arrange();
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.store_binding).toBe(bindingOf(PROFILE, 'https://acme.myshopify.com', 'at-1'));
+  });
+
+  it('says the connection failed, and records no binding, when engine.db cannot bind it', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    bindingDigest = () => null; // no vault key
+    const { cookie, store } = await arrange();
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toMatch(/could not bind it to the store/);
+    expect(store.get(PROFILE)?.oauth_grant?.store_binding).toBeUndefined();
+  });
+
+  it('says the connection failed when there is no engine.db at all', async () => {
+    repayRateWindow(); // this file shares one per-IP rate window
+    bindingDigest = null;
+    const { cookie } = await arrange();
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(500);
+    expect(await res.text()).toMatch(/could not bind it to the store/);
   });
 
   it.each([
@@ -18024,6 +18060,11 @@ describe('the control plane\'s admin bearer (cp-admin, §3.4)', () => {
     });
 
     it('refuses the control plane on every other admin route in the table', async () => {
+      // One request per admin route, against the file's ONE per-IP rate window: what tests before
+      // it spent would turn the last routes into 429s, which says nothing about the bearer. It
+      // starts from an empty window and hands the window back as it found it.
+      repayRateWindow();
+      for (const e of (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts.values()) e.count = 0;
       const others = table().filter((r) => r.scope === 'admin' && !r.cpAdmin);
       // A table this guard could not read would pass on nothing.
       expect(others.length).toBeGreaterThan(10);
