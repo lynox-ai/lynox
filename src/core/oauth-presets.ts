@@ -103,29 +103,32 @@ export interface OAuthPreset {
   };
   /**
    * How the scopes are joined on the authorize link. Absent: a space, as OAuth 2.0 says and
-   * as bexio takes them. A provider that splits on commas gets every scope as one unknown
-   * scope from a space-joined list, so the preset says which it is. Read through
-   * {@link presetScopeParam}.
+   * as bexio takes them; a provider that documents commas says so here. Only the link: the
+   * refresh in `fetch_token` joins with a space whatever this says, and the consent page
+   * compares its own space-joined list. Read through {@link presetScopeParam}.
    */
   readonly scopeSeparator?: ' ' | ',';
   /**
    * The header the provider reads the access token from, carrying the bare token. Absent:
    * `Authorization: Bearer`. A preset profile cannot choose a header itself: one that names its
    * own `auth.header_name` gets no token attached (`attachEngineManagedAuth` in `http.ts`), so a
-   * save cannot point the token at another header. Read through {@link presetTokenHeaderName}.
+   * save cannot point the token at another header. Unlike a profile's `header_name`, a value of
+   * `Authorization` here still means the bare token, without `Bearer`. Read through
+   * {@link presetTokenHeaderName}.
    */
   readonly tokenHeaderName?: string;
   /**
    * The body of every request to the token endpoint: the code exchange and each refresh.
-   * Absent: whatever the profile says, `form` unless it says `json`. Set by the preset, it wins
-   * over the profile for the same reason as `tokenHeaderName`. Read through
+   * Absent: whatever the profile says, `form` unless it says `json`, as for a profile without a
+   * preset. Set by the preset, it wins over the profile: what the provider's token endpoint
+   * accepts is a fact about the provider, and the profile is written by the model. Read through
    * {@link presetTokenBodyFormat}.
    */
   readonly tokenBodyFormat?: 'form' | 'json';
   /**
    * A check the callback runs on the provider's redirect before it exchanges the code, on top
    * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
-   * {@link ./oauth-callback-hmac.ts}.
+   * {@link ./oauth-callback-hmac.ts}; nothing reads this field yet.
    */
   readonly callbackVerification?: 'shopify-hmac';
 }

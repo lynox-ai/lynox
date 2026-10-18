@@ -11,9 +11,16 @@ const PUBLISHED = {
   nowMs: 1337178173 * 1000,
 };
 
-/** A query signed the way Shopify signs, for shapes the published example does not have. */
+/**
+ * A query signed the way Shopify's library signs (`hmac-validator.ts`,
+ * `stringifyQueryForAdmin`): sorted with localeCompare, written back through
+ * URLSearchParams, `+` as `%20`. It mirrors the code under test, so it shows the
+ * procedure is applied consistently; that the procedure is Shopify's rests on the
+ * published example above and on the library's source.
+ */
 function signed(params: Record<string, string>, secret: string): string {
-  const message = Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join('&');
+  const message = new URLSearchParams(Object.keys(params).sort((a, b) => a.localeCompare(b)).map((k) => [k, params[k] ?? '']))
+    .toString().replace(/\+/g, '%20');
   const hmac = createHmac('sha256', secret).update(message).digest('hex');
   return new URLSearchParams({ ...params, hmac }).toString();
 }
@@ -23,13 +30,17 @@ const NOW = 1_800_000_000_000;
 const BASE = { code: 'abc123', shop: 'demo-store.myshopify.com', state: 'st4te', timestamp: String(NOW / 1000) };
 
 describe('verifyShopifyCallback', () => {
-  it('accepts the published example', () => {
-    expect(verifyShopifyCallback(PUBLISHED.query, PUBLISHED.secret, PUBLISHED.nowMs)).toEqual({ ok: true });
+  it('accepts the published example and hands back the values it verified', () => {
+    const verdict = verifyShopifyCallback(PUBLISHED.query, PUBLISHED.secret, PUBLISHED.nowMs);
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) return;
+    expect(verdict.params.get('shop')).toBe('some-shop.myshopify.com');
+    expect(verdict.params.get('code')).toBe('0907a61c0c8d55e99db179b68161bc00');
   });
 
-  it('accepts the published example with its parameters in another order', () => {
-    const reordered = 'timestamp=1337178173&state=0.6784241404160823&hmac=700e2dadb827fcc8609e9d5ce208b2e9cdaab9df07390d2cbca10d7c328fc4bf&shop=some-shop.myshopify.com&code=0907a61c0c8d55e99db179b68161bc00';
-    expect(verifyShopifyCallback(reordered, PUBLISHED.secret, PUBLISHED.nowMs)).toEqual({ ok: true });
+  it('accepts the published example with its parameters in another order, and with a leading ?', () => {
+    const reordered = '?timestamp=1337178173&state=0.6784241404160823&hmac=700e2dadb827fcc8609e9d5ce208b2e9cdaab9df07390d2cbca10d7c328fc4bf&shop=some-shop.myshopify.com&code=0907a61c0c8d55e99db179b68161bc00';
+    expect(verifyShopifyCallback(reordered, PUBLISHED.secret, PUBLISHED.nowMs).ok).toBe(true);
   });
 
   it('refuses the published example under another secret', () => {
@@ -43,15 +54,39 @@ describe('verifyShopifyCallback', () => {
 
   it('checks the shop as received: an upper-case shop signed as such passes, and lower-casing it breaks the signature', () => {
     const upper = signed({ ...BASE, shop: 'Demo-Store.myshopify.com' }, SECRET);
-    expect(verifyShopifyCallback(upper, SECRET, NOW)).toEqual({ ok: true });
+    expect(verifyShopifyCallback(upper, SECRET, NOW).ok).toBe(true);
     const lowered = upper.replace('Demo-Store', 'demo-store');
     expect(verifyShopifyCallback(lowered, SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
   });
 
-  it('signs the decoded value: a value sent percent-encoded verifies against its decoded form', () => {
-    const query = signed({ ...BASE, host: 'YWRtaW4uc2hvcGlmeS5jb20vc3RvcmUvZGVtbw==' }, SECRET);
-    expect(query).toContain('%3D%3D');
-    expect(verifyShopifyCallback(query, SECRET, NOW)).toEqual({ ok: true });
+  it('signs a base64 host re-encoded, as the library does, and not as decoded', () => {
+    const host = 'YWRt+aW4/uc2hvcGlmeS5jb20=';
+    const query = signed({ ...BASE, host }, SECRET);
+    expect(verifyShopifyCallback(query, SECRET, NOW).ok).toBe(true);
+    // The same values signed decoded, `name=value` joined: what this module did before.
+    const decoded = Object.entries({ ...BASE, host }).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join('&');
+    const naive = new URLSearchParams({ ...BASE, host, hmac: createHmac('sha256', SECRET).update(decoded).digest('hex') }).toString();
+    expect(verifyShopifyCallback(naive, SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
+  });
+
+  it('signs a space as %20, not as +', () => {
+    const query = signed({ ...BASE, state: 'a b' }, SECRET);
+    expect(verifyShopifyCallback(query, SECRET, NOW).ok).toBe(true);
+    const plus = new URLSearchParams({ ...BASE, state: 'a b' });
+    const asPlus = createHmac('sha256', SECRET).update(new URLSearchParams([...plus].sort(([a], [b]) => a.localeCompare(b))).toString()).digest('hex');
+    plus.set('hmac', asPlus);
+    expect(verifyShopifyCallback(plus.toString(), SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
+  });
+
+  it('leaves signature out of the signed text, as it leaves out hmac', () => {
+    const query = `${signed(BASE, SECRET)}&signature=anything`;
+    expect(verifyShopifyCallback(query, SECRET, NOW).ok).toBe(true);
+  });
+
+  it('sorts names the way the library does', () => {
+    // Code-unit order puts `B` before `a_b`; localeCompare puts it after.
+    const query = signed({ ...BASE, B: '1', a_b: '2' }, SECRET);
+    expect(verifyShopifyCallback(query, SECRET, NOW).ok).toBe(true);
   });
 
   it('refuses without a secret, before anything else', () => {
@@ -81,31 +116,35 @@ describe('verifyShopifyCallback', () => {
     expect(verifyShopifyCallback(`${good}&hmac=${hmac}`, SECRET, NOW)).toEqual({ ok: false, reason: 'repeated-param' });
   });
 
+  it.each(['code', 'shop', 'state'] as const)('refuses a signed callback without %s, or with it empty', (name) => {
+    const { [name]: _dropped, ...rest } = BASE;
+    expect(verifyShopifyCallback(signed(rest, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'missing-param' });
+    expect(verifyShopifyCallback(signed({ ...BASE, [name]: '' }, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'missing-param' });
+  });
+
   it.each([
-    ['a & in a value', { state: 'a&b' }],
-    ['a % in a value', { state: 'a%b' }],
-    ['a = in a name', { 'x=y': 'z' }],
-    ['a & in a name', { 'x&y': 'z' }],
-    ['a % in a name', { 'x%y': 'z' }],
-  ])('refuses %s, even when it is signed', (_label, extra) => {
-    const query = signed({ ...BASE, ...extra }, SECRET);
-    expect(verifyShopifyCallback(query, SECRET, NOW)).toEqual({ ok: false, reason: 'unsignable-param' });
+    ['another domain', 'demo-store.example.com'],
+    ['the suffix followed by more', 'demo-store.myshopify.com.attacker.example'],
+    ['a leading hyphen', '-demo.myshopify.com'],
+    ['a subdomain', 'a.demo.myshopify.com'],
+  ])('refuses a signed shop that is %s', (_label, shop) => {
+    expect(verifyShopifyCallback(signed({ ...BASE, shop }, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'bad-shop' });
   });
 
-  it('still accepts a = in a value', () => {
-    const query = signed({ ...BASE, state: 'a=b' }, SECRET);
-    expect(verifyShopifyCallback(query, SECRET, NOW)).toEqual({ ok: true });
+  it.each([
+    ['missing', undefined],
+    ['a float', '1800000000.0'],
+    ['in exponent form', '1.8e9'],
+    ['negative', '-1'],
+  ])('refuses a signed timestamp that is %s', (_label, timestamp) => {
+    const { timestamp: _t, ...rest } = BASE;
+    const params = timestamp === undefined ? rest : { ...rest, timestamp };
+    expect(verifyShopifyCallback(signed(params, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'bad-timestamp' });
   });
 
-  it('refuses a signed callback without a timestamp, or with one that is not a number', () => {
-    const { timestamp: _t, ...noTimestamp } = BASE;
-    expect(verifyShopifyCallback(signed(noTimestamp, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'missing-timestamp' });
-    expect(verifyShopifyCallback(signed({ ...BASE, timestamp: '1e9' }, SECRET), SECRET, NOW)).toEqual({ ok: false, reason: 'missing-timestamp' });
-  });
-
-  it('checks the signature before the age: a forged fresh timestamp is a mismatch', () => {
+  it('checks the signature before the age: a stale callback with a bad hmac is a mismatch, not a stale one', () => {
     const params = new URLSearchParams(signed({ ...BASE, timestamp: String(NOW / 1000 - 3600) }, SECRET));
-    params.set('timestamp', String(NOW / 1000));
+    params.set('code', 'swapped');
     expect(verifyShopifyCallback(params.toString(), SECRET, NOW)).toEqual({ ok: false, reason: 'signature-mismatch' });
   });
 
@@ -115,11 +154,15 @@ describe('verifyShopifyCallback', () => {
     ['one second too old', -SHOPIFY_CALLBACK_WINDOW_SECONDS - 1, false],
     ['one second too far ahead', SHOPIFY_CALLBACK_WINDOW_SECONDS + 1, false],
   ])('a timestamp %s', (_label, offset, ok) => {
-    const query = signed({ ...BASE, timestamp: String(NOW / 1000 + offset) }, SECRET);
-    expect(verifyShopifyCallback(query, SECRET, NOW)).toEqual(ok ? { ok: true } : { ok: false, reason: 'timestamp-outside-window' });
+    const verdict = verifyShopifyCallback(signed({ ...BASE, timestamp: String(NOW / 1000 + offset) }, SECRET), SECRET, NOW);
+    expect(verdict.ok ? true : verdict.reason).toBe(ok ? true : 'timestamp-outside-window');
   });
 
-  it('keeps the window at five minutes', () => {
-    expect(SHOPIFY_CALLBACK_WINDOW_SECONDS).toBe(300);
+  it('refuses when the clock is not a number', () => {
+    expect(verifyShopifyCallback(signed(BASE, SECRET), SECRET, Number.NaN)).toEqual({ ok: false, reason: 'timestamp-outside-window' });
+  });
+
+  it('keeps the window at the library\'s 90 seconds', () => {
+    expect(SHOPIFY_CALLBACK_WINDOW_SECONDS).toBe(90);
   });
 });

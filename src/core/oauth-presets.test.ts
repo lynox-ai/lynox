@@ -452,7 +452,7 @@ describe('what a preset says about the request shape, and what a preset that say
     expect(presetScopeParam(COMMA, ['read_a', 'read_b'])).toBe('read_a,read_b');
   });
 
-  it('puts the token in Authorization by default and in the preset\'s header when it names one', () => {
+  it('names no header by default (Authorization: Bearer) and the preset\'s header when it names one', () => {
     expect(presetTokenHeaderName(CONSTANT)).toBeUndefined();
     expect(presetTokenHeaderName(COMMA)).toBe('X-Example-Access-Token');
   });
@@ -469,19 +469,18 @@ describe('what a preset says about the request shape, and what a preset that say
     expect(presetTokenBodyFormat(preset, profileFormat)).toBe(expected);
   });
 
-  it('leaves the shipped bexio preset on the defaults, so nothing it sends changes', () => {
+  it('gives the shipped bexio preset what its link and token requests compute today: a space join, the profile\'s format or form', () => {
     const bexio = OAUTH_PRESETS.get('bexio');
     expect(bexio).toBeDefined();
     if (!bexio) return;
-    expect(bexio.scopeSeparator).toBeUndefined();
-    expect(bexio.tokenHeaderName).toBeUndefined();
-    expect(bexio.tokenBodyFormat).toBeUndefined();
-    expect(bexio.callbackVerification).toBeUndefined();
+    expect(presetTokenHeaderName(bexio)).toBeUndefined();
     expect(presetScopeParam(bexio, ['openid', 'offline_access', 'contact_show'])).toBe('openid offline_access contact_show');
     expect(presetTokenBodyFormat(bexio, undefined)).toBe('form');
     expect(presetTokenBodyFormat(bexio, 'json')).toBe('json');
   });
 
+  // A tripwire: the change that gives a shipped preset one of these also wires its consumer,
+  // and removes this test.
   it('ships no preset that sets any of the four yet', () => {
     for (const id of OAUTH_PRESETS.ids()) {
       const preset = OAUTH_PRESETS.get(id);
