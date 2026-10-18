@@ -926,6 +926,17 @@ export class TaskManager {
    * costs is the VOCABULARY and its readers — `TriggerStatus`, `VALID_STATUSES`, the
    * status filter the agent tool offers, and the UI's status map — which is a wider unit
    * than this one and is filed as its own. No migration.
+   *
+   * `'halted'` is a run that stopped where its approval told it to — a bulk run at its
+   * approved maximum, or at the one target it may write before its probe holds. It is
+   * scheduled exactly like a stop (no retry, a one-shot is `completed`, a cron keeps its
+   * status) for the same reason: the run did what was asked and waits for the owner, and
+   * the owner's resume re-arms the trigger. Recorded as `failed`, it was a failure the owner
+   * learned to read past, right next to the real ones.
+   *
+   * `'interrupted'` is a run the engine lost mid-way and did not start again. It IS a run
+   * that did not finish, so it is scheduled exactly like `failed` (the same retry, the same
+   * `failed` status); the word only keeps it apart from a tool or provider failure.
    */
   /**
    * @param opts.noRetry No retry for this run, whatever the trigger's retries say: a run a
@@ -937,7 +948,7 @@ export class TaskManager {
    *   conditions drifted from it (a cron or watch with retries set was never retried here,
    *   and its failures were reported nowhere).
    */
-  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped', opts?: { noRetry?: boolean | undefined }): boolean {
+  recordTaskRun(id: string, result: string, status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted', opts?: { noRetry?: boolean | undefined }): boolean {
     const task = this.history.getTrigger(id);
     // The schedule was deleted while this run was in flight: deleting removes the row and
     // leaves the run going, so there is nothing left to record the run against.
@@ -956,7 +967,7 @@ export class TaskManager {
     // that union breaks the build here rather than silently disarming the guard.
     // A stop withholds the status for the reason given above; a parked trigger
     // withholds it because its wait is still open. Two causes, one mechanism.
-    const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped';
+    const mayWriteStatus = task.status !== 'waiting' && status !== 'stopped' && status !== 'halted';
 
     // A test run by hand (hand-run-door.ts; decided at dispatch and carried by the run)
     // records what happened and leaves the schedule exactly as it was: no status, no next
@@ -1013,7 +1024,7 @@ export class TaskManager {
       // Reset retry count on success
       if (status === 'success') retryCount = 0;
     } else if (
-      (status === 'failed' || status === 'timeout')
+      (status === 'failed' || status === 'timeout' || status === 'interrupted')
       && task.max_retries
       && (task.retry_count ?? 0) < task.max_retries
       && opts?.noRetry !== true
@@ -1036,7 +1047,7 @@ export class TaskManager {
       // 'timeout') for the UI.
       if (mayWriteStatus) {
         this.history.updateTrigger(id, { status: 'failed' });
-      } else if (status === 'stopped' && task.status !== 'waiting') {
+      } else if ((status === 'stopped' || status === 'halted') && task.status !== 'waiting') {
         // Terminal, for the reason in the docstring: this row has no next run and
         // nothing will give it one, so leaving it `open` is a lie the model acts on.
         //

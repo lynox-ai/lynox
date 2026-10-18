@@ -149,7 +149,14 @@ const LEASE_HEARTBEAT_MS = 30_000;
 const LEASE_TTL_MS = 15 * 60_000;
 /** What a run the engine lost mid-way reads as — a RESULT, the status is `failed`. */
 const INTERRUPTED_RESULT =
-  'The engine stopped while this run was in progress. It is recorded as failed instead of being run again from the start, because what it had already done would happen a second time.';
+  'The engine stopped while this run was in progress. It is recorded as interrupted instead of being run again from the start, because what it had already done would happen a second time.';
+/** How each end of a run is recorded and announced (`recordAndNotify`). */
+const RUN_END_LOOK = {
+  success: { status: 'success', mark: '\u2713', priority: 'normal' },
+  failed: { status: 'failed', mark: '\u2717', priority: 'high' },
+  halted: { status: 'halted', mark: '\u23F8', priority: 'normal' },
+  interrupted: { status: 'interrupted', mark: '\u26A0', priority: 'high' },
+} as const;
 /**
  * Per effect: does a run continue where a lost run stopped without repeating anything that
  * run already did? Only then may a lost run be started again. Every effect has to answer —
@@ -614,7 +621,7 @@ export class WorkerLoop {
     tm: ReturnType<Engine['getTaskManager']> | undefined,
     id: string,
     result: string,
-    status: 'success' | 'failed' | 'timeout' | 'stopped',
+    status: 'success' | 'failed' | 'timeout' | 'stopped' | 'halted' | 'interrupted',
     run?: RunStarterSlot | null,
   ): boolean {
     // `null`: the caller decided there is no run, so nothing is looked up.
@@ -1210,7 +1217,7 @@ export class WorkerLoop {
         if (lease === 'interrupted' && !RESUMES_AFTER_LOSS[task.effect]) {
           // A run the engine lost mid-way is not started again: what it already did — a
           // mail sent, a record written, tokens spent — would happen twice. It is recorded
-          // as the failed run it was, which schedules it like any other failure (the next
+          // `interrupted`, which schedules it exactly like a failure (the next
           // occurrence for a cron, nothing more for a one-shot, a retry where the owner
           // asked for retries — a retry does run it from the start, which is what retries
           // were set up for), and the owner can run it again by hand. Fenced per task: a
@@ -1218,7 +1225,7 @@ export class WorkerLoop {
           // then stays and lapses again, and the run is reported once more, never re-run.
           releasePersistentBudget(reservation.reservedUSD);
           try {
-            this.recordAndNotify(task, INTERRUPTED_RESULT, false);
+            this.recordAndNotify(task, INTERRUPTED_RESULT, 'interrupted');
             this.engine.getTaskManager()?.releaseLease(task.id, this.leaseHolder);
           } catch (err: unknown) {
             process.stderr.write(
@@ -1694,7 +1701,9 @@ export class WorkerLoop {
       });
       return;
     }
-    this.recordAndNotify(task, outcome.summary, outcome.status === 'done');
+    // A halt at the approved maximum is the run doing what it was told: recorded as such,
+    // not as the failure every other halt is.
+    this.recordAndNotify(task, outcome.summary, outcome.status === 'done' ? true : outcome.planned === true ? 'halted' : false);
   }
 
   /**
@@ -2797,18 +2806,28 @@ export class WorkerLoop {
     return new Date(ms).toISOString();
   }
 
-  private recordAndNotify(task: TriggerRecord, resultSummary: string, success: boolean): void {
+  /**
+   * Record a run's end and tell the owner. `true` and `false` are success and failure; the
+   * two words are ends that are neither, and each needs its own recorded status and its own
+   * notification, or the owner learns to read past `failed` and misses the real one:
+   *   · `'halted'` — the run stopped where its approval told it to and waits for the owner
+   *     (a bulk run at its approved maximum). Not a failure: no ✗, normal priority.
+   *   · `'interrupted'` — the engine lost the run mid-way and did not start it again. It did
+   *     not finish, so it stays high priority, but it is not a tool's or provider's failure.
+   */
+  private recordAndNotify(task: TriggerRecord, resultSummary: string, end: boolean | 'halted' | 'interrupted'): void {
+    const look = RUN_END_LOOK[end === true ? 'success' : end === false ? 'failed' : end];
     const taskManager = this.engine.getTaskManager();
     if (taskManager) {
-      this.#recordRun(taskManager, task.id, resultSummary, success ? 'success' : 'failed');
+      this.#recordRun(taskManager, task.id, resultSummary, look.status);
     }
 
     if (this.notificationRouter.hasChannels()) {
       void this.notificationRouter.notify({
-        title: `${success ? '\u2713' : '\u2717'} ${task.title}`,
+        title: `${look.mark} ${task.title}`,
         body: resultSummary,
         taskId: task.id,
-        priority: success ? 'normal' : 'high',
+        priority: look.priority,
       });
     }
   }

@@ -96,6 +96,11 @@ export interface BulkEffectOutcome {
    *  where it stood (a resume carries on, an undo takes back what was written); an atomic
    *  one was rolled back, as on a failed target. */
   status: 'done' | 'halted' | 'refused' | 'aborted' | 'pending' | 'stopped';
+  /** Set on a `halted` run that stopped where its approval told it to: the approved maximum,
+   *  or the one target a run without a holding probe may write. The run did what was asked
+   *  and waits for the owner, so the trigger records it as `halted`, not as a failure. Every
+   *  other halt (failures, an unreachable host, the time budget) leaves it unset. */
+  planned?: true;
   /** Engine-authored, counts only. Recorded as the trigger's run result. */
   summary: string;
 }
@@ -312,7 +317,7 @@ async function applyRunEffect(
     if (cappedOut) {
       const reason = cappedByProbe ? BULK_HALT_REASONS.probeRequired : BULK_HALT_REASONS.maxTargets;
       ledger.halt(runId, reason);
-      return { status: 'halted', summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
+      return { status: 'halted', planned: true, summary: summarize(ledger, runId, `Bulk run halted: ${reason}.`) };
     }
     // The stop that came during the loop's last write, with the rest held by another loop:
     // no pass between targets is left to read it, and `pending` would re-arm the trigger and

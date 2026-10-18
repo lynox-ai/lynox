@@ -1753,6 +1753,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tasks.no_tasks_hint': { de: 'Sag lynox im Chat z.B. "Erstelle einen wöchentlichen Report-Task"', en: 'Tell lynox in chat e.g. "Create a weekly report task"' },
 	'tasks.next_run': { de: 'Nächster Lauf', en: 'Next run' },
 	'tasks.last_run': { de: 'Letzter Lauf', en: 'Last run' },
+	'tasks.run_halted': { de: 'wie vorgesehen angehalten, wartet auf dich', en: 'halted as planned, waiting for you' },
+	'tasks.run_interrupted': { de: 'unterbrochen, nicht neu gestartet', en: 'interrupted, not started again' },
 	'tasks.every_hour': { de: 'Stündlich', en: 'Every hour' },
 	'tasks.daily_at': { de: 'Täglich um', en: 'Daily at' },
 	'tasks.monthly_on': { de: 'Monatlich am', en: 'Monthly on' },

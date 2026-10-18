@@ -196,7 +196,10 @@ describe('the trigger run lease across a restart', () => {
     await new Promise((r) => setImmediate(r));
     expect(b.dispatches()).toBe(0);
     const settled = b.manager.getTrigger('trg-1')!;
-    expect(settled.last_run_status).toBe('failed');
+    // Its own word, so the owner can tell it from a tool's or provider's failure — and the
+    // schedule's status still `failed`, because the run did not finish.
+    expect(settled.last_run_status).toBe('interrupted');
+    expect(settled.status).toBe('failed');
     expect(settled.last_run_result).toMatch(/engine stopped while this run was in progress/);
     // Scheduled like any failed cron run: its next occurrence, not now.
     expect(Date.parse(settled.next_run_at!)).toBeGreaterThan(T0 + 16 * MIN);

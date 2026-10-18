@@ -269,6 +269,18 @@
 		// utility for a token that does not exist compiles and renders NOTHING — the
 		// same silent no-verdict this entry exists to remove.
 		stopped: 'text-text-muted',
+		// The run stopped where its approval told it to (a bulk run at its approved maximum)
+		// and waits for the owner: not a failure, so not red.
+		halted: 'text-text-muted',
+		// The engine lost the run and did not start it again. It did not finish, which the
+		// owner should see, but it is not the run's own failure: amber, not red.
+		interrupted: 'text-warning',
+	};
+	// Colour alone does not tell these two apart from the rest (and not at all to a reader
+	// who does not see colour), so they also carry a word.
+	const runStatusWord: Record<string, 'tasks.run_halted' | 'tasks.run_interrupted'> = {
+		halted: 'tasks.run_halted',
+		interrupted: 'tasks.run_interrupted',
 	};
 
 	$effect(() => { void loadTriggers(); /* catches and sets its error */ });
@@ -328,7 +340,7 @@
 									<span>{t('tasks.next_run')}: {fmtDate(trigger.next_run_at)}</span>
 								{/if}
 								{#if trigger.last_run_at}
-									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}</span>
+									<span class={runStatusColor[trigger.last_run_status ?? ''] ?? ''} data-run-status={trigger.last_run_status}>{t('tasks.last_run')}: {fmtDate(trigger.last_run_at)}{#if Object.hasOwn(runStatusWord, trigger.last_run_status ?? '')} · {t(runStatusWord[trigger.last_run_status ?? '']!)}{/if}</span>
 								{/if}
 								{#if escalationNotice(trigger)}
 									{@const notice = escalationNotice(trigger)!}
