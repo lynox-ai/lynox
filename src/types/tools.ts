@@ -109,8 +109,8 @@ export interface ToolEntry<TInput = unknown> {
    * nothing outside. Never content, and never a query or a search text: a search can carry a
    * customer's name. A mandate's call that returns a target leaves a `read` row before it runs,
    * and does not run without it (`Agent._recordOutwardRead`). A write that reads first — a
-   * reply reads the mail it answers — declares both. Every tool a mandate may use is placed in `MANDATE_TOOL_REACH`
-   * (`mandate-tool-lock.ts`), and one placed `'outward'` must declare this.
+   * reply reads the mail it answers — declares both. A tool a mandate may use declares this
+   * exactly when it is on `MANDATE_OUTWARD_READERS` (`mandate-tool-lock.ts`).
    */
   outwardRead?: ((input: TInput) => string | null) | undefined;
   /**

@@ -16,6 +16,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { isOwnerPrincipal, type RequestPrincipal } from './request-principal.js';
+import { effectiveWriteMethod } from './outbound-write.js';
 import { oneLineForLog } from './profile-value-shape.js';
 import { maskSecretPatterns } from './secret-store.js';
 
@@ -243,16 +244,18 @@ export function outwardReadRecorder(
 /**
  * The `onRedirect` of a delegated session's call: each hop it follows is a read of its own,
  * recorded as one before it is requested (PRD customer-granted-operator-access §3.9). A hop
- * that keeps a write method is not followed in such a session — a 307/308 means the write
- * did not happen where it was asked, and the session writes only where its write's row
- * points. `undefined` for the owner, whose hops are not recorded.
+ * that a server would act on as a write is not followed under such access — the verb it is
+ * sent with, or an override its address or headers carry (`effectiveWriteMethod`, the reading
+ * every write gate uses): the session writes only where its write's row points. `undefined`
+ * for the owner, whose hops are not recorded.
  */
-export function delegatedRedirects(record: ((target: string) => void) | null): ((nextUrl: string, method: string) => void) | undefined {
+export function delegatedRedirects(record: ((target: string) => void) | null): ((nextUrl: string, method: string, headers?: Record<string, string>) => void) | undefined {
   if (record === null) return undefined;
-  return (nextUrl, method) => {
-    if (method !== 'GET' && method !== 'HEAD') {
-      throw new Error(`Blocked: a redirect that keeps the ${method} is not followed in a delegated session. Nothing was written at ${new URL(nextUrl).hostname}.`);
+  return (nextUrl, method, headers = {}) => {
+    const acted = effectiveWriteMethod(method, headers, nextUrl);
+    if (acted !== 'GET' && acted !== 'HEAD') {
+      throw new Error(`Blocked: a redirect a server would act on as a write (${acted ?? 'an override that is not a method'}) is not followed under delegated access. Nothing was sent to ${new URL(nextUrl).hostname}.`);
     }
-    record(httpTarget(method, nextUrl));
+    record(httpTarget(acted, nextUrl));
   };
 }

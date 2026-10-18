@@ -4078,7 +4078,8 @@ describe('hand runs carry the starter\'s principal', () => {
       vi.useRealTimers();
       const recs: Rec[] = [];
       mockFetchPinned.mockClear();
-      const task = watch();
+      // As the stamp leaves it: the stamper takes the trigger over in `edited_by`.
+      const task = watch({ edited_by: 'owner' });
       const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
       mockFetchPinned.mockResolvedValueOnce(page());
       await (loop as unknown as Exec).executeTask(task, null);
@@ -4086,11 +4087,22 @@ describe('hand runs carry the starter\'s principal', () => {
       expect(mockFetchPinned).toHaveBeenCalledTimes(1);
     });
 
+    it('is a row under a mandate that changed the owner\'s watch, before the owner stamped it again', async () => {
+      vi.useRealTimers();
+      const recs: Rec[] = [];
+      mockFetchPinned.mockClear();
+      const task = watch({ created_by: undefined, edited_by: 'mandate:eva@kanzlei.example' });
+      const { loop } = watchSetup(task, { record: (e) => { recs.push(e); } });
+      mockFetchPinned.mockResolvedValueOnce(page());
+      await (loop as unknown as Exec).executeTask(task, null);
+      expect(recs).toEqual([expect.objectContaining({ principal: { kind: 'mandate', email: 'eva@kanzlei.example' }, action: 'watch:read' })]);
+    });
+
     it('is not fetched when the row cannot be written; the run ends failed and says why', async () => {
       vi.useRealTimers();
       for (const auditLog of [{ record: () => { throw new Error('disk full'); } }, null]) {
         mockFetchPinned.mockClear();
-        const task = watch();
+        const task = watch({ edited_by: 'owner' });
         const { loop, engine } = watchSetup(task, auditLog);
         await (loop as unknown as Exec).executeTask(task, null);
         expect(mockFetchPinned).not.toHaveBeenCalled();
@@ -4104,7 +4116,7 @@ describe('hand runs carry the starter\'s principal', () => {
       vi.useRealTimers();
       for (const auditLog of [{ record: vi.fn() }, null]) {
         mockFetchPinned.mockClear();
-        const task = watch({ created_by: undefined });
+        const task = watch({ created_by: undefined, edited_by: 'owner' });
         const { loop } = watchSetup(task, auditLog);
         mockFetchPinned.mockResolvedValueOnce(page());
         await (loop as unknown as Exec).executeTask(task, null);

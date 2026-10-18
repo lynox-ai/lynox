@@ -7632,6 +7632,19 @@ describe('a mandate\'s reads inside one http_request', () => {
     }
   });
 
+  it('does not follow a mandate\'s GET hop that names a write in its address', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://api.example.invalid/items/5?_method=DELETE' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { recs, log } = recorder();
+    testCtx.auditLog = log;
+    const err = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal: MANDATE })).then(() => null, (e: unknown) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(err)).toMatch(/would act on as a write \(DELETE\)/);
+    expect(recs).toEqual([]);
+  });
+
   it('does not follow a mandate\'s hop whose row cannot be written', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.invalid/next' } }))

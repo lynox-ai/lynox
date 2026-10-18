@@ -3023,11 +3023,13 @@ function bulkReadRecorder(
 
 /**
  * Who a watch's read is recorded for, or null for the owner's own watch: the delegated
- * session that started the run by hand, else the one that set up or last changed the watch
- * (the tag the owner's stamp is asked for, `mandateNeedsOwnerStamp`).
+ * session that started the run by hand, else one that last changed the watch, else the one
+ * that set it up. Not `edited_by` alone: the owner's stamp writes itself there
+ * (`TriggerStore.setConfirmedAt`), and a watch a mandate set up runs on schedule only after
+ * that stamp.
  */
 export function watchReader(task: Pick<TriggerRecord, 'created_by' | 'edited_by'>, starter: RequestPrincipal | undefined): RequestPrincipal | null {
   if (starter !== undefined && !isOwnerPrincipal(starter)) return starter;
-  const tag = task.edited_by ?? task.created_by;
-  return isMandateTag(tag) ? principalFromTag(tag) : null;
+  if (isMandateTag(task.edited_by)) return principalFromTag(task.edited_by);
+  return isMandateTag(task.created_by) ? principalFromTag(task.created_by) : null;
 }

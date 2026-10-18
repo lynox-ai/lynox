@@ -331,8 +331,19 @@ describe('outwardReadRecorder and delegatedRedirects', () => {
     const hop = delegatedRedirects((t) => { seen.push(t); })!;
     hop('https://other.example.invalid/next?q=1', 'GET');
     expect(seen).toEqual(['GET other.example.invalid/next']);
-    expect(() => hop('https://other.example.invalid/x', 'PUT')).toThrow(/not followed in a delegated session/);
+    expect(() => hop('https://other.example.invalid/x', 'PUT')).toThrow(/not followed under delegated access/);
     expect(seen, 'the refused hop wrote no row').toHaveLength(1);
     expect(delegatedRedirects(null)).toBeUndefined();
+  });
+
+  it('refuses a GET hop a server would act on as a write — by its address or a header it carries — and records a plain one', () => {
+    const seen: string[] = [];
+    const hop = delegatedRedirects((t) => { seen.push(t); })!;
+    expect(() => hop('https://a.example.invalid/items/5?_method=DELETE', 'GET')).toThrow(/not followed under delegated access/);
+    expect(() => hop('https://a.example.invalid/items/5', 'GET', { 'X-HTTP-Method-Override': 'DELETE' })).toThrow(/not followed under delegated access/);
+    expect(() => hop('https://a.example.invalid/items/5', 'GET', { 'X-HTTP-Method-Override': 'BREW' }), 'an override that is not a method').toThrow(/not followed/);
+    expect(seen).toEqual([]);
+    hop('https://a.example.invalid/items/5?page=2', 'GET', { accept: 'application/json' });
+    expect(seen, 'the counter-direction: a plain GET hop stays a read and gets its row').toEqual(['GET a.example.invalid/items/5']);
   });
 });

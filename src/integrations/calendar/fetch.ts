@@ -50,8 +50,8 @@ export async function fetchIcsFeed(
   onRead?: ((host: string) => void) | undefined,
 ): Promise<FetchIcsResult> {
   let response: Response;
-  if (onRead) onRead(new URL(url).hostname);
   try {
+    if (onRead) onRead(new URL(url).hostname);
     ({ response } = await fetchWithValidatedRedirects(
       url,
       {

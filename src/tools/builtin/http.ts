@@ -316,11 +316,11 @@ export async function fetchWithValidatedRedirects(
   // credentials that origin's api_profile carries. `response.url` cannot serve
   // here: fetchPinned constructs its Responses, so that field is always empty.
   //
-  // Called for every redirect hop the guards above let through, with the method it is about to
-  // be requested with, before it is requested. What it throws stops the call there: a delegated
+  // Called for every redirect hop the guards above let through, with the method and headers it
+  // is about to be requested with, before it is requested. What it throws stops the call there: a delegated
   // session's reader records each hop it follows as a read of its own, and does not follow a
   // hop it cannot record (`outwardReadRecorder`).
-  onRedirect?: ((nextUrl: string, method: string) => void) | undefined,
+  onRedirect?: ((nextUrl: string, method: string, headers: Record<string, string>) => void) | undefined,
 ): Promise<{ response: Response; finalUrl: string; hosts: string[] }> {
   let currentUrl = url;
   // Every host the request reached, the final one included: an answer counts as the approved
@@ -391,7 +391,7 @@ export async function fetchWithValidatedRedirects(
       }
       throw new Error(`Blocked: redirect to ${new URL(nextUrl).hostname} is outside the workflow's capability-contract`);
     }
-    onRedirect?.(nextUrl, method);
+    onRedirect?.(nextUrl, method, headers);
     currentUrl = nextUrl;
   }
 
