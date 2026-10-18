@@ -147,6 +147,8 @@ const _builtClients = new Set<BuiltClient>();
 
 // Cached module reference to avoid repeated dynamic imports in hot paths
 let _sentry: typeof import('@sentry/node') | null = null;
+/** The SDK module once loaded; never cleared, so a refusal can still reach the client it bound. */
+let _sentryModule: typeof import('@sentry/node') | null = null;
 
 /** Keys in LynoxError.context that are safe to send as extras (no PII). */
 const SAFE_CONTEXT_KEYS = new Set([
@@ -169,6 +171,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
   try {
     const Sentry = await import('@sentry/node');
     _sentry = Sentry;
+    _sentryModule = Sentry;
 
     // Read version from package.json at runtime
     let version = 'unknown';
@@ -457,7 +460,16 @@ export function refuseErrorReporting(): void {
   // First, and synchronously: a disabled client sends no envelope of any kind. That matters
   // beyond error events: feedback and the session aggregates the http integration flushes on
   // `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
-  for (const client of _builtClients) {
+  // Both lookups, because each misses a case: the current scope does not see a client built
+  // inside a request, and `_builtClients` misses one `Sentry.init` bound before it threw.
+  const clients = new Set<BuiltClient>(_builtClients);
+  try {
+    const current = _sentryModule?.getClient();
+    if (current) clients.add(current);
+  } catch {
+    // the built clients are still disabled below
+  }
+  for (const client of clients) {
     try {
       client.getOptions().enabled = false;
       void Promise.resolve(client.close(2000)).catch(() => { /* disabled; nothing is sent */ });
