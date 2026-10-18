@@ -846,6 +846,11 @@ describe('halt thresholds', () => {
     expect((await runBulkEffect(over.runId, 'bulk_apply', effectDeps(memory(over.initial, new Set(scattered)).writer))).status).toBe('halted');
     const s = ledger.getStatus(over.runId)!;
     expect([s.haltReason, s.failed]).toEqual([BULK_HALT_REASONS.failureRate, s.failureLimit + 1]);
+    // 30 × 0.05 is 1.5: one may fail, the second halts — rounded, the status would say two.
+    const half = recordMemoryRun(30);
+    approve(half.runId);
+    await runBulkEffect(half.runId, 'bulk_apply', effectDeps(memory(half.initial, new Set(['k005', 'k020'])).writer));
+    expect(ledger.getStatus(half.runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.failureRate, failed: 2, failureLimit: 1 });
   });
 
   it('a run approved before failures were recorded per target has no total', async () => {
