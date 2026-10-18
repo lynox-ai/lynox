@@ -191,10 +191,17 @@ describe('the trigger run lease across a restart', () => {
     // same row a live run leaves whose event loop was blocked past the lease.
     vi.setSystemTime(T0 + 16 * MIN);
     const b = boot(dir);
+    b.router.hasChannels.mockReturnValue(true);
     expect(b.manager.getDueTriggers().map((t) => t.id)).toEqual(['trg-1']);
     await b.loop.tick();
     await new Promise((r) => setImmediate(r));
     expect(b.dispatches()).toBe(0);
+    // Announced as what it is: high priority, because the run did not finish, but under its
+    // own mark rather than the ✗ of a tool's or provider's failure.
+    await vi.waitFor(() => expect(b.router.notify).toHaveBeenCalledTimes(1));
+    expect(b.router.notify).toHaveBeenCalledWith(expect.objectContaining({
+      title: expect.stringMatching(/^⚠ /) as unknown as string, priority: 'high',
+    }));
     const settled = b.manager.getTrigger('trg-1')!;
     // Its own word, so the owner can tell it from a tool's or provider's failure — and the
     // schedule's status still `failed`, because the run did not finish.
