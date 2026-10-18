@@ -18,6 +18,7 @@ import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getErrorMessage } from '../utils.js';
+import { INPUT_GUARD_ARGS } from '../ffmpeg-input.js';
 import type { SegmentCallback, TranscribeOpts, TranscribeProvider } from './types.js';
 
 const WHISPER_PATHS = [
@@ -70,6 +71,14 @@ function runCommand(cmd: string, args: string[]): Promise<{ stdout: string; stde
   });
 }
 
+/**
+ * ffmpeg arguments that turn the uploaded audio into 16 kHz mono WAV. The input's bytes come
+ * from the upload, so the input-side guard goes first (core/ffmpeg-input.ts).
+ */
+export function toWavArgs(input: string, wav: string): string[] {
+  return ['-nostdin', ...INPUT_GUARD_ARGS, '-i', input, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wav];
+}
+
 function safeLang(language: string | undefined): string {
   return /^[a-z]{2}$/.test(language ?? '') ? language! : 'auto';
 }
@@ -103,7 +112,7 @@ export async function transcribeWhisperCpp(
   const { input, wav, cleanup } = tmpPaths(filename, opts?.tenantId);
   try {
     writeFileSync(input, audio);
-    await runCommand('ffmpeg', ['-i', input, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wav]);
+    await runCommand('ffmpeg', toWavArgs(input, wav));
     const model = pickModel(wav);
     const { stdout } = await runCommand(WHISPER_CLI!, [
       '-m', model, '-f', wav, '--language', safeLang(language), '--no-timestamps',
@@ -132,7 +141,7 @@ export async function transcribeWhisperCppStream(
 
   try {
     writeFileSync(input, audio);
-    await runCommand('ffmpeg', ['-i', input, '-ar', '16000', '-ac', '1', '-f', 'wav', '-y', wav]);
+    await runCommand('ffmpeg', toWavArgs(input, wav));
 
     const model = pickModel(wav);
     const duration = wavDurationSec(wav);
