@@ -113,6 +113,8 @@ describe('ask_secret', () => {
       const result = await askSecretTool.handler({ name, prompt: 'Enter it' }, agentWith(promptSecret, store));
       expect(promptSecret).not.toHaveBeenCalled();
       expect(result).toContain(`Settings → API Keys, under exactly the name "${canonical}"`);
+      // Sent by the engine only where a profile reads it: the sentence says so.
+      expect(result).toContain(`for a profile that names "${canonical}" as its client secret and may read it.`);
     }
   });
 
