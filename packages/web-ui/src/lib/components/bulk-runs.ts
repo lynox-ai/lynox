@@ -158,13 +158,18 @@ const BULK_RESUME_NONE = new Set(['checksum', 'contract']);
 /** How an approved run that halted goes on: write on (`write`), write on under a higher maximum
  *  (`max`), or not at all (`none`). Null for a run that did not halt while writing, for one at its
  *  probe (it has its own way on), and on a halt this page has no sentence for: then it shows the
- *  engine's reason and offers nothing. */
+ *  engine's reason and offers nothing. Null too where the engine would refuse the resume for want
+ *  of a probe: without one, a run writes on only under a maximum of one target, so a higher
+ *  maximum is refused, and so is writing on under a maximum above one. */
 export type BulkResumeKind = 'write' | 'max' | 'none';
 
-export function bulkResumeKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason'>): BulkResumeKind | null {
+export function bulkResumeKind(
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'maxTargets' | 'changes'>,
+): BulkResumeKind | null {
 	if ((run.phase !== 'approved' && run.phase !== 'writing') || run.haltKey === null || bulkAtProbe(run)) return null;
-	if (run.haltKey === 'maxTargets') return 'max';
 	if (BULK_RESUME_NONE.has(run.haltKey)) return 'none';
+	if (!run.probeConfirmed && (run.haltKey === 'maxTargets' || (run.maxTargets ?? bulkWriting(run)) > 1)) return null;
+	if (run.haltKey === 'maxTargets') return 'max';
 	return BULK_RESUME_WRITE.has(run.haltKey) ? 'write' : null;
 }
 
@@ -172,7 +177,7 @@ export function bulkResumeKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' 
  *  what the owner can do first, and for a halt on failures how many failed so far and what the
  *  next pass may still fail. Every count comes from the engine: the page computes none of them. */
 export function bulkResumeText(
-	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'targetSystem' | 'maxTargets' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries'>,
+	run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'probe' | 'haltReason' | 'probeConfirmed' | 'changes' | 'targetSystem' | 'maxTargets' | 'applied' | 'failed' | 'failedOnce' | 'failureLimit' | 'resumeOpen' | 'resumeTries'>,
 	managed: boolean | null,
 	i18n: BulkI18n,
 ): { cause: string; before: string | null; kept: string | null; soFar: string | null; allows: string | null } | null {
@@ -188,6 +193,7 @@ export function bulkResumeText(
 	const cause = key === 'failureRate' ? (limit === 0 ? i18n.t('bulk.halt.failureRate_write0') : i18n.tf('bulk.halt.failureRate_write', { limit: String(limit) }))
 		: key === 'consecutiveFailures' ? i18n.t('bulk.halt.consecutiveFailures_write')
 		: key === 'unrecorded' ? i18n.tf('bulk.halt.unrecorded_write', vars)
+		: key === 'maxTargets' && run.maxTargets === 1 ? i18n.t('bulk.halt.maxTargets_one')
 		: i18n.tf(`bulk.halt.${key}`, vars);
 	const beforeKey = failures ? 'bulk.halt.failures_before_write'
 		: key === 'unauthorized' || key === 'credential' ? 'bulk.halt.credential_before'
@@ -196,8 +202,12 @@ export function bulkResumeText(
 	const before = beforeKey === null ? null : i18n.tf(beforeKey, vars);
 	if (kind === 'none') return { cause, before, kept: null, soFar: null, allows: null };
 	// "All the rest" holds only when the approved maximum does not stop the pass first; a run
-	// written on under a new maximum is bounded by that one.
-	const kept = i18n.t(kind === 'max' || run.resumeTries < open ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write');
+	// written on under a new maximum is bounded by that one. With nothing written yet there is
+	// nothing that stays and nothing to try again.
+	const capped = kind === 'max' || run.resumeTries < open;
+	const kept = i18n.t(run.applied === 0
+		? (capped ? 'bulk.resume.kept_write_none_capped' : 'bulk.resume.kept_write_none')
+		: (capped ? 'bulk.resume.kept_write_capped' : 'bulk.resume.kept_write'));
 	if (!failures) return { cause, before, kept, soFar: null, allows: null };
 	const f = run.failed;
 	const soFar = run.failedOnce === null
