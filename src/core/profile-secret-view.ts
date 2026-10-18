@@ -416,14 +416,17 @@ export function slotMayReach(
       // A held-back owner's access token goes nowhere: it is stored, not in use.
       if (apiStore.get(owner.id) === undefined) return false;
       const destination = destinationOf(new URL(target));
+      // A store profile's token, shared or not, reaches its store's host only, never a base
+      // re-pointed elsewhere.
+      const ownPreset = owner.auth?.type === 'oauth2' && owner.auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(owner.auth.oauth.preset_id) : undefined;
+      if (ownPreset?.apiOnDerivedHost === true) {
+        const store = presetStoreHost(owner);
+        return store !== null && destination === `https://${store}`;
+      }
       // The owner's own refresh slot says whether it shares its grant, and through which provider;
       // only when the owner is one of that grant's members.
       const ownGrant = owner.auth?.type === 'oauth2' ? slotGrant(profiles, readersRefreshSlot(owner)) : undefined;
       if (ownGrant?.kind === 'owned' && ownGrant.members.length > 1 && ownGrant.preset !== undefined && ownGrant.members.some((m) => m.id === owner.id)) {
-        if (ownGrant.preset.apiOnDerivedHost === true) {
-          const store = presetStoreHost(owner);
-          return store !== null && destination === `https://${store}`;
-        }
         return ownGrant.preset.apiHosts.some((h) => destination === `https://${h}`);
       }
       const [base] = credentialUrls(owner);

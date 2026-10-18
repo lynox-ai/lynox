@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { OAUTH_PRESETS, derivePresetEndpoints, presetClaimsHost, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
+import { OAUTH_PRESETS, derivePresetEndpoints, presetNotFollowed, presetRegisterOf, presetScopeRequest, presetStoreHost } from './oauth-presets.js';
 
 const shopify = OAUTH_PRESETS.get('shopify')!;
-const bexio = OAUTH_PRESETS.get('bexio')!;
 
 const profile = (base_url: string, shop: unknown, preset_id: string | undefined = 'shopify', type = 'oauth2') => ({
   base_url,
@@ -31,32 +30,10 @@ describe('the Shopify preset', () => {
   });
 });
 
-describe('presetClaimsHost', () => {
-  it.each([
-    ['my-store.myshopify.com', true],
-    ['a.myshopify.com', true],
-    ['myshopify.com', false],
-    ['.myshopify.com', false],
-    ['my.store.myshopify.com', false],
-    ['My-Store.myshopify.com', false],
-    ['my-store.myshopify.com.evil.com', false],
-    ['my-store.myshopify.co', false],
-    ['api.bexio.com', false],
-  ] as const)('Shopify claims %s: %s', (host, want) => {
-    expect(presetClaimsHost(shopify, host)).toBe(want);
-  });
-
-  it('claims no derived host for a template preset whose API is not on it', () => {
+describe('a template preset whose API is not on its derived host', () => {
+  it('has no store host', () => {
     const tenant = { ...shopify, id: 'tenant', apiOnDerivedHost: undefined };
-    const register = presetRegisterOf([tenant]);
-    expect(presetClaimsHost(tenant, 'my-store.myshopify.com', register)).toBe(false);
-    expect(presetStoreHost(profile('https://my-store.myshopify.com', 'my-store', 'tenant'), register)).toBeNull();
-  });
-
-  it('keeps a constant preset to its apiHosts', () => {
-    expect(presetClaimsHost(bexio, 'api.bexio.com')).toBe(true);
-    expect(presetClaimsHost(bexio, 'auth.bexio.com')).toBe(false);
-    expect(presetClaimsHost(bexio, 'my-store.myshopify.com')).toBe(false);
+    expect(presetStoreHost(profile('https://my-store.myshopify.com', 'my-store', 'tenant'), presetRegisterOf([tenant]))).toBeNull();
   });
 });
 
@@ -86,13 +63,14 @@ describe('presetStoreHost', () => {
 });
 
 describe('presetNotFollowed on a store host', () => {
-  it('names Shopify for a profile on a store that does not follow it', () => {
-    expect(presetNotFollowed({ base_url: 'https://my-store.myshopify.com', auth: { type: 'bearer' } })?.id).toBe('shopify');
-    expect(presetNotFollowed({ base_url: 'https://my-store.myshopify.com' })?.id).toBe('shopify');
+  // While Shopify is closed, a profile on a store is not pointed at the preset: it gets the
+  // closed text where it is used.
+  it('names no provider for a store host', () => {
+    expect(presetNotFollowed({ base_url: 'https://my-store.myshopify.com', auth: { type: 'bearer' } })).toBeUndefined();
+    expect(presetNotFollowed({ base_url: 'https://my-store.myshopify.com' })).toBeUndefined();
   });
 
-  it('is undefined for a profile that follows it, and for a host no provider claims', () => {
-    expect(presetNotFollowed(profile('https://my-store.myshopify.com', 'my-store'))).toBeUndefined();
-    expect(presetNotFollowed({ base_url: 'https://shopify.com' })).toBeUndefined();
+  it('still names bexio for its own host', () => {
+    expect(presetNotFollowed({ base_url: 'https://api.bexio.com', auth: { type: 'bearer' } })?.id).toBe('bexio');
   });
 });

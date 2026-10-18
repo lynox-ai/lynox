@@ -39,14 +39,14 @@ describe('a Shopify grant shared by two profiles of one store', () => {
     expect(slotMayReach(storeOf([owner, other]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/x', other)).toBe(false);
   });
 
-  it('shares nothing with a profile whose base names another store than its parameter', () => {
+  it('sends nothing to a base that names another store than its parameter', () => {
     const astray = shop('sh-d', 'alpha', 'https://beta.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN', access_token_key: 'SH_A_ACCESS_TOKEN' });
     expect(slotMayReach(storeOf([owner, astray]), 'SH_A_ACCESS_TOKEN', 'request', 'https://beta.myshopify.com/x', owner)).toBe(false);
   });
 });
 
 describe('the admission of two profiles that name one refresh slot', () => {
-  it('registers both when they are of one store, and neither when they are of two', async () => {
+  it('registers the second when both are of one store, and not when it is of another', async () => {
     const { ApiStore } = await import('./api-store.js');
     const { vi } = await import('vitest');
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -59,5 +59,30 @@ describe('the admission of two profiles that name one refresh slot', () => {
     apart.register(shop('sh-a', 'alpha'));
     apart.register(shop('sh-b', 'beta', 'https://beta.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN' }));
     expect(apart.get('sh-b')).toBeUndefined();
+  });
+
+  it('does not register a second whose base names another store than its parameter', async () => {
+    const { ApiStore } = await import('./api-store.js');
+    const { vi } = await import('vitest');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const store = new ApiStore();
+    store.register(shop('sh-a', 'alpha'));
+    store.register(shop('sh-d', 'alpha', 'https://beta.myshopify.com', { refresh_token_key: 'SH_A_REFRESH_TOKEN' }));
+    expect(store.get('sh-d')).toBeUndefined();
+  });
+});
+
+describe('a store profile\'s own token on a base outside its store', () => {
+  it('reaches neither that base nor the store', () => {
+    // Re-pointed after it was connected: its parameter still names the store, its base does not.
+    const moved = shop('sh-e', 'alpha', 'https://evil.example.com');
+    const s = storeOf([moved]);
+    expect(slotMayReach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://evil.example.com/x', moved)).toBe(false);
+    expect(slotMayReach(s, 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/x', moved)).toBe(false);
+  });
+
+  it('reaches the store while the base is on it', () => {
+    const home = shop('sh-e', 'alpha');
+    expect(slotMayReach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', home)).toBe(true);
   });
 });

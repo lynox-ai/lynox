@@ -48,6 +48,11 @@ describe('a Shopify preset profile behind the store check', () => {
     expect(headers).toEqual({});
   });
 
+  it('attaches nothing when the base is re-pointed off the store', async () => {
+    const { headers } = await attach('https://evil.example.com/admin/api/2025-10/shop.json', shopProfile('https://evil.example.com', 'acme'));
+    expect(headers).toEqual({});
+  });
+
   it('attaches nothing to another port of the store', async () => {
     const { headers } = await attach('https://acme.myshopify.com:8443/admin/api/2025-10/shop.json', shopProfile('https://acme.myshopify.com', 'acme'));
     expect(headers).toEqual({});

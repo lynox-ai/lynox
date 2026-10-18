@@ -149,7 +149,8 @@ export interface ApiAuth {
      */
     preset_params?: Record<string, string> | undefined;
     /** Body encoding for the token POST. Most providers want `form`
-     *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
+     *  (application/x-www-form-urlencoded). A built-in provider's own
+     *  `tokenBodyFormat` wins over this (Shopify: `form`).
      *  Default: `form`. */
     body_format?: 'form' | 'json' | undefined;
     /**

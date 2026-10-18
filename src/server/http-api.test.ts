@@ -15550,6 +15550,37 @@ describe('GET /api/oauth/callback — a Shopify store', () => {
     expect((await call(signed(good()), cookie)).status).toBe(200);
     expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toBeUndefined();
   });
+
+  it('records scopes the answer separates with spaces', async () => {
+    const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products read_orders' }) });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
+  });
+
+  it('stores no token when the profile is re-pointed to another store while the code is exchanged', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      const p = store.get(PROFILE)!;
+      const moved = { ...p, base_url: 'https://other.myshopify.com', auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: { shop: 'other' } } } };
+      expect(store.save(moved, dataDir).ok).toBe(true);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(409);
+    expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('stores the token when the profile is changed but still names the store', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      const p = store.get(PROFILE)!;
+      expect(store.save({ ...p, base_url: 'https://acme.myshopify.com/admin/api/2026-01' }, dataDir).ok).toBe(true);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(mockSecretSet).toHaveBeenCalledWith(expect.stringMatching(/ACCESS_TOKEN$/), 'at-1');
+  });
 });
 
 describe('GET /api/oauth/callback — the half behind the cookie check', () => {

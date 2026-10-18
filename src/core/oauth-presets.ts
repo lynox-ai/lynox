@@ -74,7 +74,9 @@ export interface OAuthPreset {
    * The provider's API runs on the host the preset derives, one per account (Shopify: the
    * store's `{shop}.myshopify.com`), so every host the template can build is an API host of the
    * provider, and a profile's `base_url` has to be the host its own parameter derives
-   * ({@link presetStoreHost}). Only for a `template` host; read through {@link presetClaimsHost}.
+   * ({@link presetStoreHost}). Only for a `template` host. The store hosts are not in `apiHosts`
+   * and `presetNotFollowed` does not claim them: while Shopify is closed, a profile on a store
+   * gets the closed text, not a pointer to this preset.
    */
   readonly apiOnDerivedHost?: true;
   /** Path on the derived host, leading slash included. */
@@ -475,25 +477,9 @@ export function presetNotFollowed(
     return undefined;
   }
   // Every provider that claims the host: a profile that follows any of them is in order.
-  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p !== undefined && presetClaimsHost(p, host, register));
+  const claiming = register.ids().map((id) => register.get(id)).filter((p): p is OAuthPreset => p?.apiHosts.includes(host) === true);
   const follows = (preset: OAuthPreset): boolean => profile.auth?.type === 'oauth2' && profile.auth.oauth?.preset_id === preset.id;
   return claiming.some(follows) ? undefined : claiming[0];
-}
-
-/**
- * Whether `host` is an API host of `preset`: one of its `apiHosts`, or, for a preset whose API
- * runs on the host it derives, a host its template builds from a parameter the preset accepts.
- * `host` is compared as given, lower case and without a trailing dot being the caller's job.
- */
-export function presetClaimsHost(preset: OAuthPreset, host: string, register: PresetRegister = OAUTH_PRESETS): boolean {
-  if (preset.apiHosts.includes(host)) return true;
-  if (preset.apiOnDerivedHost !== true || preset.host.kind !== 'template') return false;
-  // The value the template would need, cut out of the host, then derived again: only a host the
-  // template builds from a value the preset accepts comes back as itself.
-  const [prefix = '', suffix = ''] = preset.host.template.split(`{${preset.host.param}}`);
-  const value = host.slice(prefix.length, host.length - suffix.length);
-  const derived = derivePresetEndpoints(preset.id, { [preset.host.param]: value }, register);
-  return !('kind' in derived) && derived.host === host;
 }
 
 /**

@@ -1866,9 +1866,10 @@ async function attachEngineManagedAuth(
     const ownHeader = auth.header_name !== undefined && auth.header_name.toLowerCase() !== 'authorization'
       ? auth.header_name
       : undefined;
-    // An account connected through a built-in provider takes its token as `Bearer`: the header
-    // name a profile names is the model's choice, and it would reach the provider on every
-    // request, a bulk run's included, where no question shows it.
+    // An account connected through a built-in provider takes its token as `Bearer`, or in the
+    // header the provider itself names (Shopify): the header name a profile names is the model's
+    // choice, and it would reach the provider on every request, a bulk run's included, where no
+    // question shows it.
     if (ownHeader !== undefined && auth.oauth?.preset_id !== undefined) {
       return { refusal: `Error: api_profile "${profile.id}" is connected through a built-in provider and names its own header for the token (auth.header_name), which nothing shows before it is sent, so the token was not attached. Remove auth.header_name with api_setup action="update".` };
     }

@@ -85,8 +85,8 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
     expect(Object.keys(module).sort()).toEqual(
       // `presetScopeRequest`, `presetScopeNeedUnmet` and `presetNotFollowed` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
       // So are `presetScopeParam`, `presetTokenHeaderName` and `presetTokenBodyFormat`: each reads one field of a preset it is handed.
-      // And `presetClaimsHost` and `presetStoreHost`: they derive a host from a preset and a profile.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetClaimsHost', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
+      // And `presetStoreHost`: it derives a host from a preset and a profile.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
     );
   });
 

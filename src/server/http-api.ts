@@ -10410,7 +10410,8 @@ export class LynoxHTTPApi {
         return;
       }
       let exchangeCode = code;
-      // Where a later gate on the store's host attaches: made here, after both checks, only.
+      // The store the provider signed for: made here, after both checks, only, and asked again
+      // before the token is stored.
       let storeCallback: VerifiedStoreCallback | undefined;
       if (preset?.callbackVerification === 'shopify-hmac') {
         const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
@@ -10422,7 +10423,6 @@ export class LynoxHTTPApi {
         exchangeCode = bound.code;
         storeCallback = bound.binding;
       }
-      void storeCallback; // read by the store gate on this host once it exists
 
       // A mandate's consent spends the code at the provider and writes tokens into the vault: a
       // change, recorded like one (PRD §3.6, §7(c)). The attempt goes before the exchange, so the
@@ -10473,6 +10473,15 @@ export class LynoxHTTPApi {
       if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
         return;
+      }
+      // The profile can be re-pointed while the exchange runs: a token minted for one store is
+      // stored only on a profile that still names that store, whoever started the connection.
+      if (storeCallback !== undefined) {
+        const storeNow = current === undefined ? null : presetStoreHost(current);
+        if (storeNow === null || `https://${storeNow}` !== storeCallback.origin) {
+          sendOAuthHtml(res, 409, 'This connection\'s address changed while it was being completed. Nothing was stored.');
+          return;
+        }
       }
       // Guarded, and the message is deliberately NOT "nothing was stored".
       //
