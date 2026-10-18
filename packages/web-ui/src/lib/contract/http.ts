@@ -138,9 +138,9 @@ export interface UsageStatusResponse {
   spend_gate: SpendGate;
   /**
    * Whether the control plane records that this instance has been cleared for
-   * an exact (Shopify) connection (`exact_held_at` set). Only `true` and
-   * `false` are statements: an absent field comes from a control plane that
-   * does not know it and must be read as no statement, never as `false`. An
+   * an exact (Shopify) connection. Only `true` and `false` are statements: an
+   * absent field comes from a control plane that does not know it and must be
+   * read as no statement, never as `false` ({@link readExactHeld}). An
    * engine that holds its own marker and reads `false` asks the exact-attach
    * route again, so a control plane that lost the record gets it back.
    */
@@ -167,7 +167,20 @@ export type ExactAttachRequest = Record<string, never>;
  *  - `'busy'`            — another operation holds the instance; ask later.
  *  - `'rate_limited'`    — asked again too soon; ask later.
  */
-export type ExactAttachRefusal = 'not_tenant_host' | 'below_floor' | 'no_floor' | 'busy' | 'rate_limited';
+export const EXACT_ATTACH_REFUSALS = [
+  'not_tenant_host',
+  'below_floor',
+  'no_floor',
+  'busy',
+  'rate_limited',
+] as const;
+
+export type ExactAttachRefusal = (typeof EXACT_ATTACH_REFUSALS)[number];
+
+/** Runtime membership test for the `reason` of an exact-attach refusal. */
+export function isExactAttachRefusal(value: unknown): value is ExactAttachRefusal {
+  return typeof value === 'string' && (EXACT_ATTACH_REFUSALS as readonly string[]).includes(value);
+}
 
 /**
  * `ok: true` only after the control plane has recorded the clearance and
@@ -177,6 +190,25 @@ export type ExactAttachRefusal = 'not_tenant_host' | 'below_floor' | 'no_floor' 
 export type ExactAttachResponse =
   | { ok: true }
   | { ok: false; reason: ExactAttachRefusal };
+
+/**
+ * Whether a parsed exact-attach answer clears the instance. Only the boolean
+ * `true` does: `"true"`, `1`, a missing field or a malformed body are refusals.
+ */
+export function isExactAttachCleared(body: unknown): boolean {
+  return typeof body === 'object' && body !== null && (body as { ok?: unknown }).ok === true;
+}
+
+/**
+ * Reads `exact_held` off a parsed usage-status body. `true` and `false` are the
+ * only statements; anything else (absent, `"true"`, `1`, `null`, a body that is
+ * not an object) is `null`, no statement, and must leave the engine's view as it was.
+ */
+export function readExactHeld(body: unknown): boolean | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const value = (body as { exact_held?: unknown }).exact_held;
+  return typeof value === 'boolean' ? value : null;
+}
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===
 
