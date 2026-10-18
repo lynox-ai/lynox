@@ -1518,7 +1518,7 @@ describe('the trail of one call of a run', () => {
     expect(clean.t.events).toEqual(['begin', 'end done 1 0']);
     const failing = await countReads(clean.reads);
     expect(failing.out.status, 'a finished call stays finished').toBe('done');
-    expect(failing.t.events, 'the row after is written, with the counts it could not read as nothing').toEqual(['begin', 'end done 0 0']);
+    expect(failing.t.events, 'the row after is written, with the counts it could not read as unknown, not as zero').toEqual(['begin', 'end done null null']);
   });
 
   it('control: with no trail the same run writes as before', async () => {

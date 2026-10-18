@@ -85,15 +85,6 @@ export function requestMatchesBase(profile: ApiProfile, url: string): boolean {
   try { return destinationOf(new URL(url)) === destinationOf(base); } catch { return false; }
 }
 
-/**
- * The host the profile's OAuth token is renewed at, as the renewal resolves it — a built-in
- * provider's derived endpoint, not the stored `token_url`, which is display only for one — or
- * `undefined` when the profile names none it could renew at.
- */
-export function tokenEndpointHost(profile: ApiProfile): string | undefined {
-  return credentialUrls(profile)[1]?.hostname;
-}
-
 /** The parsed `base_url` and token endpoint, `undefined` for one missing or not a URL. */
 function credentialUrls(profile: ApiProfile): [URL | undefined, URL | undefined] {
   const oauth = profile.auth?.type === 'oauth2' ? profile.auth.oauth : undefined;
