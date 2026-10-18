@@ -556,14 +556,17 @@ export function isOutboundEffectWrite(url: string, method: string): boolean {
   // written together, spell an action without its separators: `send.json`, `send:x`, `_send`,
   // `x.send`, `mark-as-sent`, `markAsSent`, `outgoing_payments`. Which of these a provider's
   // router still reads as the action is not documented, so every such form counts. `sender`,
-  // `send2` and `resend` do not: a run is never cut.
+  // `send2` and `resend` do not: a run is never cut. Spelling stops past the longest action, so a
+  // long segment costs linear time, not cubic.
   const actions = new Set(entry.segments.map((s) => s.replace(/[^a-z0-9]/gu, '')));
+  const longest = Math.max(...[...actions].map((a) => a.length));
   return path.split('/').some((segment) => {
     const runs = segment.split(/[^a-z0-9]+/u);
     for (let i = 0; i < runs.length; i++) {
       let spelled = '';
       for (let j = i; j < runs.length; j++) {
         spelled += runs[j];
+        if (spelled.length > longest) break;
         if (actions.has(spelled)) return true;
       }
     }

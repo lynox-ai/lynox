@@ -27,6 +27,15 @@ describe('isOutboundEffectWrite — spellings of an action', () => {
   ] as const)('POST %s → %s', (path, want) => {
     expect(isOutboundEffectWrite(`${BEXIO}${path}`, 'POST')).toBe(want);
   });
+
+  // Spelling every run onward to the segment's end took seconds here (cubic in its length).
+  it('reads a long segment of many runs in linear time, and still finds an action at its end', () => {
+    const long = 'a.'.repeat(2500);
+    const started = performance.now();
+    expect(isOutboundEffectWrite(`${BEXIO}/2.0/contact/${long}`, 'POST')).toBe(false);
+    expect(isOutboundEffectWrite(`${BEXIO}/2.0/contact/${long}send`, 'POST')).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe('outboundEffectField — bexio bills and payroll', () => {
