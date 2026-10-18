@@ -136,11 +136,12 @@ export function bulkHaltText(
 	return { cause: i18n.tf(causeKey, vars), before: before === beforeKey ? null : before };
 }
 
-/** Whether `/api/config` says this is a managed instance (its `managed` field is the billing
- *  tier, null on a self-hosted one). Unknown (null) when the answer is not a config: a refused
- *  or failed request carries an error body, which has no tier and would read as self-hosted. */
+/** Whether `/api/config` says this is a managed instance: its config carries `managed` (the
+ *  billing tier) only there, and a self-hosted one has no such field. Unknown (null) when the
+ *  answer is not a config: a refused or failed request carries an error body, which has no tier
+ *  either and would read as self-hosted. */
 export function bulkManagedOf(ok: boolean, data: unknown): boolean | null {
-	if (!ok || typeof data !== 'object' || data === null || !('managed' in data)) return null;
+	if (!ok || typeof data !== 'object' || data === null) return null;
 	return !!(data as Record<string, unknown>)['managed'];
 }
 

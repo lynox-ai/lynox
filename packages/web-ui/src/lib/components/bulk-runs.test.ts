@@ -319,12 +319,13 @@ describe('restarting a run that halted on a failure', () => {
 	});
 
 	it('reads the instance as managed only from a config, unknown otherwise', () => {
-		expect(bulkManagedOf(true, { managed: 'managed_pro' })).toBe(true);
-		expect(bulkManagedOf(true, { managed: null })).toBe(false);
+		expect(bulkManagedOf(true, { provider: 'anthropic', managed: 'managed_pro' })).toBe(true);
+		// A self-hosted instance's config has no `managed` field at all (GET /api/config sets it
+		// only when a billing tier is set).
+		expect(bulkManagedOf(true, { provider: 'anthropic' })).toBe(false);
 		// A refused or failed request carries an error body: no tier in it, and none to read.
 		expect(bulkManagedOf(false, { error: 'Unauthorized' })).toBeNull();
-		expect(bulkManagedOf(false, { managed: 'managed' })).toBeNull();
-		expect(bulkManagedOf(true, { error: 'x' })).toBeNull();
+		expect(bulkManagedOf(false, { error: 'Service unavailable', managed: null })).toBeNull();
 		expect(bulkManagedOf(true, null)).toBeNull();
 	});
 
