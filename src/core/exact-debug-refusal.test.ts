@@ -93,7 +93,7 @@ describe('refuseDebug', () => {
   it('removes every debug variable and reports names, never values', () => {
     const env: NodeJS.ProcessEnv = { KEEP: 'x' };
     // Spelled out, not read from DEBUG_ENV_VARS: a name dropped from the list must fail here.
-    const names = ['ANTHROPIC_LOG', 'LYNOX_DEBUG', 'LYNOX_DEBUG_FILE', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_DEBUG_WIRE_CAPTURE'];
+    const names = ['ANTHROPIC_LOG', 'LYNOX_DEBUG', 'LYNOX_DEBUG_FILE', 'LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED', 'LYNOX_DEBUG_WIRE_CAPTURE', 'LYNOX_BUGSINK_DSN'];
     for (const v of names) env[v] = `value-of-${v}`;
     const writes: string[] = [];
     vi.spyOn(process.stderr, 'write').mockImplementation((s: string | Uint8Array) => { writes.push(String(s)); return true; });
