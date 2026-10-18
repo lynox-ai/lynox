@@ -43,7 +43,8 @@ import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApp
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, isGraphqlEndpoint, graphqlWrite, graphqlUrlWrites, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
-import { mintStorePass, STORE_CREDENTIAL_HEADERS, type StorePass } from '../../core/store-pass.js';
+import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
+import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -1676,6 +1677,43 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
   }
   if (toolContext.exactClearance.blockedNow()) return SHOPIFY_UNAVAILABLE;
   return null;
+}
+
+/**
+ * The token exchange's pass (PRD Appendix B4), for the connect callback alone, once the store's
+ * signature on the callback held (`callback`). `undefined` when any condition fails; the
+ * exchange is then refused as before. In this order:
+ *  0. the switch `LYNOX_SHOPIFY_EXCHANGE` is on (`1` or `true`); off by default;
+ *  1. a provisioned managed instance, with the clearance and the store binding;
+ *  2. the shell-exec sidecar;
+ *  3. exactly the callback's profile on the host, of the store preset, whose own parameter
+ *     derives this host (`presetStoreHost` is `null` for any other preset), and the token URL is
+ *     that store's token endpoint;
+ *  6. the control plane's clearance, which records the instance as one that holds a store
+ *     connection. `ensure` refuses during a refusal's backoff without a call (6a) and asks once
+ *     otherwise (6b). It runs before the exchange, because the exchange needs the pass: a failed
+ *     exchange has set the record all the same, which then means "an exchange was sent".
+ * The pass covers `body`, the exchange's body as `serializeTokenBody` writes it.
+ */
+export async function storeExchangePassFor(
+  callback: VerifiedStoreCallback,
+  tokenUrl: string,
+  body: string,
+  toolContext: ToolContext | undefined,
+): Promise<StorePass | undefined> {
+  const sw = process.env['LYNOX_SHOPIFY_EXCHANGE'];
+  if (sw !== '1' && sw !== 'true') return undefined;
+  if (controlPlaneFromEnv() === null || !toolContext?.exactClearance || !toolContext.storeBindingDigest) return undefined;
+  if ((process.env['LYNOX_SHELL_EXEC_SOCKET'] ?? '').trim() === '') return undefined;
+  let parsed: URL;
+  try { parsed = new URL(tokenUrl); } catch { return undefined; }
+  const origin = storeOriginOf(parsed);
+  if (origin === null || origin !== callback.origin || parsed.pathname !== STORE_EXCHANGE_PATH || parsed.href.includes('?')) return undefined;
+  const profile = toolContext.apiStore?.getByHostname(parsed.hostname);
+  if (profile === undefined || profile.id !== callback.profileId || presetStoreHost(profile) !== normalizeHostForMatch(parsed.hostname)) return undefined;
+  const clearance = await toolContext.exactClearance.ensure();
+  if (!clearance.ok) return undefined;
+  return mintStoreExchangePass(origin, body);
 }
 
 async function attachEngineManagedAuth(

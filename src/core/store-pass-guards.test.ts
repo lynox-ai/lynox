@@ -43,6 +43,47 @@ describe('the store pass is minted in one place', () => {
   });
 });
 
+describe('the exchange pass is minted in one place, for the connect callback alone (B4)', () => {
+  const users = (name: string): string[] => sources(SRC)
+    .filter((p) => new RegExp(`\\b${name}\\b`).test(readFileSync(p, 'utf-8')))
+    .map((p) => relative(SRC, p).replace(/\\/g, '/'))
+    .sort();
+
+  it('only store-pass.ts defines mintStoreExchangePass and only tools/builtin/http.ts calls it', () => {
+    expect(users('mintStoreExchangePass')).toEqual(['core/store-pass.ts', 'tools/builtin/http.ts']);
+  });
+
+  it('http.ts calls it once, inside storeExchangePassFor, after the switch and the clearance', () => {
+    const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
+    expect(http.match(/mintStoreExchangePass\(/g) ?? []).toHaveLength(1);
+    const fn = http.indexOf('export async function storeExchangePassFor(');
+    const at = http.indexOf('mintStoreExchangePass(');
+    const next = http.indexOf('\nasync function ', fn + 1);
+    expect(fn).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(fn);
+    expect(at).toBeLessThan(next);
+    const body = http.slice(fn, at);
+    expect(body.indexOf("process.env['LYNOX_SHOPIFY_EXCHANGE']")).toBeGreaterThan(-1);
+    expect(body.indexOf('exactClearance.ensure()')).toBeGreaterThan(body.indexOf("process.env['LYNOX_SHOPIFY_EXCHANGE']"));
+  });
+
+  it('the switch is read in that one place', () => {
+    expect(users('LYNOX_SHOPIFY_EXCHANGE')).toEqual(['contract/env-registry.ts', 'tools/builtin/http.ts']);
+    const http = readFileSync(join(SRC, 'tools/builtin/http.ts'), 'utf-8');
+    expect(http.match(/LYNOX_SHOPIFY_EXCHANGE/g)).toHaveLength(2); // the doc comment and the read
+  });
+
+  it('only the connect callback asks for an exchange pass', () => {
+    // A call, not a mention: doc comments name the function in two more files.
+    const callers = sources(SRC)
+      .filter((p) => /\bstoreExchangePassFor\(/.test(readFileSync(p, 'utf-8').replace(/export async function storeExchangePassFor\(/, '')))
+      .map((p) => relative(SRC, p).replace(/\\/g, '/'));
+    expect(callers).toEqual(['server/http-api.ts']);
+    const api = readFileSync(join(SRC, 'server/http-api.ts'), 'utf-8');
+    expect(api.match(/storeExchangePassFor\(/g) ?? []).toHaveLength(1);
+  });
+});
+
 describe('the store binding has a subkey of its own (R1-7)', () => {
   it('derives it with its own HKDF label, distinct from the keyed-hash and encryption labels', () => {
     const src = readFileSync(join(SRC, 'core/engine-db.ts'), 'utf-8');
