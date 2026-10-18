@@ -1043,7 +1043,7 @@ describe('the write verb and the one-target probe', () => {
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
-      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets, sentUnknown: 1 });
 
       // Nor is it sent again: whether the host applied it, the redirect does not say.
       s.special.delete('PATCH /products/0');
@@ -1074,7 +1074,7 @@ describe('the write verb and the one-target probe', () => {
 
       expect((await runBulkEffect(runId, 'bulk_apply', { ledger, trailFor: () => null, writerFor: writerFor(c) })).status).toBe('halted');
       expect(s.requests.filter((r) => r.method === 'PATCH').map((r) => r.path)).toEqual(['/products/0']);
-      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets });
+      expect(ledger.getStatus(runId)).toMatchObject({ applied: 0, haltReason: BULK_HALT_REASONS.maxTargets, sentUnknown: 1 });
     } finally {
       restore();
     }
@@ -2356,7 +2356,7 @@ describe('a send without a clear answer is not sent again', () => {
       const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
       const runId = await approvedRun(rows(), c);
       expect((await run(runId, c)).status).toBe('halted');
-      expect(ledger.getStatus(runId)!.haltReason).toBe(BULK_HALT_REASONS.unauthorized);
+      expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.unauthorized, sentUnknown: 0 });
       s.special.delete('PATCH /products/0');
       resume(runId);
       expect((await run(runId, c)).status).toBe('done');
@@ -2382,6 +2382,86 @@ describe('a send without a clear answer is not sent again', () => {
     } finally {
       restore();
     }
+  });
+
+  it('a target a loop holds is not counted unclear while its send is out, and is once the claim is given back', async () => {
+    const s = fiveShop();
+    const restore = serve(s);
+    try {
+      const c = client({ contract: mintBulkContract(HOST, FIVE.map(url)) });
+      const runId = await approvedRun(rows(), c);
+      expect(ledger.claimTarget(runId, 0)).toBe(true);
+      ledger.markSent(runId, 0);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(0);
+      ledger.releaseClaim(runId, 0);
+      expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  describe('counted unclear on every way a pass stops', () => {
+    const SIXTY = Array.from({ length: 60 }, (_, i) => i);
+    const sixtyShop = (): Shop => {
+      const s = shop();
+      for (let i = 4; i < 60; i++) s.items.set(`/products/${String(i)}`, { id: i, title: `Item ${String(i)}`, price: '12.00', updated_at: 't0' });
+      return s;
+    };
+    const sixty = async (s: Shop, c: ExternalClient): Promise<string> =>
+      approvedRun(SIXTY.map((i) => ({ target: url(i), after: { price: '15.00' } })), c);
+
+    it('three in a row', async () => {
+      const s = sixtyShop();
+      for (const i of [0, 1, 2]) s.special.set(`PATCH /products/${String(i)}`, { status: 502 });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
+        const runId = await sixty(s, c);
+        expect((await run(runId, c)).status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.consecutiveFailures, sentUnknown: 3 });
+      } finally {
+        restore();
+      }
+    });
+
+    it('the time budget', async () => {
+      const s = sixtyShop();
+      s.special.set('PATCH /products/0', { status: 502 });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
+        const runId = await sixty(s, c);
+        // The clock runs out once the first write went out.
+        const out = await runBulkEffect(runId, 'bulk_apply', {
+          ledger, trailFor: () => null, writerFor: writerFor(c), now: () => (patches(s).length > 0 ? 1e13 : 0),
+        });
+        expect(out.status).toBe('halted');
+        expect(ledger.getStatus(runId)).toMatchObject({ haltReason: BULK_HALT_REASONS.timeBudget, sentUnknown: 1 });
+      } finally {
+        restore();
+      }
+    });
+
+    it("the owner's stop", async () => {
+      const s = sixtyShop();
+      s.special.set('PATCH /products/0', { status: 502 });
+      const restore = serve(s);
+      try {
+        const c = client({ contract: mintBulkContract(HOST, SIXTY.map(url)) });
+        const runId = await sixty(s, c);
+        const stop = new AbortController();
+        stop.abort();
+        // The stop is read between targets: it takes effect once the first write went out.
+        const out = await runBulkEffect(runId, 'bulk_apply', {
+          ledger, trailFor: () => null, writerFor: writerFor(c), signal: stop.signal, ownerStopped: () => patches(s).length > 0,
+        });
+        expect(out.status).not.toBe('done');
+        expect(patches(s)).toEqual(['/products/0']);
+        expect(ledger.getStatus(runId)!.sentUnknown).toBe(1);
+      } finally {
+        restore();
+      }
+    });
   });
 
   it('a target another loop wrote is not counted unclear, whatever a loop that lost its claim recorded on it', async () => {

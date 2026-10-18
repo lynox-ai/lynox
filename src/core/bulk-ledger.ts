@@ -311,8 +311,11 @@ const WRITE_FAILED_SQL = `(change != 'invalid' AND applied_at IS NULL AND error 
 // written or taken back, and it is not a conflict, which the owner sees as one. Read off the
 // count the check in the write loop reads, not off `sent_unknown`: right after the halt that
 // left it unclear it still carries that send's own failure. Only an external run's targets: a
-// local writer's outcome is always known, and its sends are counted all the same.
-const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND (error IS NULL OR error != 'conflict'))";
+// local writer's outcome is always known, and its sends are counted all the same. Not a target a
+// loop holds: it is being sent to now, and its answer may still come. Every way a pass leaves a
+// target (written, failed, halted, released) gives the claim back; only a loop that died keeps
+// it, and that target counts once a later pass has read it.
+const UNCLEAR_SQL = "(unknown_sends > 0 AND applied_at IS NULL AND undone_at IS NULL AND claimed_at IS NULL AND (error IS NULL OR error != 'conflict'))";
 
 /** The failure-rate halt (PRD §3.4): a pass halts once more than this share of the run's
  *  writing targets failed in it. */
