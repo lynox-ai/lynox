@@ -8622,6 +8622,8 @@ describe('LynoxHTTPApi', () => {
         expect(body.error, 'still says it was taken back already').not.toMatch(/taken back already/i);
         // A view cannot read a sentence — the category rides as a code.
         expect(body.code).toBe('merge_chained');
+        // …and the blocking merge as data, the same id the sentence names.
+        expect((body as { blocking?: unknown }).blocking, 'the blocking merge is not in the body as data').toBe(newer.id);
 
         // The refusal really refused: the chain stands, read from the store
         // rather than spending another request on it.
@@ -8706,6 +8708,7 @@ describe('LynoxHTTPApi', () => {
         expect(body.error, 'an id was invented for a ledger that is gone').not.toContain(newer.id);
         expect(body.error, 'fell back to the bare refusal').not.toBe('Refused.');
         expect(body.code, 'the category no longer rides as a code').toBe('merge_chained');
+        expect('blocking' in body, 'a blocking merge is named as data where none can be').toBe(false);
       });
     });
 
@@ -8759,7 +8762,7 @@ describe('LynoxHTTPApi', () => {
       // `applied:false`; the blocking merge is then on disk, returned by
       // `GET /api/merges`, and answers `not_applied` — not `not_found`. It is
       // deliberately NOT named: naming it sends the owner to a route that says
-      // «This merge did not complete, so there is nothing to take back», two
+      // «This merge did not complete, so it cannot be taken back here», two
       // answers pointing at each other. Unnamed and truthful is the cut.
       await withMergeRoute(async ({ store, dir }) => {
         const { runMerge, listMergeRuns } = await import('../core/subject-merge-runner.js');
@@ -8866,9 +8869,12 @@ describe('LynoxHTTPApi', () => {
 
         const again = await jsonFetch(`/api/merges/${id}/rollback`, { method: 'POST', body: '{}' });
         expect(again.status).toBe(409);
-        expect(((await again.json()) as { error: string }).error).toMatch(/no longer in effect/);
+        const againBody = (await again.json()) as { error: string; code?: string };
+        expect(againBody.error).toMatch(/no longer in effect/);
+        expect(againBody.code).toBe('merge_not_in_effect');
         const traversal = await jsonFetch(`/api/merges/${encodeURIComponent('../engine')}/rollback`, { method: 'POST', body: '{}' });
         expect(traversal.status).toBe(404);
+        expect(((await traversal.json()) as { code?: string }).code).toBe('merge_not_found');
 
         engineRef['getSubjectStore'] = () => null;
         expect((await jsonFetch('/api/merges')).status).toBe(404);

@@ -2,12 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+	bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkManagedOf, bulkMergeAnswer, bulkMergeState, bulkMergeTakeable, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 	type BulkI18n, type BulkRunDetailData,
 } from './bulk-runs.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../../../../../src/core/bulk-write-forms.js';
 import { BULK_LIST_NOTE } from '../../../../../src/core/bulk-list.js';
 import { BULK_HALT_REASONS } from '../../../../../src/core/bulk-ledger.js';
+import { MERGE_REFUSAL_CODES } from '../../../../../src/core/subject-merge-runner.js';
 
 const TABLE: Record<string, string> = {
 	'bulk.label': '{n} Ziele · {target}',
@@ -360,5 +361,114 @@ describe('restarting a run that halted on a failure', () => {
 		expect(bulkRestartCap('1.50', 2)).toBeNull();
 		expect(bulkRestartCap('abc', 2)).toBeNull();
 		expect(bulkRestartCap('5', null)).toBe(5);
+	});
+});
+
+// Taking a merge back: the page says what came of it by the route's status and code, in the
+// owner's language, never the route's English sentence.
+describe('taking a merge of two contacts back', () => {
+	const source = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf8');
+	const ENTRY = /^\s*'([^']+)': \{ de: '((?:[^'\\]|\\.)*)', en: '((?:[^'\\]|\\.)*)' \},$/;
+	const de: Record<string, string> = {};
+	const en: Record<string, string> = {};
+	for (const l of source.split('\n')) {
+		const m = ENTRY.exec(l);
+		if (m) { de[m[1]!] = m[2]!.replace(/\\'/g, "'"); en[m[1]!] = m[3]!.replace(/\\'/g, "'"); }
+	}
+	const from = (table: Record<string, string>): BulkI18n => ({
+		t: (k) => table[k] ?? k,
+		tf: (k, vars) => Object.entries(vars).reduce((s, [name, v]) => s.split(`{${name}}`).join(v), table[k] ?? k),
+	});
+	const DE = from(de);
+	const EN = from(en);
+	const merge = { id: 'm-older', dupName: 'Northwind GmbH', canonicalName: 'Northwind', applied: true, inEffect: true };
+	const blocker = { id: 'm-newer', dupName: 'Northwind', canonicalName: 'Northwind Holding', applied: true, inEffect: true };
+	const list = [blocker, merge];
+
+	it('shows a merge that never completed as not completed, not as no longer in effect', () => {
+		expect(bulkMergeState({ applied: false, inEffect: false, superseded: false })).toBe('not_completed');
+		expect(bulkMergeState({ applied: false, inEffect: false, superseded: true })).toBe('not_completed');
+		expect(bulkMergeState({ applied: true, inEffect: true, superseded: false })).toBe('in_effect');
+		expect(bulkMergeState({ applied: true, inEffect: false, superseded: true })).toBe('superseded');
+		expect(bulkMergeState({ applied: true, inEffect: false, superseded: false })).toBe('not_in_effect');
+		// Offered for taking back only when completed AND in effect: a merge that crashed after the
+		// contact graph is in effect there and still not completed, and the route refuses it.
+		expect(bulkMergeTakeable({ applied: true, inEffect: true })).toBe(true);
+		expect(bulkMergeTakeable({ applied: false, inEffect: true })).toBe(false);
+		expect(bulkMergeTakeable({ applied: true, inEffect: false })).toBe(false);
+		for (const state of ['not_completed', 'in_effect', 'superseded', 'not_in_effect']) {
+			expect(de[`bulk.merges.${state}`], state).toBeTruthy();
+			expect(en[`bulk.merges.${state}`], state).toBeTruthy();
+		}
+	});
+
+	it('gives every code the engine sends its own sentence, in both languages', () => {
+		const codes = Object.values(MERGE_REFUSAL_CODES);
+		expect(new Set(codes).size, 'two reasons share a code').toBe(codes.length);
+		for (const [reason, code] of Object.entries(MERGE_REFUSAL_CODES)) {
+			if (code === 'merge_chained') continue;
+			for (const [lang, i18n, table] of [['de', DE, de], ['en', EN, en]] as const) {
+				const said = bulkMergeAnswer(409, { error: 'English.', code }, merge, list, i18n);
+				expect(said.text, `${lang} ${code}`).toBe((table[`bulk.merges.refused.${reason}`] ?? `missing ${reason}`).split('{canonical}').join('Northwind').split('{dup}').join('Northwind GmbH'));
+				expect([said.ok, said.goTo], code).toEqual([false, null]);
+			}
+		}
+	});
+
+	it('names the merge in the way when the route names one the list holds, and goes there', () => {
+		const said = bulkMergeAnswer(409, { error: 'Take merge m-newer back first: …', code: 'merge_chained', blocking: 'm-newer' }, merge, list, DE);
+		expect(said).toEqual({
+			text: 'Der Kontakt, in den diese Zusammenführung geführt hat, wurde seither weiter zusammengeführt. Nimm zuerst die Zusammenführung „Northwind“ → „Northwind Holding“ zurück. Danach versuch es hier noch einmal.',
+			ok: false,
+			goTo: 'm-newer',
+		});
+	});
+
+	it('says the dead end only when the route names no merge in the way', () => {
+		const unnamed = de['bulk.merges.refused.chained_unnamed'];
+		expect(unnamed).toBeTruthy();
+		for (const body of [{ code: 'merge_chained' }, { code: 'merge_chained', blocking: null }]) {
+			expect(bulkMergeAnswer(409, body, merge, list, DE), JSON.stringify(body)).toEqual({ text: unnamed, ok: false, goTo: null });
+		}
+	});
+
+	it('says the list changed when the merge the route names is no longer one to take back there', () => {
+		const changed = de['bulk.merges.refused.chained_changed'];
+		expect(changed).toBeTruthy();
+		// Gone from the list since, named as this merge itself, or still listed but taken back or
+		// never completed: the step the route named is not there now. Not the dead end.
+		const cases: [string, typeof list][] = [
+			['m-gone', list],
+			['m-older', list],
+			['m-newer', [{ ...blocker, inEffect: false }, merge]],
+			['m-newer', [{ ...blocker, applied: false }, merge]],
+			['m-newer', []],
+		];
+		for (const [blocking, merges] of cases) {
+			expect(bulkMergeAnswer(409, { code: 'merge_chained', blocking }, merge, merges, DE), `${blocking} ${JSON.stringify(merges)}`)
+				.toEqual({ text: changed, ok: false, goTo: null });
+		}
+	});
+
+	it('says who may take a merge back, what came of a take-back, and nothing it cannot read', () => {
+		// The owner-only refusal carries no code; an access that has ended does.
+		expect(bulkMergeAnswer(403, { error: 'Only the owner of this instance can take back a merge.' }, merge, list, DE).text)
+			.toBe('Nur der Inhaber dieser Instanz kann eine Zusammenführung zurücknehmen.');
+		expect(bulkMergeAnswer(403, { error: 'This access has ended.', code: 'mandate_revoked' }, merge, list, DE).text)
+			.toBe(de['bulk.merges.refused.failed']);
+		expect(bulkMergeAnswer(200, null, merge, list, DE)).toEqual({ text: '„Northwind GmbH“ ist wieder von „Northwind“ getrennt.', ok: true, goTo: null });
+		const unclear = { text: de['bulk.merges.refused.unclear'], ok: false, goTo: null };
+		expect(unclear.text).toBeTruthy();
+		for (const body of [null, {}, { error: 'Subject merges are not available on this instance.' }, { code: '__proto__' }, { code: 'toString' }, 'text']) {
+			expect(bulkMergeAnswer(404, body, merge, list, DE), JSON.stringify(body)).toEqual(unclear);
+			expect(bulkMergeAnswer(500, body, merge, list, DE), JSON.stringify(body)).toEqual(unclear);
+		}
+		// No answer at all (the request failed on the way): status 0.
+		expect(bulkMergeAnswer(0, null, merge, list, DE)).toEqual(unclear);
+	});
+
+	it('shows supplied names with their hidden characters marked', () => {
+		const said = bulkMergeAnswer(200, null, { id: 'x', dupName: 'A\u202Eb', canonicalName: 'C' }, [], DE);
+		expect(said.text).toContain('A⟨U+202E⟩b');
 	});
 });

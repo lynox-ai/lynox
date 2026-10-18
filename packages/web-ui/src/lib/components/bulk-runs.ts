@@ -159,6 +159,82 @@ export function bulkRestartCap(input: string, current: number | null): number | 
 	return cap === null || (current !== null && cap <= current) ? null : cap;
 }
 
+/** A merge of two contacts as `GET /api/merges` lists it. */
+export interface BulkMerge {
+	id: string;
+	createdAt: string;
+	dupName: string;
+	canonicalName: string;
+	applied: boolean;
+	inEffect: boolean;
+	superseded: boolean;
+	dataStoreRows: number;
+	threadRows: number;
+}
+
+/** A merge's status chip (`bulk.merges.<state>`). A merge that crashed half way never took
+ *  effect, so it is not "no longer" in effect. */
+export function bulkMergeState(m: Pick<BulkMerge, 'applied' | 'inEffect' | 'superseded'>): 'not_completed' | 'in_effect' | 'superseded' | 'not_in_effect' {
+	if (!m.applied) return 'not_completed';
+	if (m.inEffect) return 'in_effect';
+	return m.superseded ? 'superseded' : 'not_in_effect';
+}
+
+/** Whether the page offers "Take back" for a merge: only one that completed and is in effect.
+ *  A merge that crashed after the contact graph is in effect in the graph and still not
+ *  completed (`applied: false`), and the route refuses it. */
+export function bulkMergeTakeable(m: Pick<BulkMerge, 'applied' | 'inEffect'>): boolean {
+	return m.applied && m.inEffect;
+}
+
+/** The rollback route's codes (`MERGE_REFUSAL_CODES` in the engine), each with its sentence. */
+const BULK_MERGE_REFUSALS = new Map<unknown, string>([
+	['merge_not_found', 'not_found'],
+	['merge_not_applied', 'not_applied'],
+	['merge_missing', 'missing'],
+	['merge_superseded', 'superseded'],
+	['merge_not_in_effect', 'not_in_effect'],
+	['merge_unavailable', 'unavailable'],
+	['merge_partial', 'partial'],
+	['merge_failed', 'failed'],
+]);
+
+/** What the page says after "Yes, take it back", read from the route's status and code, never
+ *  from its English sentence. `merges`: the list as loaded after the answer. A chain names the
+ *  merge in the way only when the route names it AND that merge is in the list, so the owner
+ *  can find it there (`goTo`); a chain the route could not name is the dead end. An answer
+ *  the page cannot read says it is not certain what came of it. */
+export function bulkMergeAnswer(
+	status: number,
+	body: unknown,
+	merge: Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName'>,
+	merges: readonly Pick<BulkMerge, 'id' | 'dupName' | 'canonicalName' | 'applied' | 'inEffect'>[],
+	i18n: BulkI18n,
+): { text: string; ok: boolean; goTo: string | null } {
+	const names = { dup: bulkVisibleText(merge.dupName), canonical: bulkVisibleText(merge.canonicalName) };
+	if (status >= 200 && status < 300) return { text: i18n.tf('bulk.merges.done', names), ok: true, goTo: null };
+	const said = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+	const refused = (key: string): { text: string; ok: boolean; goTo: string | null } =>
+		({ text: i18n.tf(`bulk.merges.refused.${key}`, names), ok: false, goTo: null });
+	// The owner-only refusal carries no code. A 403 with one (an access that has ended) is
+	// refused before the route as well: nothing was taken back, for another reason.
+	if (status === 403) return refused(said['code'] === undefined ? 'forbidden' : 'failed');
+	if (said['code'] === 'merge_chained') {
+		if (typeof said['blocking'] !== 'string') return refused('chained_unnamed');
+		// Named by the route, but in the list as loaded after the answer it is gone or no longer
+		// one to take back (taken back in another tab, say): the step named is not there now.
+		const blocking = merges.find((m) => m.id === said['blocking'] && m.id !== merge.id && bulkMergeTakeable(m));
+		if (!blocking) return refused('chained_changed');
+		return {
+			text: i18n.tf('bulk.merges.refused.chained_named', { dup2: bulkVisibleText(blocking.dupName), canonical2: bulkVisibleText(blocking.canonicalName) }),
+			ok: false,
+			goTo: blocking.id,
+		};
+	}
+	const key = BULK_MERGE_REFUSALS.get(said['code']);
+	return refused(key ?? 'unclear');
+}
+
 /** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
  *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
  *  run reads the text as it is, so what the owner reads must be that text too: a removed

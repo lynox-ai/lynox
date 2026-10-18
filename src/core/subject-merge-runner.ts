@@ -338,6 +338,20 @@ export type MergeRollbackRefusal =
   | 'not_found' | 'not_applied' | 'missing' | 'superseded' | 'not_in_effect' | 'chained'
   | 'unavailable' | 'partial' | 'failed';
 
+/** The code each refusal rides with on the rollback route, so a client branches on the
+ *  reason and never on the English sentence. `merge_chained` came first and keeps its name. */
+export const MERGE_REFUSAL_CODES: Readonly<Record<MergeRollbackRefusal, string>> = {
+  not_found: 'merge_not_found',
+  not_applied: 'merge_not_applied',
+  missing: 'merge_missing',
+  superseded: 'merge_superseded',
+  not_in_effect: 'merge_not_in_effect',
+  chained: 'merge_chained',
+  unavailable: 'merge_unavailable',
+  partial: 'merge_partial',
+  failed: 'merge_failed',
+};
+
 /**
  * The newer merge that has to be taken back before a `chained` one can be.
  *

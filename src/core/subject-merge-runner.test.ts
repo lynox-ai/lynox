@@ -803,7 +803,7 @@ describe('owner rollback of a merge chain A→B→C', () => {
     // exactly this state — ledger written `applied:false`, graph change
     // committed, a satellite store throwing before the applied stamp. Naming
     // such a merge sent the owner to a route answering «This merge did not
-    // complete, so there is nothing to take back»: two API answers pointing at
+    // complete, so it cannot be taken back here»: two API answers pointing at
     // each other with no way out.
     const { dir, sweeps, store, threadStore } = setup();
     const a = store.createSubject({ kind: 'organization', name: 'Woodgrove GmbH' });
