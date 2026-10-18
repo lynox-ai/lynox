@@ -158,13 +158,15 @@ describe('a migration import drops store connections', () => {
       { name: 'MY_REFRESH', fp: tokenFingerprint('named-refresh') },
       // Written once, replaced by the customer since: not the exchange's to take.
       { name: 'C_CID', fp: tokenFingerprint('an-earlier-value') },
+      // A provider key slot is never removed, whatever the record says.
+      { name: 'ANTHROPIC_API_KEY', fp: tokenFingerprint('provider-key-value') },
     ];
     seedEngine(src, SRC_KEY, [storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), written } } as Partial<ApiProfile>)]);
-    seedVault(src, SRC_KEY, SECRETS);
+    seedVault(src, SRC_KEY, { ...SECRETS, ANTHROPIC_API_KEY: 'provider-key-value' });
     migrate(src, dst);
     const names = vaultNames(dst);
     expect(names).not.toContain('MY_REFRESH');
-    for (const kept of ['S_CID', 'S_CSECRET', 'C_CID']) expect(names).toContain(kept);
+    for (const kept of ['S_CID', 'S_CSECRET', 'C_CID', 'ANTHROPIC_API_KEY']) expect(names).toContain(kept);
   });
 
   it('an import without a store connection reports none', () => {
