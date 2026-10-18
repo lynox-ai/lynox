@@ -67,10 +67,11 @@ function finiteOrUndefined(v: unknown, what: string): number | undefined {
 /**
  * Refuse a text the owner confirms and the judge reads if it carries a character the owner does
  * not see (`hiddenCharAt`): the model would follow what the page shows only as a marking. The
- * message names the rule, not the character, and where the text holds it, in characters.
+ * message names the rule, not the character, and where the text holds it, in characters. An enum
+ * value is a choice, not running text, so it takes no hidden character in any place (`inPlace`).
  */
-function refuseHidden(text: string, what: string): void {
-  const at = hiddenCharAt(text);
+function refuseHidden(text: string, what: string, opts: { inPlace?: boolean } = {}): void {
+  const at = hiddenCharAt(text, opts);
   if (at === -1) return;
   throw new BulkSourceError(
     `${what} holds a character a reader does not see (an invisible format, direction or control character, `
@@ -94,7 +95,7 @@ function normalizeProperty(name: string, raw: unknown): ExtractSchemaProperty {
           || !enumValues.every((e) => typeof e === 'string' && e.length > 0 && e.length <= 200)) {
           throw new BulkSourceError(`judge.schema: field ${name}: enum must be 1–100 texts of up to 200 characters.`);
         }
-        (enumValues as string[]).forEach((e, i) => { refuseHidden(e, `judge.schema: field ${name}: enum value ${String(i + 1)}`); });
+        (enumValues as string[]).forEach((e, i) => { refuseHidden(e, `judge.schema: field ${name}: enum value ${String(i + 1)}`, { inPlace: false }); });
         return { type: 'string', enum: [...new Set(enumValues as string[])] };
       }
       const max = raw['maxLength'];

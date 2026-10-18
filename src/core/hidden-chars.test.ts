@@ -83,6 +83,14 @@ describe('hiddenCharIndexes — what real text needs is taken only where it does
     expect(hiddenCharIndexes(text)).toEqual(bits.flatMap((b, i) => (b ? [2 * i + 1] : [])));
   });
 
+  it('takes none of them with inPlace: false, and hides nothing else for it', () => {
+    const word = ch(0x0645, 0x06cc, ZWNJ, 0x0631);
+    expect(hiddenCharIndexes(word)).toEqual([]);
+    expect(hiddenCharIndexes(word, { inPlace: false })).toEqual([2]);
+    expect(hiddenCharAt(word, { inPlace: false })).toBe(2);
+    expect(hiddenCharIndexes('a\tb\nc', { inPlace: false })).toEqual([]);
+  });
+
   it(`takes at most ${String(HIDDEN_ALLOWED_MAX)} of them in one text`, () => {
     const word = ch(0x0645, 0x06cc, ZWNJ, 0x0631);
     const at = (n: number): number[] => hiddenCharIndexes(Array(n).fill(word).join(' '));

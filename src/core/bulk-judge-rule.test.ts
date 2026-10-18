@@ -100,8 +100,20 @@ describe('normalizeJudgeRule — a rule the owner confirms carries no character 
       ch(0x2764, 0xfe0f),
     ].join(' ');
     expect(normalizeJudgeRule({ rule: text, schema: { title: TITLE } }).rule).toBe(text);
-    expect(normalizeJudgeRule({ rule: 'x', schema: { level: { type: 'string', enum: [text] } } }).schema.properties['level'])
-      .toEqual({ type: 'string', enum: [text] });
+    // An enum value without any hidden character, in another script, is taken.
+    const plain = ch(0x0645, 0x06cc, 0x0631, 0x0648, 0x0645);
+    expect(normalizeJudgeRule({ rule: 'x', schema: { level: { type: 'string', enum: [plain] } } }).schema.properties['level'])
+      .toEqual({ type: 'string', enum: [plain] });
+  });
+
+  it('an enum value takes no hidden character, not even one the rule takes in place', () => {
+    const word = ch(0x0645, 0x06cc, 0x200c, 0x0631, 0x0648, 0x0645);
+    expect(normalizeJudgeRule({ rule: `Choose ${word}.`, schema: { title: TITLE } }).rule).toBe(`Choose ${word}.`);
+    expect(() => normalizeJudgeRule({ rule: 'x', schema: { level: { type: 'string', enum: ['low', word] } } }))
+      .toThrow(/field level: enum value 2 holds a character a reader does not see .* at character 3\./);
+    // Two values that look the same, one with a soft hyphen: the second is refused.
+    expect(() => normalizeJudgeRule({ rule: 'x', schema: { ok: { type: 'string', enum: ['yes', `ye${ch(0xad)}s`] } } }))
+      .toThrow(/field ok: enum value 2 holds/);
   });
 });
 

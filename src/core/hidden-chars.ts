@@ -41,8 +41,11 @@ const AFTER_MARK = /[\p{L}\p{M}\p{N}\p{P}\p{Zs}]/u;
 /** The most hidden characters one text may carry in the places it may carry one. */
 export const HIDDEN_ALLOWED_MAX = 32;
 
-/** The indexes, counted in characters (code points), of every hidden character in `text`. */
-export function hiddenCharIndexes(text: string): number[] {
+/** The indexes, counted in characters (code points), of every hidden character in `text`.
+ *  `inPlace: false` takes none of them in any place: for a value that is not running text, such
+ *  as one of a fixed set of choices. */
+export function hiddenCharIndexes(text: string, opts: { inPlace?: boolean } = {}): number[] {
+  const takeInPlace = opts.inPlace ?? true;
   const chars = Array.from(text);
   const hidden: boolean[] = [];
   const out: number[] = [];
@@ -53,7 +56,7 @@ export function hiddenCharIndexes(text: string): number[] {
     let isHidden: boolean;
     if (TEXT_CONTROLS.has(cp) || !HIDDEN.test(c)) {
       isHidden = false;
-    } else if (inPlace(chars, hidden, i, cp) && allowed < HIDDEN_ALLOWED_MAX) {
+    } else if (takeInPlace && inPlace(chars, hidden, i, cp) && allowed < HIDDEN_ALLOWED_MAX) {
       allowed++;
       isHidden = false;
     } else {
@@ -66,8 +69,8 @@ export function hiddenCharIndexes(text: string): number[] {
 }
 
 /** The index, in characters, of the first hidden character in `text`, or -1. */
-export function hiddenCharAt(text: string): number {
-  const at = hiddenCharIndexes(text);
+export function hiddenCharAt(text: string, opts: { inPlace?: boolean } = {}): number {
+  const at = hiddenCharIndexes(text, opts);
   return at.length === 0 ? -1 : at[0]!;
 }
 
