@@ -248,12 +248,14 @@ const endpointOf = (preset: string): string => {
 describe('deleting the owner of a grant a reader shares through a built-in provider', () => {
   const A_REFRESH = value('a', 'refresh');
   const A_ACCESS = value('a', 'access');
+  /** A name the owner's exchange wrote that is not one of its derived names. */
+  const A_OUT = value('a', 'out');
   const owner = (): ApiProfile => ({
     ...ofPreset('bexio', 'bexio-a', 'https://api.bexio.com/2.0'),
-    oauth_grant: { written: [{ name: 'BEXIO_A_REFRESH_TOKEN', fp: tokenFingerprint(A_REFRESH) }, { name: 'BEXIO_A_ACCESS_TOKEN', fp: tokenFingerprint(A_ACCESS) }] },
+    oauth_grant: { written: [{ name: 'BEXIO_A_REFRESH_TOKEN', fp: tokenFingerprint(A_REFRESH) }, { name: 'BEXIO_A_ACCESS_TOKEN', fp: tokenFingerprint(A_ACCESS) }, { name: 'A_OUT', fp: tokenFingerprint(A_OUT) }] },
   });
   const reader = (): ApiProfile => ofPreset('bexio', 'bexio-b', 'https://api.bexio.com/2.0', { refresh_token_key: 'BEXIO_A_REFRESH_TOKEN' });
-  const VAULT = { BEXIO_A_REFRESH_TOKEN: A_REFRESH, BEXIO_A_ACCESS_TOKEN: A_ACCESS, BEXIO_A_CID: 'a-client', BEXIO_A_CSECRET: value('a', 'secret'), BEXIO_B_CID: 'b-client', BEXIO_B_CSECRET: value('b', 'secret') };
+  const VAULT = { BEXIO_A_REFRESH_TOKEN: A_REFRESH, BEXIO_A_ACCESS_TOKEN: A_ACCESS, A_OUT, BEXIO_A_CID: 'a-client', BEXIO_A_CSECRET: value('a', 'secret'), BEXIO_B_CID: 'b-client', BEXIO_B_CSECRET: value('b', 'secret') };
   /** The directory `api_setup` deletes from, booted with both. */
   const booted = (): ApiStore => {
     const dir = join(lynoxDir, 'apis');
@@ -273,14 +275,16 @@ describe('deleting the owner of a grant a reader shares through a built-in provi
     expect(tokenPosts()[0]!.body).toContain(A_REFRESH);
   });
 
-  // What holds: the owner's values are gone and nothing is sent. What happens once a value lies
-  // under the owner's name again is not pinned here.
-  it('removes the owner\'s tokens, and the reader\'s next exchange sends nothing', async () => {
+  // What holds: the owner's values are gone, so the reader's exchange has nothing of the owner's
+  // to send. Whether a check refuses that exchange is not pinned here: without a value nothing is
+  // sent either way, and what happens once a value lies under the owner's name again is not pinned.
+  it('removes the owner\'s tokens, derived and written, and the reader then has none of them to send', async () => {
     const store = booted();
     const vault = vaultOf(VAULT);
     expect(await tool(store, vault, { action: 'delete', id: 'bexio-a' })).toMatch(/^Deleted API profile "bexio-a"\./);
     expect(vault.resolve('BEXIO_A_REFRESH_TOKEN')).toBeNull();
     expect(vault.resolve('BEXIO_A_ACCESS_TOKEN')).toBeNull();
+    expect(vault.resolve('A_OUT')).toBeNull();
     const result = await tool(store, vault, { action: 'fetch_token', id: 'bexio-b' });
     expect(result).not.toContain('Token exchange OK');
     expect(sent).toHaveLength(0);
@@ -333,7 +337,7 @@ describe('a grant shared through a provider with two API hosts (fixture provider
     expect(tokenPosts().map((p) => p.url)).toEqual([endpointOf('twohost')]);
   });
 
-  it.each(['https://api.one.example/v1/x', 'https://api.two.example/v1/x'])('W1/W4: the reader\'s access token goes to the API host %s', async (url) => {
+  it.each(['https://api.one.example/v1/x', 'https://api.two.example/v1/x'])('a secret: reference to the reader\'s access token goes to the API host %s', async (url) => {
     const store = fromDirectory([owner(), reader()]);
     await referenced(store, VAULT, url, 'TWO_B_ACCESS_TOKEN');
     expect(sent).toHaveLength(1);
@@ -343,21 +347,21 @@ describe('a grant shared through a provider with two API hosts (fixture provider
   it.each([
     ['a host of neither', 'https://collector.example/x'],
     ['an API host on another port', 'https://api.two.example:8443/v1/x'],
-  ])('W4: the reader\'s access token is refused to %s, and nothing is sent', async (_label, url) => {
+  ])('a secret: reference to the reader\'s access token is refused to %s, and nothing is sent', async (_label, url) => {
     const store = fromDirectory([owner(), reader()]);
     const result = await referenced(store, VAULT, url, 'TWO_B_ACCESS_TOKEN');
     expect(result).toContain('would send TWO_B_ACCESS_TOKEN');
     expect(sent).toHaveLength(0);
   });
 
-  it('W1: the engine attaches the reader\'s access token at the reader\'s base', async () => {
+  it('the engine attaches the reader\'s access token at the reader\'s base', async () => {
     const store = fromDirectory([owner(), reader()]);
     await attached(store, VAULT, 'https://api.two.example/v1/x');
     expect(sent).toHaveLength(1);
     expect(sent[0]!.headers['Authorization']).toBe(`Bearer ${B_ACCESS}`);
   });
 
-  it('W1: the owner\'s access token goes to an API host, and not to a host of neither', async () => {
+  it('a secret: reference to the owner\'s access token goes to the other API host, and not to a host of neither', async () => {
     const store = fromDirectory([owner(), reader()]);
     await referenced(store, VAULT, 'https://api.two.example/v1/x', 'TWO_A_ACCESS_TOKEN');
     expect(sent).toHaveLength(1);
@@ -368,9 +372,13 @@ describe('a grant shared through a provider with two API hosts (fixture provider
   });
 });
 
-// ── each condition of sharing broken on the side not yet tested ──
+// ── conditions 1 and 2 of sharing, on the owner's and the register's side ──
+// The reader's side of condition 2 (host, port, scheme) is in token-slot-admission.test.ts, and
+// condition 3 (the same token endpoint) in token-slot-shared-endpoint.test.ts. Condition 1 cannot
+// be broken on its own: a preset the register does not have has no API hosts and derives no token
+// endpoint, so conditions 2 and 3 fail with it.
 
-describe('sharing: the conditions the other files test on the reader, here on the owner and the register', () => {
+describe('sharing: condition 1 on the register side, condition 2 on the owner\'s side', () => {
   describe.each(loaders)('boot through %s', (_loader, load) => {
     it.each(orders)('§2a 1: two profiles on the same preset id that is not in the register are not registered, read %s', (_order, order) => {
       const a = ofPreset('unlisted', 'un-a', 'https://api.unlisted.example/v1', {}, 'auth.unlisted.example');
@@ -385,6 +393,14 @@ describe('sharing: the conditions the other files test on the reader, here on th
       const store = load(order([a, b]));
       expect(store.get('un-a')).toBeDefined();
       expect(store.get('un-b')).toBeDefined();
+    });
+
+    it.each(orders)('control (§2a 1): the same sharing through a preset the register has, on its API hosts, registers both, read %s', (_order, order) => {
+      const a = ofPreset('twohost', 'two-a', 'https://api.one.example/v1');
+      const b = ofPreset('twohost', 'two-b', 'https://api.two.example/v1', { refresh_token_key: 'TWO_A_REFRESH_TOKEN' });
+      const store = load(order([a, b]));
+      expect(store.get('two-a')).toBeDefined();
+      expect(store.get('two-b')).toBeDefined();
     });
 
     it.each(orders)('control (§2a 2): the same owner beside a reader of its own is registered with it, read %s', (_order, order) => {
