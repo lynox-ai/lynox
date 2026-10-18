@@ -6777,6 +6777,25 @@ describe('write approvals per method and host (270)', () => {
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
+  it('(3d) an approval for a service on another port holds for its next write', async () => {
+    const { agent, prompt } = agent270();
+    await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
+    await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('(3e) a denial in a batch stands for the same service, not for another port of the host', async () => {
+    const batch = {};
+    const { agent, prompt } = agent270({ answer: 'Deny', batch });
+    await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+    const other = await visible({ url: 'http://h.example:8080/a', method: 'POST', body: '{}' }, agent);
+    expect(other).not.toContain('was denied earlier in this batch');
+    expect(prompt).toHaveBeenCalledTimes(2);
+    const same = await visible({ url: 'http://h.example:8080/b', method: 'POST', body: '{}' }, agent);
+    expect(same).toContain('was denied earlier in this batch');
+    expect(prompt).toHaveBeenCalledTimes(2);
+  });
+
   it('(2) an approval for POST does not cover PUT on the same host', async () => {
     const { agent, prompt } = agent270();
     await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
