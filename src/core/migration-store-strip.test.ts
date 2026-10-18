@@ -228,6 +228,22 @@ describe('a migration import drops store connections', () => {
     expect(names).toContain('SHARED_X');
   });
 
+  it('a slot both a mandate store and another store recorded goes when its value is the mandate store\'s', () => {
+    const src = tmp(); const dst = tmp();
+    const a = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`,
+      written: [{ name: 'SHARED_X', fp: tokenFingerprint('a-value') }] } } as Partial<ApiProfile>);
+    const b = storeProfile('shop-beta', { base_url: 'https://beta.myshopify.com', auth: { type: 'oauth2', oauth: { preset_id: 'shopify', preset_params: { shop: 'beta' }, client_id_key: 'S_CID', client_secret_key: 'S_CSECRET' } },
+      custom_endpoint_ack: { accepted: true, hosts: ['beta.myshopify.com'], accepted_at: '2026-10-18T00:00:00.000Z' },
+      oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'e'.repeat(64), written: [{ name: 'SHARED_X', fp: tokenFingerprint('b-value') }] } } as Partial<ApiProfile>);
+    const user: ApiProfile = { id: 'crm', name: 'CRM', base_url: 'https://api.crm.example.com', description: 'names it',
+      auth: { type: 'bearer', vault_keys: ['SHARED_X'] } } as ApiProfile;
+    seedEngine(src, SRC_KEY, [a, b, user], true);
+    seedVault(src, SRC_KEY, { ...SECRETS, SHARED_X: 'a-value' });
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme', 'shop-beta']);
+    // A's entry is forced and its fingerprint matches; B's entry does not hold it.
+    expect(vaultNames(dst)).not.toContain('SHARED_X');
+  });
+
   it('a `-`/`_` partner keeps its derived pair even against a store a mandate connected', () => {
     const src = tmp(); const dst = tmp();
     const store = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`,
