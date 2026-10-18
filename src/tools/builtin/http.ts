@@ -1692,9 +1692,9 @@ async function attachEngineManagedAuth(
   const attachPreset = auth.type === 'oauth2' && auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(auth.oauth.preset_id) : undefined;
   if (attachPreset?.apiOnDerivedHost === true) {
     const store = presetStoreHost(profile);
-    let target: URL | undefined;
-    try { target = new URL(url); } catch { target = undefined; }
-    if (store === null || target === undefined || target.protocol !== 'https:' || target.port !== '' || target.hostname !== store) {
+    // `url` parsed above, where the profile was looked up by its host.
+    const target = new URL(url);
+    if (store === null || target.protocol !== 'https:' || target.port !== '' || target.hostname !== store) {
       return { refusal: `Error: api_profile "${profile.id}" connects one ${attachPreset.label} store, and this request does not go to it over https: its base_url and auth.oauth.preset_params have to name the same store. The token was not attached.` };
     }
   }

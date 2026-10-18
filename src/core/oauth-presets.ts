@@ -490,8 +490,7 @@ export function presetClaimsHost(preset: OAuthPreset, host: string, register: Pr
   if (preset.apiOnDerivedHost !== true || preset.host.kind !== 'template') return false;
   // The value the template would need, cut out of the host, then derived again: only a host the
   // template builds from a value the preset accepts comes back as itself.
-  const [prefix, suffix] = preset.host.template.split(`{${preset.host.param}}`) as [string, string | undefined];
-  if (suffix === undefined) return false;
+  const [prefix = '', suffix = ''] = preset.host.template.split(`{${preset.host.param}}`);
   const value = host.slice(prefix.length, host.length - suffix.length);
   const derived = derivePresetEndpoints(preset.id, { [preset.host.param]: value }, register);
   return !('kind' in derived) && derived.host === host;
