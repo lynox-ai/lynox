@@ -136,6 +136,15 @@ let _enabled = false;
  */
 let _refused = false;
 
+/** What `refuseErrorReporting` needs of a client: its live options and a close. */
+interface BuiltClient { getOptions(): { enabled?: boolean }; close(timeout?: number): PromiseLike<boolean> }
+/**
+ * Every client this module ever built, kept by reference. `Sentry.getClient()` reads the
+ * CURRENT scope, and an init inside a request (the privacy toggle, a config reload) binds its
+ * client to that request's forked scope only, so the refusal must not look the client up.
+ */
+const _builtClients = new Set<BuiltClient>();
+
 // Cached module reference to avoid repeated dynamic imports in hot paths
 let _sentry: typeof import('@sentry/node') | null = null;
 
@@ -180,7 +189,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
       return false;
     }
 
-    Sentry.init({
+    const built = Sentry.init({
       dsn: resolvedDsn,
       release: `lynox@${version}`,
       environment: process.env['NODE_ENV'] ?? 'production',
@@ -289,6 +298,7 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         return event;
       },
     });
+    if (built) _builtClients.add(built);
 
     _enabled = true;
     return true;
@@ -443,18 +453,16 @@ export function refuseErrorReporting(): void {
   _refused = true;
   _enabled = false;
   uninstallGlobalHandlers();
-  const sentry = _sentry;
   _sentry = null;
-  if (sentry) {
+  // First, and synchronously: a disabled client sends no envelope of any kind. That matters
+  // beyond error events: feedback and the session aggregates the http integration flushes on
+  // `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
+  for (const client of _builtClients) {
     try {
-      // First, and synchronously: a disabled client sends no envelope of any kind. That matters
-      // beyond error events: feedback and the session aggregates the http integration flushes
-      // on `close` never pass `beforeSend`, and `sendEnvelope` checks only `enabled`.
-      const client = sentry.getClient();
-      if (client) client.getOptions().enabled = false;
-      void sentry.close(2000).catch(() => { /* the client is disabled; nothing is sent */ });
+      client.getOptions().enabled = false;
+      void Promise.resolve(client.close(2000)).catch(() => { /* disabled; nothing is sent */ });
     } catch {
-      // captures already return early; a client that could not be disabled is left to close
+      // captures already return early; the next client is still disabled
     }
   }
 }
@@ -472,6 +480,7 @@ export function isErrorReportingEnabled(): boolean {
 /** @internal Reset state for testing. */
 export function _resetForTesting(): void {
   _refused = false;
+  _builtClients.clear();
   _initialized = false;
   _enabled = false;
   _sentry = null;

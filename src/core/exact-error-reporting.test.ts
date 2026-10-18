@@ -32,7 +32,7 @@ vi.mock('@sentry/node', async () => {
 const Sentry = await import('@sentry/node');
 const {
   initErrorReporting, captureError, captureUserFeedback, refuseErrorReporting,
-  isErrorReportingEnabled, isErrorReportingRefused, _resetForTesting,
+  isErrorReportingEnabled, isErrorReportingRefused, shutdownErrorReporting, _resetForTesting,
 } = await import('./error-reporting.js');
 const { refuseDebug, exactMarkerOnDisk } = await import('./exact-debug-refusal.js');
 const { EngineDb } = await import('./engine-db.js');
@@ -142,4 +142,24 @@ it('exactMarkerOnDisk reads the marker before the engine opens engine.db, fail-c
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+it('disables a client built inside a forked scope, which Sentry.getClient() does not see', async () => {
+  // Boot init at the root, then the privacy toggle off and on again from inside a request.
+  expect(await initErrorReporting(DSN)).toBe(true);
+  const rootClient = Sentry.getClient();
+  await shutdownErrorReporting();
+  let scoped: ReturnType<typeof Sentry.getClient>;
+  await Sentry.withScope(async () => {
+    expect(await initErrorReporting(DSN)).toBe(true);
+    scoped = Sentry.getClient();
+  });
+  expect(scoped).toBeDefined();
+  expect(scoped).not.toBe(Sentry.getClient());  // the root scope still names the old client
+  expect(Sentry.getClient()).toBe(rootClient);
+  sent.length = 0;
+  refuseErrorReporting();
+  scoped!.captureException(new Error('from-the-forked-scope'));
+  await scoped!.flush(2000);
+  expect(sent).toEqual([]);
 });
