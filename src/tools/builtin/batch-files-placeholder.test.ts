@@ -143,6 +143,16 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
     expect(readFileSync(join(artifacts, 'lost.html'), 'utf8')).toBe(`<h1>Offer</h1>${placeholder}`);
   });
 
+  it('outside the artifacts directory, a file too large to check still moves', async () => {
+    const src = join(data, 'notes');
+    const dst = join(data, 'archive');
+    mkdirSync(src);
+    writeFileSync(join(src, 'big.log'), 'x'.repeat(MAX_BUFFER_BYTES + 1));
+    const out = await run({ pattern: '*.log', directory: src, operation: 'move', destination: dst });
+    expect(out).not.toMatch(/Error/);
+    expect(readdirSync(dst)).toEqual(['big.log']);
+  });
+
   it('outside the artifacts directory, a placeholder file still moves (the check is scoped there)', async () => {
     const [, placeholder] = placeholders()[0]!;
     const src = join(data, 'notes');
