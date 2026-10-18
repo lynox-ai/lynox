@@ -13,7 +13,7 @@
 #     copied into the final image (multi-stage), so image size is unaffected.
 
 # --- Stage 1: Build Engine ---
-FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-engine
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS build-engine
 WORKDIR /app
 # Disable lefthook in the build: its dev-dep postinstall runs `lefthook install`
 # which needs a git repo/binary that isn't in this stage, failing the build on a
@@ -41,7 +41,7 @@ COPY tsconfig.json ./
 RUN pnpm run build
 
 # --- Stage 2: Build Web UI ---
-FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS build-webui
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS build-webui
 WORKDIR /app
 
 # Bake the build SHA into the web-ui bundle so the running client can detect
@@ -73,7 +73,7 @@ COPY packages/web-ui/ packages/web-ui/
 RUN cd packages/web-ui && pnpm run build
 
 # --- Stage 3: Production deps (Engine) ---
-FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS deps
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS deps
 WORKDIR /app
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     && node -e "require(require('path').resolve(process.argv[1])); console.log('onnxruntime-node OK')" "$ORT_DIR"
 
 # --- Stage 4: Whisper.cpp (audio transcription) ---
-FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS whisper-build
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS whisper-build
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -137,7 +137,7 @@ RUN --mount=type=bind,source=scripts/fetch-pinned.sh,target=/tmp/fetch-pinned.sh
        https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin
 
 # --- Stage 5: Production image ---
-FROM node:22-slim@sha256:4f77a690f2f8946ab16fe1e791a3ac0667ae1c3575c3e4d0d4589e9ed5bfaf3d AS production
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS production
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -153,18 +153,26 @@ COPY --from=whisper-build /usr/share/whisper/ggml-base.bin /usr/share/whisper/gg
 RUN ldconfig
 
 # Harden: remove package managers, shells, SUID binaries.
-# npm + corepack are the base image's bundled Node package managers; the runtime
-# runs `node /app/dist/index.js` with pre-installed /app/node_modules and never
-# invokes either, so they are dead weight — and their bundled node-tar carries
-# fixed-but-unreachable CVEs (e.g. CVE-2026-59873) that fail the image scan. This
-# hardening block already strips apt/dpkg/perl/bash for the same reason; npm was
-# the gap.
+# npm, corepack and yarn are the base image's bundled Node package managers; the
+# runtime runs `node /app/dist/index.js` with pre-installed /app/node_modules and
+# never invokes them, so they are dead weight — and their bundled node-tar carries
+# fixed-but-unreachable CVEs (e.g. CVE-2026-59873) that fail the image scan.
+#
+# The dpkg STATUS stays (/var/lib/dpkg): an image scanner reads the installed OS
+# packages from it. Without it a scan reports zero OS packages, which reads like a
+# clean image and is a blind one. The tools go; the record of what is installed stays.
+# Perl is removed through dpkg first, so the database no longer lists it. (It still
+# lists apt, dpkg and bash, whose binaries the chain below deletes: a stale entry can
+# only add findings, so it errs toward failing a release, never toward passing one.)
+# Its own RUN, because the chain below ends in `|| true`.
+RUN dpkg --purge --force-remove-essential --force-depends perl-base
 RUN \
     rm -rf /usr/bin/apt-get /usr/bin/apt /usr/bin/dpkg /usr/bin/dpkg-* \
-           /usr/lib/apt /var/lib/dpkg /var/lib/apt /etc/apt \
+           /usr/lib/apt /var/lib/apt /etc/apt \
     && rm -rf /usr/bin/perl* /usr/share/perl* /usr/lib/*/perl* \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
               /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+              /opt/yarn-v* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
     && rm -f /usr/bin/bash /bin/bash /usr/bin/rbash /bin/rbash \
     && find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true \
     && sed -i 's|root:/bin/bash|root:/usr/sbin/nologin|' /etc/passwd
