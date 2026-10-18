@@ -136,10 +136,10 @@ export function judgeAxisOf(
 ): JudgeAxis | null {
   if (snap.provider === 'anthropic') return 'anthropic';
   if (snap.provider === 'vertex') return 'vertex';
-  // A Mistral slot without an endpoint is served by Mistral's own; one with an endpoint must be it.
+  // A Mistral slot is served by its own endpoint only (never the base's), so that must be Mistral's.
   if (snap.provider === 'mistral') {
     const own = snap.apiBaseURL;
-    return own === undefined || (httpsHostOf(own) !== null && isMistralHost(own)) ? 'mistral' : null;
+    return httpsHostOf(own) !== null && isMistralHost(own) ? 'mistral' : null;
   }
   if (getProviderDescriptor(snap.provider)?.wireClient !== 'openai') return null;
   const url = snap.apiBaseURL ?? baseApiBaseURL;

@@ -95,7 +95,8 @@ describe('judgeAxisOf', () => {
   it('reads the endpoint on the OpenAI wire, the slot before the base', () => {
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: FIREWORKS_API_BASE }, MISTRAL_BASE)).toBe('fireworks');
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: undefined }, MISTRAL_BASE)).toBe('mistral');
-    expect(judgeAxisOf({ provider: 'mistral', apiBaseURL: undefined }, undefined)).toBe('mistral');
+    // A Mistral slot's client never falls back to the base's endpoint: without its own, no judge.
+    expect(judgeAxisOf({ provider: 'mistral', apiBaseURL: undefined }, MISTRAL_BASE)).toBeNull();
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'https://api.fireworks.ai.example.invalid/v1' }, undefined)).toBeNull();
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'not a url' }, undefined)).toBeNull();
   });
