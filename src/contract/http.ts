@@ -136,7 +136,47 @@ export interface UsageStatusResponse {
    * absent or unrecognised value as no statement and keeps its current mirror.
    */
   spend_gate: SpendGate;
+  /**
+   * Whether the control plane records that this instance has been cleared for
+   * an exact (Shopify) connection (`exact_held_at` set). Only `true` and
+   * `false` are statements: an absent field comes from a control plane that
+   * does not know it and must be read as no statement, never as `false`. An
+   * engine that holds its own marker and reads `false` asks the exact-attach
+   * route again, so a control plane that lost the record gets it back.
+   */
+  exact_held?: boolean | undefined;
 }
+
+// === Exact attach — POST /internal/instances/:instanceId/exact-attach (engine → CP) ===
+
+/**
+ * The engine asks before the first exact (Shopify) request of a boot. The body
+ * carries no merchant data; the instance secret header authenticates it like
+ * the usage routes.
+ */
+export type ExactAttachRequest = Record<string, never>;
+
+/**
+ * Why the control plane did not clear the instance. The engine acts on `ok`
+ * alone; the reason is for the log and the refusal text.
+ *
+ *  - `'not_tenant_host'` — the instance is not hosted where exact runs.
+ *  - `'below_floor'`     — a recorded image of the instance is below the floor
+ *    (or is not a version the floor can compare).
+ *  - `'no_floor'`        — no floor is set yet, so no image qualifies.
+ *  - `'busy'`            — another operation holds the instance; ask later.
+ *  - `'rate_limited'`    — asked again too soon; ask later.
+ */
+export type ExactAttachRefusal = 'not_tenant_host' | 'below_floor' | 'no_floor' | 'busy' | 'rate_limited';
+
+/**
+ * `ok: true` only after the control plane has recorded the clearance and
+ * committed it. Anything else, including a body without `ok: true`, is a
+ * refusal for the engine.
+ */
+export type ExactAttachResponse =
+  | { ok: true }
+  | { ok: false; reason: ExactAttachRefusal };
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===
 
