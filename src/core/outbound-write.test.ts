@@ -670,6 +670,11 @@ describe('isGraphqlEndpoint', () => {
     ['not a url', true],
     ['https://api.example.com/v1/items', false],
     ['https://api.example.com/a%20b', false],
+    ['https://api.example.com/GRAPHQL.JSON', true],
+    ['https://api.example.com/graphql.xml', true],
+    ['https://api.example.com/graphql..', true],
+    ['https://api.example.com/graphql%2E', true],
+    ['https://api.example.com/graphqlx', false],
     ['https://api.example.com/graphqlish', false],
     ['https://api.example.com/api', false],
   ] as const)('%s → %s', (url, want) => {

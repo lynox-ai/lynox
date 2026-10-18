@@ -552,7 +552,7 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   // No contract grants a write to a GraphQL endpoint: there a read and every mutation the token
   // can run are the same POST to the same path, and nothing here reads the document. Read from
   // the URL alone, so it holds for the callers that never pass a body.
-  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS' && isGraphqlEndpoint(obj.url)) return false;
+  if (method !== 'GET' && method !== 'HEAD' && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
   try {

@@ -387,14 +387,21 @@ export function normalizeWritePath(pathname: string): { path: string; ambiguous:
 }
 
 /**
- * Whether a URL is a GraphQL endpoint, read from the URL alone: a path segment `graphql` or
- * `graphql.json` (as `normalizeWritePath` routes it), or a host label that starts with
+ * Whether a URL is a GraphQL endpoint, read from the URL alone: a path segment `graphql`
+ * (`GRAPHQL_SEGMENT`, as `normalizeWritePath` routes it), or a host label that starts with
  * `graphql`. A path whose routing is not known here (`ambiguous`, a decoding error included)
  * counts when any way of decoding it names `graphql`, and a URL that does not parse counts.
  *
  * Only the URL, so that every caller can ask it, those that never see a body included. A
  * GraphQL API on another path (`/api`, `/v2`) is not recognised and is handled as any POST is.
  */
+/**
+ * A path segment a server routes to its GraphQL endpoint: `graphql`, with a format suffix a
+ * router strips or matches on (`graphql.json`, Rails' `(.:format)`), and with trailing dots, which
+ * IIS drops. Read from the decoded, lower-cased segment.
+ */
+const GRAPHQL_SEGMENT = /^graphql(?:\.[a-z0-9]*)?\.*$/i;
+
 export function isGraphqlEndpoint(url: string): boolean {
   let parsed: URL;
   try {
@@ -408,7 +415,7 @@ export function isGraphqlEndpoint(url: string): boolean {
   // a character a router may strip) is read every way a server may decode it, and any reading
   // that names `graphql` anywhere counts. Not every such path: an encoded space is a REST path.
   if (ambiguous) return [parsed.pathname, ...serverReadings(parsed.pathname)].some((reading) => reading.toLowerCase().includes('graphql'));
-  return path.split('/').some((segment) => segment === 'graphql' || segment === 'graphql.json');
+  return path.split('/').some((segment) => GRAPHQL_SEGMENT.test(segment));
 }
 
 /** An operation that writes: `mutation` or `subscription` as a GraphQL name anywhere in the document. */

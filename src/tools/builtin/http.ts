@@ -2474,6 +2474,11 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const graphqlEndpoint = isGraphqlEndpoint(input.url);
     let graphqlMutates = false;
     if (graphqlEndpoint && isWriteMethod(gatedMethod)) {
+      // Some servers read `query` from the URL before the body (express-graphql, graphene-django),
+      // so a write there carries nothing in its URL: no list of parameter names a server might read.
+      if (new URL(input.url).search.length > 1) {
+        blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.`);
+      }
       const reading = graphqlWrite(headers, input.body);
       if ('refusal' in reading) {
         blockedVerbatim(`Blocked: ${gatedMethod} to ${new URL(input.url).hostname} is a GraphQL request this check cannot read: ${reading.refusal}. Send one JSON object with a query string and Content-Type: application/json.`);

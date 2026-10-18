@@ -7582,6 +7582,31 @@ describe('write approvals per method and host (270)', () => {
       expect(prompt).toHaveBeenCalledTimes(2);
     });
 
+    it('a denied GraphQL read in a batch does not stand for a REST POST; the POST is asked', async () => {
+      const batch = {};
+      const { agent, prompt } = agent270({ answer: 'Deny', batch });
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      const rest = await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+      expect(rest).not.toContain('was denied earlier in this batch');
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['a mutation in the URL beside a read in the body', `${GQL}?query=${encodeURIComponent('mutation { x }')}`, 'POST', {}],
+      ['a credential in the URL', `${GQL}?access_token=t`, 'POST', {}],
+      ['a GET raised to a write by an override', `${GQL}?query=${encodeURIComponent('mutation { x }')}`, 'GET', { 'X-HTTP-Method-Override': 'POST' }],
+    ] as const)('refuses a GraphQL write with a query string (%s), and says where the arguments go', async (_k, url, method, extra) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      const out = await visible({ url, method, headers: { ...JSON_CT, ...extra }, body: doc('{ me { id } }') }, agent);
+      expect(out).toContain('is a GraphQL write with a query string, which a server may run instead of the body. Put the arguments in the JSON body and a credential in a header.');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       ['no Content-Type', {}, doc('{ a }')],
       ['text/plain', { 'Content-Type': 'text/plain' }, doc('{ a }')],
@@ -7617,7 +7642,7 @@ describe('write approvals per method and host (270)', () => {
     it('an OPTIONS is a write here, so a GraphQL endpoint reads its body like a POST and refuses one it cannot read', async () => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);
-      const out = await visible({ url: `${GQL}?query=${encodeURIComponent('mutation{b}')}`, method: 'OPTIONS' }, agent270().agent);
+      const out = await visible({ url: GQL, method: 'OPTIONS', body: 'mutation{b}' }, agent270().agent);
       expect(out).toContain('is a GraphQL request this check cannot read');
       expect(fetchMock).not.toHaveBeenCalled();
     });
