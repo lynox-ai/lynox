@@ -191,14 +191,15 @@ describe('ApiStore — profiles the boot held back', () => {
       expect(mayServeAsClientId(control, 'CRM_USER')).toBe(true);
     });
 
-    it('a deleted profile\'s recorded token under its username stays', () => {
+    // A token a deleted profile's exchange wrote leaves with it, although the held-back profile
+    // signs in with that name: the held-back profile loses its source (PRD §4a, N4).
+    it('a deleted profile\'s recorded token under its username is removed', () => {
       const vault = purgeVault({ CRM_USER: 'u-1' });
       const gone = written('gone-api', 'CRM_USER', 'u-1');
-      expect(purgeRecordedTokens(boot(), gone, vault).removed).toEqual([]);
-      expect(vault.resolve('CRM_USER')).toBe('u-1');
-      const store = boot();
-      store.remove('crm');
-      expect(purgeRecordedTokens(store, gone, vault).removed).toEqual(['CRM_USER']);
+      const result = purgeRecordedTokens(boot(), gone, vault);
+      expect(result.removed).toEqual(['CRM_USER']);
+      expect(result.kept).toEqual([]);
+      expect(vault.resolve('CRM_USER')).toBeNull();
     });
   });
 
@@ -248,13 +249,15 @@ describe('ApiStore — profiles the boot held back', () => {
   };
 
   describe('purgeRecordedTokens', () => {
-    it('keeps a recorded token under a name a held-back profile reads', () => {
+    // A held-back profile that reads the name does not keep a token the deleted profile's exchange
+    // wrote (PRD §4a, N4).
+    it('removes a recorded token under a name a held-back profile reads', () => {
       const store = heldBySlot(bearer('feed_x', 'feed.example', 'SHARED_TOKEN'));
       const vault = purgeVault({ SHARED_TOKEN: 'v-1' });
       const result = purgeRecordedTokens(store, written('gone-api', 'SHARED_TOKEN', 'v-1'), vault);
-      expect(result.removed).toEqual([]);
-      expect(result.kept).toContain('SHARED_TOKEN');
-      expect(vault.resolve('SHARED_TOKEN')).toBe('v-1');
+      expect(result.removed).toEqual(['SHARED_TOKEN']);
+      expect(result.kept).toEqual([]);
+      expect(vault.resolve('SHARED_TOKEN')).toBeNull();
     });
 
     it('control: removes it once the held-back profile is removed', () => {

@@ -838,6 +838,19 @@ export interface TokenPurge {
    * could not see — a true-sounding cause that sends the reader at the wrong repair.
    */
   notVisible: string[];
+  /**
+   * Recorded names still holding the value written, left only because a stored entry the boot
+   * could not read names them too ({@link ApiStore.unreadableHolds}): whose they are cannot be
+   * told. The delete refuses before this point when it sees such a name
+   * ({@link ApiStore.deleteRefusal}); this is the net for an entry that appears in between.
+   */
+  heldByUnreadable: string[];
+  /**
+   * Recorded names still holding the value written, left because another stored profile whose id
+   * collapses onto the same vault slot (`vaultSlotBase`, the `-`/`_` pair) names the same token
+   * with the same fingerprint on its own record: the value is that profile's as much as this one's.
+   */
+  heldBySlotPartner: string[];
 }
 
 /**
@@ -846,16 +859,22 @@ export interface TokenPurge {
  * was, so `store` holds only the others.
  *
  * Removed: a name on the profile's record (`written`) while the vault still
- * holds the very value the exchange wrote there — unless another profile still
- * references the name, or the name is protected. The name alone proves nothing:
+ * holds the very value the exchange wrote there, whoever else names it: a token
+ * this profile's exchange wrote does not outlive the profile, and another profile
+ * that reads it loses its source with it. Not removed: a protected name, and one
+ * that a stored entry the boot could not read names as well — its owner cannot be
+ * told, and admission keeps a registered profile from writing such a name, so it
+ * is named back (`heldByUnreadable`) rather than taken; and one that the other half
+ * of a `-`/`_` pair, on the same vault slot, records with the same fingerprint
+ * (`heldBySlotPartner`), since that value is the partner's too. A record of the
+ * same token on any other profile keeps nothing. The name alone proves nothing:
  * the user can store their own token under it after the exchange, and a name
  * derived from the id can hold one from the start. A delete that guesses
  * destroys it for good.
  *
  * Kept: every other name the profile referenced that still holds a value — the
  * credentials the user stored, tokens from before exchanges were recorded,
- * recorded names whose value has changed since, and recorded names another
- * profile uses. The caller names them, because only the user can say whether
+ * and recorded names whose value has changed since. The caller names them, because only the user can say whether
  * anything else needs them. A protected name is not named either: an
  * infrastructure secret, or the slot holding the tenant's own provider key, is
  * not this profile's to hand over for removal.
@@ -882,10 +901,9 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
   // remembered once per pass is the wrong shape; this is the multiplication made
   // into one name.
   //
-  // Another profile naming the name does not hold back a token a MANDATE's consent wrote. That
-  // naming is the way such a token would outlive its connection: a second profile names the
-  // first one's slot, the first is deleted, and the token now authenticates wherever the second
-  // points. What the owner's exchanges wrote keeps the rule, since the owner may share a name.
+  // An unreadable entry does not hold back a token a MANDATE's consent wrote: naming another
+  // profile's slot is the way such a token would outlive its connection. The second pass, which
+  // only reports configured names, still leaves out what another profile names.
   const mandateConnection = isMandateConnection(profile);
   const notOursToOffer = (name: string): boolean =>
     isProtectedSecretWrite(name) || (!mandateConnection && (inUseElsewhere.has(name) || store.unreadableHolds(name)));
@@ -893,8 +911,12 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
   const removed: string[] = [];
   const notRemovable: string[] = [];
   const notVisible: string[] = [];
+  const heldByUnreadable: string[] = [];
+  const heldBySlotPartner: string[] = [];
+  // The other half of a `-`/`_` pair, the one case where two stored profiles hold one slot.
+  const slotPartners = store.knownProfiles().filter((o) => typeof o.id === 'string' && o.id !== profile.id && vaultSlotBase(o.id) === vaultSlotBase(profile.id));
   for (const w of recordedWrites(profile)) {
-    if (notOursToOffer(w.name)) continue;
+    if (isProtectedSecretWrite(w.name)) continue;
     // A store that cannot READ the name cannot judge whether this profile wrote
     // what sits there. Saying so is the difference between "nothing to purge"
     // and "I could not look": without this branch a caller whose vault view is
@@ -908,6 +930,14 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
     // Only the value this profile's exchange wrote. Anything else under the
     // name — replaced since, or nothing at all — is not this profile's to take.
     if (value === null || tokenFingerprint(value) !== w.fp) continue;
+    if (!mandateConnection && store.unreadableHolds(w.name)) {
+      heldByUnreadable.push(w.name);
+      continue;
+    }
+    if (slotPartners.some((o) => recordedWrites(o).some((r) => r.name === w.name && r.fp === w.fp))) {
+      heldBySlotPartner.push(w.name);
+      continue;
+    }
     if (!secretStore?.deleteSecret) {
       notRemovable.push(w.name);
       continue;
@@ -930,8 +960,8 @@ export function purgeRecordedTokens(store: ApiStore, profile: ApiProfile, secret
     if (secretStore?.explainUnresolved?.(k) === 'out-of-scope') notVisible.push(k);
   }
   const kept = collectVaultKeys(profile)
-    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !notVisible.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
-  return { removed, kept, notRemovable, notVisible };
+    .filter((k) => !removed.includes(k) && !notRemovable.includes(k) && !notVisible.includes(k) && !heldByUnreadable.includes(k) && !heldBySlotPartner.includes(k) && !isProtectedSecretWrite(k) && valueOf(k) !== null);
+  return { removed, kept, notRemovable, notVisible, heldByUnreadable, heldBySlotPartner };
 }
 
 /**
@@ -1219,6 +1249,16 @@ function unreadableEntry(source: string, deleteId: string, parsed: unknown, raw:
     take(refreshTokenKey(id));
   }
   return { source, deleteId, ids, names, all };
+}
+
+/** Where an unreadable entry is, for a sentence that has to let someone find it. */
+function unreadableWhere(e: UnreadableEntry): string {
+  return `a stored API profile that could not be read (${e.source}, id ${JSON.stringify(e.deleteId)})`;
+}
+
+/** A file whose name is no id cannot be deleted through the store; then the file has to go by hand. */
+function clearedByHand(e: UnreadableEntry): boolean {
+  return e.source.startsWith('file ') && !PROFILE_ID_PATTERN.test(e.deleteId);
 }
 
 /**
@@ -2248,11 +2288,36 @@ export class ApiStore {
   }
 
   /**
-   * Every stored profile: the registered ones and those the boot held back ({@link heldBack}).
-   * For a check whether ANOTHER profile uses a name or a slot; a held-back profile is not usable,
-   * but its names are its own again once it is admitted. Everything that attaches, lists or
-   * sends reads {@link getAll}.
+   * Why deleting `profile` would leave a token in the vault: a name on its record (`written`)
+   * still holds the value its exchange wrote, and a stored entry the boot could not read names
+   * it too, so whose it is cannot be told and the purge keeps it. Asked before the delete, so a
+   * delete that would leave such a token removes nothing and says how to clear the entry first.
+   * `null` when nothing stands in the way. A token a mandate's consent wrote is not kept for an
+   * entry (see {@link purgeRecordedTokens}), so it refuses nothing here either.
    */
+  deleteRefusal(profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): string | null {
+    if (isMandateConnection(profile)) return null;
+    for (const e of this.unreadable.values()) {
+      const names = recordedWrites(profile).filter((w) => {
+        if (isProtectedSecretWrite(w.name) || !(e.all || e.names.has(w.name))) return false;
+        let value: string | null;
+        try {
+          value = secretStore?.resolve(w.name) ?? null;
+        } catch {
+          value = null;
+        }
+        return value !== null && tokenFingerprint(value) === w.fp;
+      }).map((w) => w.name);
+      if (names.length === 0) continue;
+      const one = names.length === 1;
+      const first = clearedByHand(e)
+        ? `remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes)`
+        : `delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered)`;
+      return `API profile "${profile.id}" was not deleted. Its sign-in wrote ${names.join(', ')}, and the delete would have to remove ${one ? 'that token' : 'those tokens'} with it, but ${unreadableWhere(e)} names ${one ? 'it' : 'them'} too, so whose ${one ? 'it is' : 'they are'} cannot be told. Nothing was changed. First ${first}, then delete "${profile.id}" again.`;
+    }
+    return null;
+  }
+
   /** Whether a stored entry the boot could not read or register names `name` ({@link unreadable}). */
   unreadableHolds(name: string): boolean {
     for (const e of this.unreadable.values()) if (e.all || e.names.has(name)) return true;
@@ -2273,10 +2338,8 @@ export class ApiStore {
     }
     const outcome = mode === 'save' ? 'Nothing was saved.' : 'It is not registered; nothing was deleted.';
     for (const e of this.unreadable.values()) {
-      const where = `a stored API profile that could not be read (${e.source}, id ${JSON.stringify(e.deleteId)})`;
-      // A file whose name is no id cannot be deleted through the store; then the file has to go by hand.
-      const byHand = e.source.startsWith('file ') && !PROFILE_ID_PATTERN.test(e.deleteId);
-      const remedy = byHand
+      const where = unreadableWhere(e);
+      const remedy = clearedByHand(e)
         ? `To clear it, remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes), then set that API up again.`
         : `To clear it, delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered), then set that API up again.`;
       if (e.ids.has(profile.id)) {
@@ -2293,6 +2356,12 @@ export class ApiStore {
     return null;
   }
 
+  /**
+   * Every stored profile: the registered ones and those the boot held back ({@link heldBack}).
+   * For a check whether ANOTHER profile uses a name or a slot; a held-back profile is not usable,
+   * but its names are its own again once it is admitted. Everything that attaches, lists or
+   * sends reads {@link getAll}.
+   */
   knownProfiles(): ApiProfile[] {
     return [...this.profiles.values(), ...[...this.heldBack.values()].filter((p) => !this.profiles.has(p.id))];
   }

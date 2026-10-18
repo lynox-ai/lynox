@@ -11463,8 +11463,12 @@ export class LynoxHTTPApi {
       const { getLynoxDir } = await import('../core/config.js');
       const { ApiProfileUnlinkError, purgeRecordedTokens } = await import('../core/api-store.js');
       const apisDir = join(getLynoxDir(), 'apis');
-      // Read before the delete: the tokens to purge are named on the profile.
-      const existing = store.get(params['id']!);
+      // Read before the delete: the tokens to purge are named on the profile, registered or held
+      // back by the boot.
+      const existing = store.storedProfile(params['id']!);
+      // A delete that would have to leave a token behind removes nothing (see `deleteRefusal`).
+      const blocked = existing ? store.deleteRefusal(existing, engine.getSecretStore()) : null;
+      if (blocked !== null) { errorResponse(res, 409, blocked); return; }
       try {
         const removed = store.remove(params['id']!, apisDir);
         if (!removed) { errorResponse(res, 404, 'Profile not found'); return; }

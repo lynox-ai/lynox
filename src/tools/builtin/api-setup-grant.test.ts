@@ -1726,12 +1726,12 @@ describe('fetch_token — what a successful exchange records', () => {
     expect(vault.peek(REFRESH)).toBeUndefined();
   });
 
-  it('names what it kept because another profile uses it, when the profile was deleted while its exchange ran', async () => {
+  it('removes what it wrote although another profile reads it, when the profile was deleted while its exchange ran', async () => {
     const store = new ApiStore();
     store.register(crmProfile());
-    // Another profile reads the name this exchange writes its access token to.
-    // The admission holds this reader back now: stored, not registered. The purge reads stored
-    // profiles, so it still keeps the name.
+    // Another profile reads the name this exchange writes its access token to. The admission
+    // holds this reader back: stored, not registered. It keeps nothing: the token leaves with the
+    // profile whose exchange wrote it (PRD §4a, N4).
     expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
     const vault = vaultWithRefresh();
     const agent = makeAgent(store, vault);
@@ -1742,10 +1742,10 @@ describe('fetch_token — what a successful exchange records', () => {
 
     const result = await fetchToken(agent);
 
-    expect(vault.peek(ACCESS)).toBe('at-1');
+    expect(vault.peek(ACCESS)).toBeUndefined();
     expect(vault.peek(REFRESH)).toBeUndefined();
-    expect(result).toContain(`Removed the tokens its exchanges wrote: ${REFRESH}.`);
-    expect(result).toContain(`Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET, ${ACCESS}.`);
+    expect(result).toContain(`Removed the tokens its exchanges wrote: ${ACCESS}, ${REFRESH}.`);
+    expect(result).toContain('Still in the vault: CRM_CLIENT_ID, CRM_CLIENT_SECRET.');
     expect(result).not.toContain('Nothing is stored');
   });
 
@@ -1923,7 +1923,7 @@ describe('(285) delete asks the person before it removes anything', () => {
     const ask = vi.fn(async (_q: unknown) => 'Deny');
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, makeAgent(store, vaultOf(), ask as never));
     const q = ask.mock.calls[0]![0];
-    expect(flattenPrompt(q as never)).toBe('⚠ api_setup: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it (a token another profile still uses stays), so the connection has to be authorized again. Delete it?');
+    expect(flattenPrompt(q as never)).toBe('⚠ api_setup: delete the API profile CRM (id crm-api, host api.crm.example)? The 2 token(s) its sign-in stored are removed from the vault with it, also where another profile reads them, so the connection has to be authorized again. Delete it?');
     const values = promptSegments(q as never).filter((x) => x.kind === 'value').map((x) => x.text);
     expect(values).toEqual(['CRM', 'crm-api', 'api.crm.example', '2']);
   });
@@ -2087,35 +2087,35 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek(REFRESH)).toBe('pasted-by-the-user');
   });
 
-  it('keeps a recorded token another profile still reads', async () => {
+  it('removes a recorded token another profile still reads', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
-    // The admission holds this reader back now: stored, not registered. The purge reads stored
-    // profiles, so it still keeps the name.
+    // A profile that names the name does not keep it: a token this profile's exchange wrote leaves
+    // with this profile (PRD §4a, N4), and the profile that named it loses its source.
     expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: [ACCESS] } })).toBe(false);
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
     const result = await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent)) as string;
 
-    expect(vault.peek(ACCESS)).toBe('shared');
-    expect(result).not.toContain('Removed');
-    expect(result).toContain(`Still in the vault: ${ACCESS}.`);
+    expect(vault.peek(ACCESS)).toBeUndefined();
+    expect(result).toContain(`Removed the tokens its exchanges wrote: ${ACCESS}.`);
+    expect(result).not.toContain('Still in the vault');
   });
 
-  it('keeps a recorded token a neighbour reads through an array-like vault_keys', async () => {
+  it('removes a recorded token a neighbour reads through an array-like vault_keys', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ [ACCESS]: 'shared' }) } }));
     // Not an array, but the attach reads `vault_keys?.[0]` from it all the same.
-    // The admission holds this reader back now: stored, not registered. The purge reads stored
-    // profiles, so it still keeps the name.
+    // A profile that names the name does not keep it: a token this profile's exchange wrote leaves
+    // with this profile (PRD §4a, N4), and the profile that named it loses its source.
     expect(store.register({ id: 'reporting', name: 'Reporting', base_url: 'https://reports.example.com/v1', description: 'Reports', auth: { type: 'bearer', vault_keys: { 0: ACCESS } as unknown as string[] } })).toBe(false);
     const vault = makeVault({ [ACCESS]: 'shared' });
     const agent = makeAgent(store, vault);
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
-    expect(vault.peek(ACCESS)).toBe('shared');
+    expect(vault.peek(ACCESS)).toBeUndefined();
   });
 
   it('cannot be used to delete an unrelated secret by creating and deleting a profile of the same name', async () => {
@@ -2150,11 +2150,11 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
   });
 
   // A recorded name of the exchange's choosing, not the derived pair.
-  it('keeps a recorded token another profile reads as its basic password', async () => {
+  it('removes a recorded token another profile reads as its basic password', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
-    // The admission holds this reader back now: stored, not registered. The purge reads stored
-    // profiles, so it still keeps the name.
+    // A profile that names the name does not keep it: a token this profile's exchange wrote leaves
+    // with this profile (PRD §4a, N4), and the profile that named it loses its source.
     expect(store.register({ id: 'legacy', name: 'Legacy', base_url: 'https://legacy.example.com/v1', description: 'Legacy', auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'LEGACY_USER', password_key: 'CRM_MINTED' } })).toBe(false);
     expect(store.knownProfiles().map((p) => p.id)).toContain('legacy');
     const vault = makeVault({ CRM_MINTED: 'shared' });
@@ -2162,14 +2162,14 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
-    expect(vault.peek('CRM_MINTED')).toBe('shared');
+    expect(vault.peek('CRM_MINTED')).toBeUndefined();
   });
 
-  it('keeps a recorded token another profile names as its oauth client secret', async () => {
+  it('removes a recorded token another profile names as its oauth client secret', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ CRM_MINTED: 'shared' }) } }));
-    // The admission holds this reader back now: stored, not registered. The purge reads stored
-    // profiles, so it still keeps the name.
+    // A profile that names the name does not keep it: a token this profile's exchange wrote leaves
+    // with this profile (PRD §4a, N4), and the profile that named it loses its source.
     expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(false);
     expect(store.knownProfiles().map((p) => p.id)).toContain('other-oauth');
     const vault = makeVault({ CRM_MINTED: 'shared' });
@@ -2177,19 +2177,18 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
-    expect(vault.peek('CRM_MINTED')).toBe('shared');
+    expect(vault.peek('CRM_MINTED')).toBeUndefined();
   });
 
-  // PRD §3.13 (H2i): a token a mandate's consent wrote leaves with its profile, even when
-  // another profile names it — that naming is how it would outlive its connection.
+  // PRD §3.13 (H2i) made a token a mandate's consent wrote leave with its profile even when another
+  // profile names it; PRD §4a (N4) makes that hold whoever's consent wrote it.
   it.each([
     ['removes it when a mandate\'s consent wrote it', 'mandate:setup@example.org', undefined],
-    ['control: keeps it when the owner\'s consent wrote it', 'owner', 'shared'],
+    ['removes it when the owner\'s consent wrote it', 'owner', undefined],
   ])('a recorded token another profile names: %s', async (_label, connectedBy, left) => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { connected_by: connectedBy, written: wrote({ CRM_MINTED: 'shared' }) } }));
-    // The admission holds this reader back now: stored, not registered. The purge reads stored
-    // profiles, so it still keeps the name.
+    // The other profile is held back by the admission: stored, not registered.
     expect(store.register({ ...crmProfile(), id: 'other-oauth', base_url: 'https://other.example.com/v1', custom_endpoint_ack: { ...ACK, hosts: ['other.example.com'] }, auth: { type: 'oauth2', vault_keys: ['OTHER_ID'], oauth: { token_url: 'https://other.example.com/token', grant_type: 'client_credentials', client_id_key: 'OTHER_ID', client_secret_key: 'CRM_MINTED' } } })).toBe(false);
     expect(store.knownProfiles().map((p) => p.id)).toContain('other-oauth');
     const vault = makeVault({ CRM_MINTED: 'shared' });
@@ -2199,7 +2198,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(vault.peek('CRM_MINTED')).toBe(left);
   });
 
-  it('keeps a recorded token that another profile has on its own record', async () => {
+  // Another profile on another vault slot recording the same token holds nothing back: only the
+  // other half of a `-`/`_` pair does (see the next test but two).
+  it('removes a recorded token that a profile on another slot has on its own record', async () => {
     const store = new ApiStore();
     store.register(crmProfile({ oauth_grant: { written: wrote({ SHARED_TOKEN: 'v' }) } }));
     // Two records of one name: the admission registers neither now, and the delete of a profile
@@ -2215,7 +2216,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
 
     await apiSetupTool.handler({ action: 'delete', id: 'crm-api' }, withDeleteConsent(agent));
 
-    expect(vault.peek('SHARED_TOKEN')).toBe('v');
+    expect(vault.peek('SHARED_TOKEN')).toBeUndefined();
   });
 
   it('never removes a protected name, even when it is on the record', async () => {
@@ -2233,7 +2234,9 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     expect(result).toBe('Deleted API profile "crm-g".');
   });
 
-  it('purges nothing for a row the boot refused', async () => {
+  // The other half of a `-`/`_` pair records the same token on the same vault slot: the value is
+  // its too, so it stays, and the reply says why.
+  it('leaves a token the other half of a `-`/`_` pair records, and names it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-api-grant-slot-'));
     tmpDirs.push(dir);
     const engine = new EngineDb(join(dir, 'engine.db'), '');
@@ -2258,7 +2261,7 @@ describe('delete — only what the profile\'s exchanges wrote leaves the vault',
     const agent = makeAgent(booted, vault);
     const result = await apiSetupTool.handler({ action: 'delete', id: refused }, withDeleteConsent(agent)) as string;
 
-    expect(result).toBe(`Deleted API profile "${refused}".`);
+    expect(result).toBe(`Deleted API profile "${refused}". Left in the vault: X_Y_ACCESS_TOKEN. Another stored profile whose id differs from this one only in \`-\` versus \`_\` uses the same vault slot and records the same token, so it stays for that profile.`);
     expect(vault.peek('X_Y_ACCESS_TOKEN')).toBe('the-holders-token');
   });
 

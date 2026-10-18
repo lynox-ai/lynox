@@ -218,13 +218,24 @@ describe.each(loaders)('a written entry whose fingerprint is not a string, throu
     expect(store.get('shop')).toBeDefined();
     expect(slotMayReach(store, 'SHOP_OUT', 'other', undefined)).toBe(false);
   });
-  it('a delete of another profile leaves the written name in the vault', () => {
+  // What another profile's exchange wrote leaves with that profile, whoever else names it.
+  it('a delete of another profile that recorded the same name removes it', () => {
     const { store } = boot([asEntry(shop())]);
     const token = value('shop', 'out');
     const other: ApiProfile = { ...oauth('crm'), oauth_grant: { written: [{ name: 'SHOP_OUT', fp: tokenFingerprint(token) }] } };
     const vault = handlerVault({ SHOP_OUT: token });
-    expect(purgeRecordedTokens(store, other, vault).removed).toEqual([]);
-    expect(vault.peek('SHOP_OUT')).toBe(token);
+    expect(purgeRecordedTokens(store, other, vault).removed).toEqual(['SHOP_OUT']);
+    expect(vault.peek('SHOP_OUT')).toBeUndefined();
+  });
+  // The written name counts among the names the writer uses: a deleted profile that only
+  // CONFIGURES it does not offer it as one this caller could not look at.
+  it('a delete of a profile configuring the written name does not report it as its own', () => {
+    const configures = bearer('crm', 'SHOP_OUT');
+    const scoped = { resolve: () => null, explainUnresolved: (n: string) => (n === 'SHOP_OUT' ? 'out-of-scope' : 'absent') } as unknown as Parameters<typeof purgeRecordedTokens>[2];
+    const { store } = boot([asEntry(shop())]);
+    expect(purgeRecordedTokens(store, configures, scoped).notVisible).toEqual([]);
+    // Control: without the writer it is reported.
+    expect(purgeRecordedTokens(new ApiStore(), configures, scoped).notVisible).toEqual(['SHOP_OUT']);
   });
 });
 
