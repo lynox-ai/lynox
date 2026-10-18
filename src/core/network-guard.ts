@@ -748,9 +748,13 @@ export async function fetchPinned(url: string, init: RequestInit = {}): Promise<
   // pinned request and every redirect hop is sent, by the URL and by a Host header a caller set,
   // which names the server that answers whatever the URL says.
   // Every host-named key counts: a plain object can carry `Host` and `host` side by side, and the
-  // transport sends the last one. The port is cut whatever follows the colon.
+  // transport sends the last one. A value is not always one clean host, so it is split on the
+  // characters that cannot be part of one, and each piece is read as it is and with whatever
+  // follows its last colon cut.
   const hostHeaders = Object.entries(headers).filter(([h]) => h.toLowerCase() === 'host').map(([, v]) => v);
-  if (isShopifyAdminHost(parsed.hostname) || hostHeaders.some((v) => isShopifyAdminHost(v.trim().replace(/:[^:\]]*$/, '')))) {
+  const namesStore = (v: string): boolean => v.split(/[\s,/@]+/).some((piece) =>
+    isShopifyAdminHost(piece) || isShopifyAdminHost(piece.replace(/:[^:\]]*$/, '')));
+  if (isShopifyAdminHost(parsed.hostname) || hostHeaders.some(namesStore)) {
     throw new Error(`Blocked: ${SHOPIFY_UNAVAILABLE}`);
   }
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '');

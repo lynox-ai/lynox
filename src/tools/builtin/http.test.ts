@@ -7529,6 +7529,9 @@ describe('requests to a Shopify store are refused', () => {
     [{ HOST: '  shop.myshopify.com  ' }, true],
     [{ Host: 'shop.myshopify.com:x' }, true],
     [{ Host: 'other.commerce.example', host: 'shop.myshopify.com' }, true],
+    [{ Host: 'shop.myshopify.com, other.commerce.example' }, true],
+    [{ Host: 'other.commerce.example:x.myshopify.com' }, true],
+    [{ Host: 'other.commerce.example:8443' }, false],
     [{ Host: 'other.commerce.example' }, false],
   ] as const)('Host headers %o on a read: refused %s', async (hostHeaders, refused) => {
     const { SHOPIFY_UNAVAILABLE } = await import('../../core/shopify-host.js');
