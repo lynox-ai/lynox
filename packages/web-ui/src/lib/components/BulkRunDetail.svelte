@@ -251,8 +251,8 @@
 													</div>
 												{/each}
 											{:else if target.diff.kind === 'text'}
-												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line}<del class="text-danger">- {line}</del>
-{/each}{#each target.diff.added as line}<ins class="text-success no-underline">+ {line}</ins>
+												<pre class="text-xs whitespace-pre-wrap">{#each target.diff.removed as line, i (i)}<del class="text-danger">- {line}</del>
+{/each}{#each target.diff.added as line, i (i)}<ins class="text-success no-underline">+ {line}</ins>
 {/each}</pre>
 											{:else if target.error}
 												<span class="text-text-subtle">{target.error}</span>

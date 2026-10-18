@@ -101,7 +101,7 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson, externalHostOf } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
 import { bulkPreviewTriggerId } from '../core/trigger-store.js';
