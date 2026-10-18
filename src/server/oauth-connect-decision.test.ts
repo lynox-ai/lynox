@@ -139,6 +139,7 @@ describe('the start route decides everything before it mints anything', () => {
       authorizeUrl: 'https://acme.shops.example.com/admin/oauth/authorize',
       tokenUrl: 'https://acme.shops.example.com/admin/oauth/access_token',
       scopes: ['openid'],
+      scopeParam: 'openid',
     });
   });
 
@@ -364,7 +365,7 @@ describe('the authorize link', () => {
   const target = { host: 'auth.example.com', authorizeUrl: 'https://auth.example.com/authorize?prompt=consent', tokenUrl: 'https://auth.example.com/token' };
 
   it('carries the scopes the decision named, space-separated, next to the PKCE and state values', () => {
-    const url = new URL(buildAuthorizeUrl({ ...target, scopes: ['openid', 'offline_access', 'contact_show'] }, parts));
+    const url = new URL(buildAuthorizeUrl({ ...target, scopes: ['openid', 'offline_access', 'contact_show'], scopeParam: 'openid offline_access contact_show' }, parts));
     expect(url.searchParams.get('scope')).toBe('openid offline_access contact_show');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('state')).toBe('st');
@@ -374,7 +375,33 @@ describe('the authorize link', () => {
   });
 
   it('sends no scope parameter when there is nothing to ask for', () => {
-    const url = new URL(buildAuthorizeUrl({ ...target, scopes: [] }, parts));
+    const url = new URL(buildAuthorizeUrl({ ...target, scopes: [], scopeParam: '' }, parts));
     expect(url.searchParams.has('scope')).toBe(false);
+  });
+});
+
+describe('the authorize link of a shipped preset', () => {
+  const parts = { clientId: 'cid', redirectUri: 'https://tenant.example/api/oauth/callback', state: 'st', challenge: 'ch', method: 'S256' };
+  const shipped = (presetId: string, base: string, params: Record<string, string>, scope: string, authHost: string): ConnectFacts => ({
+    ...good,
+    profile: profile({
+      base_url: base,
+      auth: { type: 'oauth2', vault_keys: ['SHOP_CLIENT_ID'], oauth: { preset_id: presetId, preset_params: params, scope, client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET' } },
+      custom_endpoint_ack: { ...ACK, hosts: [authHost], redirect_hosts: [authHost] },
+    }),
+  });
+
+  it('joins Shopify\'s scopes with commas', () => {
+    const decision = decideConnect(shipped('shopify', 'https://acme.myshopify.com', { shop: 'acme' }, 'read_products read_orders', 'acme.myshopify.com'));
+    if (isRefusal(decision)) throw new Error(`refused: ${decision.kind} ${decision.message}`);
+    const url = new URL(buildAuthorizeUrl(decision, parts));
+    expect(url.origin + url.pathname).toBe('https://acme.myshopify.com/admin/oauth/authorize');
+    expect(url.searchParams.get('scope')).toBe('read_products,read_orders');
+  });
+
+  it('keeps bexio\'s scopes space-separated', () => {
+    const decision = decideConnect(shipped('bexio', 'https://api.bexio.com', {}, 'contact_show', 'auth.bexio.com'));
+    if (isRefusal(decision)) throw new Error(`refused: ${decision.kind} ${decision.message}`);
+    expect(new URL(buildAuthorizeUrl(decision, parts)).searchParams.get('scope')).toBe('openid offline_access contact_show');
   });
 });

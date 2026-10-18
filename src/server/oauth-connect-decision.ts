@@ -18,7 +18,7 @@
  * proves nothing, so the test iterates it.
  */
 import type { ApiProfile } from '../core/api-store.js';
-import { derivePresetEndpoints, presetIds, presetScopeRequest, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetScopeParam, presetScopeRequest, OAUTH_PRESETS, type PresetRegister } from '../core/oauth-presets.js';
 import { checkRedirectTarget } from '../core/oauth-redirect-guard.js';
 
 /** Every way the start route refuses before anything is minted. */
@@ -71,6 +71,8 @@ export interface ConnectTarget {
   readonly host: string;
   /** What the authorize link asks for: the preset's required scopes plus the profile's. */
   readonly scopes: readonly string[];
+  /** `scopes` as the link's `scope` parameter, joined the way the preset says (Shopify: commas). */
+  readonly scopeParam: string;
   /**
    * The preset's customer text, when the link asks for one of its write scopes, with the write
    * scopes it asks for. The route shows it and sends the person on only after they confirm.
@@ -207,6 +209,7 @@ export function decideConnect(
   return {
     ...endpoints,
     scopes: scope.scopes,
+    scopeParam: preset ? presetScopeParam(preset, scope.scopes) : scope.scopes.join(' '),
     ...(notice && writes.length > 0 ? { consent: { lang: notice.lang, paragraphs: notice.paragraphs, writeScopes: writes } } : {}),
   };
 }
@@ -235,7 +238,7 @@ export function buildAuthorizeUrl(target: ConnectTarget, parts: AuthorizeLinkPar
   authorize.searchParams.set('state', parts.state);
   authorize.searchParams.set('code_challenge', parts.challenge);
   authorize.searchParams.set('code_challenge_method', parts.method);
-  if (target.scopes.length > 0) authorize.searchParams.set('scope', target.scopes.join(' '));
+  if (target.scopes.length > 0) authorize.searchParams.set('scope', target.scopeParam);
   return authorize.toString();
 }
 
