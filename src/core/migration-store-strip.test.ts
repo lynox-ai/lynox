@@ -15,6 +15,7 @@ import { SecretVault } from './secret-vault.js';
 import { MigrationExporter } from './migration-export.js';
 import { MigrationImporter, type ImportVerification } from './migration-import.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
+import { MANDATE_TAG_PREFIX } from './request-principal.js';
 import { generateEphemeralKeypair, serializePublicKey, deserializePublicKey, deriveTransferKey } from './migration-crypto.js';
 
 const SRC_KEY = 'source-vault-key-store-strip-2026';
@@ -190,6 +191,20 @@ describe('a migration import drops store connections', () => {
     const names = vaultNames(dst);
     expect(names).toContain(shared);
     expect(names).toContain(accessTokenKey('shop-acme'));
+  });
+
+  it('a store a mandate connected loses its slots even where a kept profile names them', () => {
+    const src = tmp(); const dst = tmp();
+    const shared = 'SHARED_TOKEN';
+    const store = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`, written: [{ name: shared, fp: tokenFingerprint('shared-value') }] } } as Partial<ApiProfile>);
+    const user: ApiProfile = { id: 'crm', name: 'CRM', base_url: 'https://api.crm.example.com', description: 'names the slot',
+      auth: { type: 'bearer', vault_keys: [shared, accessTokenKey('shop-acme')] } } as ApiProfile;
+    seedEngine(src, SRC_KEY, [store, user], true);
+    seedVault(src, SRC_KEY, { ...SECRETS, [shared]: 'shared-value' });
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
+    const names = vaultNames(dst);
+    expect(names).not.toContain(shared);
+    expect(names).not.toContain(accessTokenKey('shop-acme'));
   });
 
   it('an import without a store connection reports none', () => {

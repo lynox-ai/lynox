@@ -1769,13 +1769,21 @@ export class ApiStore {
    * `purgeRecordedTokens` would. `out.inUse` names every slot a profile that is not stripped
    * reads (`collectVaultKeys`, its derived token pair included): the caller leaves those, derived
    * or recorded, so a `-`/`_` partner or a profile that names the same slot keeps its credential.
+   * Not for a store a mandate connected: naming its slot is how a mandate's token would outlive its
+   * connection (`purgeRecordedTokens`), so `out.force` names those slots, removed in any case.
    * A row or flat file that does not parse is skipped: the boot parses it the same way and does
    * not load it either.
    */
-  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: WrittenSecret[]; inUse: string[] }): string[] {
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: WrittenSecret[]; inUse: string[]; force: string[] }): string[] {
     const ids = new Set<string>();
     const written: WrittenSecret[] = [];
     const inUse = new Set<string>();
+    const force = new Set<string>();
+    const noteMandate = (p: ApiProfile): void => {
+      if (!isMandateConnection(p)) return;
+      force.add(accessTokenKey(p.id)); force.add(refreshTokenKey(p.id));
+      for (const w of Array.isArray(p.oauth_grant?.written) ? p.oauth_grant.written : []) if (typeof w.name === 'string') force.add(w.name);
+    };
     const noteWritten = (grant: OAuthGrantRecord | undefined): void => {
       for (const w of Array.isArray(grant?.written) ? grant.written : []) {
         const { name, fp } = w as { name?: unknown; fp?: unknown };
@@ -1802,6 +1810,7 @@ export class ApiStore {
           if (!isStore(profile)) { for (const k of collectVaultKeys(profile)) inUse.add(k); continue; }
           ids.add(profile.id);
           noteWritten(profile.oauth_grant);
+          noteMandate(profile);
           const grant = stripGrant(profile.oauth_grant);
           store.upsert(profileToConnectionRow(grant === undefined ? profile : { ...profile, oauth_grant: grant }));
         }
@@ -1822,13 +1831,14 @@ export class ApiStore {
         }
         ids.add(profile.id);
         noteWritten(profile.oauth_grant);
+        noteMandate(profile as unknown as ApiProfile);
         if (profile.oauth_grant !== undefined) {
           profile.oauth_grant = stripGrant(profile.oauth_grant);
           writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
         }
       }
     }
-    if (out !== undefined) { out.written = written; out.inUse = [...inUse].sort(); }
+    if (out !== undefined) { out.written = written; out.inUse = [...inUse].sort(); out.force = [...force].sort(); }
     return [...ids].sort();
   }
 

@@ -458,7 +458,7 @@ export class MigrationImporter {
     // key and their tokens reach no store here, so each is dropped and the customer connects the
     // store again. Every destination, managed or not; after the secrets, so the vault holds what
     // is removed. A token slot of a store profile goes; the client pair stays.
-    const written: { written: WrittenSecret[]; inUse: string[] } = { written: [], inUse: [] };
+    const written: { written: WrittenSecret[]; inUse: string[]; force: string[] } = { written: [], inUse: [], force: [] };
     const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey, written);
     if (reconnect.length > 0) {
       const vaultPath = join(this.lynoxDir, 'vault.db');
@@ -467,13 +467,15 @@ export class MigrationImporter {
         try {
           // A slot a kept profile reads stays, derived or recorded: a `-`/`_` partner shares the
           // derived pair, and any profile may name a slot an exchange once wrote.
-          const inUse = new Set(written.inUse);
+          const force = new Set(written.force);
+          const inUse = new Set(written.inUse.filter((n) => !force.has(n)));
           for (const id of reconnect) {
             for (const name of [accessTokenKey(id), refreshTokenKey(id)]) if (!inUse.has(name)) vault.delete(name);
           }
           // Of a recorded slot only the value the exchange wrote, and never a protected name: what
-          // sits there now may be the customer's own. The three questions `purgeRecordedTokens`
-          // asks, minus the unreadable rows, which the boot does not load either.
+          // sits there now may be the customer's own. `purgeRecordedTokens` asks the same, with
+          // the same mandate exception; it also holds a slot an unreadable row names, which this
+          // does not (such a row is skipped here).
           for (const w of written.written) {
             if (isProtectedSecretWrite(w.name) || inUse.has(w.name)) continue;
             const value = vault.get(w.name);
