@@ -77,6 +77,75 @@ export function bulkStartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' |
 	return run.judge !== null ? 'judge' : 'read';
 }
 
+/** A planned run's halts that a restart moves on from, each with its own sentence on the page
+ *  (`bulk.halt.<key>`). The waiting halts (`awaitingStart`, `listed`) are starts, not restarts. */
+const BULK_RESTART_AS_IS = new Set([
+	'unavailable', 'timeBudget', 'consecutiveFailures', 'stoppedByOwner', 'listUnreadable', 'credential', 'unauthorized',
+	'blocked', 'creditRefused', 'spendLimit', 'judgeModel', 'costCap',
+]);
+/** Halts a restart would meet again on the same targets: the run has to be planned again. */
+const BULK_RESTART_NONE = new Set(['contract', 'listFormWithdrawn', 'listNotAList', 'listTooLarge', 'listNoProgress']);
+
+/** How a planned run that halted on a failure goes on: read on, read its list on, judge on, judge
+ *  on under a higher spend limit — or not at all (`none`, `no_judge`, `judge_own_key`). Null for a
+ *  run that did not halt that way, or on a halt this page has no sentence for: then it shows the
+ *  engine's reason and offers nothing. */
+export type BulkRestartKind = 'read' | 'list' | 'judge' | 'judge_cap' | 'none' | 'no_judge' | 'judge_own_key';
+
+export function bulkRestartKind(run: Pick<BulkRunDetailData, 'phase' | 'haltKey' | 'listFirstPage' | 'judge' | 'judgeServedBy' | 'judgeOwnKey'>): BulkRestartKind | null {
+	if (run.phase !== 'planned' || run.haltKey === null) return null;
+	if (BULK_RESTART_NONE.has(run.haltKey)) return 'none';
+	if (!BULK_RESTART_AS_IS.has(run.haltKey)) return null;
+	// As at the start: a judged run that cannot be judged is not moved on, not even its list.
+	if (run.judge !== null && run.judgeOwnKey) return 'judge_own_key';
+	if (run.judge !== null && run.judgeServedBy === null) return 'no_judge';
+	// A list still being read reads on from its page, judged or not.
+	if (run.listFirstPage !== null) return 'list';
+	if (run.judge !== null) return run.haltKey === 'costCap' ? 'judge_cap' : 'judge';
+	return 'read';
+}
+
+/** The page's own sentences for a run's halt: why it halted, and what the owner can do first.
+ *  `managed`: whether this instance is a managed one; unknown reads as managed, whose wording
+ *  holds for both. Null on a halt this page has no sentence for. */
+export function bulkHaltText(
+	run: Pick<BulkRunDetailData, 'haltKey' | 'targetSystem' | 'costUsd' | 'costCapUsd'>,
+	managed: boolean | null,
+	i18n: BulkI18n,
+): { cause: string; before: string | null } | null {
+	const key = run.haltKey;
+	if (key === null || !(BULK_RESTART_AS_IS.has(key) || BULK_RESTART_NONE.has(key))) return null;
+	if (key === 'judgeModel') return { cause: i18n.t('bulk.start.no_judge_model'), before: null };
+	// An external run's name is its host, so `{provider}` and `{host}` read the same there.
+	const name = bulkSystemName(run.targetSystem, i18n);
+	const vars = {
+		provider: name,
+		host: name,
+		cap: bulkUsd(run.costCapUsd ?? 0),
+		spent: bulkUsd(run.costUsd),
+	};
+	const tier = managed === false ? 'selfhost' : 'managed';
+	const beforeKey = key === 'unauthorized' ? 'bulk.halt.credential_before'
+		: key === 'blocked' || key === 'spendLimit' ? `bulk.halt.${key}_before_${tier}`
+		: `bulk.halt.${key}_before`;
+	const before = i18n.tf(beforeKey, vars);
+	return { cause: i18n.tf(`bulk.halt.${key}`, vars), before: before === beforeKey ? null : before };
+}
+
+/** An amount in US dollars as the halt sentences show it, without a currency sign: to the cent,
+ *  and to the hundredth of a cent below one cent, so a small spend is not shown as nothing. */
+export function bulkUsd(usd: number): string {
+	return usd > 0 && usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2);
+}
+
+/** The spend limit a run halted on its limit restarts with, or null: an amount `bulkCostCap`
+ *  takes, and above the current limit. A limit just above what is spent would halt again at once:
+ *  the run halts before a target whose worst case could cross it. */
+export function bulkRestartCap(input: string, current: number | null): number | null {
+	const cap = bulkCostCap(input);
+	return cap === null || (current !== null && cap <= current) ? null : cap;
+}
+
 /** Text the owner reads before a run acts on it, with every hidden character (`hidden-chars.ts`,
  *  the same file the engine refuses a judge rule by) shown as its code point. Not removed: the
  *  run reads the text as it is, so what the owner reads must be that text too: a removed

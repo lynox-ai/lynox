@@ -10,7 +10,7 @@
 	import { formatCost } from '../format.js';
 	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import {
-		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkStartKind, bulkStep, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
+		BULK_STEPS, bulkAtProbe, bulkCanUndo, bulkCostCap, bulkHaltText, bulkHostOf, bulkJudgeProviderName, bulkLabel, bulkRestartCap, bulkRestartKind, bulkStartKind, bulkStep, bulkUsd, bulkVisibleText, bulkSystemName, bulkValueText, bulkWaitsForStart, bulkWriting,
 		type BulkRunDetailData, type BulkTarget,
 	} from './bulk-runs.js';
 
@@ -35,6 +35,9 @@
 	let capInput = $state('');
 	// The started, unapproved judged run a judged start would end, once the engine has named it.
 	let supersedable = $state<{ id: string; costUsd: number } | null>(null);
+	// Whether this is a managed instance: two halt sentences name a different next step there.
+	// Unknown (not yet loaded, or the config could not be read) reads as managed.
+	let managed = $state<boolean | null>(null);
 
 	async function json<T>(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: T }> {
 		const res = await fetch(`${getApiBase()}${path}`, init);
@@ -194,6 +197,43 @@
 		});
 	}
 
+	/** Move a planned run on that halted on a failure (`bulkRestartKind`), with what this page
+	 *  showed: a list's start checksum, a judged run's rule hash, and on a run halted at its spend
+	 *  limit the higher limit as typed. Without a new limit a judged run keeps the one it started
+	 *  with. A judged restart ends another started judged run only as a start does: named first. */
+	function restart(supersedes?: string): Promise<void> {
+		return act(async () => {
+			if (!run) return t('common.load_failed');
+			const kind = bulkRestartKind(run);
+			let body: Record<string, unknown> = {};
+			if (kind === 'list') {
+				if (!run.listStartChecksum) return t('common.load_failed');
+				body = { listChecksum: run.listStartChecksum };
+			} else if (kind === 'judge' || kind === 'judge_cap') {
+				if (!run.judgeRuleHash) return t('common.load_failed');
+				body = { judgeRuleHash: run.judgeRuleHash, ...(supersedes !== undefined ? { supersedes } : {}) };
+				if (kind === 'judge_cap') {
+					const cap = bulkRestartCap(capInput, run.costCapUsd);
+					if (cap === null) return tf('bulk.restart.cap_low', { cap: bulkUsd(run.costCapUsd ?? 0) });
+					body['costCapUsd'] = cap;
+				}
+			} else if (kind !== 'read') {
+				return t('common.load_failed');
+			}
+			const r = await post(`/bulk/runs/${encodeURIComponent(runId)}/resume`, body);
+			if (!r.ok && r.body.code === 'supersede_required' && r.body.supersedable) {
+				supersedable = r.body.supersedable;
+				return '';
+			}
+			const refusal = refusalOf(r);
+			if (refusal !== null) {
+				await load();
+				if (error) error = refusal;
+			}
+			return refusal;
+		});
+	}
+
 	/** Plan the undo of this run; it is a run of its own, opened for its second approval. */
 	function planUndo(): Promise<void> {
 		return act(async () => {
@@ -211,6 +251,12 @@
 	}
 
 	$effect(() => { void runId; void load(); });
+	$effect(() => {
+		fetch(`${getApiBase()}/config`)
+			.then((r) => r.json())
+			.then((data: Record<string, unknown>) => { managed = !!data['managed']; })
+			.catch(() => { managed = null; });
+	});
 
 	const host = $derived(run ? bulkHostOf(run.targetSystem) : null);
 	const atProbe = $derived(run !== null && bulkAtProbe(run));
@@ -221,6 +267,8 @@
 	const unmeasuredConfirmation = $derived(getLocale() === 'de' || !run?.writeFormConfirmation ? t('bulk.approve.unmeasured_confirm') : run.writeFormConfirmation);
 	const canUndo = $derived(run !== null && bulkCanUndo(run));
 	const startKind = $derived(run ? bulkStartKind(run) : null);
+	const restartKind = $derived(run ? bulkRestartKind(run) : null);
+	const haltText = $derived(run ? bulkHaltText(run, managed, i18n) : null);
 
 	const btn = 'rounded-[var(--radius-sm)] px-3 py-1.5 text-sm disabled:opacity-50 disabled:cursor-not-allowed';
 	const btnPrimary = `${btn} bg-accent text-accent-fg hover:opacity-90`;
@@ -256,7 +304,7 @@
 				{/if}
 				{#if run.haltReason}
 					<dt class="text-text-subtle">{t('bulk.head.halted')}</dt>
-					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : run.haltReason}</dd>
+					<dd>{atProbe && run.haltKey === 'maxTargets' ? t('bulk.halted_after_probe') : haltText?.cause ?? run.haltReason}</dd>
 				{/if}
 			</dl>
 
@@ -379,6 +427,50 @@
 							<button type="button" class={btnPrimary} disabled={busy || bulkCostCap(capInput) === null} onclick={() => start()}>{t('bulk.start.judge')}</button>
 							<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
 						</div>
+					{/if}
+				</div>
+			{:else if restartKind !== null}
+				<div class="space-y-3 border-t border-border pt-4">
+					{#if haltText?.before}
+						<p class="text-sm">{haltText.before}</p>
+					{/if}
+					{#if restartKind === 'none'}
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.restart.none')}</p>
+					{:else if restartKind === 'judge_own_key'}
+						<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.judge_own_key')}</p>
+					{:else if restartKind === 'no_judge'}
+						{#if run.haltKey !== 'judgeModel'}
+							<p class="text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">{t('bulk.start.no_judge_model')}</p>
+						{/if}
+					{:else}
+						{#if restartKind === 'judge_cap'}
+							<div class="text-sm space-y-1">
+								<label class="flex flex-wrap items-center gap-2">
+									{t('bulk.start.cap_prefix')}
+									<input type="text" inputmode="decimal" class={inputClass} bind:value={capInput} aria-invalid={capInput !== '' && bulkRestartCap(capInput, run.costCapUsd) === null} />
+									{t('bulk.start.cap_suffix')}
+								</label>
+								<p class="text-text-muted">{t('bulk.restart.cap_whole')} {t('bulk.start.cap_explain')}</p>
+								{#if capInput !== '' && bulkRestartCap(capInput, run.costCapUsd) === null}
+									<p class="text-danger">{tf('bulk.restart.cap_low', { cap: bulkUsd(run.costCapUsd ?? 0) })}</p>
+								{/if}
+							</div>
+						{/if}
+						<p class="text-sm text-text-muted">{t(restartKind === 'list' ? 'bulk.restart.kept_list' : 'bulk.restart.kept')}</p>
+						{#if supersedable}
+							<div class="space-y-2 text-sm rounded-[var(--radius-sm)] bg-warning/10 border border-warning/30 px-3 py-2">
+								<p>{tf('bulk.start.supersede', { cost: formatCost(supersedable.costUsd) })}</p>
+								<div class="flex flex-wrap gap-2">
+									<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} onclick={() => restart(supersedable!.id)}>{t('bulk.start.supersede_yes')}</button>
+									<button type="button" class={btnPlain} onclick={() => { supersedable = null; }}>{t('bulk.not_now')}</button>
+								</div>
+							</div>
+						{:else}
+							<div class="flex flex-wrap gap-2">
+								<button type="button" class={btnPrimary} disabled={busy || (restartKind === 'judge_cap' && bulkRestartCap(capInput, run.costCapUsd) === null)} onclick={() => restart()}>{t(restartKind === 'list' ? 'bulk.restart.list' : restartKind === 'read' ? 'bulk.restart.read' : 'bulk.restart.judge')}</button>
+								<button type="button" class={btnPlain} onclick={onBack}>{t('bulk.not_now')}</button>
+							</div>
+						{/if}
 					{/if}
 				</div>
 			{:else if run.phase === 'previewed' && run.kind === 'apply'}
