@@ -89,8 +89,12 @@ describe('with a pass', () => {
       `${ORIGIN}/admin/%2e%2e/apps/evil`,
       `${ORIGIN}/admin/x%2Fy`,
       `${ORIGIN}/admin/x%5Cy`,
+      `${ORIGIN}/admin/..;/apps/evil`,
+      `${ORIGIN}/admin/x;y`,
+      `${ORIGIN}/admin/%252e%252e/apps/evil`,
+      `${ORIGIN}/admin/caf%C3%A9`,
     ]) {
-      await expect(send(url, { [H]: TOKEN }, pass()), url).rejects.toThrow(/Admin API|encoded separator/);
+      await expect(send(url, { [H]: TOKEN }, pass()), url).rejects.toThrow(/Admin API|encoded character or a matrix segment/);
     }
     expect(sent).toHaveLength(0);
   });
@@ -98,6 +102,13 @@ describe('with a pass', () => {
   it('refuses a Host header that names another server', async () => {
     await expect(send(`${ORIGIN}/admin/x`, { [H]: TOKEN, Host: 'other.myshopify.com' }, pass()))
       .rejects.toThrow(/Host header/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('refuses a header that re-targets the request, on a read as well', async () => {
+    for (const name of ['X-Original-URL', 'x-rewrite-url', 'X-Forwarded-Host', 'X-Forwarded-Prefix']) {
+      await expect(send(`${ORIGIN}/admin/x`, { [H]: TOKEN, [name]: '/apps/evil' }, pass()), name).rejects.toThrow(/re-targets/);
+    }
     expect(sent).toHaveLength(0);
   });
 

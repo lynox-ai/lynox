@@ -61,6 +61,8 @@ export class ExactClearance {
   private cleared = false;
   private backoffUntil = 0;
   private asking: Promise<ExactClearanceResult> | null = null;
+  /** The next re-assert may ask from here on, whatever the last one got back. */
+  private reassertNotBefore = 0;
 
   constructor(
     private readonly cp: ExactControlPlane | null,
@@ -147,7 +149,11 @@ export class ExactClearance {
       return;
     }
     if (!set) return;
-    if (this.now() < this.backoffUntil) return;
+    if (this.now() < this.backoffUntil || this.now() < this.reassertNotBefore) return;
+    // Spaced on an ok as well: a control plane that keeps reporting `false` after it took the
+    // record is asked once a minute, not on every status sync. Kept apart from `backoffUntil`,
+    // which would block this boot's attaches.
+    this.reassertNotBefore = this.now() + EXACT_ATTACH_BACKOFF_MS;
     const answer = await this.ask();
     if (!answer.ok) this.backoffUntil = this.now() + EXACT_ATTACH_BACKOFF_MS;
   }

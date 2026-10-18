@@ -55,3 +55,20 @@ describe('the store binding has a subkey of its own (R1-7)', () => {
     expect(src).toMatch(/createHmac\('sha256', this\._bindKey\)/);
   });
 });
+
+describe('every caller of attachStoredCredential hands it what a store pass needs', () => {
+  it('passes exactClearance and storeBindingDigest at each call, so no caller fails a store closed by leaving them out', () => {
+    const calls: string[] = [];
+    for (const p of sources(SRC)) {
+      const lines = readFileSync(p, 'utf-8').split('\n');
+      lines.forEach((line, i) => {
+        if (/\battachStoredCredential\(/.test(line) && !/function attachStoredCredential\(/.test(line)) calls.push(`${relative(SRC, p)}:${String(i + 1)}|${line}`);
+      });
+    }
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const c of calls) {
+      expect(c, c.split('|')[0]).toMatch(/exactClearance: \w+\.exactClearance/);
+      expect(c, c.split('|')[0]).toMatch(/storeBindingDigest: \w+\.storeBindingDigest/);
+    }
+  });
+});

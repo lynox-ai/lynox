@@ -1883,7 +1883,12 @@ async function attachEngineManagedAuth(
     // `secretAccess` audit event in the real store, so the swap buys three vault
     // reads of a credential on a request that was never going to be sent.
     const expiresAt = profile.auth?.oauth?.token_expires_at;
-    if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
+    // A store preset's token is never renewed here (B3): only the callback mints it, and it
+    // binds it to the store there. A renewal would replace a bound token with an unbound one.
+    // Asked before the refresh slot is read, so a store connection costs no vault read for it.
+    if (attachPreset?.apiOnDerivedHost === true && typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
+      process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
+    } else if (typeof expiresAt === 'number' && Date.now() >= expiresAt - OAUTH_REFRESH_BUFFER_MS) {
       // Asked HERE rather than inside the renewal because only this scope can
       // answer the second argument: whether the vault actually holds a refresh
       // token for this profile. The profile can NAME a slot that is empty.
@@ -1903,11 +1908,7 @@ async function attachEngineManagedAuth(
       // question and not this change's to answer.
       const stored = secretStore.resolve(refreshSlot);
       const slotState = oauthRefreshSlotState(profile, refreshSlot, stored);
-      // A store preset's token is never renewed here (B3): only the callback mints it, and it
-      // binds it to the store there. A renewal would replace a bound token with an unbound one.
-      if (attachPreset?.apiOnDerivedHost === true) {
-        process.stderr.write(`[lynox:http] oauth token renewal skipped for profile "${profile.id}": a store connection is renewed by connecting it again\n`);
-      } else if (oauthProfileMayBeRenewedUnattended(profile, stored !== null)) {
+      if (oauthProfileMayBeRenewedUnattended(profile, stored !== null)) {
         await renewExpiringOAuthToken(profile.id, agent, oauthRenewalInputs(profile, stored), { apiStore, secretStore });
       } else {
         process.stderr.write(

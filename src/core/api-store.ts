@@ -1762,9 +1762,22 @@ export class ApiStore {
    * `presetStoreHost`: a profile whose base was changed away from its store is stripped too.
    * The client pair stays. Independent of the managed re-gate: a self-hosted import is a move
    * under another vault key just the same.
+   *
+   * `out.slots` receives every slot the stripped records say an exchange wrote (a named refresh
+   * slot among them): with the record gone, deleting the profile later would no longer remove
+   * them, so the caller removes them now. A `connections` row that does not parse counts as a
+   * store connection: the boot cannot load it either, and its derived slots are dropped rather
+   * than kept on a guess. A flat file that does not parse is skipped; the boot reads the flat
+   * files only once, into `connections`, and skips the same file.
    */
-  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string): string[] {
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { slots: string[] }): string[] {
     const ids = new Set<string>();
+    const slots = new Set<string>();
+    const noteWritten = (grant: OAuthGrantRecord | undefined): void => {
+      for (const w of Array.isArray(grant?.written) ? grant.written : []) {
+        if (typeof (w as { name?: unknown }).name === 'string') slots.add((w as { name: string }).name);
+      }
+    };
     const isStore = (p: { base_url?: unknown; auth?: unknown }): boolean => {
       const presetId = (p.auth as { oauth?: { preset_id?: unknown } } | undefined)?.oauth?.preset_id;
       if (typeof presetId === 'string' && OAUTH_PRESETS.get(presetId)?.apiOnDerivedHost === true) return true;
@@ -1781,9 +1794,10 @@ export class ApiStore {
         const store = new ConnectionStore(engine);
         for (const row of store.getByKind('api')) {
           let profile: ApiProfile;
-          try { profile = connectionRowToProfile(row); } catch { continue; }
+          try { profile = connectionRowToProfile(row); } catch { ids.add(row.id); continue; }
           if (!isStore(profile)) continue;
           ids.add(profile.id);
+          noteWritten(profile.oauth_grant);
           const grant = stripGrant(profile.oauth_grant);
           store.upsert(profileToConnectionRow(grant === undefined ? profile : { ...profile, oauth_grant: grant }));
         }
@@ -1799,12 +1813,14 @@ export class ApiStore {
         try { profile = JSON.parse(readFileSync(path, 'utf-8')) as typeof profile; } catch { continue; }
         if (typeof profile.id !== 'string' || !isStore({ base_url: profile['base_url'], auth: profile['auth'] })) continue;
         ids.add(profile.id);
+        noteWritten(profile.oauth_grant);
         if (profile.oauth_grant !== undefined) {
           profile.oauth_grant = stripGrant(profile.oauth_grant);
           writeFileSync(path, JSON.stringify(profile, null, 2), { mode: 0o600 });
         }
       }
     }
+    if (out !== undefined) out.slots = [...slots].sort();
     return [...ids].sort();
   }
 

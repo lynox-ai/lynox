@@ -241,6 +241,8 @@ describe('no renewal of a store preset (AC6)', () => {
     // The renewal reads the client credentials before it posts; it was not entered.
     expect(r.read).not.toContain('S_CSECRET');
     expect(r.read).not.toContain('S_CID');
+    // Nor is the refresh slot read to decide it.
+    expect(r.read).not.toContain(refreshTokenKey('shop-acme'));
     expect(isStorePass(r.pass)).toBe(true);
   });
 });

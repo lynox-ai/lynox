@@ -96,3 +96,18 @@ describe('a store profile\'s own token on a base outside its store', () => {
     expect(slotMayReach(storeOf([home]), 'SH_E_ACCESS_TOKEN', 'request', 'https://alpha.myshopify.com/admin/api/2025-10/shop.json', home)).toBe(true);
   });
 });
+
+describe('a token the callback bound to a store, after its profile was re-pointed away', () => {
+  it('reaches nothing, while the same profile without a binding reaches its base', async () => {
+    const { accessTokenKey } = await import('./api-store.js');
+    const repointed = (binding: boolean): ApiProfile => ({
+      id: 'sh-x', name: 'sh-x', base_url: 'https://api.example.com', description: 'sh-x',
+      auth: { type: 'oauth2', oauth: { client_id_key: 'S_CID', client_secret_key: 'S_CSECRET' } },
+      oauth_grant: { origin: 'callback', state: 'connected', ...(binding ? { store_binding: 'f'.repeat(64) } : {}) },
+    } as ApiProfile);
+    for (const [binding, reaches] of [[true, false], [false, true]] as const) {
+      const p = repointed(binding);
+      expect(slotMayReach(storeOf([p]), accessTokenKey('sh-x'), 'request', 'https://api.example.com/v1/x', p), String(binding)).toBe(reaches);
+    }
+  });
+});

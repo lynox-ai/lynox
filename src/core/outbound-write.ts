@@ -334,7 +334,7 @@ const RETARGETING_HEADERS = new Set(['host', 'x-host', 'forwarded']);
  */
 const RETARGETING_FAMILIES = ['x-forwarded', 'x-original', 'x-rewrite'];
 
-function isRetargetingHeaderName(raw: string): boolean {
+export function isRetargetingHeaderName(raw: string): boolean {
   const name = headerKey(raw);
   if (RETARGETING_HEADERS.has(name)) return true;
   return name !== 'x-forwarded-for' && RETARGETING_FAMILIES.some((family) => name.startsWith(family));

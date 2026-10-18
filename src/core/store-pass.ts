@@ -9,9 +9,11 @@
  *
  *  - it is a pass this process minted (an object of the same shape is not);
  *  - the hop goes over https to the pass's origin, compared the way DNS reads the host;
- *  - the path is under `/admin/`, with no encoded `/`, `\` or `.` that a server could
- *    decode into another path;
- *  - a Host header, if any, names the same host;
+ *  - the path is under `/admin/` and carries no `%` and no `;`: an encoded `/`, `\` or `.`,
+ *    a double encoding (`%252e`) or a matrix segment (`/admin/..;/apps/`) is something a server
+ *    in front of the store could route to another path;
+ *  - a Host header, if any, names the same host, and no header re-targets the request
+ *    (`X-Original-URL`, `X-Forwarded-*`, …), on a read as on a write;
  *  - exactly one header of the credential set is sent, it is the pass's header, and its
  *    value digests to the pass's digest.
  *
@@ -25,6 +27,7 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { normalizeHostForMatch } from './shopify-host.js';
+import { isRetargetingHeaderName } from './outbound-write.js';
 
 /** Headers that carry a credential, any of which a pass must account for. */
 export const STORE_CREDENTIAL_HEADERS: ReadonlySet<string> = new Set([
@@ -89,12 +92,14 @@ export function storePassRefusal(url: URL, headers: Record<string, string>, pass
   if (origin === null || origin !== pass.origin) return 'the request does not go to the verified store';
   const path = url.pathname;
   if (!path.startsWith(STORE_PASS_PATH_PREFIX)) return 'the request is not for the Admin API';
-  if (/%(2f|5c|2e)/i.test(path)) return 'the path carries an encoded separator';
+  if (path.includes('%') || path.includes(';')) return 'the path carries an encoded character or a matrix segment';
   const passHost = new URL(pass.origin).host;
   for (const [name, value] of Object.entries(headers)) {
     if (name.toLowerCase() !== 'host') continue;
     if (normalizeHostForMatch(value.trim()) !== passHost) return 'the Host header names another server';
   }
+  const retarget = Object.keys(headers).find(isRetargetingHeaderName);
+  if (retarget !== undefined) return 'the request carries a header that re-targets it';
   const credentials = Object.entries(headers).filter(([name]) => STORE_CREDENTIAL_HEADERS.has(name.toLowerCase()));
   if (credentials.length !== 1) return 'the request must carry exactly the verified credential';
   const [[name, value]] = credentials as [[string, string]];

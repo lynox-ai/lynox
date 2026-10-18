@@ -422,6 +422,10 @@ export function slotMayReach(
       // is refused there: the URL parser leaves it alone, a server may decode it and route out of
       // that path. (Encoded dot segments the parser resolves itself.)
       const ownPreset = owner.auth?.type === 'oauth2' && owner.auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(owner.auth.oauth.preset_id) : undefined;
+      // A token the callback bound to a store stays a store token after the profile was re-pointed
+      // away from the store preset (a human may accept the new host): it reaches nothing then.
+      // `oauth_grant` is the engine's; an update cannot clear the binding.
+      if (ownPreset?.apiOnDerivedHost !== true && typeof owner.oauth_grant?.store_binding === 'string') return false;
       if (ownPreset?.apiOnDerivedHost === true) {
         const store = presetStoreHost(owner);
         const path = new URL(target).pathname;

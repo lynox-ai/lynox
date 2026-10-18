@@ -456,7 +456,8 @@ export class MigrationImporter {
     // key and their tokens reach no store here, so each is dropped and the customer connects the
     // store again. Every destination, managed or not; after the secrets, so the vault holds what
     // is removed. A token slot of a store profile goes; the client pair stays.
-    const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey);
+    const written = { slots: [] as string[] };
+    const reconnect = ApiStore.stripStoreConnectionsOnImport(join(this.lynoxDir, 'engine.db'), join(this.lynoxDir, 'apis'), this.vaultKey, written);
     if (reconnect.length > 0) {
       const vaultPath = join(this.lynoxDir, 'vault.db');
       if (existsSync(vaultPath)) {
@@ -466,6 +467,7 @@ export class MigrationImporter {
             vault.delete(accessTokenKey(id));
             vault.delete(refreshTokenKey(id));
           }
+          for (const slot of written.slots) vault.delete(slot);
         } finally {
           vault.close();
         }

@@ -143,6 +143,32 @@ describe('reassert', () => {
     await h.c.reassert(false);
     expect(h.calls).toHaveLength(1);
   });
+
+  it('a refused re-assert holds the attaches of this boot as well', async () => {
+    const h = harness([async () => json(409, { ok: false, reason: 'busy' })], markerStub({ set: true }));
+    await h.c.reassert(false);
+    expect(h.c.blockedNow()).toBe(true);
+    expect(await h.c.ensure()).toEqual({ ok: false, reason: 'backoff' });
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it('asks once a minute while the control plane keeps reporting false after an ok', async () => {
+    const h = harness([async () => json(200, { ok: true }), async () => json(200, { ok: true })], markerStub({ set: true }));
+    await h.c.reassert(false);
+    h.advance(EXACT_ATTACH_BACKOFF_MS - 1);
+    await h.c.reassert(false);
+    expect(h.calls).toHaveLength(1);
+    h.advance(1);
+    await h.c.reassert(false);
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it('an ok re-assert does not hold the attaches', async () => {
+    const h = harness([async () => json(200, { ok: true }), async () => json(200, { ok: true })], markerStub({ set: true }));
+    await h.c.reassert(false);
+    expect(h.c.blockedNow()).toBe(false);
+    expect(await h.c.ensure()).toEqual({ ok: true });
+  });
 });
 
 describe('controlPlaneFromEnv', () => {
