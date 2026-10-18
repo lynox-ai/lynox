@@ -447,7 +447,7 @@ describe('going on from a run that halted', () => {
 		// At its maximum the run writes on under the new one the owner types.
 		expect(bulkResumeText(w('maxTargets'), true, EN)?.kept).toBe('What is already written stays. lynox tries the remaining targets up to the approved maximum, including the failed ones. Targets whose content lynox may not send are left out.');
 		// A write sent and failed may have reached its target: that is not "nothing written".
-		expect(bulkResumeText(w('consecutiveFailures', { sent: 3 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
+		expect(bulkResumeText(w('consecutiveFailures', { applied: 0, sent: 3 }), true, DE)?.kept).toBe('Was schon geschrieben ist, bleibt. lynox versucht alle übrigen Ziele noch einmal, auch die gescheiterten. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
 		// With nothing sent to any target, nothing stays and nothing is tried again.
 		expect(bulkResumeText(w('expired', { phase: 'approved', sent: 0 }), true, DE)?.kept).toBe('Bisher ist noch nichts geschrieben. lynox versucht jetzt alle Ziele. Ausgenommen sind Ziele, deren Inhalt lynox nicht senden darf.');
 		expect(bulkResumeText(w('unavailable', { sent: 0, resumeTries: 4 }), true, EN)?.kept).toBe('Nothing has been written yet. lynox now tries the targets up to the approved maximum. Targets whose content lynox may not send are left out.');
