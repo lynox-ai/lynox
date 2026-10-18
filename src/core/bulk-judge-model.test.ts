@@ -105,6 +105,12 @@ describe('judgeAxisOf', () => {
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: 'http://api.fireworks.ai/inference/v1' }, undefined)).toBeNull();
     expect(judgeAxisOf({ provider: 'openai', apiBaseURL: undefined }, 'http://api.mistral.ai/v1')).toBeNull();
   });
+
+  it('gives a Mistral slot the Mistral judge only on Mistral\'s own endpoint', () => {
+    expect(judgeAxisOf({ provider: 'mistral', apiBaseURL: MISTRAL_BASE }, undefined)).toBe('mistral');
+    expect(judgeAxisOf({ provider: 'mistral', apiBaseURL: 'http://api.mistral.ai/v1' }, undefined)).toBeNull();
+    expect(judgeAxisOf({ provider: 'mistral', apiBaseURL: 'https://proxy.example.invalid/v1' }, undefined)).toBeNull();
+  });
 });
 
 describe('judgeOutputBudget', () => {
@@ -113,7 +119,7 @@ describe('judgeOutputBudget', () => {
   it('lifts a thinking-only judge above the budget it comes back empty at', () => {
     const silent = modelCapability(JUDGE_MODELS.fireworks)!.thinkingOnly!.emptyAtOrBelow;
     expect(judgeMaxOutputTokens(small)).toBeLessThanOrEqual(silent);
-    expect(judgeOutputBudget(JUDGE_MODELS.fireworks, small)).toBe(1024);
+    expect(judgeOutputBudget(JUDGE_MODELS.fireworks, small)).toBe(judgeMaxOutputTokens(small) + 1024);
   });
 
   it('leaves every other judge on the schema bound', () => {
@@ -123,9 +129,10 @@ describe('judgeOutputBudget', () => {
     }
   });
 
-  it('keeps a large schema bound above the floor', () => {
+  it('adds the room to think on top of a large schema bound too', () => {
+    // Its thinking counts against the same budget: a large verdict still needs the room.
     const large: ExtractSchema = { type: 'object', properties: { body: { type: 'string', maxLength: 4000 } } };
-    expect(judgeOutputBudget(JUDGE_MODELS.fireworks, large)).toBe(judgeMaxOutputTokens(large));
     expect(judgeMaxOutputTokens(large)).toBeGreaterThan(1024);
+    expect(judgeOutputBudget(JUDGE_MODELS.fireworks, large)).toBe(judgeMaxOutputTokens(large) + 1024);
   });
 });

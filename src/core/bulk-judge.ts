@@ -95,19 +95,21 @@ export const JUDGE_MODELS = {
 
 export type JudgeAxis = keyof typeof JUDGE_MODELS;
 
-/** A thinking-only judge gets this many times its silent bound (see {@link judgeOutputBudget}). */
+/** A thinking-only judge gets this many times its silent bound on top (see {@link judgeOutputBudget}). */
 export const THINKING_JUDGE_HEADROOM = 4;
 
 /**
- * Output tokens a verdict call on `modelId` may take: the schema's bound, raised for a model
- * that only answers after thinking. Such a model comes back empty at or below its measured bound
- * and the adapter refuses that request, so a small schema's bound would halt the run at its first
- * target. Four times the bound is 1024 for `gpt-oss-120b`, a budget it was never empty at.
+ * Output tokens a verdict call on `modelId` may take: the schema's bound, and for a model that
+ * only answers after thinking, room to think on top of it. Such a model comes back empty at or
+ * below its measured bound and the adapter refuses that request, so a small schema's bound alone
+ * would halt the run at its first target; and its thinking counts against the same budget, so the
+ * room is added, not a floor. Four times the bound is 1024 for `gpt-oss-120b`, a budget it was
+ * never empty at. A reply cut off anyway is refused per target (`cut_off`), never recorded.
  */
 export function judgeOutputBudget(modelId: string, schema: ExtractSchema): number {
   const base = judgeMaxOutputTokens(schema);
   const silent = modelCapability(modelId)?.thinkingOnly?.emptyAtOrBelow;
-  return silent === undefined ? base : Math.max(base, silent * THINKING_JUDGE_HEADROOM);
+  return silent === undefined ? base : base + silent * THINKING_JUDGE_HEADROOM;
 }
 
 type JudgeUserConfig = Pick<LynoxUserConfig, 'account_tier' | 'max_tier' | 'blocked_model_ids' | 'api_base_url'>;
@@ -134,7 +136,11 @@ export function judgeAxisOf(
 ): JudgeAxis | null {
   if (snap.provider === 'anthropic') return 'anthropic';
   if (snap.provider === 'vertex') return 'vertex';
-  if (snap.provider === 'mistral') return 'mistral';
+  // A Mistral slot without an endpoint is served by Mistral's own; one with an endpoint must be it.
+  if (snap.provider === 'mistral') {
+    const own = snap.apiBaseURL;
+    return own === undefined || (httpsHostOf(own) !== null && isMistralHost(own)) ? 'mistral' : null;
+  }
   if (getProviderDescriptor(snap.provider)?.wireClient !== 'openai') return null;
   const url = snap.apiBaseURL ?? baseApiBaseURL;
   const host = httpsHostOf(url);
