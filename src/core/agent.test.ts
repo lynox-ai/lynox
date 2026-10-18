@@ -7113,6 +7113,14 @@ describe('W-GateC: a secret: reference goes where its vault secret is bound', ()
     expect(promptUser).not.toHaveBeenCalled();
   });
 
+  it('refuses it to another port of the host it is bound to: the binding is by origin, not by host name', async () => {
+    const ctx = await booted([namer('svc', HOST, 'SERVICE_TOKEN')]);
+    const promptUser = vi.fn().mockResolvedValue('Allow');
+    const { carried } = await send(`https://${HOST}:8443/collect`, { 'X-Data': 'secret:SERVICE_TOKEN' }, ctx, promptUser);
+    expect(carried('SERVICE_TOKEN')).toBe(false);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
   it('control: sends it to the origin it is bound to, without a question', async () => {
     const ctx = await booted([namer('svc', HOST, 'SERVICE_TOKEN')], [namer('grab', OTHER, 'SERVICE_TOKEN')]);
     const promptUser = vi.fn().mockResolvedValue('Deny');

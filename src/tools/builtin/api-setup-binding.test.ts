@@ -13,7 +13,7 @@ vi.mock('../../core/config.js', async (orig) => ({ ...(await orig<typeof import(
 import { ApiStore, accessTokenKey, type ApiProfile } from '../../core/api-store.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { SecretReleases } from '../../core/secret-releases.js';
-import { releaseBinding } from '../../core/profile-secret-view.js';
+import { releaseBinding, slotMayReach, slotsToClearBeforeSave } from '../../core/profile-secret-view.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
@@ -386,6 +386,64 @@ describe('W-Question: the owner is asked with what is stored, and only then does
     expect(store.get('crm2')).toBeUndefined();
     expect(asked.some((q) => q.includes('REPORT_KEY'))).toBe(false);
     expect(bindings()?.boundOf('REPORT_KEY')).not.toContain('https://crm2.example');
+  });
+});
+
+describe('W-Basic: a basic profile on another host names the owner\'s secret as its password', () => {
+  const basicOn = (id: string, host: string, user: string, pass: string): ApiProfile => ({
+    id, name: id, base_url: `https://${host}/v1`, description: 'd', custom_endpoint_ack: ack(host),
+    auth: { type: 'basic', basic_format: 'user_pass_split', username_key: user, password_key: pass },
+  } as ApiProfile);
+
+  it('attaches nothing there', async () => {
+    vault['GRAB_USER'] = value('gu');
+    const store = boot(reports());
+    expect(store.register(basicOn('grab', 'evil.example', 'GRAB_USER', 'REPORT_KEY'))).toBe(true);
+    await get(store, 'https://evil.example/v1/items');
+    expect(carried(vault['REPORT_KEY']!)).toBe(false);
+  });
+
+  it('control: the owner\'s basic profile signs in on its own base', async () => {
+    vault['CRM_USER'] = value('cu');
+    vault['CRM_PASS'] = value('cp');
+    const store = boot(basicOn('crm', 'crm.example', 'CRM_USER', 'CRM_PASS'));
+    await get(store, 'https://crm.example/v1/items');
+    expect(carried(vault['CRM_PASS']!)).toBe(true);
+  });
+});
+
+describe('W-Mandate-save: a mandate\'s save is never asked and never widens a binding', () => {
+  it('stores the mandate\'s profile without a question about the owner\'s secret', async () => {
+    const store = boot(reports());
+    const asked: string[] = [];
+    const p = { ...bearerOn('m-new', 'mandate.example', 'REPORT_KEY'), ...extra };
+    const principal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+    await apiSetupTool.handler({ action: 'create', profile: p } as never, agentOf(store, { principal, promptUser: async (q) => { asked.push(flattenPrompt(q)); return 'Allow'; } }));
+    expect(asked.some((q) => q.includes('REPORT_KEY'))).toBe(false);
+    expect(bindings()?.boundOf('REPORT_KEY')).toEqual(['https://reports.example']);
+  });
+});
+
+describe('W-Purge-move: a save that moves where the credentials go empties the tokens they minted', () => {
+  it('names the access token when the base moves, and nothing for an edit that keeps the destinations', () => {
+    const moved = { ...owner(), base_url: 'https://moved.example/v1' };
+    expect(slotsToClearBeforeSave(owner(), moved, [owner()])).toContain(accessTokenKey('owner'));
+    expect(slotsToClearBeforeSave(owner(), { ...owner(), description: 'edited' }, [owner()])).toEqual([]);
+  });
+});
+
+describe('W-H1-ctx: without a binding context a token minted with a client secret goes nowhere', () => {
+  it('refuses the owner\'s access token at its own base when no binding context is given, and allows it with one', () => {
+    const store = boot(owner());
+    const target = 'https://owner.example/v1/items';
+    expect(slotMayReach(store, accessTokenKey('owner'), 'request', target, undefined, undefined)).toBe(false);
+    expect(slotMayReach(store, accessTokenKey('owner'), 'request', target, undefined, { bindings: bindings(), store: null, read: null })).toBe(true);
+  });
+});
+
+describe('W-Contested-throw: a count that throws counts as contested', () => {
+  it('answers contested when the profiles cannot be read', () => {
+    expect(bindingsModule?.isContestedName({ knownProfiles: () => { throw new Error('unreadable'); } }, 'REPORT_KEY')).toBe(true);
   });
 });
 

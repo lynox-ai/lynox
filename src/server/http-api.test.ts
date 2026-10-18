@@ -15983,6 +15983,12 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
     let bindingsDir = '';
     let bindingsDb: import('../core/engine-db.js').EngineDb | null = null;
     let previous: unknown;
+    // The callbacks below count against the file's shared rate window; give it back afterwards.
+    const rateCounts = (): Map<string, { count: number }> =>
+      (api as unknown as { rateCounts: Map<string, { count: number }> }).rateCounts;
+    let windowBefore = new Map<string, number>();
+    beforeAll(() => { windowBefore = new Map([...rateCounts()].map(([k, v]) => [k, v.count])); });
+    afterAll(() => { for (const [k, e] of rateCounts()) e.count = windowBefore.get(k) ?? 0; });
     afterEach(() => {
       (api as unknown as { engine: Record<string, unknown> }).engine['getVaultNameBindings'] = previous;
       bindingsDb?.close();
