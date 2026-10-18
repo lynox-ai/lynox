@@ -40,12 +40,18 @@ const plainProfile: ApiProfile = {
 const dirs: string[] = [];
 const tmp = (): string => { const d = mkdtempSync(join(tmpdir(), 'lynox-strip-')); dirs.push(d); return d; };
 
-function seedEngine(dir: string, key: string, profiles: ApiProfile[]): void {
+/** `apart`: each profile through a store of its own, for a state a save refuses and only older rows hold. */
+function seedEngine(dir: string, key: string, profiles: ApiProfile[], apart = false): void {
   const engine = new EngineDb(join(dir, 'engine.db'), key);
   try {
-    const store = new ApiStore();
-    store.setConnectionStore(new ConnectionStore(engine));
-    for (const p of profiles) expect(store.save(p).ok).toBe(true);
+    const shared = new ApiStore();
+    shared.setConnectionStore(new ConnectionStore(engine));
+    for (const p of profiles) {
+      const store = apart ? new ApiStore() : shared;
+      if (apart) store.setConnectionStore(new ConnectionStore(engine));
+      const r = store.save(p);
+      expect(r.ok, `${p.id}: ${JSON.stringify(r)}`).toBe(true);
+    }
   } finally { engine.close(); }
 }
 
@@ -167,6 +173,23 @@ describe('a migration import drops store connections', () => {
     const names = vaultNames(dst);
     expect(names).not.toContain('MY_REFRESH');
     for (const kept of ['S_CID', 'S_CSECRET', 'C_CID', 'ANTHROPIC_API_KEY']) expect(names).toContain(kept);
+  });
+
+  it('a slot a kept profile reads stays: a recorded slot it names, and the derived pair of a `-`/`_` partner', () => {
+    const src = tmp(); const dst = tmp();
+    const shared = 'SHARED_TOKEN';
+    const store = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), written: [{ name: shared, fp: tokenFingerprint('shared-value') }] } } as Partial<ApiProfile>);
+    const user: ApiProfile = { id: 'crm', name: 'CRM', base_url: 'https://api.crm.example.com', description: 'names the slot',
+      auth: { type: 'bearer', vault_keys: [shared] } } as ApiProfile;
+    const partner: ApiProfile = { id: 'shop_acme', name: 'Partner', base_url: 'https://api.partner.example.com', description: 'shares the derived pair',
+      auth: { type: 'oauth2', oauth: { client_id_key: 'P_CID', client_secret_key: 'P_CSECRET' } } } as ApiProfile;
+    seedEngine(src, SRC_KEY, [store, user, partner], true);
+    seedVault(src, SRC_KEY, { ...SECRETS, [shared]: 'shared-value' });
+    expect(accessTokenKey('shop_acme')).toBe(accessTokenKey('shop-acme'));
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
+    const names = vaultNames(dst);
+    expect(names).toContain(shared);
+    expect(names).toContain(accessTokenKey('shop-acme'));
   });
 
   it('an import without a store connection reports none', () => {

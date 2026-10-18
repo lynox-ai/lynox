@@ -1766,12 +1766,16 @@ export class ApiStore {
    * `out.written` receives what the stripped records say an exchange wrote (a named refresh slot
    * among them), name and fingerprint: with the record gone, deleting the profile later would no
    * longer remove them, so the caller removes each one whose value still has that fingerprint, as
-   * `purgeRecordedTokens` would. A row or flat file that does not parse is skipped: the boot
-   * parses it the same way and does not load it either.
+   * `purgeRecordedTokens` would. `out.inUse` names every slot a profile that is not stripped
+   * reads (`collectVaultKeys`, its derived token pair included): the caller leaves those, derived
+   * or recorded, so a `-`/`_` partner or a profile that names the same slot keeps its credential.
+   * A row or flat file that does not parse is skipped: the boot parses it the same way and does
+   * not load it either.
    */
-  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: WrittenSecret[] }): string[] {
+  static stripStoreConnectionsOnImport(engineDbPath: string | null, apisDir: string, vaultKey: string, out?: { written: WrittenSecret[]; inUse: string[] }): string[] {
     const ids = new Set<string>();
     const written: WrittenSecret[] = [];
+    const inUse = new Set<string>();
     const noteWritten = (grant: OAuthGrantRecord | undefined): void => {
       for (const w of Array.isArray(grant?.written) ? grant.written : []) {
         const { name, fp } = w as { name?: unknown; fp?: unknown };
@@ -1795,7 +1799,7 @@ export class ApiStore {
         for (const row of store.getByKind('api')) {
           let profile: ApiProfile;
           try { profile = connectionRowToProfile(row); } catch { continue; }
-          if (!isStore(profile)) continue;
+          if (!isStore(profile)) { for (const k of collectVaultKeys(profile)) inUse.add(k); continue; }
           ids.add(profile.id);
           noteWritten(profile.oauth_grant);
           const grant = stripGrant(profile.oauth_grant);
@@ -1811,7 +1815,11 @@ export class ApiStore {
         const path = join(apisDir, file);
         let profile: Record<string, unknown> & { id?: unknown; oauth_grant?: OAuthGrantRecord | undefined };
         try { profile = JSON.parse(readFileSync(path, 'utf-8')) as typeof profile; } catch { continue; }
-        if (typeof profile.id !== 'string' || !isStore({ base_url: profile['base_url'], auth: profile['auth'] })) continue;
+        if (typeof profile.id !== 'string') continue;
+        if (!isStore({ base_url: profile['base_url'], auth: profile['auth'] })) {
+          try { for (const k of collectVaultKeys(profile as unknown as ApiProfile)) inUse.add(k); } catch { /* not a profile the boot can read */ }
+          continue;
+        }
         ids.add(profile.id);
         noteWritten(profile.oauth_grant);
         if (profile.oauth_grant !== undefined) {
@@ -1820,7 +1828,7 @@ export class ApiStore {
         }
       }
     }
-    if (out !== undefined) out.written = written;
+    if (out !== undefined) { out.written = written; out.inUse = [...inUse].sort(); }
     return [...ids].sort();
   }
 
