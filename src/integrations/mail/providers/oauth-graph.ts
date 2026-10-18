@@ -7,10 +7,11 @@
 // ── Not wired yet ─────────────────────────────────────────────────────────
 //
 // Nothing constructs this provider: `mail/context.ts` has no `oauth_microsoft`
-// branch, and a test there holds that. The reason is the watch cursor. Its
-// only store today is `InMemoryDeltaCursorStore`, so a restart would begin a
-// new cursor at "now" and silently skip every message that arrived while the
-// process was down. The wiring and a persistent cursor store arrive together.
+// branch, and a test there holds that. The cursor store is a required
+// constructor argument, with no default: with `InMemoryDeltaCursorStore`, a
+// restart begins a new cursor at "now" and silently skips every message that
+// arrived while the process was down. The wiring passes the persistent one
+// (`MailStateDeltaCursorStore`, `mail/state.ts`); the tests pass the in-memory one.
 //
 // ── What each call costs ──────────────────────────────────────────────────
 //
@@ -167,7 +168,7 @@ export interface DeltaCursor {
   readonly since: string;
 }
 
-/** Per account and folder. In memory today; a persistent store comes with the wiring. */
+/** Per account and folder. In memory, or in mail-state.db (`MailStateDeltaCursorStore`). */
 export interface DeltaCursorStore {
   get(accountId: string, folder: string): DeltaCursor | null;
   set(accountId: string, folder: string, cursor: DeltaCursor): void;
@@ -466,7 +467,7 @@ export class OAuthGraphProvider implements MailProvider {
     return this.account.displayName;
   }
 
-  constructor(account: MailAccountConfig, auth: MicrosoftAuth, cursors: DeltaCursorStore = new InMemoryDeltaCursorStore()) {
+  constructor(account: MailAccountConfig, auth: MicrosoftAuth, cursors: DeltaCursorStore) {
     this.accountId = account.id;
     this.address = account.address;
     this.account = account;
