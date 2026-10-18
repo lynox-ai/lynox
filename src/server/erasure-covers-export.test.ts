@@ -615,11 +615,12 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       id: 'wf-granted', name: 'wf-granted', goal: 'post the weekly report', reasoning: 'r', estimatedCost: 0,
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }],
+      ...{ parameters: [{ name: 'recipient', description: '', type: 'string', source: 'user_input' }] },
     } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
     forgetPipeline('wf-granted');
     const planned = getPipeline('wf-granted', rh);
     if (planned === undefined) throw new Error('fixture: the saved workflow did not load');
-    const entry = { method: 'POST', host: GRANT_HOST, paths: ['/v1/reports'], params: {}, cron: '0 9 * * 1', afterUntrusted: false };
+    const entry = { method: 'POST', host: GRANT_HOST, paths: ['/v1/reports'], params: { recipient: GRANT_VALUE }, cron: '0 9 * * 1', afterUntrusted: false };
     const shown = prepareWorkflowGrant(planned, entry, engineDb);
     if (!shown.ok) throw new Error(`fixture: ${shown.error}`);
     const accepted = acceptWorkflowGrant(planned, { ...entry, checksum: shown.checksum, name: GRANT_NAME, title: GRANT_TITLE }, 'cookie:zzmarker', { history: rh, taskManager: tm, hasher: engineDb });
@@ -639,9 +640,11 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
     // Where the schedule lives today. A schedule written anywhere else as well shows up here first.
     expect(schedulesNamed(GRANT_TITLE), 'fixture: the acceptance must have created its schedule').toEqual(['engine.db:triggers=1']);
     expect(attributedRuns()).toEqual([{ id: 'run-granted', workflow_grant_id: grantId, started_via: 'library:cookie:zzmarker' }]);
+    expect(boundValuesHeld(), 'fixture: the bound value must be in the grant row and in its schedule').toEqual(['engine.db:triggers.params_json', 'engine.db:workflow_grants.bound_params_json']);
 
     const { status } = await erase();
     expect(status).toBe(200);
+    expect(boundValuesHeld(), 'no bound value of a grant may outlive an Art. 17 erasure').toEqual([]);
     expect(grants(), 'the acceptance must not outlive an Art. 17 erasure').toEqual([]);
     expect(stampedWorkflows(), 'no workflow may still carry a grant stamp after an Art. 17 erasure').toEqual([]);
     expect(schedulesNamed(GRANT_TITLE), 'the schedule a grant created must not outlive an Art. 17 erasure').toEqual([]);
@@ -651,6 +654,7 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
   const GRANT_HOST = 'zzmarker-grant-7f3a.example.com';
   const GRANT_NAME = 'ZZMARKER-grant-name-7f3a';
   const GRANT_TITLE = 'ZZMARKER-grant-schedule-7f3a';
+  const GRANT_VALUE = 'ZZMARKER-grant-bound-value-7f3a';
 
   function readDb<T>(file: 'engine.db' | 'history.db', read: (db: BetterSqlite3.Database) => T): T {
     const db = new BetterSqlite3(join(dir, file), { readonly: true });
@@ -677,6 +681,13 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       });
     }
     return found;
+  }
+  /** The two places a grant's bound values are kept, each listed when it still holds `GRANT_VALUE`. */
+  function boundValuesHeld(): string[] {
+    return readDb('engine.db', db => [
+      ...(db.prepare('SELECT 1 FROM triggers WHERE instr(params_json, ?) > 0').all(GRANT_VALUE).length > 0 ? ['engine.db:triggers.params_json'] : []),
+      ...(db.prepare('SELECT 1 FROM workflow_grants WHERE instr(bound_params_json, ?) > 0').all(GRANT_VALUE).length > 0 ? ['engine.db:workflow_grants.bound_params_json'] : []),
+    ]);
   }
   function attributedRuns(): unknown[] {
     return readDb('history.db', db => db.prepare('SELECT id, workflow_grant_id, started_via FROM pipeline_runs WHERE workflow_grant_id IS NOT NULL OR started_via IS NOT NULL').all());
