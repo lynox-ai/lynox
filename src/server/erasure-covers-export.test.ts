@@ -615,6 +615,8 @@ describe('Art. 17 erasure covers every surface the Art. 15 export reads (real en
       id: 'wf-granted', name: 'wf-granted', goal: 'post the weekly report', reasoning: 'r', estimatedCost: 0,
       createdAt: '2026-10-01T00:00:00.000Z', template: true,
       steps: [{ id: 's1', task: 'post the weekly report', tools: ['http_request'] }],
+      // `insertPlannedPipeline` does not declare `parameters` in its type but stores the whole object; the
+      // acceptance below only binds `recipient` because the stored workflow declares it.
       ...{ parameters: [{ name: 'recipient', description: '', type: 'string', source: 'user_input' }] },
     } as Parameters<RunHistory['insertPlannedPipeline']>[0]);
     forgetPipeline('wf-granted');
