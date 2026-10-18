@@ -4767,6 +4767,93 @@ describe('LynoxHTTPApi', () => {
         mockSecretResolve.mockReturnValue(null);
       }
     });
+
+    // The owner's releases to a deleted profile go with it, as `api_setup delete` does: a profile
+    // saved again under the same id, author and binding asks anew instead of getting them back.
+    describe('the owner\'s releases', () => {
+      const engineRef = (): Record<string, unknown> => (api as unknown as { engine: Record<string, unknown> }).engine;
+      let orig: unknown;
+      let dir = '';
+      let edb: { close(): void } | undefined;
+      beforeEach(() => { orig = engineRef()['getSecretReleases']; });
+      afterEach(() => {
+        engineRef()['getSecretReleases'] = orig;
+        mockGetApiStore.mockReturnValue(null);
+        edb?.close();
+        edb = undefined;
+        if (dir) rmSync(dir, { recursive: true, force: true });
+      });
+
+      async function releasesWith(...profileIds: string[]) {
+        const { EngineDb } = await import('../core/engine-db.js');
+        const { SecretReleases } = await import('../core/secret-releases.js');
+        dir = mkdtempSync(join(tmpdir(), 'lynox-http-delete-releases-'));
+        const db = new EngineDb(join(dir, 'engine.db'));
+        edb = db;
+        const releases = new SecretReleases(db.getDb());
+        for (const profileId of profileIds) {
+          releases.release({ kind: 'owner' } as never, { profileId, profileAuthor: 'mandate:setup@example.org', name: 'CRM_KEY', binding: 'b-1', mandateId: 'M-1' });
+        }
+        engineRef()['getSecretReleases'] = () => releases;
+        return releases;
+      }
+
+      it('are forgotten when the profile is deleted, and another profile\'s stay', async () => {
+        const { ApiStore } = await import('../core/api-store.js');
+        const releases = await releasesWith('crm-api', 'other-api');
+        const store = new ApiStore();
+        store.register({ id: 'crm-api', name: 'CRM', base_url: 'https://api.crm.example/v1', description: 'CRM', auth: { type: 'bearer', vault_keys: ['CRM_KEY'] }, created_by: 'mandate:setup@example.org' });
+        mockGetApiStore.mockReturnValue(store);
+        expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeDefined();
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeUndefined();
+        expect(releases.activeReleases().map((r) => r.profileId)).toEqual(['other-api']);
+      });
+
+      it('control: a refused delete forgets nothing', async () => {
+        const { ApiStore } = await import('../core/api-store.js');
+        const releases = await releasesWith('crm-api');
+        mockGetApiStore.mockReturnValue(new ApiStore());
+        const res = await jsonFetch('/api/api-profiles/crm-api', { method: 'DELETE' });
+        expect(res.status).toBe(404);
+        expect(releases.releaseOf('crm-api', 'mandate:setup@example.org', 'CRM_KEY')).toBeDefined();
+      });
+    });
+
+    it('answers with what the purge left, so the page can say it', async () => {
+      const { ApiStore } = await import('../core/api-store.js');
+      const { tokenFingerprint } = await import('../core/oauth-refresh-failure.js');
+      // `x_y` and `x-y` share one vault slot, and both recorded the same token there: the delete
+      // of one keeps it for the other.
+      mockSecretResolve.mockImplementation((n: string) => (n === 'X_Y_ACCESS_TOKEN' ? 'at-1' : null));
+      const store = new ApiStore();
+      const profile = (id: string) => ({
+        id, name: id, base_url: `https://${id.replace(/_/g, '-')}.example/v1`, description: id,
+        auth: { type: 'oauth2' as const, oauth: { token_url: `https://${id.replace(/_/g, '-')}.example/oauth/token`, grant_type: 'refresh_token' as const, client_id_key: `${id.toUpperCase().replace(/-/g, '_')}_CID`, client_secret_key: `${id.toUpperCase().replace(/-/g, '_')}_CSECRET` } },
+        oauth_grant: { written: [{ name: 'X_Y_ACCESS_TOKEN', fp: tokenFingerprint('at-1') }] },
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      store.register(profile('x-y'));
+      store.register(profile('x_y'));
+      stderr.mockRestore();
+      vi.spyOn(store, 'remove').mockImplementation(() => true);
+      mockGetApiStore.mockReturnValue(store);
+      mockSecretDelete.mockClear();
+      try {
+        const res = await jsonFetch('/api/api-profiles/x_y', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        const body = await res.json() as { ok: boolean; purge?: { removed: string[]; heldBySlotPartner: string[] } };
+        expect(body.ok).toBe(true);
+        expect(body.purge?.heldBySlotPartner).toEqual(['X_Y_ACCESS_TOKEN']);
+        expect(body.purge?.removed).toEqual([]);
+        expect(mockSecretDelete).not.toHaveBeenCalled();
+      } finally {
+        mockGetApiStore.mockReturnValue(null);
+        mockSecretResolve.mockReset();
+        mockSecretResolve.mockReturnValue(null);
+      }
+    });
   });
 
   describe('config', () => {

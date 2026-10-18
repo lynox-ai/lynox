@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
+	import { apiDeleteNotice } from '../utils/api-delete-notice.js';
 	import { newChat, sendMessage } from '../stores/chat.svelte.js';
 	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import Icon from '../primitives/Icon.svelte';
@@ -14,6 +15,8 @@
 	let expanded = $state<string | null>(null);
 	let deleting = $state<string | null>(null);
 	let error = $state('');
+	// What the last delete left in the vault, one sentence per kind (see `apiDeleteNotice`).
+	let left = $state<string[]>([]);
 
 	async function loadProfiles() {
 		loading = true;
@@ -36,9 +39,11 @@
 		if (!confirm(msg)) return;
 		deleting = profile.id;
 		error = '';
+		left = [];
 		try {
 			const res = await fetch(`${getApiBase()}/api-profiles/${encodeURIComponent(profile.id)}`, { method: 'DELETE' });
 			if (!res.ok) throw new Error();
+			left = apiDeleteNotice(await res.json().catch(() => null), tf);
 			profiles = profiles.filter(p => p.id !== profile.id);
 			if (expanded === profile.id) expanded = null;
 		} catch {
@@ -78,6 +83,11 @@
 
 	{#if error}
 		<div class="rounded-[var(--radius-md)] bg-danger/10 border border-danger/20 px-4 py-3 text-sm text-danger mb-4">{error}</div>
+	{/if}
+	{#if left.length > 0}
+		<div class="rounded-[var(--radius-md)] border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning mb-4 space-y-1" role="status" data-testid="api-delete-left">
+			{#each left as line}<p>{line}</p>{/each}
+		</div>
 	{/if}
 
 	{#if loading}

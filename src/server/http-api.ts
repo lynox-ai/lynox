@@ -11538,10 +11538,14 @@ export class LynoxHTTPApi {
         }
         throw err;
       }
+      // Releases to the profile go with it, as with `api_setup delete`: a profile saved again
+      // under the same id asks anew instead of inheriting them.
+      engine.getSecretReleases()?.forgetProfile(params['id']!);
       // The same purge `api_setup delete` runs, so the settings page and the tool
-      // take the same tokens with a profile — only those its exchanges wrote.
-      if (existing) purgeRecordedTokens(store, existing, engine.getSecretStore());
-      jsonResponse(res, 200, { ok: true });
+      // take the same tokens with a profile — only those its exchanges wrote. What it
+      // left is in the answer, so the page can say so instead of reporting a clean delete.
+      const purge = existing ? purgeRecordedTokens(store, existing, engine.getSecretStore()) : undefined;
+      jsonResponse(res, 200, purge ? { ok: true, purge } : { ok: true });
     }, ownerOnly('delete an API profile')));
 
     // ── DataStore ────────────────────────────────────────────────
