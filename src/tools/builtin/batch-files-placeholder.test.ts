@@ -132,7 +132,7 @@ describe('batch_files refuses the eviction placeholder into the artifacts direct
     }
   });
 
-  it('transform: the placeholder is not inserted again into an artifact that already holds one, as edit_file refuses it', async () => {
+  it('transform: the placeholder as inserted text is refused, also into an artifact that already holds one', async () => {
     const [, placeholder] = placeholders()[0]!;
     const held = `<h1>Pitch</h1>${placeholder}`;
     writeFileSync(join(artifacts, 'lost.html'), held);

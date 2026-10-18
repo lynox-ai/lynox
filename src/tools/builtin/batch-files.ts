@@ -319,8 +319,8 @@ export const batchFilesTool: ToolEntry<BatchFilesInput> = {
         // Whether the inserted text is the placeholder does not depend on the file. The result can
         // still form it from what the file already holds (`replaceAll` expands `$&`, `$'` and `` $` ``,
         // and an empty `replace` joins the text around `find`), so a file whose result holds the
-        // placeholder and whose content did not is judged too. A file that already held it can
-        // still be repaired.
+        // placeholder and whose content held none of its forms is judged too. A file that already
+        // holds one can still be repaired.
         const insertsPlaceholder = containsEvictionMarker(input.replace);
         for (const file of files) {
           try {
