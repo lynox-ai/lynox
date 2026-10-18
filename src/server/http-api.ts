@@ -101,9 +101,10 @@ import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
-import { BULK_UNKEYED_CHECKSUM_NOTE } from '../core/bulk-ledger.js';
+import { BULK_HALT_REASONS, BULK_UNKEYED_CHECKSUM_NOTE, canonicalJson } from '../core/bulk-ledger.js';
 import { BULK_LIST_NOTE, listPageUrl } from '../core/bulk-list.js';
 import { BULK_UNMEASURED_CONFIRMATION, BULK_UNMEASURED_NOTE } from '../core/bulk-write-forms.js';
+import { bulkPreviewTriggerId } from '../core/trigger-store.js';
 import { BulkTriggerLockedError, ForeignTodoError, TodoHasForeignSubtasksError, TriggerTierUnsupportedError, isTriggerModelTierUpdate, triggerTakesModelTier, type TaskManager } from '../core/task-manager.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 import { cpFetch } from '../core/connector-egress.js';
@@ -1013,6 +1014,20 @@ function requestIsTls(req: IncomingMessage, trustProxy: boolean): boolean {
   const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
   return proto === 'https';
 }
+
+/**
+ * Why an external run is not approved or resumed for more than one target, and what to do
+ * next. The model reads refusals and takes a rule from them, so the sentence says exactly
+ * when a run stays at one target (`probeHolds`): a probe is per host, verb and kind of entry,
+ * and an unchecked change needs a probe of its own run, written to an unchecked target.
+ */
+export const BULK_PROBE_REQUIRED =
+  'This run writes one target first. Approve it with maxTargets 1, check that target at the provider, confirm the ' +
+  'probe, then resume with more. One probe covers one kind of entry changed in one way, so a run that changes ' +
+  'several kinds of entry needs a confirmed probe for each. A run with an unchecked change needs a probe of its own, ' +
+  'written to an unchecked target: it cannot get past its first target if it changes several kinds of entry, starts ' +
+  'with a checked change, or must be written as a whole. Plan one run per kind of entry, and put unchecked changes ' +
+  'in a run of their own.';
 
 function errorResponse(
   res: ServerResponse,
@@ -8307,7 +8322,7 @@ export class LynoxHTTPApi {
       atomic_partial: [409, 'An atomic bulk run can only be undone after it was applied completely.'],
       external_in_progress: [409, 'Another external dry run is still reading its targets. Start this one when that one is done.'],
       mail_api: [403, 'A bulk run does not write to a mail provider\'s API — not a change, and not the undo of one. Send mail from the chat, where lynox asks before each email, and change a mail setting at the provider itself.'],
-      probe_required: [409, 'This host, write method and kind of resource have no confirmed probe yet: approve one target first (maxTargets 1), check that target at the provider, confirm the probe, then resume with more.'],
+      probe_required: [409, BULK_PROBE_REQUIRED],
       not_a_probe: [409, 'A probe is an external run that wrote exactly one target and has stopped.'],
       unmeasured_unconfirmed: [409, `lynox has not checked this kind of change with this provider. Approve it with "unmeasuredConfirmed": true — the statement "${BULK_UNMEASURED_CONFIRMATION}"`],
       undo_open: [409, 'Another run over the same targets — the run itself, an undo of it, or an undo of that — is approved or still writing. Let it finish first.'],
@@ -8318,8 +8333,36 @@ export class LynoxHTTPApi {
     };
     // Every response a run is approved from, or whose checksum it carries, says whether
     // that checksum binds — the approver decides with it, not only a later status read.
-    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed' }>(status: T): T & { checksumNote?: string } =>
-      status.checksumBinding === 'unkeyed' ? { ...status, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : status;
+    /** Which halt a run stands at, by name: the owner's page words its own sentences on the
+     *  name, never on the engine's English text. Null for no halt, or a text it does not know. */
+    const bulkHaltKey = (haltReason: string | null): string | null =>
+      haltReason === null ? null : (Object.entries(BULK_HALT_REASONS).find(([, text]) => text === haltReason)?.[0] ?? null);
+    const withBinding = <T extends { checksumBinding: 'keyed' | 'unkeyed'; haltReason: string | null }>(status: T): T & { checksumNote?: string; haltKey: string | null } => {
+      const named = { ...status, haltKey: bulkHaltKey(status.haltReason) };
+      return status.checksumBinding === 'unkeyed' ? { ...named, checksumNote: BULK_UNKEYED_CHECKSUM_NOTE } : named;
+    };
+    /** When a run that stands still is picked up again, from the lease of the trigger it runs
+     *  under (the read phase's, or the write phase's); null when nothing waits on a lease. */
+    const bulkResumesAt = (runId: string): string | null => {
+      const loop = engine.getWorkerLoop();
+      if (!loop) return null;
+      return loop.resumesAt(bulkPreviewTriggerId(runId)) ?? loop.resumesAt(`bulk-${runId}`);
+    };
+    /** The target a probe wrote and the fields it changed; null unless the run waits on its probe. */
+    const bulkProbeOf = (status: import('../core/bulk-ledger.js').BulkRunStatus, ledger: import('../core/bulk-ledger.js').BulkLedger): { key: string; fields: string[] } | null => {
+      // Offered only where confirm-probe can succeed: a target found already holding its
+      // value was not written, and a run still writing has not stopped at its probe.
+      if (status.probeConfirmed) return null;
+      const key = ledger.probeKey(status.id);
+      const written = key === null ? undefined : ledger.listAppliedDesc(status.id).find((t) => t.key === key);
+      if (!written) return null;
+      const fieldsOf = (image: { absent: boolean; value?: unknown }): Record<string, unknown> =>
+        !image.absent && image.value !== null && typeof image.value === 'object' && !Array.isArray(image.value) ? image.value as Record<string, unknown> : {};
+      const before = fieldsOf(written.expected);
+      const after = fieldsOf(written.after);
+      const fields = Object.keys(after).filter((f) => !(f in before) || canonicalJson(after[f]) !== canonicalJson(before[f]));
+      return { key: written.key, fields };
+    };
     /** Why an external run could not reach its host now, or null (a local run, or one it can). */
     const bulkExternalReach = async (runId: string, ledger: import('../core/bulk-ledger.js').BulkLedger): Promise<string | null> => {
       const status = ledger.getStatus(runId);
@@ -8387,6 +8430,14 @@ export class LynoxHTTPApi {
         judgeRule: judgeRule ? { rule: judgeRule.rule, schema: judgeRule.schema, tier: judgeRule.tier } : null,
         judgeRuleHash: judgeRule?.hash ?? null,
         judgeModel,
+        // A run whose process is gone stands still until its lease lapses; the owner sees when.
+        resumesAt: bulkResumesAt(params['id']!),
+        // The one target an external run wrote before its probe is confirmed: what the owner
+        // opens at the provider, and the fields the write changed there.
+        probe: bulkProbeOf(status, ledger),
+        // What an undo would take back now; for an external run that includes a failed write,
+        // which may have landed although its answer never came back.
+        undoable: ledger.countUndoable(status.id),
       });
     }, READS));
 

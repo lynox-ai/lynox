@@ -1276,26 +1276,52 @@ export class BulkLedger {
    */
   confirmProbe(runId: string, params: { confirmedBy?: string | undefined; now?: number | undefined } = {}):
     { ok: true } | { ok: false; reason: 'not_found' | 'not_a_probe' } {
-    const run = this.runRow(runId);
-    if (!run) return { ok: false, reason: 'not_found' };
-    const host = externalHostOf(run.target_system);
-    const method = parseContractMethods(run.contract_json);
-    if (host === null || method === null || run.kind !== 'apply') return { ok: false, reason: 'not_a_probe' };
-    const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
-    const applied = (this.engineDb.getDb().prepare(
-      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
-    ).all(runId) as { target_key: string; result: string | null }[]);
-    const only = applied[0];
-    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') {
-      return { ok: false, reason: 'not_a_probe' };
-    }
-    const path = new URL(this.engineDb.dec(only.target_key)).pathname;
+    const probe = this.probeCandidate(runId);
+    if (probe === 'not_found') return { ok: false, reason: 'not_found' };
+    if (probe === null) return { ok: false, reason: 'not_a_probe' };
+    const { host, method, key } = probe;
+    const path = new URL(key).pathname;
     const kind = `${isMeasuredWriteForm(host, path, method) ? '' : UNMEASURED_PROBE}${resourceKindOf(path)}`;
     this.engineDb.getDb().prepare(
       `INSERT INTO bulk_host_probes (host, method, kind, run_id, confirmed_by, confirmed_at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (host, method, kind) DO UPDATE SET run_id = excluded.run_id, confirmed_by = excluded.confirmed_by, confirmed_at = excluded.confirmed_at`,
     ).run(host, method, kind, runId, params.confirmedBy ?? null, new Date(params.now ?? Date.now()).toISOString());
     return { ok: true };
+  }
+
+  /** The target {@link confirmProbe} would accept as this run's probe, with its host and
+   *  verb: an external apply run that stopped with exactly one applied target, and that one
+   *  written. 'not_found' for no such run; null for a run that holds no probe. */
+  private probeCandidate(runId: string): { host: string; method: string; key: string } | 'not_found' | null {
+    const run = this.runRow(runId);
+    if (!run) return 'not_found';
+    const host = externalHostOf(run.target_system);
+    const method = parseContractMethods(run.contract_json);
+    if (host === null || method === null || run.kind !== 'apply') return null;
+    const stopped = run.phase === 'done' || (run.phase === 'writing' && run.halt_reason !== null);
+    const applied = (this.engineDb.getDb().prepare(
+      'SELECT target_key, result FROM bulk_targets WHERE run_id = ? AND applied_at IS NOT NULL',
+    ).all(runId) as { target_key: string; result: string | null }[]);
+    const only = applied[0];
+    if (!stopped || applied.length !== 1 || !only || only.result === null || this.engineDb.dec(only.result) !== 'written') return null;
+    return { host, method, key: this.engineDb.dec(only.target_key) };
+  }
+
+  /** The key of the target {@link confirmProbe} would accept for this run, or null. For the
+   *  owner's page: it offers the confirmation only where the confirmation can succeed. */
+  probeKey(runId: string): string | null {
+    const probe = this.probeCandidate(runId);
+    return probe === null || probe === 'not_found' ? null : probe.key;
+  }
+
+  /** How many of the run's targets an undo would take back now — for an external run that
+   *  includes a failed write, which may have landed ({@link undoEligible}). */
+  countUndoable(runId: string): number {
+    const run = this.runRow(runId);
+    if (!run) return 0;
+    return (this.engineDb.getDb().prepare(
+      `SELECT COUNT(*) AS n FROM bulk_targets WHERE run_id = ? AND ${undoEligible(externalHostOf(run.target_system) !== null)}`,
+    ).get(runId) as { n: number }).n;
   }
 
   /** Targets the run writes: `update`, `create`, `delete`. */
