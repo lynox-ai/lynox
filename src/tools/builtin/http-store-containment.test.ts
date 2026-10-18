@@ -218,6 +218,21 @@ describe('no container, or no record, means no request', () => {
     expect(containment.isContained({ threadId: 'thread-1' })).toBe(true);
   });
 
+  it('a thread row that does not exist, whose update changes nothing and throws nothing, refuses', async () => {
+    ctx.threadStore = { getThread: () => undefined, updateThread: () => undefined } as never;
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).toMatch(/could not record/);
+    expect(atReceipt).toEqual([]);
+    expect(containment.isContained({ threadId: 'thread-1' })).toBe(true);
+  });
+
+  it('no thread store refuses a thread\'s request', async () => {
+    ctx.threadStore = null;
+    const out = await request(agent({ current: 'thread-1' }));
+    expect(out).toMatch(/could not record/);
+    expect(atReceipt).toEqual([]);
+  });
+
   it('no containment store refuses', async () => {
     ctx.containment = null;
     const out = await request(agent({ current: 'thread-1' }));

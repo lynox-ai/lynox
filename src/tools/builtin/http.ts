@@ -1721,8 +1721,12 @@ async function mintStorePassFor(
   try {
     containment.contain(target, connection);
     if (target.kind === 'thread') {
+      // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
+      // insert is best-effort) changes nothing and throws nothing.
       const threads = toolContext.threadStore;
-      if (threads && threads.getThread(target.id)?.skip_extraction !== 1) threads.updateThread(target.id, { skip_extraction: true });
+      if (!threads) throw new Error('no thread store');
+      if (threads.getThread(target.id)?.skip_extraction !== 1) threads.updateThread(target.id, { skip_extraction: true });
+      if (threads.getThread(target.id)?.skip_extraction !== 1) throw new Error('the private flag did not hold');
     }
   } catch {
     return { refusal: CONTAINMENT_UNWRITABLE };
