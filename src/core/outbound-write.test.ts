@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
+  bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, graphqlUrlWrites, graphqlWrite, isGraphqlEndpoint, writeMethodsNamed, retargetingHeader, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, outboundEffectField, pathForQuestion,
 } from './outbound-write.js';
 
 const U = 'https://h.example/a';
@@ -655,5 +655,86 @@ describe('outboundEffectField', () => {
     [`${SHOP}/wp-json/wcx/v3/orders/5`, { status: 'completed' }],
   ] as const)('%s with %j sets off nothing', (url, body) => {
     expect(outboundEffectField(url, body)).toBeNull();
+  });
+});
+
+describe('isGraphqlEndpoint', () => {
+  it.each([
+    ['https://api.example.com/graphql', true],
+    ['https://api.example.com/v1/graphql/', true],
+    ['https://shop.example.com/admin/api/2024-01/graphql.json', true],
+    ['https://api.example.com/GraphQL', true],
+    ['https://graphql.example.com/v1/items', true],
+    ['https://api.example.com/%2567raphql', true],
+    ['https://api.example.com/%E0/graphql', true],
+    ['not a url', true],
+    ['https://api.example.com/v1/items', false],
+    ['https://api.example.com/a%20b', false],
+    ['https://api.example.com/graphqlish', false],
+    ['https://api.example.com/api', false],
+  ] as const)('%s → %s', (url, want) => {
+    expect(isGraphqlEndpoint(url)).toBe(want);
+  });
+});
+
+describe('graphqlWrite', () => {
+  const JSON_CT = { 'Content-Type': 'application/json' };
+  const body = (fields: Record<string, unknown>): string => JSON.stringify(fields);
+
+  it.each([
+    ['a read', { query: '{ viewer { login } }' }, false],
+    ['a named read', { query: 'query Q { a }', operationName: 'Q', variables: { x: 1 }, extensions: {} }, false],
+    ['a mutation', { query: 'mutation { a }' }, true],
+    ['a subscription', { query: 'subscription S { a }' }, true],
+    ['a mutation picked as the second operation', { query: 'query A { a } mutation B { b }', operationName: 'B' }, true],
+    ['the word in upper case', { query: 'MUTATION { a }' }, true],
+    ['the word as a field name prefix only', { query: '{ mutationCount }' }, false],
+  ] as const)('%s → mutates %s', (_k, fields, mutates) => {
+    expect(graphqlWrite(JSON_CT, body(fields))).toEqual({ mutates });
+  });
+
+  it('accepts application/json with charset utf-8', () => {
+    expect(graphqlWrite({ 'content-type': 'application/json; charset=UTF-8' }, body({ query: '{ a }' }))).toEqual({ mutates: false });
+  });
+
+  it.each([
+    ['no Content-Type', {}, body({ query: '{ a }' })],
+    ['another media type', { 'Content-Type': 'application/graphql' }, '{ a }'],
+    ['two Content-Type headers', { 'Content-Type': 'application/json', 'CONTENT-TYPE': 'application/json' }, body({ query: '{ a }' })],
+    ['another charset', { 'Content-Type': 'application/json; charset=latin1' }, body({ query: '{ a }' })],
+    ['no body', JSON_CT, undefined],
+    ['a batch array', JSON_CT, `[${body({ query: '{ a }' })}]`],
+    ['a body that is not JSON', JSON_CT, 'query=%7Ba%7D'],
+    ['a leading byte order mark', JSON_CT, `\uFEFF${body({ query: '{ a }' })}`],
+    ['query named twice', JSON_CT, '{"query":"{ a }","query":"mutation { b }"}'],
+    ['query named twice, once escaped', JSON_CT, '{"query":"{ a }","qu\\u0065ry":"mutation { b }"}'],
+    ['a key named twice in a nested object', JSON_CT, '{"query":"{ a }","variables":{"x":1,"x":2}}'],
+    ['a field other than the four', JSON_CT, body({ query: '{ a }', documentId: 'x' })],
+    ['a persisted query', JSON_CT, body({ query: '{ a }', extensions: { persistedQuery: { version: 1, sha256Hash: 'x' } } })],
+    ['extensions that are not an object', JSON_CT, body({ query: '{ a }', extensions: 'x' })],
+    ['no query', JSON_CT, body({ operationName: 'A' })],
+    ['a query that is not a string', JSON_CT, body({ query: { a: 1 } })],
+  ] as const)('refuses %s', (_k, headers, sent) => {
+    expect(graphqlWrite(headers, sent)).toHaveProperty('refusal');
+  });
+
+  it('CONTROL: the same key in two sibling objects is not a repeat', () => {
+    expect(graphqlWrite(JSON_CT, '{"query":"{ a }","variables":{"a":{"x":1},"b":{"x":2}}}')).toEqual({ mutates: false });
+  });
+
+  it('a body nested far deeper than any request needs is read without throwing', () => {
+    const deep = `{"query":"{ a }","variables":{"v":${'['.repeat(200_000)}${']'.repeat(200_000)}}}`;
+    expect(() => graphqlWrite(JSON_CT, deep)).not.toThrow();
+  });
+});
+
+describe('graphqlUrlWrites', () => {
+  it.each([
+    ['https://h.example/graphql?query=mutation%7Ba%7D', true],
+    ['https://h.example/graphql?query=%7Ba%7D&query=subscription%7Bb%7D', true],
+    ['https://h.example/graphql?query=%7Ba%7D', false],
+    ['https://h.example/graphql?q=mutation', false],
+  ] as const)('%s → %s', (url, want) => {
+    expect(graphqlUrlWrites(url)).toBe(want);
   });
 });

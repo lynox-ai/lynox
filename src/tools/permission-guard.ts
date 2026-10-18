@@ -1,5 +1,5 @@
 import { realpathSync, existsSync } from 'node:fs';
-import { effectiveWriteMethod } from '../core/outbound-write.js';
+import { effectiveWriteMethod, isGraphqlEndpoint } from '../core/outbound-write.js';
 import { DATA_DIR_INVENTORY } from '../core/data-dir-inventory.js';
 import { resolve, dirname, basename, join } from 'node:path';
 import type { AutonomyLevel, ToolEntry, WarningPayload } from '../types/index.js';
@@ -549,6 +549,10 @@ export function contractGrants(toolName: string, input: unknown, contract: Capab
   const method = (typeof obj.method === 'string' ? obj.method : 'GET').toUpperCase();
   if (!(contract.httpMethods ?? []).some(m => m.toUpperCase() === method)) return false;
   if (typeof obj.url !== 'string') return false;
+  // No contract grants a write to a GraphQL endpoint: there a read and every mutation the token
+  // can run are the same POST to the same path, and nothing here reads the document. Read from
+  // the URL alone, so it holds for the callers that never pass a body.
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS' && isGraphqlEndpoint(obj.url)) return false;
 
   let parsed: URL;
   try {

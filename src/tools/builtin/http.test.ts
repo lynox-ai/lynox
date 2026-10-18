@@ -7523,6 +7523,133 @@ describe('write approvals per method and host (270)', () => {
     await runInCallSlot(hopped, () => handler({ url: 'https://h.example/a' }, makeAgent()));
     expect(hopped.answeredBy).toBeNull();
   });
+
+  describe('a GraphQL endpoint, where a read and a mutation are the same POST', () => {
+    const GQL = 'https://h.example/graphql';
+    const JSON_CT = { 'Content-Type': 'application/json' };
+    const doc = (query: string, extra: Record<string, unknown> = {}): string => JSON.stringify({ query, ...extra });
+
+    it('an approved read does not cover a mutation on the same host; the mutation is asked', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ viewer { login } }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { deleteRepo(id: 1) { ok } }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('an approved mutation is asked again the second time, and a subscription is too', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { a }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('mutation { a }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('subscription { a }') }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('subscription { a }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(4);
+    });
+
+    it('a document whose second operation is a mutation, picked by operationName, is not remembered', async () => {
+      const { agent, prompt } = agent270();
+      const both = doc('query A { a } mutation B { b }', { operationName: 'B' });
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: both }, agent);
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('CONTROL: an approved read covers the next read on the same host', async () => {
+      const { agent, prompt } = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      const second = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('query { b }') }, agent);
+      expect(prompt).toHaveBeenCalledTimes(1);
+      expect(second).toContain('HTTP 200');
+    });
+
+    it('an approved GraphQL read does not cover a REST POST to the host, nor the other way round', async () => {
+      const first = agent270();
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, first.agent);
+      await visible({ url: 'https://h.example/repos/o/r/issues', method: 'POST', body: '{}' }, first.agent);
+      expect(first.prompt).toHaveBeenCalledTimes(2);
+      testCounters.approvedWrites?.clear();
+      const second = agent270();
+      await visible({ url: 'https://h.example/repos/o/r/issues', method: 'POST', body: '{}' }, second.agent);
+      await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, second.agent);
+      expect(second.prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('a denied REST POST in a batch does not stand for a GraphQL read; the read is asked', async () => {
+      const batch = {};
+      const { agent, prompt } = agent270({ answer: 'Deny', batch });
+      await visible({ url: 'https://h.example/a', method: 'POST', body: '{}' }, agent);
+      const read = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc('{ a }') }, agent);
+      expect(read).not.toContain('was denied earlier in this batch');
+      expect(prompt).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      ['no Content-Type', {}, doc('{ a }')],
+      ['text/plain', { 'Content-Type': 'text/plain' }, doc('{ a }')],
+      ['two Content-Type headers', { 'Content-Type': 'application/json', 'content-type': 'application/json' }, doc('{ a }')],
+      ['a batch array', JSON_CT, `[${doc('{ a }')}]`],
+      ['a persisted query', JSON_CT, doc('{ a }', { extensions: { persistedQuery: { version: 1, sha256Hash: 'x' } } })],
+      ['a document id', JSON_CT, doc('{ a }', { documentId: 'x' })],
+      ['query named twice', JSON_CT, '{"query":"{ a }","query":"mutation { b }"}'],
+      ['no query', JSON_CT, '{"operationName":"A"}'],
+    ] as const)('refuses a write it cannot read (%s), before the question, and nothing is sent', async (_k, headers, body) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: GQL, method: 'POST', headers, body }, agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(prompt).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a path that decodes to graphql only twice, or not cleanly, is a GraphQL endpoint; an encoded space is not', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent } = agent270();
+      for (const url of ['https://h.example/%2567raphql', 'https://h.example/%E0/graphql']) {
+        const out = await visible({ url, method: 'POST', body: 'a=1' }, agent);
+        expect(out, url).toContain('is a GraphQL request this check cannot read');
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      const rest = await visible({ url: 'https://h.example/a%20b', method: 'POST', body: 'a=1' }, agent);
+      expect(rest).toContain('HTTP 200');
+    });
+
+    it('an OPTIONS is a write here, so a GraphQL endpoint reads its body like a POST and refuses one it cannot read', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const out = await visible({ url: `${GQL}?query=${encodeURIComponent('mutation{b}')}`, method: 'OPTIONS' }, agent270().agent);
+      expect(out).toContain('is a GraphQL request this check cannot read');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each(['GET', 'HEAD'])('refuses a %s whose query parameter carries a mutation; the plain one goes out', async (method) => {
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      const { agent, prompt } = agent270();
+      const out = await visible({ url: `${GQL}?query=${encodeURIComponent('{a} mutation{b}')}`, method }, agent);
+      expect(out).toContain('carries a GraphQL mutation in its URL');
+      expect(fetchMock).not.toHaveBeenCalled();
+      await visible({ url: `${GQL}?query=${encodeURIComponent('{ a }')}`, method }, agent);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(prompt).not.toHaveBeenCalled();
+    });
+
+    it('a contract that grants POST on a GraphQL path grants neither a mutation nor a read; a REST POST under it goes out', async () => {
+      const contract: CapabilityContract = {
+        version: 7, grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
+        hostPatterns: ['h.example'], pathPatterns: ['/graphql', '/v1/*'], paramConstraints: {},
+      };
+      const fetchMock = vi.fn().mockImplementation(async () => ok());
+      vi.stubGlobal('fetch', fetchMock);
+      for (const query of ['mutation { a }', '{ a }']) {
+        const out = await visible({ url: GQL, method: 'POST', headers: JSON_CT, body: doc(query) }, makeAgent({ capabilityContract: contract }));
+        expect(out, query).toContain('requires user consent');
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      const rest = await visible({ url: 'https://h.example/v1/a', method: 'POST', body: '{}' }, makeAgent({ capabilityContract: contract }));
+      expect(rest).toContain('HTTP 200');
+    });
+  });
 });
 
 // A Shopify store gets no request from this engine for now (`core/shopify-host.ts`). The refusal
