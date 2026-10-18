@@ -22,7 +22,7 @@ import { accessTokenKey, collectVaultKeys, grantTokenNames, isMandateAuthored, i
 import { compose, engineText, renderFence } from '../../core/data-boundary.js';
 import { classifyRefreshFailure, isScopeRejection, reclassifyForeignGrant, revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { authTypeForModel, slotNameForModel, shapedForLog, DERIVED_NAME_SHAPE, HOSTNAME_SHAPE, HTTP_HEADER_NAME, QUERY_PARAM_NAME, VAULT_NAME_SHAPE } from '../../core/profile-value-shape.js';
-import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat } from '../../core/oauth-presets.js';
+import { derivePresetEndpoints, presetIds, presetNotFollowed, type OAuthPreset, presetScopeNeedUnmet, presetScopeRequest, OAUTH_PRESETS, PRESET_ID_PATTERN, presetStoreHost, presetTokenBodyFormat, isPresetClientSecretName, presetClientSecretGuidance } from '../../core/oauth-presets.js';
 import { checkRedirectTarget } from '../../core/oauth-redirect-guard.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION, oauthGrantIsUserDelegated } from './http.js';
 import { exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom } from '../../core/oauth-token-exchange.js';
@@ -2355,7 +2355,11 @@ ${draftJson}
         }
         const withheld = agent.secretStore ? withheldFrom(agent.secretStore, profile, apiStore, unfilled, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${id}" cannot authorize yet. ${withheldText(withheld)}`;
-        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}. Call ask_secret for ${unfilled.length === 1 ? 'it' : 'each'}, then connect.`;
+        // A built-in provider's client secret is not collected through the chat: say where it goes.
+        const askable = unfilled.filter((k) => !isPresetClientSecretName(k));
+        const settled = unfilled.filter((k) => isPresetClientSecretName(k)).map(presetClientSecretGuidance);
+        const ask = askable.length > 0 ? ` Call ask_secret for ${askable.join(' and ')}.` : '';
+        return `Error: profile "${id}" cannot authorize yet — the vault has no value for ${unfilled.join(' and ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then connect.`;
       }
       // The two refusals the route gives before anything is sent, asked here as well.
       if (clientIdKey && !mayServeAsClientId(apiStore, clientIdKey)) {
@@ -2649,7 +2653,10 @@ ${draftJson}
       if (missing.length > 0) {
         const withheld = agent.secretStore && apiStore ? withheldFrom(agent.secretStore, profile, apiStore, missing, readCtxOf(agent)) : [];
         if (withheld.length > 0) return `Error: profile "${input.id}": ${withheldText(withheld)} Nothing was sent.`;
-        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
+        const askable = missing.filter((n) => !isPresetClientSecretName(n));
+        const settled = missing.filter((n) => isPresetClientSecretName(n)).map(presetClientSecretGuidance);
+        const ask = askable.length > 0 ? ` Call \`ask_secret\` for ${askable.map((n) => `"${shownSlot(n)}"`).join(', ')} first.` : '';
+        return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${shownSlot(n)}"`).join(', ')}.${ask}${settled.map((g) => ` ${g}`).join('')} Then retry fetch_token.`;
       }
       // Past this point every slot name has resolved, and `resolveOne` resolves only a
       // name that is, as a whole, an identifier (`SECRET_REF_PATTERN`): a name that

@@ -41,6 +41,19 @@ vi.mock('./stream.js', () => ({
   }),
 }));
 
+// Off unless a test turns it on: the check for a built-in provider's client secret then throws.
+const presetCheck = vi.hoisted(() => ({ throws: false }));
+vi.mock('./oauth-presets.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./oauth-presets.js')>();
+  return {
+    ...real,
+    isPresetClientSecretName: (...args: Parameters<typeof real.isPresetClientSecretName>): boolean => {
+      if (presetCheck.throws) throw new Error('register unreadable');
+      return real.isPresetClientSecretName(...args);
+    },
+  };
+});
+
 vi.mock('../tools/permission-guard.js', () => ({
   isDangerous: vi.fn().mockReturnValue(null),
   isDangerousDetailed: vi.fn().mockReturnValue(null),
@@ -2295,6 +2308,83 @@ describe('Agent', () => {
       await agent.send('send it');
       expect(tool.handler).not.toHaveBeenCalled();
       expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+    });
+
+    describe('a built-in provider\'s client secret', () => {
+      // The owner's own turn, interactive, every consent given: what is left to refuse it is the name.
+      async function run(input: Record<string, unknown>): Promise<{ handler: ReturnType<typeof vi.fn>; store: ReturnType<typeof makeSecretStore>; content: string }> {
+        const store = makeSecretStore({ hasConsent: vi.fn().mockReturnValue(true) });
+        const handler = vi.fn().mockResolvedValue('ok');
+        const tool = makeTool('http_request', handler);
+        mockProcess
+          .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_c', name: 'http_request', input }]))
+          .mockResolvedValueOnce(endTurnResponse('Done'));
+        const agent = new Agent({
+          name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser: vi.fn().mockResolvedValue('Allow'), secretStore: store,
+        });
+        await agent.send('go');
+        const toolResults = agent.getMessages()[2] as { content: Array<{ content: string; is_error: boolean }> };
+        const result = toolResults.content[0]!;
+        return { handler, store, content: result.is_error ? result.content : '' };
+      }
+
+      it.each([
+        ['a header', { url: 'https://collector.example.org', headers: { 'x-key': 'secret:SHOPIFY_CLIENT_SECRET' } }],
+        ['a nested object', { url: 'https://collector.example.org', body: { a: { b: { c: 'secret:BEXIO_CLIENT_SECRET' } } } }],
+        ['an array', { url: 'https://collector.example.org', body: ['x', ['y', 'secret:SHOPIFY_CLIENT_SECRET']] }],
+        ['the middle of a long string', { url: 'https://collector.example.org', body: `${'a '.repeat(2000)}secret:BEXIO_CLIENT_SECRET${' z'.repeat(2000)}` }],
+      ])('is refused in %s before the vault is asked', async (_label, input) => {
+        const { handler, store, content } = await run(input);
+        expect(handler).not.toHaveBeenCalled();
+        expect(store.findUnresolvedSecretRefs).not.toHaveBeenCalled();
+        expect(store.resolveSecretRefs).not.toHaveBeenCalled();
+        expect(store.resolve).not.toHaveBeenCalled();
+        expect(content).toContain('OAuth client secret of a built-in provider');
+        expect(content).toContain('Settings → API Keys');
+        expect(content).toContain('Write the request without it.');
+        expect(content).not.toMatch(/call `?ask_secret|reference it as/i);
+      });
+
+      it('refuses when the check itself fails', async () => {
+        presetCheck.throws = true;
+        try {
+          const { handler, store, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET' } });
+          expect(handler).not.toHaveBeenCalled();
+          expect(store.resolve).not.toHaveBeenCalled();
+          // This refusal's own text: the turn's general error path refuses too, and would pass the two above.
+          expect(content).toContain('could not be checked, so they are refused');
+          expect(content).toContain('Write the request without it.');
+          expect(content).not.toContain('is the OAuth client secret of a built-in provider');
+        } finally {
+          presetCheck.throws = false;
+        }
+      });
+
+      it('refuses two names in the plural when the check fails', async () => {
+        presetCheck.throws = true;
+        try {
+          const { handler, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET', b: 'secret:BAR_TOKEN' } });
+          expect(handler).not.toHaveBeenCalled();
+          expect(content).toContain('could not be checked, so they are refused');
+          expect(content).toContain('Write the request without them.');
+        } finally {
+          presetCheck.throws = false;
+        }
+      });
+
+      it('names each provider secret, and speaks of them in the plural', async () => {
+        const { handler, content } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:SHOPIFY_CLIENT_SECRET', b: 'secret:BEXIO_CLIENT_SECRET' } });
+        expect(handler).not.toHaveBeenCalled();
+        expect(content).toContain('under exactly the name "SHOPIFY_CLIENT_SECRET"');
+        expect(content).toContain('under exactly the name "BEXIO_CLIENT_SECRET"');
+        expect(content).toContain('Write the request without them.');
+      });
+
+      it('lets a client secret of the operator\'s own name through, and the provider\'s client id', async () => {
+        const { handler, store } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET', b: 'secret:SHOPIFY_CLIENT_ID' } });
+        expect(store.resolveSecretRefs).toHaveBeenCalled();
+        expect(handler).toHaveBeenCalled();
+      });
     });
 
     it('a mandate\'s turn reads a store that cannot say where a value came from as the environment', async () => {

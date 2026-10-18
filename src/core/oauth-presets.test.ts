@@ -86,7 +86,9 @@ describe('the preset register is frozen, and the freeze is the boundary', () => 
       // `presetScopeRequest`, `presetScopeNeedUnmet` and `presetNotFollowed` are pure derivations, like `derivePresetEndpoints`: they read a preset, they add none.
       // So are `presetScopeParam`, `presetTokenHeaderName` and `presetTokenBodyFormat`: each reads one field of a preset it is handed.
       // And `presetStoreHost`: it derives a host from a preset and a profile.
-      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
+      // And `presetClientKeys` and `isPresetClientSecretName`: they derive vault names from a preset's id;
+      // `presetClientSecretGuidance` only phrases a sentence around a name.
+      ['OAUTH_PRESETS', 'PRESET_ID_PATTERN', 'derivePresetEndpoints', 'isPresetClientSecretName', 'presetClientKeys', 'presetClientSecretGuidance', 'presetIds', 'presetNotFollowed', 'presetStoreHost', 'presetRegisterOf', 'presetScopeNeedUnmet', 'presetScopeParam', 'presetScopeRequest', 'presetTokenBodyFormat', 'presetTokenHeaderName'].sort(),
     );
   });
 

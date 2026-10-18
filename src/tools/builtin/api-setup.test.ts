@@ -3081,6 +3081,23 @@ describe('api_setup tool', () => {
       expect(result).toMatch(/missing the OAuth credentials/i);
       expect(result).toContain('SHOPIFY_CLIENT_ID');
       expect(result).toContain('SHOPIFY_CLIENT_SECRET');
+      // The client id is collected in the chat; the provider's client secret goes to the settings.
+      expect(result).toContain('Call `ask_secret` for "SHOPIFY_CLIENT_ID" first.');
+      expect(result).not.toMatch(/ask_secret` for [^.]*SHOPIFY_CLIENT_SECRET/);
+      expect(result).toContain('Settings → API Keys, under exactly the name "SHOPIFY_CLIENT_SECRET"');
+    });
+
+    it('sends an operator-named client secret to ask_secret, and only the provider\'s to the settings', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store, makeMockSecretStore({ SHOPIFY_CLIENT_ID: 'client-id-xyz' }));
+      store.register({
+        ...SHOPIFY_PROFILE,
+        auth: { ...SHOPIFY_PROFILE.auth, vault_keys: ['SHOPIFY_CLIENT_ID', 'MY_SHOP_SECRET'], oauth: { ...SHOPIFY_PROFILE.auth.oauth, client_secret_key: 'MY_SHOP_SECRET' } },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.commerce.example'], accepted_at: '2026-07-12T00:00:00.000Z' },
+      });
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+      expect(result).toContain('Call `ask_secret` for "MY_SHOP_SECRET" first.');
+      expect(result).not.toContain('Settings → API Keys');
     });
 
     it('refuses fetch_token once the per-session HTTP ceiling is reached (no outbound POST)', async () => {

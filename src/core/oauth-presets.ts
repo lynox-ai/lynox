@@ -519,6 +519,37 @@ export function presetStoreHost(
   return base.hostname === derived.host ? derived.host : null;
 }
 
+/**
+ * The vault names a built-in provider's OAuth client is meant to live under: one pair per provider
+ * and instance, derived from the preset's id the way a profile's token slots are derived from its
+ * own (`BEXIO_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`). Derived rather than chosen, so the secret's name
+ * is known before any profile names it. Nothing here makes a profile use the pair: a profile still
+ * names its own `client_secret_key`, and one that names another name is not reached by the checks
+ * keyed on this one.
+ */
+export function presetClientKeys(presetId: string): { readonly id: string; readonly secret: string } {
+  const base = presetId.toUpperCase().replace(/-/g, '_');
+  return { id: `${base}_CLIENT_ID`, secret: `${base}_CLIENT_SECRET` };
+}
+
+/**
+ * Whether `name` is the client secret of a built-in provider ({@link presetClientKeys}). The set
+ * is the register's, so it is finite and fixed at build time; a name an operator chose for an OAuth
+ * client of their own (`MY_APP_CLIENT_SECRET`) is not in it.
+ */
+export function isPresetClientSecretName(name: string, register: PresetRegister = OAUTH_PRESETS): boolean {
+  return register.ids().some((id) => presetClientKeys(id).secret === name);
+}
+
+/**
+ * What the model is told about a built-in provider's client secret wherever it would otherwise be
+ * told to collect or reference a vault name: the owner stores it in the settings, under that exact
+ * name. What uses it from there is a profile that names it as its client secret.
+ */
+export function presetClientSecretGuidance(name: string): string {
+  return `"${name}" is the OAuth client secret of a built-in provider. The owner of this lynox instance stores it under Settings → API Keys, under exactly the name "${name}" — not in the chat and not through ask_secret, and it is not referenced in a request. The engine sends it to the provider itself, for a profile that names "${name}" as its client secret and may read it.`;
+}
+
 /** The ids a profile may name, for a message that lists what exists. */
 export function presetIds(register: PresetRegister = OAUTH_PRESETS): string[] {
   return register.ids();

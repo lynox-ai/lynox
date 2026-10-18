@@ -104,6 +104,7 @@ import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
 import { collectVaultKeys } from './api-store.js';
 import { slotMayReach } from './profile-secret-view.js';
+import { isPresetClientSecretName, presetClientSecretGuidance } from './oauth-presets.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
@@ -4404,6 +4405,31 @@ export class Agent implements IAgent {
             type: 'tool_result',
             tool_use_id: tc.id,
             content: annotateNonRetryable(`Secret(s) not available in this session: ${secretNames.map(n => `"${n}"`).join(', ')}. A secret reaches a request only through an API profile, which the engine attaches it from; write the request without "secret:" references.`),
+            is_error: true,
+          };
+        }
+        // A `secret:` reference to a built-in provider's client secret is refused on the name, for
+        // every principal and every tool whose input is resolved here (not the
+        // SECRET_RESOLUTION_EXEMPT ones), before the vault is asked, with the names `extractSecretNames`
+        // read the input with — the same reading `resolveSecretRefs` resolves. This covers
+        // references only: a profile that names the secret as its credential is attached by the
+        // http tool, and what that may reach is decided there. A check that throws refuses.
+        let clientSecrets: string[];
+        try {
+          clientSecrets = secretNames.filter((n) => isPresetClientSecretName(n));
+        } catch {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: annotateNonRetryable(`Secret(s) not available to tools: ${secretNames.map(n => `"${n}"`).join(', ')}. Whether they are the OAuth client secret of a built-in provider could not be checked, so they are refused. Write the request without ${secretNames.length === 1 ? 'it' : 'them'}.`),
+            is_error: true,
+          };
+        }
+        if (clientSecrets.length > 0) {
+          return {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: annotateNonRetryable(`Secret(s) not available to tools: ${clientSecrets.map(n => `"${n}"`).join(', ')}. ${clientSecrets.map(presetClientSecretGuidance).join(' ')} Write the request without ${clientSecrets.length === 1 ? 'it' : 'them'}.`),
             is_error: true,
           };
         }
