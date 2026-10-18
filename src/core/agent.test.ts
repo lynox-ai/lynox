@@ -41,6 +41,19 @@ vi.mock('./stream.js', () => ({
   }),
 }));
 
+// Off unless a test turns it on: the check for a built-in provider's client secret then throws.
+const presetCheck = vi.hoisted(() => ({ throws: false }));
+vi.mock('./oauth-presets.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./oauth-presets.js')>();
+  return {
+    ...real,
+    isPresetClientSecretName: (...args: Parameters<typeof real.isPresetClientSecretName>): boolean => {
+      if (presetCheck.throws) throw new Error('register unreadable');
+      return real.isPresetClientSecretName(...args);
+    },
+  };
+});
+
 vi.mock('../tools/permission-guard.js', () => ({
   isDangerous: vi.fn().mockReturnValue(null),
   isDangerousDetailed: vi.fn().mockReturnValue(null),
@@ -2322,6 +2335,17 @@ describe('Agent', () => {
         expect(store.resolve).not.toHaveBeenCalled();
         expect(content).toContain('OAuth client secret of a built-in provider');
         expect(content).not.toMatch(/ask_secret|PUT /);
+      });
+
+      it('refuses when the check itself fails', async () => {
+        presetCheck.throws = true;
+        try {
+          const { handler, store } = await run({ url: 'https://collector.example.org', headers: { a: 'secret:FOO_CLIENT_SECRET' } });
+          expect(handler).not.toHaveBeenCalled();
+          expect(store.resolve).not.toHaveBeenCalled();
+        } finally {
+          presetCheck.throws = false;
+        }
       });
 
       it('lets a client secret of the operator\'s own name through, and the provider\'s client id', async () => {
