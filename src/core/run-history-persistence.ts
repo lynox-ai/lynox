@@ -291,9 +291,9 @@ export function insertPipelineRun(db: Database.Database, params: {
   /** Slice C2: the saved-workflow id this run executed (null for ad-hoc/inline
    *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
   workflowId?: string | undefined;
-  /** 3f-1a: the accepted grant this run ran under (`workflow_grants.id`), or none. */
+  /** Workflow grant attribution: the accepted grant this run ran under (`workflow_grants.id`), or none. */
   grantId?: string | undefined;
-  /** 3f-1a: how a run under a grant was started (`schedule:…`, `library:…`, `nested:…`). */
+  /** Workflow grant attribution: how a run under a grant was started (`schedule:…`, `library:…`, `nested:…`). */
   startedVia?: string | undefined;
 }): void {
   // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a

@@ -438,7 +438,7 @@ describe('a reviewed grant lets a scheduled workflow write, and nothing else doe
     expect(posts()).toEqual([]);
   });
 
-  describe('which grant a run ran under (3f-1a)', () => {
+  describe('which grant a run ran under (workflow grant attribution)', () => {
     type GrantRowRaw = Record<string, unknown>;
     const grantRows = (): GrantRowRaw[] =>
       engineDb.getDb().prepare('SELECT * FROM workflow_grants ORDER BY rowid').all() as GrantRowRaw[];

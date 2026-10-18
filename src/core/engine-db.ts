@@ -1140,7 +1140,7 @@ const MIGRATIONS: string[] = [
    ALTER TABLE bulk_targets ADD COLUMN judge_claimed_at TEXT;
    ALTER TABLE bulk_targets ADD COLUMN judge_claim_token TEXT;`,
 
-  // v37: one row per accepted workflow grant (3f-1a), written once and never changed. The stamp
+  // v37: one row per accepted workflow grant (workflow grant attribution), written once and never changed. The stamp
   // on the workflow is overwritten by the next acceptance; this row is what still says which
   // contract was shown, who accepted it, when, and for which schedule, after that. A run
   // names its row by `id` (history.db `pipeline_runs.workflow_grant_id`).

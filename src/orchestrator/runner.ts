@@ -609,7 +609,7 @@ export async function runManifest(
   // NULL — keep it out while it stays reachable by id (invariant I6). The write is
   // fire-and-forget: a history failure must never break or mask the run.
   //
-  // ⚠ EXCEPT for a run under an accepted grant (3f-1a). Its row is the only record of which
+  // ⚠ EXCEPT for a run under an accepted grant (workflow grant attribution). Its row is the only record of which
   // grant it ran under, and a run under a grant that nothing records cannot be attributed
   // afterwards. So: a contract AND (no RunHistory OR the INSERT threw) ⇒ this run goes on
   // WITHOUT the contract and without `isAcceptedParam`, i.e. under the default refusal of

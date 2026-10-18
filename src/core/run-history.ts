@@ -1470,7 +1470,7 @@ const MIGRATIONS: string[] = [
      cost_usd REAL NOT NULL
    );
    CREATE INDEX IF NOT EXISTS idx_bulk_cost_days_created ON bulk_cost_days(created_at);`,
-  // v63: under which accepted grant a pipeline run ran, and how it was started (3f-1a).
+  // v63: under which accepted grant a pipeline run ran, and how it was started (workflow grant attribution).
   // `workflow_grant_id` names the engine.db `workflow_grants` row (its `id`) — a soft reference across files, so a
   // run can outlive its row (an erasure takes both files; a backup can catch them at different
   // times) and the reader says so (`readWorkflowGrant` → `missing`). A nested pipeline carries

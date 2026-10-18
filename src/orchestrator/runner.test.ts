@@ -1559,7 +1559,7 @@ describe('runManifest — 2a durable pipeline_runs record', () => {
     }
   });
 
-  describe('the grant a run ran under (3f-1a)', () => {
+  describe('the grant a run ran under (workflow grant attribution)', () => {
     const CONTRACT: CapabilityContract = {
       version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['GET', 'POST'],
       hostPatterns: ['api.example.com'], pathPatterns: ['/v1/reports'], paramConstraints: {},
