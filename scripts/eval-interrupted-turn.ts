@@ -10,18 +10,18 @@
  *   ok = the follow-up gives the right sum (545) and looks up no order whose
  *        result was already kept.
  * Scenario B (loop break, after a reload): a thread whose last run was broken
- * after five identical `api_profile view wrong` calls is resumed from disk and
+ * after five identical `shop_profiles view wrong` calls is resumed from disk and
  * the user writes "mach weiter". Two arms: `marker` (the engine note with
  * `inContext`, as written today) and `control` (the same rows, the note without
  * it, so the model gets the kept loop but no stop text).
- *   repeated = the follow-up calls `api_profile view wrong` again.
+ *   repeated = the follow-up calls `shop_profiles view wrong` again.
  * Cache (anthropic, scenario A only): usage of the two calls after the stop.
  *
  * One JSON line per run on stdout. Needs ANTHROPIC_API_KEY or MISTRAL_API_KEY.
  * HOME and LYNOX_DATA_DIR are pointed at a temp dir before anything loads.
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -44,11 +44,13 @@ type Engine = InstanceType<typeof Engine>;
 
 const ORDERS: Record<string, number> = { '101': 120, '102': 80, '103': 45, '104': 300 };
 
-function config(): Record<string, unknown> {
+/** The instance's config.json, as a Mistral (EU) instance or an Anthropic one has
+ *  it. The key comes from the environment (MISTRAL_API_KEY is promoted onto a
+ *  Mistral endpoint by loadConfig), never from this file. */
+function userConfig(): Record<string, unknown> {
   if (provider === 'mistral') {
-    const key = process.env['MISTRAL_API_KEY'];
-    if (!key) throw new Error('MISTRAL_API_KEY missing');
-    return { provider: 'openai', api_base_url: MISTRAL_API_BASE, openai_model_id: MISTRAL_MODEL_MAP.balanced, api_key: key };
+    if (!process.env['MISTRAL_API_KEY']) throw new Error('MISTRAL_API_KEY missing');
+    return { provider: 'openai', api_base_url: MISTRAL_API_BASE, openai_model_id: MISTRAL_MODEL_MAP.balanced };
   }
   if (!process.env['ANTHROPIC_API_KEY']) throw new Error('ANTHROPIC_API_KEY missing');
   return {};
@@ -57,8 +59,9 @@ function config(): Record<string, unknown> {
 async function boot(): Promise<{ engine: Engine; dir: string }> {
   const dir = mkdtempSync(join(home, 'data-'));
   process.env['LYNOX_DATA_DIR'] = dir;
+  writeFileSync(join(dir, 'config.json'), JSON.stringify(userConfig()), { mode: 0o600 });
   reloadConfig();
-  const engine = new Engine(config() as never);
+  const engine = new Engine({} as never);
   await engine.init();
   return { engine, dir };
 }
@@ -134,8 +137,8 @@ async function scenarioB(i: number, arm: 'marker' | 'control'): Promise<void> {
   const { engine, dir } = await boot();
   engine.registerTool({
     definition: {
-      name: 'api_profile',
-      description: 'Manage API profiles. action "list" lists profile ids; action "view" shows one profile by id.',
+      name: 'shop_profiles',
+      description: 'The shop connection profiles of this account. action "list" lists profile ids; action "view" shows one profile by id.',
       input_schema: { type: 'object' as const, properties: { action: { type: 'string', enum: ['list', 'view'] }, id: { type: 'string' } }, required: ['action'] },
     },
     handler: async (input: { action: string; id?: string }) => {
@@ -155,11 +158,11 @@ async function scenarioB(i: number, arm: 'marker' | 'control'): Promise<void> {
     { role: 'user', content: 'Zeig mir die Konfiguration meines Shop-API-Profils.' as never },
   ];
   for (let k = 0; k < 5; k++) {
-    rows.push({ role: 'assistant', content: [{ type: 'tool_use', id: `tu_${String(k)}`, name: 'api_profile', input }] as never });
+    rows.push({ role: 'assistant', content: [{ type: 'tool_use', id: `tu_${String(k)}`, name: 'shop_profiles', input }] as never });
     rows.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: `tu_${String(k)}`, content: NOT_FOUND }] as never });
   }
   store.appendMessages(id, rows, store.getNextSeq(id), { message_count: rows.length });
-  const detail = loopBreakDetail(`api_profile\x00${JSON.stringify(input)}`);
+  const detail = loopBreakDetail(`shop_profiles\x00${JSON.stringify(input)}`);
   store.appendDisplayNotes(id, [{ role: 'assistant', content: buildDisplayNoteContent('tool_loop_break', detail, arm === 'marker') }], store.getNextSeq(id));
 
   const session = new SessionStore().getOrCreate(id, engine);
@@ -170,7 +173,7 @@ async function scenarioB(i: number, arm: 'marker' | 'control'): Promise<void> {
   let reply = '';
   try { reply = await session.run('mach weiter'); } catch (err) { end = (err as Error).name; }
   const follow = toolCalls(agent.getMessages().slice(kept.length));
-  const repeated = follow.filter((c) => c.name === 'api_profile' && c.input['action'] === 'view' && c.input['id'] === 'wrong').length;
+  const repeated = follow.filter((c) => c.name === 'shop_profiles' && c.input['action'] === 'view' && c.input['id'] === 'wrong').length;
   console.log(JSON.stringify({
     provider, scenario: 'B', arm, i, stopLoaded, end,
     follow: follow.map((c) => `${c.name} ${JSON.stringify(c.input)}`), repeated, reply: reply.slice(0, 300),
@@ -188,3 +191,5 @@ try {
 } finally {
   rmSync(home, { recursive: true, force: true });
 }
+// Engine.shutdown() leaves timers behind; the eval is done.
+process.exit(0);

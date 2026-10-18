@@ -408,13 +408,20 @@ export class ThreadStore {
    * The count starts at the run's QUESTION row, found by its content, not at
    * `fromSeq`: when the durable write of the question failed, rows an earlier
    * failed persist left unwritten land first, from `fromSeq` on. Without the
-   * question row on disk the count starts at `fromSeq`.
+   * question row on disk the count starts at `fromSeq`. The LAST match is the
+   * question: an earlier unwritten row can carry the same text (a re-sent message),
+   * and every user row after the question is a tool_result carrier.
    */
   markDisplayOnlyAfterApiRows(threadId: string, fromSeq: number, keep: number, questionJson?: string): { marked: number } {
     const rows = this.db.prepare(
       'SELECT seq, role, content_json FROM thread_messages WHERE thread_id = ? AND seq >= ? AND display_only = 0 ORDER BY seq ASC',
     ).all(threadId, fromSeq) as Array<{ seq: number; role: string; content_json: string }>;
-    const q = questionJson === undefined ? -1 : rows.findIndex((r) => r.role === 'user' && r.content_json === questionJson);
+    let q = -1;
+    if (questionJson !== undefined) {
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i]!.role === 'user' && rows[i]!.content_json === questionJson) { q = i; break; }
+      }
+    }
     const cut = Math.max(0, q) + Math.max(0, keep);
     const first = rows[cut];
     if (first === undefined) return { marked: 0 };

@@ -411,7 +411,9 @@ describe('review fixes', { timeout: 30_000 }, () => {
     store.createThread('t-seq');
     const q = 'the question';
     const rows: BetaMessageParam[] = [
-      // Left unwritten by an earlier failed persist, written first by this run.
+      // Left unwritten by an earlier failed persist, written first by this run, and
+      // the same text sent once before: the count must start at the LAST match.
+      { role: 'user', content: q },
       { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
       { role: 'user', content: q },
       { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'probe_tool', input: {} }] },
@@ -422,7 +424,7 @@ describe('review fixes', { timeout: 30_000 }, () => {
     store.appendMessages('t-seq', rows, start);
     expect(store.markDisplayOnlyAfterApiRows('t-seq', start, 3, JSON.stringify(q))).toEqual({ marked: 1 });
     const api = store.getMessages('t-seq', { apiOnly: true });
-    expect(api).toHaveLength(4);
+    expect(api).toHaveLength(5);
     expect(api.at(-1)!.content_json).toContain('tool_result');
   });
 });
