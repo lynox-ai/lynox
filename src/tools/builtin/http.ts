@@ -37,7 +37,8 @@ import {
 import type { HtmlExtractResult } from '../../core/html-extract.js';
 import { onBoxBlock, pv } from '../../core/prompt-value.js';
 import { PRESET_WRITE_CONTEXT, WriteContextRefused, type PresetRead } from '../../core/preset-write-context.js';
-import { currentCallSignal, noteAnsweredBy, noteCallConnection } from '../../core/call-connection.js';
+import { currentCallSignal, noteAnsweredBy, noteCallConnection, noteGrantLift } from '../../core/call-connection.js';
+import { grantIdOf } from '../../types/capability-contract.js';
 import { approvalKey, currentEpoch, isApproved, normalizeApprovalHost, recordApproval } from '../../core/untrusted-epoch.js';
 import { SHOWN_BODY_MAX_BYTES, bodyFieldNames, bodyForQuestion, carriesInlineBinary, effectiveWriteMethod, gateReading, retargetingHeader, writeMethodsNamed, sentBytes, isOutboundEffectWrite, isRequestShapingHeaderName, normalizeWritePath, pathForQuestion, type BodyReadings } from '../../core/outbound-write.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
@@ -2777,6 +2778,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       !outboundEffect &&
       !connectedAccount &&
       named.every((m) => contractGrants('http_request', { ...input, method: m }, contract));
+    // The one place where a grant lets an unattended write through, so the one place that
+    // marks the call with it (`noteGrantLift`). A contract that names no accepted grant
+    // (handed in through `AgentConfig` by an embedder or a test) leaves no mark: the write
+    // still passes on the contract, only the record has nothing to name.
+    const liftedBy = contractGrantsWrite ? grantIdOf(contract) : undefined;
+    if (liftedBy !== undefined) noteGrantLift({ grantId: liftedBy, entry: 'v1' });
     const approvalHost = normalizeApprovalHost(new URL(input.url).hostname);
     const remembers = isWriteMethod(gatedMethod) && gatedMethod !== 'DELETE' && !outboundEffect && !connectedAccount && isOwnerPrincipal(agent.principal);
     if (isWriteMethod(gatedMethod) && !contractGrantsWrite) {

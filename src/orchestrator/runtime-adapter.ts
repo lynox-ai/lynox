@@ -1,4 +1,5 @@
 import type { RequestPrincipal } from '../core/request-principal.js';
+import type { GrantLift } from '../core/call-connection.js';
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { pinnedModelOfConfig } from '../core/profile-pair.js';
 import { Agent } from '../core/agent.js';
@@ -295,6 +296,8 @@ export type StepToolRecorder = (call: {
   outputJson: string;
   durationMs: number;
   isError: boolean;
+  /** The write grant that let this call's write through; absent means no grant did (`GrantLift`). */
+  grant?: GrantLift | undefined;
 }) => void;
 
 /** Bounded, crash-safe JSON for tool-call previews (no PII guarantees here —
@@ -363,6 +366,7 @@ export function createStepStreamHandler(opts: {
         outputJson: boundedJson(event.result),
         durationMs: matched ? Math.max(0, Date.now() - matched.start) : 0,
         isError: event.isError === true,
+        ...(event.grant !== undefined ? { grant: { ...event.grant } } : {}),
       });
     }
   };

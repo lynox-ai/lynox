@@ -106,7 +106,7 @@ import { slotMayReach } from './profile-secret-view.js';
 import { isEndpointAcked } from './llm/endpoint-allowlist.js';
 import { checkKnowledgeText } from './knowledge-store.js';
 import { getErrorMessage } from './utils.js';
-import { currentCallSignal, runInCallSlot, trackCallAnswer } from './call-connection.js';
+import { currentCallSignal, grantLiftOf, runInCallSlot, trackCallAnswer } from './call-connection.js';
 import { inSessionPromptChain } from './prompt-chain.js';
 import { BatchSources, FOREIGN, bumpNow, currentEpoch } from './untrusted-epoch.js';
 import type { CallSlot, CallConnection } from './call-connection.js';
@@ -4573,7 +4573,10 @@ export class Agent implements IAgent {
       );
 
       if (this.onStream) {
-        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id });
+        // The grant mark rides on the event the runner records a step from; the two emits after
+        // a handler ran are the only ones that can carry it (`GrantLift`).
+        const grant = grantLiftOf(callSlot);
+        await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name, toolUseId: tc.id, ...(grant !== undefined ? { grant } : {}) });
       }
       return {
         type: 'tool_result',
@@ -4627,7 +4630,9 @@ export class Agent implements IAgent {
         // terminate the run. Emitting it here triggers the UI's global toast
         // even when the agent recovers, leaving "Etwas ist schiefgelaufen" stuck
         // next to a still-streaming response.
-        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true });
+        // A write let through and then failed (the fetch threw) keeps its mark: lifted, and failed.
+        const grant = grantLiftOf(callSlot);
+        await this.onStream({ type: 'tool_result', name: tc.name, result: message, agent: this.name, toolUseId: tc.id, isError: true, ...(grant !== undefined ? { grant } : {}) });
       }
       // ⛔ …and then it ends the RUN, not the call: re-thrown, never returned as an error
       // result the model would read and work around (`input-required.ts`). AFTER the
