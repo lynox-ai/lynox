@@ -1684,10 +1684,11 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
  * minted. Called by {@link attachEngineManagedAuth} after every refusal of the oauth2 branch and
  * the binding, in this order:
  *
- *  1. the control plane's clearance, once per boot. It records the instance as one that holds a
- *     store connection, so nothing that can still refuse comes before it in the funnel;
- *  2. the container: the request's thread, or its bulk run. A request with neither is refused —
- *     what a store returns has to stay somewhere it can be found again;
+ *  1. the container: the request's thread, or its bulk run. A request with neither is refused —
+ *     what a store returns has to stay somewhere it can be found again. So is one without the
+ *     stores step 3 writes to. These checks write nothing, so they come before step 2;
+ *  2. the control plane's clearance, once per boot. It records the instance as one that holds a
+ *     store connection, so every refusal that writes nothing comes before it;
  *  3. the containment row (`core/containment.ts`), and for a thread its `skip_extraction`, so the
  *     readers of private mode stand down as well. Written BEFORE the pass exists: a request whose
  *     row cannot be written is refused, and a request that fails after it leaves the row set;
@@ -1708,8 +1709,6 @@ async function mintStorePassFor(
   slot: string,
   value: string,
 ): Promise<{ pass: StorePass } | { refusal: string }> {
-  const clearance = await toolContext.exactClearance!.ensure();
-  if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   const target: { kind: 'thread' | 'bulk_run'; id: string } | null = 'bulkRunId' in container
     ? (container.bulkRunId !== '' ? { kind: 'bulk_run', id: container.bulkRunId } : null)
     : (container.threadId !== undefined && container.threadId !== '' ? { kind: 'thread', id: container.threadId } : null);
@@ -1718,13 +1717,15 @@ async function mintStorePassFor(
   }
   const containment = toolContext.containment;
   if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  const threads = target.kind === 'thread' ? toolContext.threadStore : null;
+  if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
+  const clearance = await toolContext.exactClearance!.ensure();
+  if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
   try {
     containment.contain(target, connection);
-    if (target.kind === 'thread') {
+    if (threads) {
       // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
       // insert is best-effort) changes nothing and throws nothing.
-      const threads = toolContext.threadStore;
-      if (!threads) throw new Error('no thread store');
       if (threads.getThread(target.id)?.skip_extraction !== 1) threads.updateThread(target.id, { skip_extraction: true });
       if (threads.getThread(target.id)?.skip_extraction !== 1) throw new Error('the private flag did not hold');
     }

@@ -5356,7 +5356,7 @@ export class LynoxHTTPApi {
       if (skipExtraction === false) {
         const { threadIsContained } = await import('../core/containment.js');
         if (threadIsContained(engine.getToolContext().containment, params['id']!)) {
-          errorResponse(res, 409, 'This chat read data through a store connection, so private mode stays on for it.');
+          errorResponse(res, 409, 'This chat read data through a store connection, or this engine cannot read whether it did, so private mode stays on for it.');
           return;
         }
       }

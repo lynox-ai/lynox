@@ -145,6 +145,7 @@ export function threadIsContained(store: Containment | null, threadId: string): 
  */
 export function containedRefusal(agent: Pick<IAgent, 'currentThreadId' | 'originThreadId' | 'toolContext'>): string | null {
   if (!chatIsContained(agent)) return null;
-  return 'Not stored: this chat has read data through a store connection, and what it holds is not kept in memory. '
+  // "or": the same answer is given when the record cannot be read, and then it is not known.
+  return 'Not stored: this chat has read data through a store connection, or this engine cannot read whether it has, and what it holds is not kept in memory. '
     + 'Work that should be remembered belongs in a new chat that does not read the store.';
 }

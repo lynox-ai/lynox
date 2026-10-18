@@ -65,6 +65,8 @@ let engineDb: EngineDb;
 let containment: Containment;
 let ctx: ToolContext;
 let cpAnswer: () => Response;
+/** How often the control plane was asked: its clearance records the instance, so a request refused for a reason that writes nothing must not reach it. */
+let cpAsked: number;
 let skipSet: string[];
 let restoreTransport: () => void;
 /** What the stub store saw of the record when each request arrived. */
@@ -78,6 +80,7 @@ beforeEach(() => {
   engineDb = new EngineDb(join(dir, 'engine.db'), '');
   containment = new Containment(engineDb.getDb());
   cpAnswer = () => new Response('{"ok":true}', { status: 200 });
+  cpAsked = 0;
   skipSet = [];
   atReceipt = [];
   minted.sawContained = [];
@@ -90,7 +93,7 @@ beforeEach(() => {
   ctx.exactClearance = new ExactClearance(
     { url: 'https://cp.example.invalid', instanceId: 'inst-1', secret: 's' },
     { isSet: () => false, set: () => undefined },
-    { fetch: (async () => cpAnswer()) as unknown as typeof fetch },
+    { fetch: (async () => { cpAsked++; return cpAnswer(); }) as unknown as typeof fetch },
   );
   ctx.storeBindingDigest = bind;
   ctx.containment = containment;
@@ -148,6 +151,8 @@ describe('a request to the store under a thread', () => {
     expect(containedRows()).toEqual([{ container_kind: 'thread', container_id: 'thread-1', kind: 'api', connection_id: 'shop-acme' }]);
     // And the thread's private flag, so the readers of private mode stand down too.
     expect(skipSet).toEqual(['thread-1']);
+    // The positive control for the `cpAsked` asserts below: a request that is sent asks once.
+    expect(cpAsked).toBe(1);
   });
 
   it('a spawned child, which has no thread of its own, contains the chat it was spawned from', async () => {
@@ -191,9 +196,10 @@ describe('a refused request contains nothing', () => {
 });
 
 describe('no container, or no record, means no request', () => {
-  it('an agent with no thread (a trigger run) is refused, and the pass is never minted', async () => {
+  it('an agent with no chat (a saved workflow run without one) is refused before the control plane is asked, and the pass is never minted', async () => {
     const out = await request(agent({}));
     expect(out).toMatch(/sent only for a chat or a bulk run, and this one runs for neither/);
+    expect(cpAsked).toBe(0);
     expect(minted.sawContained).toEqual([]);
     expect(atReceipt).toEqual([]);
     expect(containedRows()).toEqual([]);
@@ -231,6 +237,7 @@ describe('no container, or no record, means no request', () => {
     const out = await request(agent({ current: 'thread-1' }));
     expect(out).toMatch(/could not record/);
     expect(atReceipt).toEqual([]);
+    expect(cpAsked).toBe(0);
   });
 
   it('no containment store refuses', async () => {
@@ -238,6 +245,7 @@ describe('no container, or no record, means no request', () => {
     const out = await request(agent({ current: 'thread-1' }));
     expect(out).toMatch(/could not record/);
     expect(atReceipt).toEqual([]);
+    expect(cpAsked).toBe(0);
   });
 });
 

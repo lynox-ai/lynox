@@ -299,4 +299,22 @@ describe('the end-of-turn capture reads the record', () => {
     expect(parent.skipMemoryExtraction).toBe(false);
     expect(gate()).toBe('extraction_off');
   });
+
+  it('the legacy extraction reads the record when it returns, not when it starts', async () => {
+    const { Agent } = await import('./agent.js');
+    const maybeUpdate = vi.fn().mockResolvedValue(undefined);
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', systemPrompt: 'SYS' });
+    const inner = agent as unknown as { memory: unknown; toolContext: Record<string, unknown>; _captureAtTurnEnd(t: string): void };
+    inner.memory = { maybeUpdate };
+    inner.toolContext = { ...createToolContext({}), containment };
+    agent.currentThreadId = 't1';
+    inner._captureAtTurnEnd('a business fact');
+    expect(maybeUpdate).toHaveBeenCalledTimes(1);
+    const cancelled = maybeUpdate.mock.calls[0]?.[4] as () => boolean;
+    expect(cancelled()).toBe(false);
+    // A spawned child's request contains the chat while the extraction is out.
+    containment.contain({ kind: 'thread', id: 't1' }, { kind: 'api', connectionId: 'shop-acme' });
+    expect(agent.skipMemoryExtraction).toBe(false);
+    expect(cancelled()).toBe(true);
+  });
 });
