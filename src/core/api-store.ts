@@ -149,7 +149,8 @@ export interface ApiAuth {
      */
     preset_params?: Record<string, string> | undefined;
     /** Body encoding for the token POST. Most providers want `form`
-     *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
+     *  (application/x-www-form-urlencoded). A built-in provider's own
+     *  `tokenBodyFormat` wins over this (Shopify: `form`).
      *  Default: `form`. */
     body_format?: 'form' | 'json' | undefined;
     /**
@@ -398,6 +399,13 @@ export interface OAuthGrantRecord {
    * address is another grant and does not revive it.
    */
   connected_mandate_id?: string | undefined;
+  /**
+   * The scopes the provider says it granted, from the `scope` of the code exchange's answer
+   * (comma- or space-separated there), in its order. A person may narrow a grant on the
+   * provider's page, so this is what the token can do, not what the link asked for. Absent when
+   * the answer named none: then nothing is known beyond what was asked.
+   */
+  granted_scope?: string[] | undefined;
   /**
    * The connection's current grant (PRD connection-attribution A1/A2): an opaque id for one
    * epoch of the connection, recorded in engine.db `connection_grants`. Not OAuth-specific —

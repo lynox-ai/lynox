@@ -25,7 +25,8 @@ import { shapeRequestForModel } from '../core/llm-wire-rules.js';
 import {
   exchangeToken, vetTokenEndpoint, isTokenEndpointRefused, tokenExpiryFrom,
 } from '../core/oauth-token-exchange.js';
-import { derivePresetEndpoints } from '../core/oauth-presets.js';
+import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, presetTokenBodyFormat } from '../core/oauth-presets.js';
+import { bindShopifyCallback, type VerifiedStoreCallback } from '../core/oauth-callback-hmac.js';
 import { accessTokenKey, refreshTokenKey, recordedWrites, withoutFingerprints } from '../core/api-store.js';
 import type { OAuthGrantRecord, WrittenSecret } from '../core/api-store.js';
 import { mandateMayConnect, mayServeAsClientId, secretsForProfile, slotMayReach, withheldFrom } from '../core/profile-secret-view.js';
@@ -10398,6 +10399,31 @@ export class LynoxHTTPApi {
         return;
       }
 
+      // The provider's own check of its redirect, where the preset names one, before the code is
+      // spent: Shopify signs the query with the client secret, and the store it names has to be
+      // the one the profile's parameter derives. The code then comes from the signed values.
+      const preset = OAUTH_PRESETS.get(oauth.preset_id ?? '');
+      // A provider on the host it derives mints a token for the store the profile's base names
+      // and no other: a base on another store would carry this store's token there.
+      if (preset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+        sendOAuthHtml(res, 409, 'This connection\'s address is not the store it authorizes. Nothing was changed.');
+        return;
+      }
+      let exchangeCode = code;
+      // The store the provider signed for: made here, after both checks, only, and asked again
+      // before the token is stored.
+      let storeCallback: VerifiedStoreCallback | undefined;
+      if (preset?.callbackVerification === 'shopify-hmac') {
+        const rawQuery = (req.url ?? '').split('#')[0]!.split('?').slice(1).join('?');
+        const bound = bindShopifyCallback(rawQuery, clientSecret, Date.now(), profile.id, presetStoreHost(profile));
+        if (!bound.ok) {
+          sendOAuthHtml(res, 400, 'The provider\'s signature on this authorization does not hold for this connection. Nothing was stored.');
+          return;
+        }
+        exchangeCode = bound.code;
+        storeCallback = bound.binding;
+      }
+
       // A mandate's consent spends the code at the provider and writes tokens into the vault: a
       // change, recorded like one (PRD §3.6, §7(c)). The attempt goes before the exchange, so the
       // code is not spent unrecorded. This route answers before dispatch, so it opens its trail
@@ -10410,13 +10436,13 @@ export class LynoxHTTPApi {
       const exchanged = await exchangeToken({
         endpoint: vetting,
         params: authorizationCodeParams({
-          code,
+          code: exchangeCode,
           redirectUri: profileOAuthRedirectUri(),
           clientId,
           clientSecret,
           verifier: signed.verifier,
         }),
-        bodyFormat: oauth.body_format ?? 'form',
+        bodyFormat: preset ? presetTokenBodyFormat(preset, oauth.body_format) : oauth.body_format ?? 'form',
       }, engine.getToolContext());
 
       if (!exchanged.ok || !exchanged.responseOk) {
@@ -10427,7 +10453,7 @@ export class LynoxHTTPApi {
         return;
       }
 
-      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
+      let parsed: { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; scope?: unknown };
       try {
         parsed = JSON.parse(exchanged.text) as typeof parsed;
       } catch {
@@ -10447,6 +10473,15 @@ export class LynoxHTTPApi {
       if (by.tag !== 'owner' && (current === undefined || !mayStillConnect(current))) {
         sendOAuthHtml(res, 409, 'This connection can no longer be completed for the session that started it. Nothing was stored.');
         return;
+      }
+      // The profile can be re-pointed while the exchange runs: a token minted for one store is
+      // stored only on a profile that still names that store, whoever started the connection.
+      // (A profile with no store host gives `https://null`, which no signed shop is.)
+      if (storeCallback !== undefined) {
+        if (current === undefined || `https://${presetStoreHost(current)}` !== storeCallback.origin) {
+          sendOAuthHtml(res, 409, 'This connection\'s address changed while it was being completed. Nothing was stored.');
+          return;
+        }
       }
       // Guarded, and the message is deliberately NOT "nothing was stored".
       //
@@ -10612,6 +10647,8 @@ export class LynoxHTTPApi {
             connected_by: by.tag,
           };
           if (by.mandateId !== undefined) grantNext.connected_mandate_id = by.mandateId;
+          // What the token can do, as the provider says: a narrower grant is recorded as granted.
+          if (typeof parsed.scope === 'string') grantNext.granted_scope = parsed.scope.split(/[\s,]+/).filter((s) => s !== '');
           // This exchange's client and refresh token are the stamp, the same one
           // `fetch_token` writes after a good exchange. An exchange that returned
           // no refresh token leaves no stamp.

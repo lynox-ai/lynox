@@ -876,6 +876,35 @@ describe('fetch_token — a grant a user gave is never renewed as an app token',
   });
 });
 
+describe('fetch_token — a Shopify store profile', () => {
+  const shopProfile = (base: string, grantType: 'refresh_token' | 'client_credentials'): ApiProfile => {
+    const p = crmProfile({ base_url: base, custom_endpoint_ack: { ...ACK, hosts: [new URL(base).hostname, 'acme.myshopify.com'] } }, grantType);
+    return { ...p, auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_id: 'shopify', preset_params: { shop: 'acme' } } } };
+  };
+
+  it('sends nothing for a profile whose base names another store than its parameter', async () => {
+    const store = new ApiStore();
+    expect(store.register(shopProfile('https://other.myshopify.com', 'refresh_token'))).toBe(true);
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'at-2' }));
+
+    const result = await fetchToken(makeAgent(store, vaultWithRefresh()));
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result).toContain('its base_url is not https on the store its preset_params derive');
+  });
+
+  it('refuses an app token for a Shopify profile that was never connected', async () => {
+    const store = new ApiStore();
+    expect(store.register(shopProfile('https://acme.myshopify.com', 'client_credentials'))).toBe(true);
+    const spy = tokenEndpoint(200, JSON.stringify({ access_token: 'app-token', expires_in: 86399 }));
+
+    const result = await fetchToken(makeAgent(store, makeVault({ CRM_CLIENT_ID: 'client-1', CRM_CLIENT_SECRET: 'secret-1' })));
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result).toContain('connects through the "shopify" provider, which issues its tokens only through a user\'s authorization');
+  });
+});
+
 describe('fetch_token — a refused scope', () => {
   const ACK2 = { ...ACK, hosts: ['api.crm.example', 'auth.bexio.com'] };
   const withPreset = (p: ApiProfile, extra: Record<string, unknown> = {}): ApiProfile =>

@@ -15451,6 +15451,148 @@ describe('mail custom-server defaults are the same on both routes', () => {
       });
     });
 
+describe('GET /api/oauth/callback — a Shopify store', () => {
+  // The provider signs its redirect with the client secret (`sec-1` below), and the signed shop
+  // has to be the store the profile's own parameter derives. All of it before the code is spent.
+  const PROFILE = 'shop-acme';
+  const STATE = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+  const VERIFIER = 'v'.repeat(43);
+  const CLIENT_SECRET = 'sec-1';
+
+  /** The query as Shopify's library signs it: sorted, re-encoded, `+` as `%20`. */
+  function signed(params: Record<string, string>, secret = CLIENT_SECRET): string {
+    const sorted = new URLSearchParams();
+    for (const k of Object.keys(params).sort((a, b) => a.localeCompare(b))) sorted.append(k, params[k]!);
+    const hmac = createHmac('sha256', secret).update(sorted.toString().replace(/\+/g, '%20')).digest('hex');
+    const q = new URLSearchParams(params);
+    q.append('hmac', hmac);
+    return `?${q.toString()}`;
+  }
+  const now = (): string => String(Math.floor(Date.now() / 1000));
+  const good = (over: Record<string, string> = {}): Record<string, string> => ({ code: 'c', shop: 'acme.myshopify.com', state: STATE, timestamp: now(), ...over });
+
+  let dataDir = '';
+  let previousDataDir: string | undefined;
+  beforeEach(() => {
+    previousDataDir = process.env['LYNOX_DATA_DIR'];
+    dataDir = mkdtempSync(join(tmpdir(), 'lynox-oauth-shopify-'));
+    process.env['LYNOX_DATA_DIR'] = dataDir;
+  });
+  afterEach(() => {
+    if (previousDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+    else process.env['LYNOX_DATA_DIR'] = previousDataDir;
+    if (dataDir !== '') rmSync(dataDir, { recursive: true, force: true });
+    mockGetApiStore.mockReturnValue(null);
+    mockSecretResolve.mockReset();
+    mockSecretSet.mockReset();
+  });
+
+  async function arrange(opts: { base?: string; oauthExtra?: Record<string, unknown>; tokenBody?: string } = {}): Promise<{ cookie: string; store: InstanceType<Awaited<typeof import('../core/api-store.js')>['ApiStore']> }> {
+    const { ApiStore } = await import('../core/api-store.js');
+    const store = new ApiStore();
+    expect(store.register({
+      id: PROFILE, name: 'Acme', base_url: opts.base ?? 'https://acme.myshopify.com', description: 'Acme store',
+      auth: {
+        type: 'oauth2',
+        vault_keys: ['SHOP_CLIENT_ID'],
+        oauth: { preset_id: 'shopify', preset_params: { shop: 'acme' }, client_id_key: 'SHOP_CLIENT_ID', client_secret_key: 'SHOP_CLIENT_SECRET', ...(opts.oauthExtra ?? {}) },
+      },
+    })).toBe(true);
+    mockGetApiStore.mockReturnValue(store);
+    mockSecretResolve.mockImplementation((n: string) => (n === 'SHOP_CLIENT_ID' ? 'id-1' : CLIENT_SECRET));
+    // A vetted endpoint stands in for the store's: what is under test is what happens before it.
+    mockDerivePresetEndpoints.mockReturnValue({ authorizeUrl: 'https://api.openai.com/authorize', tokenUrl: 'https://api.openai.com/token', host: 'api.openai.com' });
+    mockExchangeToken.mockReset();
+    mockExchangeToken.mockResolvedValue({ ok: true, status: 200, responseOk: true, text: opts.tokenBody ?? JSON.stringify({ access_token: 'at-1', scope: 'read_products,read_orders' }) });
+    const { signProfileOAuthState } = await import('../core/oauth-state-cookie.js');
+    const cookie = signProfileOAuthState({ state: STATE, profileId: PROFILE, verifier: VERIFIER, by: { tag: 'owner' } }, TEST_SECRET, Math.floor(Date.now() / 1000));
+    if (cookie === null) throw new Error('fixture could not be signed');
+    return { cookie: `lynox_profile_oauth_state=${encodeURIComponent(cookie)}`, store };
+  }
+
+  const call = (query: string, cookie: string): Promise<Response> =>
+    fetch(`${baseUrl}/api/oauth/callback${query}`, { redirect: 'manual', headers: { cookie } });
+
+  it('exchanges a signed code for the profile\'s store, in a form body, and records the scopes granted', async () => {
+    const { cookie, store } = await arrange({ oauthExtra: { body_format: 'json' } });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(200);
+    expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    const req = mockExchangeToken.mock.calls[0]![0] as { params: Record<string, string>; bodyFormat: string };
+    expect(req.params['code']).toBe('c');
+    expect(req.bodyFormat).toBe('form');
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
+    expect(store.get(PROFILE)?.oauth_grant?.origin).toBe('callback');
+  });
+
+  it.each([
+    ['no signature', (): string => `?${new URLSearchParams(good()).toString()}`],
+    ['a signature under another secret', (): string => signed(good(), 'not-the-secret')],
+    ['another store, signed', (): string => signed(good({ shop: 'other.myshopify.com' }))],
+    ['a stale timestamp, signed', (): string => signed(good({ timestamp: String(Math.floor(Date.now() / 1000) - 600) }))],
+  ])('spends no code on %s', async (_label, query) => {
+    const { cookie } = await arrange();
+    const res = await call(query(), cookie);
+    expect(res.status).toBe(400);
+    expect(mockExchangeToken).not.toHaveBeenCalled();
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('spends no code for a profile whose base names another store than its parameter', async () => {
+    const { cookie } = await arrange({ base: 'https://other.myshopify.com' });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(409);
+    expect(mockExchangeToken).not.toHaveBeenCalled();
+  });
+
+  it('records no granted scope when the answer names none', async () => {
+    const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1' }) });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toBeUndefined();
+  });
+
+  it('records scopes the answer separates with spaces', async () => {
+    const { cookie, store } = await arrange({ tokenBody: JSON.stringify({ access_token: 'at-1', scope: 'read_products read_orders' }) });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(store.get(PROFILE)?.oauth_grant?.granted_scope).toEqual(['read_products', 'read_orders']);
+  });
+
+  it('stores no token when the profile is re-pointed to another store while the code is exchanged', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      const p = store.get(PROFILE)!;
+      const moved = { ...p, base_url: 'https://other.myshopify.com', auth: { ...p.auth!, oauth: { ...p.auth!.oauth!, preset_params: { shop: 'other' } } } };
+      expect(store.save(moved, dataDir).ok).toBe(true);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    const res = await call(signed(good()), cookie);
+    expect(res.status).toBe(409);
+    expect(mockExchangeToken).toHaveBeenCalledTimes(1);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('stores no token when the profile is deleted while the code is exchanged', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      store.remove(PROFILE, dataDir);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    expect((await call(signed(good()), cookie)).status).toBe(409);
+    expect(mockSecretSet).not.toHaveBeenCalled();
+  });
+
+  it('stores the token when the profile is changed but still names the store', async () => {
+    const { cookie, store } = await arrange();
+    mockExchangeToken.mockImplementation(async () => {
+      const p = store.get(PROFILE)!;
+      expect(store.save({ ...p, base_url: 'https://acme.myshopify.com/admin/api/2026-01' }, dataDir).ok).toBe(true);
+      return { ok: true, status: 200, responseOk: true, text: JSON.stringify({ access_token: 'at-1' }) };
+    });
+    expect((await call(signed(good()), cookie)).status).toBe(200);
+    expect(mockSecretSet).toHaveBeenCalledWith(expect.stringMatching(/ACCESS_TOKEN$/), 'at-1');
+  });
+});
+
 describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   // ⚠ This region was called "not reachable by this harness" for one revision.
   // It is reachable: the engine mock already swaps `getApiStore` and
@@ -15903,7 +16045,7 @@ describe('GET /api/oauth/callback — the half behind the cookie check', () => {
   it('does not resurrect a profile deleted while the exchange was in flight', async () => {
     const { cookie, store } = await arrange();
     mockExchangeToken.mockImplementation(async () => {
-      store.remove(PROFILE);
+      store.remove(PROFILE, dataDir);
       return {
         ok: true, status: 200, responseOk: true,
         text: JSON.stringify({ access_token: 'at-1', refresh_token: 'rt-1', expires_in: 3600 }),

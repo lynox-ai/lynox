@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { SHOPIFY_CALLBACK_WINDOW_SECONDS, verifyShopifyCallback } from './oauth-callback-hmac.js';
+import { SHOPIFY_CALLBACK_WINDOW_SECONDS, bindShopifyCallback, verifyShopifyCallback } from './oauth-callback-hmac.js';
 
 // The example several third-party Shopify libraries carry in their docs (shopify_rest,
 // shopify_oauth, exshopify on hexdocs.pm), with the secret `hush`. Not computed here: the
@@ -169,5 +169,32 @@ describe('verifyShopifyCallback', () => {
 
   it('keeps the window at the library\'s 90 seconds', () => {
     expect(SHOPIFY_CALLBACK_WINDOW_SECONDS).toBe(90);
+  });
+});
+
+describe('bindShopifyCallback', () => {
+  const STORE = 'demo-store.myshopify.com';
+
+  it('binds a verified callback to the profile whose store it names, with the signed code', () => {
+    expect(bindShopifyCallback(signed(BASE, SECRET), SECRET, NOW, 'p1', STORE)).toEqual({
+      ok: true, binding: { profileId: 'p1', origin: 'https://demo-store.myshopify.com' }, code: 'abc123',
+    });
+  });
+
+  it('binds a shop Shopify writes in upper case to the lower-case store', () => {
+    const verdict = bindShopifyCallback(signed({ ...BASE, shop: 'Demo-Store.myshopify.com' }, SECRET), SECRET, NOW, 'p1', STORE);
+    expect(verdict.ok && verdict.binding.origin).toBe('https://demo-store.myshopify.com');
+  });
+
+  it('refuses a genuine signature for another store', () => {
+    expect(bindShopifyCallback(signed({ ...BASE, shop: 'other.myshopify.com' }, SECRET), SECRET, NOW, 'p1', STORE)).toEqual({ ok: false, reason: 'other-store' });
+  });
+
+  it('refuses a profile with no store host', () => {
+    expect(bindShopifyCallback(signed(BASE, SECRET), SECRET, NOW, 'p1', null)).toEqual({ ok: false, reason: 'not-a-store-profile' });
+  });
+
+  it('passes the verifier\'s refusal through before it looks at the store', () => {
+    expect(bindShopifyCallback(signed(BASE, 'other-secret'), SECRET, NOW, 'p1', null)).toEqual({ ok: false, reason: 'signature-mismatch' });
   });
 });

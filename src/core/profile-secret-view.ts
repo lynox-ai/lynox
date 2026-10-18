@@ -20,7 +20,7 @@ import type { SecretStoreLike } from '../types/index.js';
 import { accessTokenKey, collectVaultKeys, grantTokenNames, hasTokenSlotShape, isMandateAuthored, isMandateConnection, readersRefreshSlot, refreshTokenKey, tokenSlotNames, vaultSlotBase, writtenNames } from './api-store.js';
 import type { ApiAuth, ApiProfile, ApiStore } from './api-store.js';
 import type { MandateEnds } from './mandate-ends.js';
-import { derivePresetEndpoints, OAUTH_PRESETS, type OAuthPreset } from './oauth-presets.js';
+import { derivePresetEndpoints, OAUTH_PRESETS, presetStoreHost, type OAuthPreset } from './oauth-presets.js';
 import type { RequestPrincipal } from './request-principal.js';
 import type { SecretReleases } from './secret-releases.js';
 import { shapedForLog, VAULT_NAME_SHAPE } from './profile-value-shape.js';
@@ -130,7 +130,8 @@ type SlotGrant =
 /**
  * The built-in provider two oauth2 profiles share a grant through, or undefined when they do
  * not: the same `preset_id` in {@link OAUTH_PRESETS}, both bases on one of its `apiHosts` over
- * https with no port of their own, and the same token endpoint as the preset derives it from
+ * https with no port of their own (for a provider on the host it derives, each on its own
+ * store host, `presetStoreHost`), and the same token endpoint as the preset derives it from
  * each profile's parameters. A profile whose `base_url` does not parse shares nothing.
  */
 function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
@@ -139,6 +140,9 @@ function sharedGrant(a: ApiProfile, b: ApiProfile): OAuthPreset | undefined {
   const preset = OAUTH_PRESETS.get(presetId);
   if (preset === undefined) return undefined;
   const onApiHost = (p: ApiProfile): boolean => {
+    // A provider on the host it derives: each profile on its own store's host, which the equal
+    // token endpoints below make the same store.
+    if (preset.apiOnDerivedHost === true) return presetStoreHost(p) !== null;
     let base: URL;
     try {
       base = new URL(p.base_url);
@@ -379,8 +383,10 @@ function isRefreshSlotOf(p: ApiProfile, name: string): boolean {
  * token slot and may go anywhere this predicate is concerned with. A token slot goes only to a
  * target of the grant it belongs to:
  * - `request`: an access token, never a refresh token, of an owner that is registered, to the
- *   origin (scheme, host and port) of the owner's `base_url` — or, when the owner shares its grant through a built-in provider, to
- *   `https://<host>` for a host of that provider's `apiHosts`;
+ *   origin (scheme, host and port) of the owner's `base_url` — or, when the owner shares its
+ *   grant through a built-in provider, to `https://<host>` for a host of that provider's
+ *   `apiHosts`. An owner of a provider on the host it derives, shared or not, reaches its own
+ *   store host only, and there only paths under the provider's `apiPathPrefix`;
  * - `exchange`: a refresh token, asked by the owner or by a profile sharing the grant, to the
  *   owner's token endpoint (the preset's, else `token_url`), compared whole;
  * - `client` and `other`: never.
@@ -411,6 +417,17 @@ export function slotMayReach(
       // A held-back owner's access token goes nowhere: it is stored, not in use.
       if (apiStore.get(owner.id) === undefined) return false;
       const destination = destinationOf(new URL(target));
+      // A store profile's token, shared or not, reaches its store's host only, never a base
+      // re-pointed elsewhere, and there only the provider's API path. An encoded slash or backslash
+      // is refused there: the URL parser leaves it alone, a server may decode it and route out of
+      // that path. (Encoded dot segments the parser resolves itself.)
+      const ownPreset = owner.auth?.type === 'oauth2' && owner.auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(owner.auth.oauth.preset_id) : undefined;
+      if (ownPreset?.apiOnDerivedHost === true) {
+        const store = presetStoreHost(owner);
+        const path = new URL(target).pathname;
+        return store !== null && destination === `https://${store}`
+          && (ownPreset.apiPathPrefix === undefined || (path.startsWith(ownPreset.apiPathPrefix) && !/%(2f|5c)/i.test(path)));
+      }
       // The owner's own refresh slot says whether it shares its grant, and through which provider;
       // only when the owner is one of that grant's members.
       const ownGrant = owner.auth?.type === 'oauth2' ? slotGrant(profiles, readersRefreshSlot(owner)) : undefined;

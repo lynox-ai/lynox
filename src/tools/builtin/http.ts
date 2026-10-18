@@ -9,7 +9,7 @@ import { accessTokenKey, hasRevokedGrant, recordedWrites, refreshTokenKey } from
 import type { ApiProfile } from '../../core/api-store.js';
 import { revokedGrantMessage, tokenFingerprint } from '../../core/oauth-refresh-failure.js';
 import { shapedForLog, VAULT_NAME_SHAPE, DERIVED_NAME_SHAPE, GRANT_TYPE_SHAPE, HTTP_HEADER_NAME } from '../../core/profile-value-shape.js';
-import { OAUTH_PRESETS, presetNotFollowed, type OAuthPreset } from '../../core/oauth-presets.js';
+import { OAUTH_PRESETS, presetNotFollowed, presetStoreHost, presetTokenHeaderName, type OAuthPreset } from '../../core/oauth-presets.js';
 import { isOwnerPrincipal } from '../../core/request-principal.js';
 import { DelegatedHopRefused, delegatedRedirects, httpTarget, newCorrelationId, OutwardReadUnrecorded, outwardReadRecorder } from '../../core/audit-log.js';
 import type { AuditPhase } from '../../core/audit-log.js';
@@ -1686,6 +1686,13 @@ async function attachEngineManagedAuth(
   }
   const auth = profile.auth;
   if (!auth) return {};
+  // A provider on the host it derives (Shopify): the profile's base has to be the store its own
+  // parameter derives, over https. `slotMayReach` below keeps the token off any other host as
+  // well; this says why, where its sentence would point at the base the request goes to.
+  const attachPreset = auth.type === 'oauth2' && auth.oauth?.preset_id !== undefined ? OAUTH_PRESETS.get(auth.oauth.preset_id) : undefined;
+  if (attachPreset?.apiOnDerivedHost === true && presetStoreHost(profile) === null) {
+    return { refusal: `Error: api_profile "${profile.id}" connects one ${attachPreset.label} store, and its base_url is not https on the store its auth.oauth.preset_params derive. The token was not attached. Make the two name the same store with api_setup action "update".` };
+  }
   // Before any vault read or renewal: a profile that will be refused here costs no secret access.
   if ((auth.type === 'header' || auth.type === 'oauth2') && typeof auth.header_name === 'string' && isRequestShapingHeaderName(auth.header_name)) {
     return { refusal: shapingSlotRefusal(profile.id) };
@@ -1858,14 +1865,23 @@ async function attachEngineManagedAuth(
     const ownHeader = auth.header_name !== undefined && auth.header_name.toLowerCase() !== 'authorization'
       ? auth.header_name
       : undefined;
-    // An account connected through a built-in provider takes its token as `Bearer`: the header
-    // name a profile names is the model's choice, and it would reach the provider on every
-    // request, a bulk run's included, where no question shows it.
+    // An account connected through a built-in provider takes its token as `Bearer`, or in the
+    // header the provider itself names (Shopify): the header name a profile names is the model's
+    // choice, and it would reach the provider on every request, a bulk run's included, where no
+    // question shows it.
     if (ownHeader !== undefined && auth.oauth?.preset_id !== undefined) {
       return { refusal: `Error: api_profile "${profile.id}" is connected through a built-in provider and names its own header for the token (auth.header_name), which nothing shows before it is sent, so the token was not attached. Remove auth.header_name with api_setup action="update".` };
     }
-    const oauthSlot = ownHeader ?? 'Authorization';
-    const oauthValue = ownHeader !== undefined ? resolved : `Bearer ${resolved}`;
+    // A built-in provider that documents its own token header gets it, set by the provider and not
+    // by the profile. Held to the same name checks as a profile's: a header that reshapes the
+    // request is refused even from here.
+    const presetHeader = attachPreset !== undefined ? presetTokenHeaderName(attachPreset) : undefined;
+    if (presetHeader !== undefined && (!HTTP_HEADER_NAME.test(presetHeader) || isRequestShapingHeaderName(presetHeader))) {
+      return { refusal: `Error: the built-in provider "${attachPreset?.id ?? ''}" names a token header this engine does not send, so the access token of api_profile "${profile.id}" was not attached.` };
+    }
+    const tokenHeader = presetHeader !== undefined && presetHeader.toLowerCase() !== 'authorization' ? presetHeader : ownHeader;
+    const oauthSlot = tokenHeader ?? 'Authorization';
+    const oauthValue = tokenHeader !== undefined ? resolved : `Bearer ${resolved}`;
     // The vault value came back from a token endpoint; it enters a header here.
     if (/[\r\n\0]/.test(oauthValue)) {
       return { refusal: `Error: api_profile "${profile.id}" holds an access token containing CRLF/null — refusing to send it. Mint a new one with api_setup({ action: "fetch_token", id: "${profile.id}" }).` };
