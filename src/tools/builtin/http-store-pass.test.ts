@@ -227,7 +227,17 @@ describe('the binding (AC4)', () => {
 describe('no renewal of a store preset (AC6)', () => {
   it('a due token with a filled refresh slot does not enter the renewal', async () => {
     const p = shopProfile({ oauth: { token_expires_at: Date.now() - 60_000, grant_type: 'refresh_token' } });
-    const r = await attach(URL_OK, [p], { vault: { [accessTokenKey('shop-acme')]: TOKEN, [refreshTokenKey('shop-acme')]: 'shprt-refresh', S_CID: 'cid', S_CSECRET: 'csecret' } });
+    const log = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let r: Run;
+    try {
+      r = await attach(URL_OK, [p], { vault: { [accessTokenKey('shop-acme')]: TOKEN, [refreshTokenKey('shop-acme')]: 'shprt-refresh', S_CID: 'cid', S_CSECRET: 'csecret' } });
+      // This hand-built agent may not renew unattended, so the reads below cannot tell the skip
+      // from a renewal that stopped at that check; the skip's own line can. A refresh_token
+      // grant would otherwise pass `oauthProfileMayBeRenewedUnattended` and enter the renewal.
+      expect(log.mock.calls.map((c) => String(c[0])).some((l) => l.includes('oauth token renewal skipped for profile "shop-acme": a store connection is renewed by connecting it again'))).toBe(true);
+    } finally {
+      log.mockRestore();
+    }
     // The renewal reads the client credentials before it posts; it was not entered.
     expect(r.read).not.toContain('S_CSECRET');
     expect(r.read).not.toContain('S_CID');

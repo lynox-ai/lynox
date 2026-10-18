@@ -168,3 +168,29 @@ describe('storePassRefusal on its own', () => {
     expect(storePassRefusal(new URL(`${ORIGIN}/admin/x`), { [H]: TOKEN }, pass())).toBeNull();
   });
 });
+
+describe('a bulk run\'s send (bulk-external) carries the pass its attach minted', () => {
+  it('reads the store under the pass, and the same read without one is refused', async () => {
+    const { externalClient, mintBulkContract } = await import('./bulk-external.js');
+    const { createToolContext } = await import('./tool-context.js');
+    const target = `${ORIGIN}/admin/api/2025-01/products/1.json`;
+    const c = (mint: boolean): ReturnType<typeof externalClient> => externalClient({
+      contract: mintBulkContract('acme.myshopify.com', [target]),
+      hostPolicy: createToolContext({}),
+      ackHosts: undefined,
+      attach: async (_u, headers, _m, out) => {
+        headers[H] = TOKEN;
+        if (mint && out !== undefined) out.pass = pass();
+        return true;
+      },
+      rateLimit: () => null,
+      scan: () => null,
+      connectedAccount: () => false,
+      recordRead: null,
+    });
+    expect((await c(true).get(target)).kind).toBe('ok');
+    expect(sent).toHaveLength(1);
+    expect((await c(false).get(target)).kind).not.toBe('ok');
+    expect(sent).toHaveLength(1);
+  });
+});

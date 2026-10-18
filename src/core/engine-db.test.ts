@@ -1387,7 +1387,9 @@ describe('the store binding and the exact marker (v38)', () => {
       let e = new EngineDb(path, 'k');
       expect(e.exactMarkerSet()).toBe(false);
       e.setExactMarker();
-      const first = (e.getDb().prepare('SELECT first_ok_at FROM exact_marker').get() as { first_ok_at: string }).first_ok_at;
+      // Backdated: two calls within one second would carry the same stamp either way.
+      e.getDb().prepare("UPDATE exact_marker SET first_ok_at = '2026-01-01 00:00:00'").run();
+      const first = '2026-01-01 00:00:00';
       e.setExactMarker();
       expect((e.getDb().prepare('SELECT COUNT(*) AS n FROM exact_marker').get() as { n: number }).n).toBe(1);
       expect((e.getDb().prepare('SELECT first_ok_at FROM exact_marker').get() as { first_ok_at: string }).first_ok_at).toBe(first);
