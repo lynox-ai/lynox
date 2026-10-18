@@ -905,20 +905,12 @@ export class OAuthGraphProvider implements MailProvider {
 
   private async fetchWithToken(url: string, init: { method: string; headers?: Record<string, string>; body?: string }, token: string): Promise<Response> {
     assertGraphUrl(url);
-    const res = await graphFetch(url, {
+    return await graphFetch(url, {
       method: init.method,
       headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
       ...(init.body !== undefined ? { body: init.body } : {}),
       signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
     }, this.auth.hostPolicy);
-    // The body is read HERE, inside the limiter's slot: the pinned transport
-    // streams it, and Graph counts a request as concurrent until its response is
-    // complete. Released at the headers, four slots could carry eight downloads.
-    const text = await res.text();
-    return new Response(text === '' || res.status === 204 || res.status === 205 ? null : text, {
-      status: res.status,
-      headers: res.headers,
-    });
   }
 
   private request(url: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<Response> {

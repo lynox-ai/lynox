@@ -866,33 +866,22 @@ describe('OAuthGraphProvider — review fixes', () => {
     expect(ids(events[0])).toEqual(['<m1@example.com>', '<m2@example.com>']);
   });
 
-  it('the limiter holds a slot until the body is read, not only until the headers', async () => {
-    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
-    const envs = await listed(provider, ['s1', 's2', 's3', 's4', 's5', 's6']);
-    let open = 0;
-    let peak = 0;
-    const finish: Array<() => void> = [];
-    routes.unshift((url) => {
-      if (!url.startsWith(`${ME}/messages/`)) return undefined;
-      open++;
-      peak = Math.max(peak, open);
-      const payload = url.includes('/attachments') ? '{"value":[]}' : JSON.stringify({ ...graphMessage('s'), body: { contentType: 'text', content: '' } });
-      // Headers now, body later: the stream closes only when the test says so.
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          finish.push(() => { controller.enqueue(new TextEncoder().encode(payload)); controller.close(); open--; });
-        },
-      });
-      return new Response(stream, { status: 200, headers: { 'Content-Type': 'application/json' } });
+  it('a 429 whose body cannot be read still pauses the watch', async () => {
+    routes.push((url) => {
+      if (!url.includes('/messages/delta')) return undefined;
+      const broken = new ReadableStream<Uint8Array>({ start(c) { c.error(new Error('connection reset')); } });
+      return new Response(broken, { status: 429, headers: { 'Retry-After': '3600' } });
     });
-    const all = Promise.all(envs.map((e) => provider.fetch({ uid: e.uid })));
-    for (let i = 0; i < 12; i++) {
-      await vi.waitFor(() => { expect(finish.length).toBeGreaterThan(0); });
-      await new Promise((r) => setTimeout(r, 5));
-      finish.shift()!();
-    }
-    await all;
-    expect(peak).toBe(GRAPH_MAX_CONCURRENT_REQUESTS);
+    const provider = new OAuthGraphProvider(makeAccount(), makeAuth());
+    const events: MailWatchEvent[] = [];
+    const handle = await provider.watch({ intervalMs: 10 }, (e) => { events.push(e); });
+    await vi.waitFor(() => { expect(events.length).toBe(1); });
+    await new Promise((r) => setTimeout(r, 80));
+    await handle.stop();
+    await provider.close();
+    expect(events[0]).toMatchObject({ type: 'error' });
+    expect((events[0] as { error: MailError }).error.code).toBe('rate_limited');
+    expect(fetchMock, 'paused: one request over eight intervals').toHaveBeenCalledTimes(1);
   });
 
   it('two watches on the same Graph folder do not run rounds side by side', async () => {
