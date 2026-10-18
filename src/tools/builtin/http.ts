@@ -931,9 +931,7 @@ export function oauthProfileMayBeRenewedUnattended(
   // or update is discarded (`api-setup.ts`, the update path reads the stored
   // record back over it), and `callback` means a human sat at the provider's
   // consent screen for this. Its other half, a built-in preset, lives in
-  // model-authorable `auth.oauth`, but an update may not remove or change a
-  // built-in preset (`api-setup.ts`), and where it is absent the origin check
-  // still stands.
+  // model-authorable `auth.oauth`.
   //
   // ⚠ What this does NOT claim, because an earlier version of this comment did:
   // that the engine-owned half is asked FIRST. It is asked second. An injected
