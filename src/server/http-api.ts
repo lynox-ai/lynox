@@ -6962,6 +6962,14 @@ export class LynoxHTTPApi {
           return;
         }
       }
+      // Bulk runs stay off: this route cannot turn them on, on any tier, and the whole
+      // save is refused rather than applied without the flag. Turning them off, leaving
+      // the key out, and re-sending a value already stored stay allowed, so an owner can
+      // always switch them off and save everything else.
+      if (parsed.data.bulk_runs_enabled === true && readUserConfig().bulk_runs_enabled !== true) {
+        errorResponse(res, 403, 'bulk_runs_enabled cannot be turned on through the API.');
+        return;
+      }
       // The background-task model: held to the user bounds at WRITE time, on every
       // tier, so a choice the loader would drop (and quietly replace with the worker
       // profile) is refused with its reason instead. Only a CHANGE is checked: the UI

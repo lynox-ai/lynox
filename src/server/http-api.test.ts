@@ -4976,6 +4976,49 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    // ── bulk_runs_enabled: this route cannot turn bulk runs on ──
+    it.each([['self-host', ''], ['hosted', 'hosted'], ['managed', 'managed']])(
+      'PUT refuses bulk_runs_enabled:true on %s and persists nothing, not even the other keys',
+      async (_label, tier) => {
+        const { saveUserConfig } = await import('../core/config.js');
+        const saves = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+        vi.stubEnv('LYNOX_BILLING_TIER', tier);
+        try {
+          for (const body of [{ bulk_runs_enabled: true }, { thinking_mode: 'adaptive', bulk_runs_enabled: true }]) {
+            const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify(body) });
+            expect(res.status).toBe(403);
+            expect(await res.text()).toContain('bulk_runs_enabled');
+          }
+        } finally {
+          vi.stubEnv('LYNOX_BILLING_TIER', '');
+        }
+        expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(saves);
+      },
+    );
+
+    it('PUT accepts bulk_runs_enabled:false and persists it', async () => {
+      const { saveUserConfig } = await import('../core/config.js');
+      const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: false }) });
+      expect(res.status).toBe(200);
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall![0]['bulk_runs_enabled']).toBe(false);
+    });
+
+    it('PUT lets a client re-send a bulk_runs_enabled:true that is already stored', async () => {
+      // A client that reads the config and writes it back must still save the rest;
+      // a stored true is not turned on by this route.
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', bulk_runs_enabled: true });
+      try {
+        const res = await jsonFetch('/api/config', { method: 'PUT', body: JSON.stringify({ bulk_runs_enabled: true, thinking_mode: 'adaptive' }) });
+        expect(res.status).toBe(200);
+        const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+        expect(lastCall![0]['thinking_mode']).toBe('adaptive');
+      } finally {
+        (readUserConfig as unknown as { mockReturnValue: (v: unknown) => void }).mockReturnValue({ default_tier: 'deep', thinking_mode: 'adaptive', api_key: 'sk-ant-secret-key' });
+      }
+    });
+
     // ── background_model: held to the user bounds at write time ──
     const BG_MINISTRAL = { provider: 'openai', model_id: 'ministral-14b-2512', api_base_url: 'https://api.mistral.ai/v1' };
 
