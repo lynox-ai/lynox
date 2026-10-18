@@ -101,6 +101,57 @@ export interface OAuthPreset {
     readonly writeScopes: readonly string[];
     readonly paragraphs: readonly string[];
   };
+  // The four fields below describe how a provider wants its requests shaped. No shipped preset
+  // sets one, and nothing outside this file and its tests reads them yet: the authorize link,
+  // the token requests and the attach still do what they did before these fields existed.
+  /**
+   * How the scopes are to be joined on the authorize link. Absent: a space, as OAuth 2.0 says
+   * and as bexio takes them; a provider that documents commas says so here. Read through
+   * {@link presetScopeParam}.
+   */
+  readonly scopeSeparator?: ' ' | ',';
+  /**
+   * The header the provider reads the access token from, carrying the bare token. Absent:
+   * `Authorization: Bearer`. A preset profile cannot choose a header itself: one that names its
+   * own `auth.header_name` gets no token attached (`attachEngineManagedAuth` in `http.ts`), so a
+   * save cannot point the token at another header. Read through {@link presetTokenHeaderName}.
+   */
+  readonly tokenHeaderName?: string;
+  /**
+   * The body of every request to the token endpoint: the code exchange and each refresh.
+   * Absent: whatever the profile says, `form` unless it says `json`, as for a profile without a
+   * preset. Set by the preset, it wins over the profile: what the provider's token endpoint
+   * accepts is a fact about the provider, and the profile is written by the model. Read through
+   * {@link presetTokenBodyFormat}.
+   */
+  readonly tokenBodyFormat?: 'form' | 'json';
+  /**
+   * A check the callback runs on the provider's redirect before it exchanges the code, on top
+   * of the state cookie every preset already has. Absent: none. `shopify-hmac` is
+   * {@link ./oauth-callback-hmac.ts}.
+   */
+  readonly callbackVerification?: 'shopify-hmac';
+}
+
+/** The scope parameter of the authorize link: the scopes, joined the way the preset says. */
+export function presetScopeParam(preset: OAuthPreset, scopes: readonly string[]): string {
+  return scopes.join(preset.scopeSeparator ?? ' ');
+}
+
+/**
+ * The header the preset puts the bare token in, or `undefined` for `Authorization: Bearer`.
+ */
+export function presetTokenHeaderName(preset: OAuthPreset): string | undefined {
+  return preset.tokenHeaderName;
+}
+
+/**
+ * The body format of a request to the preset's token endpoint. The preset's own value first,
+ * then the profile's, then `form`; for a preset that sets none this is exactly what a profile
+ * without a preset gets.
+ */
+export function presetTokenBodyFormat(preset: OAuthPreset, profileFormat: 'form' | 'json' | undefined): 'form' | 'json' {
+  return preset.tokenBodyFormat ?? profileFormat ?? 'form';
 }
 
 /**
