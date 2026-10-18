@@ -25,6 +25,7 @@ import { RunHistory } from './run-history.js';
 import { pruneWireSinks, isProvisionedInstance } from './wire-capture.js';
 import { EngineDb } from './engine-db.js';
 import { ExactClearance, controlPlaneFromEnv } from './exact-clearance.js';
+import { Containment } from './containment.js';
 import { isExactHeld, refuseDebug } from './exact-debug-refusal.js';
 import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { AuditLog } from './audit-log.js';
@@ -1160,10 +1161,13 @@ export class Engine {
       const marker = { isSet: () => db.exactMarkerSet(), set: () => { db.setExactMarker(); } };
       this._toolContext.exactClearance = new ExactClearance(controlPlaneFromEnv(), marker, { onMarkerSet: () => { refuseDebug(); } });
       this._toolContext.storeBindingDigest = (id, origin, value) => db.storeBindingDigest(id, origin, value);
+      // And which threads and bulk runs a store connection was attached for (v40).
+      this._toolContext.containment = new Containment(db.getDb());
       if (isExactHeld(marker)) refuseDebug();
     } else {
       this._toolContext.exactClearance = null;
       this._toolContext.storeBindingDigest = null;
+      this._toolContext.containment = null;
       // No engine.db, no readable marker: fail-closed.
       if (isExactHeld(null)) refuseDebug();
     }

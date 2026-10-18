@@ -9,6 +9,7 @@ import {
   dataStoreColumns,
 } from '../../core/bulk-plan.js';
 import { judgeTemplate, normalizeJudgeRule, type JudgeRule } from '../../core/bulk-judge-rule.js';
+import { chatThreadOf } from './private-thread.js';
 
 /**
  * The model-facing half of a bulk run's dry run (PRD bulk-changes-reversible §3.2,
@@ -136,7 +137,7 @@ function planList(input: BulkPlanInput, agent: IAgent, ledger: BulkLedger, judge
   }
   const source = parseListSource(host, listInput, input.write_method ?? 'PATCH', detectSecretInContent);
   const out = ledger.recordExternalListPlan({
-    createdBy: agent.currentThreadId, principal: agent.principal, host, source, readContract: listReadContract(host, source), judge,
+    createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, host, source, readContract: listReadContract(host, source), judge,
   });
   if (!out.ok) {
     return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -301,7 +302,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
         const method = input.write_method ?? 'PATCH';
         if (!(BULK_WRITE_METHODS as readonly string[]).includes(method)) throw new BulkSourceError('write_method must be PATCH, PUT or POST.');
         const out = ledger.recordExternalPlan({
-          createdBy: agent.currentThreadId, principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method), judge,
+          createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, host, targets: external, contract: mintBulkContract(host, keys, method), judge,
         });
         if (!out.ok) {
           return 'Error: another external dry run is still reading its targets. Wait until bulk_status shows it previewed, then plan again.';
@@ -321,7 +322,7 @@ export const bulkPlanTool: ToolEntry<BulkPlanInput> = {
       }
 
       const status = ledger.recordDryRun({
-        createdBy: agent.currentThreadId, principal: agent.principal, targetSystem: input.target_system, scope, targets,
+        createdBy: agent.currentThreadId, planningThread: chatThreadOf(agent), principal: agent.principal, targetSystem: input.target_system, scope, targets,
         targetCollection: input.target_system === 'data_store' ? input.target_collection ?? null : null,
         atomic: input.atomic === true,
         judge,

@@ -45,6 +45,7 @@ import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isShopifyAdminUrl, normalizeHostForMatch, SHOPIFY_UNAVAILABLE } from '../../core/shopify-host.js';
 import { mintStoreExchangePass, mintStorePass, STORE_CREDENTIAL_HEADERS, STORE_EXCHANGE_PATH, storeOriginOf, type StorePass } from '../../core/store-pass.js';
 import type { VerifiedStoreCallback } from '../../core/oauth-callback-hmac.js';
+import { containerOf, type ContainedConnection, type StoreContainer } from '../../core/containment.js';
 import { controlPlaneFromEnv } from '../../core/exact-clearance.js';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -1680,6 +1681,64 @@ function storePassPrecheck(url: string, headers: Record<string, string>, toolCon
 }
 
 /**
+ * The tail of the store pass (the clearance, step 6b, and the mint), the only place a request pass is
+ * minted. Called by {@link attachEngineManagedAuth} after every refusal of the oauth2 branch and
+ * the binding, in this order:
+ *
+ *  1. the container: the request's thread, or its bulk run. A request with neither is refused —
+ *     what a store returns has to stay somewhere it can be found again. So is one without the
+ *     stores step 3 writes to. These checks write nothing, so they come before step 2;
+ *  2. the control plane's clearance, once per boot. It records the instance as one that holds a
+ *     store connection, so every refusal that writes nothing comes before it;
+ *  3. the containment row (`core/containment.ts`), and for a thread its `skip_extraction`, so the
+ *     readers of private mode stand down as well. Written BEFORE the pass exists: a request whose
+ *     row cannot be written is refused, and a request that fails after it leaves the row set;
+ *  4. the pass.
+ *
+ * ⛔ Nothing may be inserted between 3 and 4 that can refuse without meaning it — a refusal
+ * there leaves a container contained for a request that was never sent, which is the safe
+ * direction, but a mint moved before 3 is a pass without a row (`store-pass-guards.test.ts`).
+ *
+ * The exchange of a store's token (the OAuth callback) is not a request for the store's data
+ * and does not contain anything.
+ */
+async function mintStorePassFor(
+  toolContext: ToolContext,
+  container: StoreContainer,
+  connection: ContainedConnection,
+  origin: string,
+  slot: string,
+  value: string,
+): Promise<{ pass: StorePass } | { refusal: string }> {
+  const target: { kind: 'thread' | 'bulk_run'; id: string } | null = 'bulkRunId' in container
+    ? (container.bulkRunId !== '' ? { kind: 'bulk_run', id: container.bulkRunId } : null)
+    : (container.threadId !== undefined && container.threadId !== '' ? { kind: 'thread', id: container.threadId } : null);
+  if (target === null) {
+    return { refusal: 'a request to a Shopify store is sent only for a chat or a bulk run, and this one runs for neither, so nothing was sent. Make the request from a chat.' };
+  }
+  const containment = toolContext.containment;
+  if (!containment) return { refusal: CONTAINMENT_UNWRITABLE };
+  const threads = target.kind === 'thread' ? toolContext.threadStore : null;
+  if (target.kind === 'thread' && !threads) return { refusal: CONTAINMENT_UNWRITABLE };
+  const clearance = await toolContext.exactClearance!.ensure();
+  if (!clearance.ok) return { refusal: SHOPIFY_UNAVAILABLE };
+  try {
+    containment.contain(target, connection);
+    if (threads) {
+      // Read back, not trusted: an UPDATE of a thread row that does not exist (the session's
+      // insert is best-effort) changes nothing and throws nothing.
+      if (threads.getThread(target.id)?.skip_extraction !== 1) threads.updateThread(target.id, { skip_extraction: true });
+      if (threads.getThread(target.id)?.skip_extraction !== 1) throw new Error('the private flag did not hold');
+    }
+  } catch {
+    return { refusal: CONTAINMENT_UNWRITABLE };
+  }
+  return { pass: mintStorePass(origin, slot, value) };
+}
+
+const CONTAINMENT_UNWRITABLE = 'this engine could not record that this chat or run reads the store, so nothing was sent to the store. Try again later.';
+
+/**
  * The token exchange's pass (PRD Appendix B4), for the connect callback alone, once the store's
  * signature on the callback held (`callback`). `undefined` when any condition fails; the
  * exchange is then refused as before. In this order:
@@ -1723,6 +1782,10 @@ async function attachEngineManagedAuth(
   agent: import('../../types/index.js').IAgent,
   /** The request may change something there ({@link isWriteMethod} of the method sent). */
   write: boolean,
+  /** What a request to a store is contained under (`core/containment.ts`): the calling agent's
+   *  thread ({@link containerOf}), or a bulk run's id. Every caller names it; the source guard
+   *  (`store-pass-guards.test.ts`) lists each with its rule. */
+  container: StoreContainer,
 ): Promise<AttachedAuth> {
   // A Shopify store gets nothing from this engine for now (`core/shopify-host.ts`): refused here,
   // before the profiles, the vault and the `!apiStore || !vault` exit below, so it holds whatever
@@ -2004,11 +2067,11 @@ async function attachEngineManagedAuth(
       if (origin === null || typeof bound !== 'string' || digest === null || !digestsEqual(digest, bound)) {
         return { refusal: `Error: the Shopify store connection of api_profile "${profile.id}" is not the one this engine connected, so nothing was sent to the store. Connect it again with api_setup action "connect".` };
       }
-      // Step 6b: the control plane's clearance, once per boot. It records the instance as one
-      // that holds a store connection, so it comes after every refusal above.
-      const clearance = await toolContext!.exactClearance!.ensure();
-      if (!clearance.ok) return { refusal: `Error: ${SHOPIFY_UNAVAILABLE}` };
-      return { ...put(oauthSlot, oauthValue), pass: mintStorePass(origin, oauthSlot, oauthValue) };
+      // Step 6b, the containment and the pass: after every refusal above, so a refused request
+      // records nothing and contains nothing (`mintStorePassFor`).
+      const minted = await mintStorePassFor(toolContext!, container, { kind: 'api', connectionId: profile.id }, origin, oauthSlot, oauthValue);
+      if ('refusal' in minted) return { refusal: `Error: ${minted.refusal}` };
+      return { ...put(oauthSlot, oauthValue), pass: minted.pass };
     }
     return put(oauthSlot, oauthValue);
   }
@@ -2717,7 +2780,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // checked; `gateReading` (`outbound-write.ts`) is compared before and after.
     const readingNow = (): string => gateReading(method, headers, input.url, gateBodyReadings(input.body, headers));
     const readBeforeAttach = readingNow();
-    const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent, isWriteMethod(gatedMethod));
+    const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent, isWriteMethod(gatedMethod), containerOf(agent));
     // A refusal means nothing was sent — a failed call, not a quiet one. It is
     // phrased for the model (`Error: api_profile "x" is oauth2 but the vault has
     // no access_token …`), so it goes to the ledger verbatim.
@@ -3576,7 +3639,7 @@ async function describeConnectedWrite(
     const limited = deps.toolContext?.apiStore?.checkRateLimit(new URL(readUrl).hostname);
     if (limited) throw new WriteContextRefused(limited);
     const headers: Record<string, string> = { accept: 'application/json' };
-    const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent, false);
+    const auth = await attachEngineManagedAuth(readUrl, headers, deps.toolContext, deps.agent, false, containerOf(deps.agent));
     if (auth.refusal) throw new WriteContextRefused(auth.refusal);
     if (recordRead !== null) {
       try {
@@ -3644,7 +3707,13 @@ export async function attachStoredCredential(
     /** For a request to a Shopify store: without both, it gets no pass and the send refuses it. */
     exactClearance?: ToolContext['exactClearance'] | undefined;
     storeBindingDigest?: ToolContext['storeBindingDigest'] | undefined;
+    /** For a request to a Shopify store: where its run is recorded as contained. Without it the
+     *  request is refused. */
+    containment?: ToolContext['containment'] | undefined;
   },
+  /** The bulk run this request is for. The agent below is built by hand and has no thread, so
+   *  the run is the container a request to a store is contained under (`core/containment.ts`). */
+  container: { bulkRunId: string },
   /** Receives the store pass minted for this request, which the caller hands to its send. */
   out?: { pass?: StorePass | undefined } | undefined,
 ): Promise<boolean> {
@@ -3654,9 +3723,13 @@ export async function attachStoredCredential(
     {
       apiStore: stores.apiStore, mandateEnds: stores.mandateEnds, secretReleases: stores.secretReleases,
       exactClearance: stores.exactClearance ?? null, storeBindingDigest: stores.storeBindingDigest ?? null,
-    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest'> as ToolContext,
+      containment: stores.containment ?? null,
+      // A bulk run is not a chat: nothing of a thread is written for it.
+      threadStore: null,
+    } as Pick<ToolContext, 'apiStore' | 'mandateEnds' | 'secretReleases' | 'exactClearance' | 'storeBindingDigest' | 'containment' | 'threadStore'> as ToolContext,
     { secretStore: stores.secretStore, principal: stores.principal } as Pick<import('../../types/index.js').IAgent, 'secretStore' | 'principal'> as import('../../types/index.js').IAgent,
     write,
+    { bulkRunId: container.bulkRunId },
   );
   if (out !== undefined && auth.refusal === undefined) out.pass = auth.pass;
   return auth.slot !== undefined && auth.refusal === undefined;

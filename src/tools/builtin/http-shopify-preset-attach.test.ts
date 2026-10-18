@@ -33,7 +33,7 @@ async function attach(url: string, profile: ApiProfile): Promise<{ attached: boo
     apiStore: store,
     secretStore: { resolve: (n: string) => { read.push(n); return n === accessTokenKey(profile.id) ? TOKEN : null; } } as never,
     principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
-  });
+  }, { bulkRunId: 'run-1' });
   return { attached, headers, read };
 }
 

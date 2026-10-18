@@ -1336,7 +1336,7 @@ describe('httpRequestTool', () => {
             const headers: Record<string, string> = {};
             const attach = attachStoredCredential('https://api.shop.example/v1/orders', headers, write, {
               apiStore: store as never, secretStore: { resolve: () => 'shop-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
-            });
+            }, { bulkRunId: 'run-1' });
             if (outcome === 'rejects') await expect(attach).rejects.toThrow(/store unavailable/);
             else expect(await attach).toBe(true);
           });
@@ -7804,7 +7804,7 @@ describe('requests to a Shopify store are refused', () => {
       const headers: Record<string, string> = {};
       const attached = await attachStoredCredential(url, headers, false, {
         apiStore: store as never, secretStore: { resolve: () => 'store-value' } as never, principal: OWNER_PRINCIPAL, mandateEnds: undefined, secretReleases: undefined,
-      });
+      }, { bulkRunId: 'run-1' });
       return { attached, headers };
     };
     const refused = await attach(STORE);
