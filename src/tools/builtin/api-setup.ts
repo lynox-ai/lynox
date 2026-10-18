@@ -2676,14 +2676,15 @@ ${draftJson}
       }
       // Nor a name that already holds a value no profile uses: one the user stored by hand, or
       // one a deleted profile left behind. The write below would replace it without asking, and
-      // nothing brings it back. Two names stay this profile's to write over: its derived access
-      // slot, which every renewal writes, and a name one of its own exchanges wrote before (on its
-      // record, which `collectVaultKeys` reads). Asked on the vault itself, not on this profile's
-      // view of it: a value the view hides is still a value the write would destroy. Both lists,
-      // because code that holds the vault writes rows past the store's map. Asked again right
-      // before the write, with the profile as stored then.
+      // nothing brings it back. The names this profile uses stay its own to write over, as
+      // `collectVaultKeys` counts them: its derived access slot, which every renewal writes (the
+      // derived pair counts for an oauth2 profile, and only those reach this branch), and a name
+      // one of its own exchanges wrote before (on its record). Asked on the vault itself, not on
+      // this profile's view of it: a value the view hides is still a value the write would
+      // destroy. Both lists, because code that holds the vault writes rows past the store's map.
+      // Asked again right before the write, with the profile as stored then.
       const vaultStore = agent.secretStore;
-      const unclaimedValueAt = (): boolean => outputName !== ownAccessName && vaultStore !== undefined
+      const unclaimedValueAt = (): boolean => vaultStore !== undefined
         && !collectVaultKeys(apiStore?.get(profile.id) ?? profile).includes(outputName)
         && (vaultStore.listNames().includes(outputName) || (vaultStore.listVaultNames?.() ?? []).includes(outputName));
       if (unclaimedValueAt()) {
