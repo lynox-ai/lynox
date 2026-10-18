@@ -33,6 +33,7 @@ import { describeDisclosure, isVettedEgressHost, isPrivateLanEndpoint } from '..
 import { pv, singleLine } from '../../core/prompt-value.js';
 import { inSessionPromptChain } from '../../core/prompt-chain.js';
 import { isProtectedSecretWrite, maskSecretPatterns, SECRET_REF_PATTERN } from '../../core/secret-store.js';
+import { VAULT_SCOPE_ALL, vaultScopeOf } from '../../core/secret-scope.js';
 import { isOwnerPrincipal, principalTag } from '../../core/request-principal.js';
 import { connectionWaits, credentialEndpoints, credentialHosts, hiddenFromProfile, releaseBoundFields, mandateMayConnect, mayServeAsClientId, occupiedTokenSlots, releaseBinding, releaseObstacle, releaseState, secretsForProfile, sendRole, slotMayReach, slotsToClearBeforeSave, withheldFrom, withheldText, type ReadCtx, type ReleaseObstacle } from '../../core/profile-secret-view.js';
 import type { ReleaseAsk } from '../../core/secret-releases.js';
@@ -2674,22 +2675,6 @@ ${draftJson}
       if (heldBefore !== undefined) {
         return `Error: output_secret_name "${outputName}" is a name API profile "${heldBefore.id}" uses, for a credential or for its tokens — the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`;
       }
-      // Nor a name that already holds a value no profile uses: one the user stored by hand, or
-      // one a deleted profile left behind. The write below would replace it without asking, and
-      // nothing brings it back. The names this profile uses stay its own to write over, as
-      // `collectVaultKeys` counts them: its derived access slot, which every renewal writes (the
-      // derived pair counts for an oauth2 profile, and only those reach this branch), and a name
-      // one of its own exchanges wrote before (on its record). Asked on the vault itself, not on
-      // this profile's view of it: a value the view hides is still a value the write would
-      // destroy. Both lists, because code that holds the vault writes rows past the store's map.
-      // Asked again right before the write, with the profile as stored then.
-      const vaultStore = agent.secretStore;
-      const unclaimedValueAt = (): boolean => vaultStore !== undefined
-        && !collectVaultKeys(apiStore?.get(profile.id) ?? profile).includes(outputName)
-        && (vaultStore.listNames().includes(outputName) || (vaultStore.listVaultNames?.() ?? []).includes(outputName));
-      if (unclaimedValueAt()) {
-        return `Error: output_secret_name "${outputName}" already holds a value in the vault that no API profile uses (one the user stored, or one a deleted profile left behind), and the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}". Do not remove the stored value to make room: if the user no longer needs it, they can delete it in Settings → API Keys.`;
-      }
       // The same question for the refresh slot: a provider that rotates the refresh token on
       // this exchange has it written there below, whatever grant was asked for.
       if (apiStore && hiddenFromProfile(secretStore, profile, apiStore, refreshTokenKey(input.id), readCtxOf(agent), true)) {
@@ -2737,6 +2722,32 @@ ${draftJson}
         return refreshKey === derivedAccess
           ? `${clash} ${refreshOnDerivedAdvice}`
           : `${clash} Leave output_secret_name out, so the access token goes to "${derivedAccess}", the slot http_request reads.`;
+      }
+      // Nor a name that already holds a value other than a token of this profile: one the user
+      // stored by hand, one a deleted profile left behind, or a credential this profile names. The
+      // write below would replace it without asking, and nothing brings it back. Only this
+      // profile's token names stay its own to write over (`grantTokenNames`): the derived pair,
+      // which every renewal writes (only oauth2 profiles reach this branch), and the names its own
+      // exchanges wrote, on a record the model cannot write. Not the names it reads: `vault_keys`
+      // and the basic pair are the model's to set, so counting them would let one update make any
+      // name this profile's own. Asked after the refresh and client slots above, which refuse
+      // those names with advice of their own.
+      // Asked on the vault itself, not on this profile's view of it: a value the view hides is
+      // still a value the write would destroy. Both lists, because code that holds the vault
+      // writes rows past the store's map. A scoped store lists only its scope and has no file
+      // list, so it cannot say whether a name is free, while its `set` writes through to the
+      // vault: there, every name but the token names is refused, held or not. Asked again right
+      // before the write, with the profile as stored then.
+      const vaultStore = agent.secretStore;
+      const unclaimedValueAt = (): boolean => {
+        if (vaultStore === undefined || grantTokenNames(apiStore?.get(profile.id) ?? profile).has(outputName)) return false;
+        if (vaultScopeOf(vaultStore) !== VAULT_SCOPE_ALL) return true;
+        return vaultStore.listNames().includes(outputName) || (vaultStore.listVaultNames?.() ?? []).includes(outputName);
+      };
+      if (unclaimedValueAt()) {
+        return vaultScopeOf(vaultStore) !== VAULT_SCOPE_ALL
+          ? `Error: output_secret_name "${outputName}" is not available in this run: it sees only part of the vault, so it cannot tell whether the name already holds a value. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}".`
+          : `Error: output_secret_name "${outputName}" already holds a value in the vault that is not a token of this profile (one the user stored, one a deleted profile left behind, or a credential), and the access token would be written over it. Nothing was sent. Leave output_secret_name out, so the token goes to "${accessTokenKey(input.id)}". Do not remove the stored value to make room: if the user no longer needs it, they can delete it in Settings → API Keys.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
