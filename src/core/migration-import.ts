@@ -467,17 +467,17 @@ export class MigrationImporter {
         try {
           // A slot a kept profile reads stays, derived or recorded: a `-`/`_` partner shares the
           // derived pair, and any profile may name a slot an exchange once wrote.
-          const force = new Set(written.force);
-          const inUse = new Set(written.inUse.filter((n) => !force.has(n)));
+          const inUse = new Set(written.inUse);
           for (const id of reconnect) {
             for (const name of [accessTokenKey(id), refreshTokenKey(id)]) if (!inUse.has(name)) vault.delete(name);
           }
           // Of a recorded slot only the value the exchange wrote, and never a protected name: what
-          // sits there now may be the customer's own. `purgeRecordedTokens` asks the same, with
-          // the same mandate exception; it also holds a slot an unreadable row names, which this
-          // does not (such a row is skipped here).
+          // sits there now may be the customer's own. A kept profile naming the slot holds it,
+          // except against a store a mandate connected (`force`), as in `purgeRecordedTokens`.
+          // Unlike there, a slot only an unreadable row names is not held: such a row is skipped.
+          const force = new Set(written.force);
           for (const w of written.written) {
-            if (isProtectedSecretWrite(w.name) || inUse.has(w.name)) continue;
+            if (isProtectedSecretWrite(w.name) || (inUse.has(w.name) && !force.has(w.name))) continue;
             const value = vault.get(w.name);
             if (value !== null && tokenFingerprint(value) === w.fp) vault.delete(w.name);
           }

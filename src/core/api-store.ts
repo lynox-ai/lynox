@@ -1769,8 +1769,10 @@ export class ApiStore {
    * `purgeRecordedTokens` would. `out.inUse` names every slot a profile that is not stripped
    * reads (`collectVaultKeys`, its derived token pair included): the caller leaves those, derived
    * or recorded, so a `-`/`_` partner or a profile that names the same slot keeps its credential.
-   * Not for a store a mandate connected: naming its slot is how a mandate's token would outlive its
-   * connection (`purgeRecordedTokens`), so `out.force` names those slots, removed in any case.
+   * As in `purgeRecordedTokens`, a store a mandate connected is the exception for what its
+   * exchanges wrote: a kept profile that names such a slot does not hold it (naming another
+   * profile's slot is how a mandate's token would outlive its connection), so `out.force` lists
+   * those recorded names. A kept `-`/`_` partner still holds its own derived pair.
    * A row or flat file that does not parse is skipped: the boot parses it the same way and does
    * not load it either.
    */
@@ -1779,9 +1781,13 @@ export class ApiStore {
     const written: WrittenSecret[] = [];
     const inUse = new Set<string>();
     const force = new Set<string>();
+    const partnerPairs = new Set<string>();
+    const noteKept = (p: ApiProfile): void => {
+      for (const k of collectVaultKeys(p)) inUse.add(k);
+      partnerPairs.add(accessTokenKey(p.id)); partnerPairs.add(refreshTokenKey(p.id));
+    };
     const noteMandate = (p: ApiProfile): void => {
       if (!isMandateConnection(p)) return;
-      force.add(accessTokenKey(p.id)); force.add(refreshTokenKey(p.id));
       for (const w of Array.isArray(p.oauth_grant?.written) ? p.oauth_grant.written : []) if (typeof w.name === 'string') force.add(w.name);
     };
     const noteWritten = (grant: OAuthGrantRecord | undefined): void => {
@@ -1807,7 +1813,7 @@ export class ApiStore {
         for (const row of store.getByKind('api')) {
           let profile: ApiProfile;
           try { profile = connectionRowToProfile(row); } catch { continue; }
-          if (!isStore(profile)) { for (const k of collectVaultKeys(profile)) inUse.add(k); continue; }
+          if (!isStore(profile)) { noteKept(profile); continue; }
           ids.add(profile.id);
           noteWritten(profile.oauth_grant);
           noteMandate(profile);
@@ -1826,7 +1832,7 @@ export class ApiStore {
         try { profile = JSON.parse(readFileSync(path, 'utf-8')) as typeof profile; } catch { continue; }
         if (typeof profile.id !== 'string') continue;
         if (!isStore({ base_url: profile['base_url'], auth: profile['auth'] })) {
-          try { for (const k of collectVaultKeys(profile as unknown as ApiProfile)) inUse.add(k); } catch { /* not a profile the boot can read */ }
+          noteKept(profile as unknown as ApiProfile);
           continue;
         }
         ids.add(profile.id);
@@ -1838,7 +1844,7 @@ export class ApiStore {
         }
       }
     }
-    if (out !== undefined) { out.written = written; out.inUse = [...inUse].sort(); out.force = [...force].sort(); }
+    if (out !== undefined) { out.written = written; out.inUse = [...inUse].sort(); out.force = [...force].filter((n) => !partnerPairs.has(n)).sort(); }
     return [...ids].sort();
   }
 

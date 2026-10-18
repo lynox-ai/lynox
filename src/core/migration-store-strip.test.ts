@@ -196,8 +196,10 @@ describe('a migration import drops store connections', () => {
   it('a store a mandate connected loses its slots even where a kept profile names them', () => {
     const src = tmp(); const dst = tmp();
     const shared = 'SHARED_TOKEN';
-    const store = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`, written: [{ name: shared, fp: tokenFingerprint('shared-value') }] } } as Partial<ApiProfile>);
-    const user: ApiProfile = { id: 'crm', name: 'CRM', base_url: 'https://api.crm.example.com', description: 'names the slot',
+    const mandateGrant = { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`,
+      written: [{ name: shared, fp: tokenFingerprint('shared-value') }, { name: accessTokenKey('shop-acme'), fp: tokenFingerprint('shpat-a') }] };
+    const store = storeProfile('shop-acme', { oauth_grant: mandateGrant } as Partial<ApiProfile>);
+    const user: ApiProfile = { id: 'crm', name: 'CRM', base_url: 'https://api.crm.example.com', description: 'names the slots',
       auth: { type: 'bearer', vault_keys: [shared, accessTokenKey('shop-acme')] } } as ApiProfile;
     seedEngine(src, SRC_KEY, [store, user], true);
     seedVault(src, SRC_KEY, { ...SECRETS, [shared]: 'shared-value' });
@@ -205,6 +207,18 @@ describe('a migration import drops store connections', () => {
     const names = vaultNames(dst);
     expect(names).not.toContain(shared);
     expect(names).not.toContain(accessTokenKey('shop-acme'));
+  });
+
+  it('a `-`/`_` partner keeps its derived pair even against a store a mandate connected', () => {
+    const src = tmp(); const dst = tmp();
+    const store = storeProfile('shop-acme', { oauth_grant: { origin: 'callback', state: 'connected', store_binding: 'f'.repeat(64), connected_by: `${MANDATE_TAG_PREFIX}m-1`,
+      written: [{ name: accessTokenKey('shop-acme'), fp: tokenFingerprint('shpat-a') }] } } as Partial<ApiProfile>);
+    const partner: ApiProfile = { id: 'shop_acme', name: 'Partner', base_url: 'https://api.partner.example.com', description: 'shares the derived pair',
+      auth: { type: 'oauth2', oauth: { client_id_key: 'P_CID', client_secret_key: 'P_CSECRET' } } } as ApiProfile;
+    seedEngine(src, SRC_KEY, [store, partner], true);
+    seedVault(src, SRC_KEY, SECRETS);
+    expect(migrate(src, dst).reconnectStores).toEqual(['shop-acme']);
+    expect(vaultNames(dst)).toContain(accessTokenKey('shop-acme'));
   });
 
   it('an import without a store connection reports none', () => {
