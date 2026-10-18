@@ -844,7 +844,6 @@ function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
   return modelBandIsDeepOrUnknown(profile.model_id);
 }
 
-/** The same test for a model id a child is pinned to without a profile of its own (an inherited pin). */
 function modelBandIsDeepOrUnknown(modelId: string): boolean {
   const band = modelCapability(modelId)?.tier;
   return band === 'deep' || band === undefined;
@@ -852,12 +851,17 @@ function modelBandIsDeepOrUnknown(modelId: string): boolean {
 
 /**
  * The model a child without a profile of its own takes from a profiled parent, when that model's
- * band is deep or unknown; otherwise undefined. Such a child runs on the parent's pinned model
+ * band is registered as deep; otherwise undefined. Such a child runs on the parent's pinned model
  * whatever tier it asks for (`resolveSpawnChildRouting`), so the tier says nothing about its cost,
  * and a clamp to balanced does not reach it.
+ *
+ * ⛔ An UNKNOWN band does NOT count as deep here, unlike an explicit profile (path 1). The parent
+ * already runs on this model, so the child adds no new cost class, and counting unknown as deep
+ * would refuse every autonomous spawn under a pin to a local or self-hosted model — the same
+ * trade-off the workflow step side makes at `rawIdIsDeepBand` (orchestrator/runtime-adapter.ts).
  */
 function inheritedDeepPin(routing: { model: string; pinnedByProfile: boolean }, profile: ModelProfile | undefined): string | undefined {
-  return !profile && routing.pinnedByProfile && modelBandIsDeepOrUnknown(routing.model) ? routing.model : undefined;
+  return !profile && routing.pinnedByProfile && modelCapability(routing.model)?.tier === 'deep' ? routing.model : undefined;
 }
 
 /**
@@ -883,12 +887,12 @@ function specResolvesDeep(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProv
   const role = spec.role ? getRole(spec.role) : undefined;
   const routing = resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider, parent });
   // 3. a pin inherited from a profiled parent: the child runs on that model, so its band
-  // decides, not the tier (deep or unknown asks; a pinned balanced model does not).
+  // decides, not the tier (a registered deep band asks; balanced, fast or unknown does not).
   if (!profile && routing.pinnedByProfile) return inheritedDeepPin(routing, profile) !== undefined;
   return routing.tier === 'deep';
 }
 
-/** Path 3 of {@link specResolvesDeep} on its own: the deep- or unknown-band model `spec` inherits, or undefined. */
+/** Path 3 of {@link specResolvesDeep} on its own: the deep-band model `spec` inherits, or undefined. */
 function specInheritedDeepPin(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider, parent: ProviderConfigSnapshot | null | undefined): string | undefined {
   const profile = spec.profile ? profileNamed(userConfig.model_profiles, spec.profile) : undefined;
   if (profile) return undefined;
@@ -2851,7 +2855,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         if ((profile && profileBandIsDeepOrUnknown(profile)) || inherited !== undefined) {
           resolvedTier = 'deep';
           canDowngrade = false;
-          if (modelCapability(profile?.model_id ?? inherited!)?.tier === undefined) hasUnknownBand = true;
+          if (profile && modelCapability(profile.model_id)?.tier === undefined) hasUnknownBand = true;
         } else {
           resolvedTier = r.tier;
         }

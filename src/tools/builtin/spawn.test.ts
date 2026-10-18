@@ -6056,10 +6056,9 @@ describe('spawn_agent tool', () => {
         expect(ask({ agents: [{ name: 'r', task: 'x', model: 'fast' }] }, 'claude-opus-4-6')).not.toBeNull();
       });
 
-      it('an unknown-band pin asks, as an unregistered model', () => {
-        const p = ask({ agents: [{ name: 'r', task: 'x' }] }, 'custom-expensive-byok-model') as WarningPayload;
-        expect(p).not.toBeNull();
-        expect(p.message).toContain('unregistered');
+      it('an unknown-band pin does not ask: the parent already runs on it, and a local model has no band', () => {
+        expect(ask({ agents: [{ name: 'r', task: 'x' }] }, 'custom-local-model')).toBeNull();
+        expect(ask({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'custom-local-model')).toBeNull();
       });
 
       it('a balanced pin does not ask, even for a deep request the pin overrides', () => {
@@ -6081,31 +6080,46 @@ describe('spawn_agent tool', () => {
         }
       });
 
-      it.each(['claude-opus-4-6', 'custom-expensive-byok-model'])('headless, a %s pin is refused, not run', async (model) => {
+      it('headless, a deep pin is refused, not run', async () => {
         const { Agent: MockAgent } = await import('../../core/agent.js');
         vi.mocked(MockAgent).mockClear();
         await expect(
           spawnAgentTool.handler(
             { agents: [{ name: 'r', task: 'x', model: 'balanced' }] },
-            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo(model) } as Partial<IAgent>),
+            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('claude-opus-4-6') } as Partial<IAgent>),
           ),
         ).rejects.toThrow(/the model this run is pinned to by its model profile/);
         expect(vi.mocked(MockAgent)).not.toHaveBeenCalled();
+      });
+
+      it('headless, an unknown-band pin runs on it, as it does today, also for a deep request', async () => {
+        const { Agent: MockAgent } = await import('../../core/agent.js');
+        for (const model of [undefined, 'deep' as const]) {
+          vi.mocked(MockAgent).mockClear();
+          await spawnAgentTool.handler(
+            { agents: [{ name: 'r', task: 'x', ...(model ? { model } : {}) }] },
+            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('custom-local-model') } as Partial<IAgent>),
+          );
+          const child = vi.mocked(MockAgent).mock.calls[0]![0] as { model?: string };
+          expect(child.model).toBe('custom-local-model');
+        }
       });
 
       it('headless, the refusal names the way out: a profile of the child\'s own with a registered band', async () => {
         await expect(
           spawnAgentTool.handler(
             { agents: [{ name: 'r', task: 'x' }] },
-            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('custom-expensive-byok-model') } as Partial<IAgent>),
+            makeAgent({ autonomy: 'autonomous', getProviderConfig: () => pinnedTo('claude-opus-4-6') } as Partial<IAgent>),
           ),
         ).rejects.toThrow('give the child a `profile` of its own whose model has a registered fast or balanced band.');
       });
 
-      it('an unknown-band pin asks for a fast-role child too: the pin, not the role, sets the model', () => {
-        const p = ask({ agents: [{ name: 'r', task: 'x', role: 'collector' }] }, 'custom-expensive-byok-model') as WarningPayload;
+      it('a deep pin asks for a fast-role child too: the pin, not the role, sets the model', () => {
+        const p = ask({ agents: [{ name: 'r', task: 'x', role: 'collector' }] }, 'claude-opus-4-6') as WarningPayload;
         expect(p).not.toBeNull();
-        expect(p.message).toContain('unregistered');
+        expect(p.tier).toBe('deep');
+        // A registered deep pin is not the unregistered case, and the GO must not say it is.
+        expect(p.message).not.toContain('unregistered');
       });
 
       it('one inherited deep pin in a batch takes "Run on balanced" away from the whole batch', () => {
