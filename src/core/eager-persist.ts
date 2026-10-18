@@ -9,6 +9,7 @@ import { buildDisplayNoteContent, sanitizeNoteDetail } from './render-projection
 import { getErrorMessage } from './utils.js';
 import type { SendStopCause } from './agent.js';
 import { isInputRequired } from './input-required.js';
+import { isRunStopCode, loopBreakDetail } from './run-stop.js';
 
 export interface EagerPersistInput {
   /** `null` mirrors `engine.getThreadStore()`'s return type — engine has no
@@ -93,6 +94,19 @@ export interface FailedTurnDisplayInput {
    *  one would surface the internal compaction prompt as a user message in the
    *  thread (a system prompt leaking into the visible history). */
   internal?: boolean | undefined;
+  /** A stop (`run_interrupted` / `tool_loop_break`) whose completed prefix the
+   *  agent KEPT in its context (`Agent.takeInterruptKeep`). The disk then keeps
+   *  the same prefix: only the rows after it turn display-only, the kept messages
+   *  not yet on disk are written as API rows, and the note is flagged so a reload
+   *  puts the stop back (run-stop.ts `hydrateApiMessages`). Absent → the whole
+   *  run's footprint turns display-only, as for any other failure. */
+  kept?: {
+    /** Messages of the run still in the context, the question included. */
+    count: number;
+    /** `agent.getUnpersistedTail()` after the cut. */
+    unpersisted: BetaMessageParam[];
+    onPersisted?: ((count: number) => void) | undefined;
+  } | undefined;
 }
 
 export type FailedTurnDisplayOutcome =
@@ -114,7 +128,33 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
   const { threadStore, sessionId, startSeq, task, error } = input;
   const noteCode = input.noteCode ?? 'provider_error';
   if (!threadStore) return { kind: 'noop', reason: 'no-threadstore' };
+  const kept = input.internal !== true && isRunStopCode(noteCode) ? input.kept : undefined;
   try {
+    if (kept !== undefined) {
+      // Order matters for the seq layout: the kept rows already on disk stay, the
+      // unfinished rest flips, the kept rows not yet written follow as API rows, and
+      // the note comes last, so on a reload the API row right before it is the end
+      // of the kept prefix (`hydrateApiMessages`).
+      const flipped = threadStore.markDisplayOnlyAfterApiRows(sessionId, startSeq, kept.count);
+      let written = 0;
+      if (kept.unpersisted.length > 0) {
+        threadStore.appendMessages(sessionId, kept.unpersisted, threadStore.getNextSeq(sessionId), {
+          message_count: threadStore.getMessageCount(sessionId) + kept.unpersisted.length,
+        });
+        written = kept.unpersisted.length;
+        kept.onPersisted?.(written);
+      }
+      const loopKey = (error as { loopKey?: unknown }).loopKey;
+      const note = buildDisplayNoteContent(
+        noteCode,
+        noteCode === 'tool_loop_break' && typeof loopKey === 'string' ? loopBreakDetail(loopKey) : undefined,
+        true,
+      );
+      const totalCount = threadStore.getMessageCount(sessionId);
+      threadStore.appendDisplayNotes(sessionId, [{ role: 'assistant', content: note }], threadStore.getNextSeq(sessionId));
+      threadStore.updateThread(sessionId, { message_count: totalCount + 1 });
+      return { kind: 'persisted', appended: written + 1, flipped: flipped.marked };
+    }
     const footprint = threadStore.markDisplayOnlyFrom(sessionId, startSeq);
     if (input.internal === true) {
       // A failed internal (compaction) run leaves no visible trace: its footprint

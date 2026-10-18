@@ -1186,10 +1186,14 @@ export class Session {
     // after awaiting this method can get a brand-new Agent whose stop is `null`.
     const runAgent = this.agent;
     if (runOptions?.internal !== true) this._lastRunStop = null;
+    // Whether the agent got the turn: a stop before the send leaves the question
+    // outside its history, and the catch hands it over (`keepUnsentQuestion`).
+    let sentToAgent = false;
     try {
       // Stopped before the agent could hear it: ends the turn as a stop, before the provider,
       // through the same recording as a stop the agent heard.
       if (runOptions?.internal !== true && this._stopBeforeSend) throw new RunAbortedError();
+      sentToAgent = true;
       const result = await runAgent.send(
         userContent,
         {
@@ -1615,7 +1619,19 @@ export class Session {
       // user message survives in display history, and (3) append a structured,
       // localizable failure note. None of these re-enter the prompt because the
       // resume hydration filters display_only=1 (session-store.ts).
+      // A stop keeps the run's completed prefix in the agent's context (run-stop.ts);
+      // the disk keeps the same rows. A stop before the send hands the question to
+      // the agent first, so both cases leave the same history.
+      if (!sentToAgent && failure.noteCode === 'run_interrupted' && runOptions?.internal !== true) {
+        runAgent?.keepUnsentQuestion?.(userContent as BetaMessageParam['content'], userTurnPrePersisted);
+      }
+      const keepCount = runOptions?.internal === true ? null : runAgent?.takeInterruptKeep?.() ?? null;
       persistFailedTurnDisplay({
+        kept: keepCount === null || !runAgent ? undefined : {
+          count: keepCount,
+          unpersisted: runAgent.getUnpersistedTail(),
+          onPersisted: (n) => runAgent.markPersisted(n),
+        },
         // runStartSeq is the seq of this run's first row (the durably-persisted
         // user message). Flipping from here marks exactly this run's footprint
         // display-only — and won't double-add the user message (already on disk).

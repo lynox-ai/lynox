@@ -3,6 +3,7 @@ import type { Session, SessionOptions } from './session.js';
 import type { Engine } from './engine.js';
 import { normalizeTier } from '../types/index.js';
 import type { ThreadRecord } from './thread-store.js';
+import { hydrateApiMessages } from './run-stop.js';
 
 const VERBATIM_THRESHOLD = 80;
 const RECENT_COUNT = 40;
@@ -125,10 +126,9 @@ export class SessionStore {
         // message) so they never re-enter the model's API context — they
         // exist purely for the render history.
         const messageRecords = threadStore!.getMessages(sessionId, { apiOnly: true });
-        const messages: BetaMessageParam[] = messageRecords.map(r => ({
-          role: r.role as 'user' | 'assistant',
-          content: JSON.parse(r.content_json) as BetaMessageParam['content'],
-        }));
+        // A stopped run's note goes back onto the end of its kept prefix, so the
+        // model reads the stop again after a reload (run-stop.ts).
+        const messages: BetaMessageParam[] = hydrateApiMessages(messageRecords, threadStore!.getDisplayNoteRows?.(sessionId) ?? []);
 
         session = engine.createSession({
           ...opts,

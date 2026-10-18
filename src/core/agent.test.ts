@@ -90,6 +90,7 @@ import { createDriveTool } from '../integrations/google/google-drive.js';
 import { createSheetsTool } from '../integrations/google/google-sheets.js';
 import { createMailTools, InMemoryMailRegistry } from '../integrations/mail/tools/index.js';
 import { noteCallConnection, runInCallSlot, type CallSlot } from './call-connection.js';
+import { readRunStop, withRunStop } from './run-stop.js';
 
 function endTurnResponse(text: string) {
   return {
@@ -472,10 +473,11 @@ describe('Agent', () => {
       // send() THROWS RunAbortedError on abort (was: returned '') so the caller
       // can record the run as interrupted instead of a silent empty success.
       await expect(sendPromise).rejects.toBeInstanceOf(RunAbortedError);
-      // The aborted user message stays in history so the next send has its context.
+      // The aborted user message stays in history so the next send has its context,
+      // and it carries the stop the next call tells the model about (run-stop.ts).
       expect(agent.getMessages()).toHaveLength(2);
       expect(agent.getMessages()[0]).toEqual({ role: 'user', content: 'old' });
-      expect(agent.getMessages()[1]).toEqual({ role: 'user', content: 'new message' });
+      expect(agent.getMessages()[1]).toEqual(withRunStop({ role: 'user', content: 'new message' }, { code: 'run_interrupted' }));
     });
 
     it('fully rolls the failed turn out of the API context on non-abort errors (B-full)', async () => {
@@ -706,15 +708,19 @@ describe('Agent', () => {
       expect(handler).toHaveBeenCalledTimes(3);
       expect(mockProcess).toHaveBeenCalledTimes(5);
 
-      // The escalated is_error results lived in the rolled-back carrier (the
-      // abort-style rollback is pinned in tool-loop-break.test.ts); on disk they
-      // become the display-only tool_loop_break note (pinned in
-      // eager-persist.test.ts) — nothing of the loop re-enters API context.
-      expect(agent.getMessages().some(
+      // A loop break keeps the question and the completed pairs (the loop
+      // included) and marks the last carrier with the stop naming the repeated
+      // call, so the next call tells the model not to take it up again
+      // (run-stop.ts; the disk side is pinned in interrupted-turn-keep.test.ts).
+      const kept = agent.getMessages();
+      expect(kept.some(
         m => m.role === 'user' && Array.isArray(m.content) && m.content.some(
           b => (b as { type?: string }).type === 'tool_result',
         ),
-      )).toBe(false);
+      )).toBe(true);
+      const stop = readRunStop(kept[kept.length - 1]!);
+      expect(stop?.code).toBe('tool_loop_break');
+      expect(stop?.detail).toContain('repeated call:');
     });
 
     it('loop guard: does NOT throttle identical calls that make progress', async () => {

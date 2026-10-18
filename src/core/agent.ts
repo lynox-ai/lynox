@@ -72,6 +72,7 @@ import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
+import { applyRunStops, completedPrefixEnd, loopBreakDetail, withRunStop, type RunStop } from './run-stop.js';
 import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER, MAX_TOKENS_CONTINUATION_PROMPT } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
@@ -1515,6 +1516,43 @@ export class Agent implements IAgent {
     this.abortController?.abort();
   }
 
+  /** How many messages of the last run stayed in the context after a stop
+   *  (question included), or null when the run did not keep a prefix. Read once:
+   *  the Session mirrors it on disk (`persistFailedTurnDisplay`). */
+  private _interruptKeep: number | null = null;
+
+  takeInterruptKeep(): number | null {
+    const keep = this._interruptKeep;
+    this._interruptKeep = null;
+    return keep;
+  }
+
+  /**
+   * On a stop, cut the history after the run's completed prefix and mark its last
+   * message with the stop. False when the question is no longer in the array.
+   */
+  private _keepCompletedPrefix(userTurn: BetaMessageParam, stop: RunStop): boolean {
+    const qIdx = this.messages.lastIndexOf(userTurn);
+    if (qIdx < 0) return false;
+    const end = completedPrefixEnd(this.messages, qIdx);
+    this.messages.length = end;
+    this.messages[end - 1] = withRunStop(this.messages[end - 1]!, stop);
+    this._persistedMark = Math.min(this._persistedMark, end);
+    this._interruptKeep = end - qIdx;
+    return true;
+  }
+
+  /**
+   * A run stopped before `send()` (Session `_stopBeforeSend`): the question still
+   * joins the context, with the stop, so the history is the same as for a run
+   * stopped one moment later. `persisted` = the Session already wrote it.
+   */
+  keepUnsentQuestion(content: BetaMessageParam['content'], persisted: boolean): void {
+    this.messages.push(withRunStop({ role: 'user', content }, { code: 'run_interrupted' }));
+    if (persisted) this._persistedMark = this.messages.length;
+    this._interruptKeep = 1;
+  }
+
   /** The current run's abort signal; `undefined` between runs. A tool that waits on a
    *  human (ask_user) hands it to the prompt so an aborted run withdraws its question. */
   get runSignal(): AbortSignal | undefined {
@@ -2341,7 +2379,11 @@ export class Agent implements IAgent {
     const content = Array.isArray(userMessage)
       ? userMessage as BetaMessageParam['content']
       : userMessage;
-    this.messages.push({ role: 'user', content });
+    // Held by identity: a stop keeps this question and the completed steps after it
+    // (`_keepCompletedPrefix`), and finds it again even if the array was rebuilt.
+    const userTurn: BetaMessageParam = { role: 'user', content };
+    this.messages.push(userTurn);
+    this._interruptKeep = null;
     // The Session writes the user turn durably BEFORE the run (so a crash before
     // the first checkpoint can't lose it). Advance the mark over it so the
     // identity-based eager-persist delta doesn't write a DUPLICATE user row.
@@ -2408,8 +2450,13 @@ export class Agent implements IAgent {
         // next turn (JSON.stringify → nulls / `.role` throws). `Math.min` keeps
         // the assignment a truncation; `sanitizeToolPairs` (before the next send)
         // then drops any tool pair the earlier truncation split.
-        this.messages.length = Math.min(snapshot + 1, this.messages.length);
-        this._persistedMark = Math.min(this._persistedMark, this.messages.length);
+        // A stop keeps the question AND every completed tool pair, and the next call
+        // tells the model the run was stopped (run-stop.ts). Only when the question
+        // itself is gone (a mid-run truncation dropped it) does the old rollback run.
+        if (!this._keepCompletedPrefix(userTurn, { code: 'run_interrupted' })) {
+          this.messages.length = Math.min(snapshot + 1, this.messages.length);
+          this._persistedMark = Math.min(this._persistedMark, this.messages.length);
+        }
         // Throw (do NOT `return ''`): a swallowed abort is indistinguishable from
         // a real empty reply, so `Session.run()` stamped it `status:'completed'`
         // with 0 tokens / NULL composition — run-history corruption + a silently
@@ -2438,6 +2485,13 @@ export class Agent implements IAgent {
       // context — benign: consecutive user turns are API-valid and
       // `sanitizeToolPairs` cleans any split pair next send. Far better than the
       // undefined-hole brick it replaces.)
+      // A loop break is not an error of the turn: like a stop, it keeps the question
+      // and the completed pairs, and the stop text names the repeated call so the
+      // model does not take it up again. The ORIGINAL error is rethrown (loopKey).
+      if (err instanceof ToolLoopBreakError
+        && this._keepCompletedPrefix(userTurn, { code: 'tool_loop_break', detail: loopBreakDetail(err.loopKey) })) {
+        throw err;
+      }
       this.messages.length = Math.min(snapshot, this.messages.length);
       this._persistedMark = Math.min(this._persistedMark, this.messages.length);
       throw err;
@@ -2766,11 +2820,10 @@ export class Agent implements IAgent {
         // ~25 identical `api_setup view` calls, every escalation read and
         // ignored, run burned 50s until the user aborted).
         // PATH NOTE: this takes send()'s NON-abort branch (the abortController
-        // signal is NOT set), so the whole turn — user message included — rolls
-        // back out of the API context. That is correct here, NOT a bug: Session
-        // has already durably persisted the user message and persistFailedTurnDisplay
-        // flips the run's footprint display-only, then appends the calm
-        // tool_loop_break note naming the stuck call. Do NOT "fix" this into the
+        // signal is NOT set). There it keeps the question and the completed pairs,
+        // the loop included, and marks the stop with the repeated call
+        // (`_keepCompletedPrefix`); persistFailedTurnDisplay keeps the same rows on
+        // disk and appends the calm tool_loop_break note. Do NOT "fix" this into the
         // abort branch: that path REPLACES the error with a fresh RunAbortedError
         // (see the abort handler in send()), which would destroy loopKey and
         // silently downgrade the note to a generic run_interrupted.
@@ -3251,7 +3304,8 @@ export class Agent implements IAgent {
     // on the last persisted block + the ephemeral grounding tail, applied to a
     // copy so the persisted history stays byte-stable across turns (the
     // invariant the whole conversation cache rests on).
-    const outboundMessages = this._applyOutboundCaching(this.messages, ephemeralBlocks);
+    // A stopped run's note rides on the outgoing copy only (run-stop.ts).
+    const outboundMessages = this._applyOutboundCaching(applyRunStops(this.messages), ephemeralBlocks);
 
     // Pre-call context-budget estimate: real prompt size of the last call plus
     // a char-estimate of only the messages appended since (see

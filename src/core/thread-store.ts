@@ -400,6 +400,31 @@ export class ThreadStore {
     return { marked: rows.length, hadUserMessage: rows.some((r) => r.role === 'user') };
   }
 
+  /**
+   * The disk side of a stop that keeps its completed prefix (run-stop.ts): of the
+   * API rows from `fromSeq` on, the first `keep` stay in the model's context and
+   * the rest (the unfinished step) turn display-only. Returns how many flipped.
+   */
+  markDisplayOnlyAfterApiRows(threadId: string, fromSeq: number, keep: number): { marked: number } {
+    const rows = this.db.prepare(
+      'SELECT seq FROM thread_messages WHERE thread_id = ? AND seq >= ? AND display_only = 0 ORDER BY seq ASC',
+    ).all(threadId, fromSeq) as Array<{ seq: number }>;
+    const first = rows[Math.max(0, keep)];
+    if (first === undefined) return { marked: 0 };
+    this.db.prepare(
+      'UPDATE thread_messages SET display_only = 1 WHERE thread_id = ? AND seq >= ? AND display_only = 0',
+    ).run(threadId, first.seq);
+    return { marked: rows.length - Math.max(0, keep) };
+  }
+
+  /** Display-only assistant rows that are notes — the rows `hydrateApiMessages`
+   *  (run-stop.ts) reads stops from. The LIKE only narrows; each row is parsed. */
+  getDisplayNoteRows(threadId: string): ThreadMessageRecord[] {
+    return this.db.prepare(
+      `SELECT * FROM thread_messages WHERE thread_id = ? AND display_only = 1 AND role = 'assistant' AND content_json LIKE '%_lynox_note%' ORDER BY seq ASC`,
+    ).all(threadId) as ThreadMessageRecord[];
+  }
+
   getMessages(threadId: string, opts?: {
     fromSeq?: number | undefined;
     limit?: number | undefined;
