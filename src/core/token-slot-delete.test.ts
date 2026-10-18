@@ -26,6 +26,7 @@ import { slotMayReach } from './profile-secret-view.js';
 import { tokenFingerprint } from './oauth-refresh-failure.js';
 import { setPinnedTransportForTests } from './network-guard.js';
 import { apiSetupTool } from '../tools/builtin/api-setup.js';
+import { flattenPrompt } from './prompt-value.js';
 import type { RequestPrincipal } from './request-principal.js';
 
 // Values assembled at runtime: no literal here has the shape of a credential.
@@ -281,6 +282,64 @@ describe('deleting a profile whose written token an unreadable entry names', () 
     // The question is asked after the check; the entry is read while it is open.
     const result = await del(store, vault, 'shop', { promptUser: async () => { store.loadFromDirectory(late); return 'Allow'; } });
     expect(result).toBe('Deleted API profile "shop". Left in the vault although this profile\'s sign-in wrote it: SHOP_ACCESS_TOKEN. A stored API profile that could not be read names it too, so whose it is cannot be told, so it was not removed. This profile is gone, so no later delete takes it away: remove it from the vault by hand once it is clear it is not that profile\'s.');
+    expect(vault.snapshot()).toEqual({ SHOP_ACCESS_TOKEN: TOKEN });
+  });
+});
+
+// ── D: an unreadable entry holds every name it carries; only the owner deletes it, asked ──
+
+describe('deleting an entry the boot could not read', () => {
+  const TOKEN = value('shop', 'access');
+  const placeholder = (file: string) => ({ file, raw: '{"id": "owner", "auth": {"vault_keys": ["SHOP_ACCESS_TOKEN"' });
+
+  it('is asked of the owner, names where the entry is, and goes through on agreement', async () => {
+    const { store, dir } = boot([placeholder('owner.json')]);
+    const asked = vi.fn(allow);
+    expect(await del(store, vaultOf({}), 'owner', { promptUser: asked })).toBe('Deleted API profile "owner".');
+    expect(asked).toHaveBeenCalledOnce();
+    expect(flattenPrompt((asked.mock.calls[0] as unknown[])[0] as never)).toBe('⚠ api_setup: delete the stored API profile owner, which could not be read (file "owner.json")? Every vault name it carries is free for other profiles once it is gone. Delete it?');
+    expect(existsSync(join(dir, 'owner.json'))).toBe(false);
+    expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(false);
+  });
+
+  it.each([
+    ['nobody to ask', undefined, 'Blocked: deleting the unreadable API profile entry "owner" needs the user\'s confirmation, and no interactive prompt is available here. Nothing was deleted.'],
+    ['the owner declines', async () => 'Deny', 'Blocked: API profile entry "owner" not deleted — user declined.'],
+  ] as const)('%s: nothing is deleted', async (_case, promptUser, reply) => {
+    const { store, dir } = boot([placeholder('owner.json')]);
+    expect(await del(store, vaultOf({}), 'owner', promptUser ? { promptUser } : {})).toBe(reply);
+    expect(existsSync(join(dir, 'owner.json'))).toBe(true);
+    expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
+  });
+
+  it('is refused to a mandate, unasked, and nothing is deleted', async () => {
+    const { store, dir } = boot([placeholder('owner.json')]);
+    const asked = vi.fn(allow);
+    expect(await del(store, vaultOf({}), 'owner', { principal: mandate('a@example.org'), promptUser: asked })).toBe('Error: "owner" is a stored API profile that could not be read (file "owner.json"). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. Ask the owner to delete it.');
+    expect(asked).not.toHaveBeenCalled();
+    expect(existsSync(join(dir, 'owner.json'))).toBe(true);
+    expect(store.unreadableHolds('SHOP_ACCESS_TOKEN')).toBe(true);
+  });
+
+  it('control: an id with neither a stored profile nor such an entry is answered unasked', async () => {
+    const { store } = boot([placeholder('owner.json')]);
+    const asked = vi.fn(allow);
+    expect(await del(store, vaultOf({}), 'nothing-here', { principal: mandate('a@example.org'), promptUser: asked })).toBe('API profile "nothing-here" not found.');
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  // The refusal of a held profile's delete shows a mandate no way it may not take.
+  it.each([
+    ['owner.json', 'First ask the owner to delete "owner"; only the owner may delete it, then delete "shop" again.'],
+    ['bad id.json', 'First ask the owner to remove the file "bad id.json" from the API profile directory by hand (its name is no id api_setup delete takes), then delete "shop" again.'],
+  ])('tells a mandate author to ask the owner to clear %s', async (file, way) => {
+    const { store } = boot([oauth('shop', { SHOP_ACCESS_TOKEN: TOKEN }, { created_by: 'mandate:a@example.org' }), placeholder(file)]);
+    const vault = vaultOf({ SHOP_ACCESS_TOKEN: TOKEN });
+    const result = await del(store, vault, 'shop', { principal: mandate('a@example.org'), promptUser: allow });
+    expect(result).toContain('API profile "shop" was not deleted.');
+    expect(result).toContain(way);
+    expect(result).not.toContain('First delete');
+    expect(result).not.toContain('First remove');
     expect(vault.snapshot()).toEqual({ SHOP_ACCESS_TOKEN: TOKEN });
   });
 });

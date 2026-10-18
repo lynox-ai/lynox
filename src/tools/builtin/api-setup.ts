@@ -2401,8 +2401,15 @@ ${draftJson}
       const foreignDelete = foreignProfileRefusal(agent, existing, id);
       if (foreignDelete) return foreignDelete;
       // Before the question: a delete that would have to leave a token behind is not asked about.
-      const blocked = existing ? apiStore.deleteRefusal(existing, agent.secretStore) : null;
+      const blocked = existing ? apiStore.deleteRefusal(existing, agent.secretStore, isOwnerPrincipal(agent.principal) ? 'owner' : 'other') : null;
       if (blocked !== null) return `Error: ${blocked}`;
+      // An entry the boot could not read holds every name it carries until it is deleted
+      // (`unreadableHolds`); a delete frees them all, and whose they are cannot be told. Only the
+      // owner, asked like any other delete.
+      const unreadableSource = existing ? null : apiStore.unreadableSourceOf(id);
+      if (unreadableSource !== null && !isOwnerPrincipal(agent.principal)) {
+        return `Error: "${id}" is a stored API profile that could not be read (${unreadableSource}). Only the owner may delete it, since it holds every vault name it carries until it is gone. Nothing was changed. Ask the owner to delete it.`;
+      }
       // ASKED, every time, before anything is removed. A delete takes a working connection and
       // the tokens its sign-in stored, and the person notices only when the connection is gone;
       // in an owner's own session a text the model read (a mail, a page) can ask for it. The
@@ -2411,10 +2418,27 @@ ${draftJson}
       // guard raises its `[BLOCKED]` signal first (`destructive` on the entry): with no prompt
       // channel that refuses the call, with one (a worker run) it is a generic question, and
       // this one follows it.
-      // Not asked: an id with no stored profile. Either nothing is there, or an entry the boot
-      // could not read, which records no token this delete could take, and which a refusal tells
-      // the model to delete by its id. A profile the boot held back is stored: it is asked like a
-      // registered one, by its author only, since its delete takes the tokens it wrote.
+      // An entry the boot could not read is asked about too (the owner's only, above). Not asked:
+      // an id with neither a stored profile nor such an entry, where nothing is there. A profile
+      // the boot held back is stored: it is asked like a registered one, by its author only,
+      // since its delete takes the tokens it wrote.
+      if (unreadableSource !== null) {
+        if (!agent.promptUser) {
+          return `Blocked: deleting the unreadable API profile entry "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;
+        }
+        const promptUser = agent.promptUser;
+        const runSignal = agent.runSignal;
+        const answer = await inSessionPromptChain(agent.sessionCounters, () => runSignal?.aborted
+          ? Promise.resolve(null)
+          : promptUser(
+            pv`⚠ api_setup: delete the stored API profile ${id}, which could not be read (${singleLine(unreadableSource)})? Every vault name it carries is free for other profiles once it is gone. Delete it?`,
+            ['Allow', 'Deny', '\x00'],
+          ));
+        if (answer === null) return `Blocked: API profile entry "${id}" not deleted — the run was stopped before the question was asked.`;
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return `Blocked: API profile entry "${id}" not deleted — user declined.`;
+        }
+      }
       if (existing) {
         if (!agent.promptUser) {
           return `Blocked: deleting API profile "${id}" needs the user's confirmation, and no interactive prompt is available here. Nothing was deleted.`;

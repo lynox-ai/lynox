@@ -2294,8 +2294,12 @@ export class ApiStore {
    * delete that would leave such a token removes nothing and says how to clear the entry first.
    * `null` when nothing stands in the way. A token a mandate's consent wrote is not kept for an
    * entry (see {@link purgeRecordedTokens}), so it refuses nothing here either.
+   *
+   * `asker` is who reads the way out. Only the owner may delete an unreadable entry
+   * ({@link unreadableSourceOf}); anyone else is told to ask the owner, since an entry gone
+   * frees every name it held.
    */
-  deleteRefusal(profile: ApiProfile, secretStore: SecretStoreLike | null | undefined): string | null {
+  deleteRefusal(profile: ApiProfile, secretStore: SecretStoreLike | null | undefined, asker: 'owner' | 'other'): string | null {
     if (isMandateConnection(profile)) return null;
     for (const e of this.unreadable.values()) {
       const names = recordedWrites(profile).filter((w) => {
@@ -2310,11 +2314,21 @@ export class ApiStore {
       }).map((w) => w.name);
       if (names.length === 0) continue;
       const one = names.length === 1;
-      const first = clearedByHand(e)
+      const clear = clearedByHand(e)
         ? `remove the ${e.source} from the API profile directory by hand (its name is no id api_setup delete takes)`
         : `delete ${JSON.stringify(e.deleteId)} with api_setup delete (it takes an id that is not registered)`;
+      const first = asker === 'owner' ? clear : `ask the owner to ${clear.replace(' with api_setup delete (it takes an id that is not registered)', '; only the owner may delete it')}`;
       return `API profile "${profile.id}" was not deleted. Its sign-in wrote ${names.join(', ')}, and the delete would have to remove ${one ? 'that token' : 'those tokens'} with it, but ${unreadableWhere(e)} names ${one ? 'it' : 'them'} too, so whose ${one ? 'it is' : 'they are'} cannot be told. Nothing was changed. First ${first}, then delete "${profile.id}" again.`;
     }
+    return null;
+  }
+
+  /**
+   * Where the unreadable entry a delete of `id` would remove was read from (its file or row), or
+   * `null` when `id` names none ({@link remove} drops the entries whose delete id is `id`).
+   */
+  unreadableSourceOf(id: string): string | null {
+    for (const e of this.unreadable.values()) if (e.deleteId === id) return e.source;
     return null;
   }
 

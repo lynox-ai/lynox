@@ -11467,7 +11467,7 @@ export class LynoxHTTPApi {
       // back by the boot.
       const existing = store.storedProfile(params['id']!);
       // A delete that would have to leave a token behind removes nothing (see `deleteRefusal`).
-      const blocked = existing ? store.deleteRefusal(existing, engine.getSecretStore()) : null;
+      const blocked = existing ? store.deleteRefusal(existing, engine.getSecretStore(), 'owner') : null;
       if (blocked !== null) { errorResponse(res, 409, blocked); return; }
       try {
         const removed = store.remove(params['id']!, apisDir);

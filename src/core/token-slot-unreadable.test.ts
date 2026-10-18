@@ -138,9 +138,10 @@ function handlerVault(entries: Record<string, string>) {
     peek: (name: string): string | undefined => map[name],
   };
 }
-function handlerAgent(store: ApiStore, vault: ReturnType<typeof handlerVault>): never {
+function handlerAgent(store: ApiStore, vault: ReturnType<typeof handlerVault>, promptUser?: () => Promise<string>): never {
   return {
     principal: { kind: 'owner' },
+    promptUser,
     sessionCounters: { httpRequests: 0 },
     secretStore: vault,
     getAvailableTools: () => [{ definition: { name: 'http_request' } }, { definition: { name: 'api_setup' } }],
@@ -150,6 +151,9 @@ function handlerAgent(store: ApiStore, vault: ReturnType<typeof handlerVault>): 
 const OWNER_VAULT = { OWNER_REFRESH_TOKEN: value('owner', 'refresh'), OWNER_ACCESS_TOKEN: value('owner', 'access'), SUB_CID: 'sub-client', SUB_CSECRET: value('sub', 'secret') };
 const callTool = (store: ApiStore, input: Record<string, unknown>, vault = handlerVault(OWNER_VAULT)): Promise<string> =>
   apiSetupTool.handler(input as never, handlerAgent(store, vault)) as Promise<string>;
+/** The owner's delete, agreed to: deleting an unreadable entry is asked. */
+const deleteAgreed = (store: ApiStore, id: string): Promise<string> =>
+  apiSetupTool.handler({ action: 'delete', id } as never, handlerAgent(store, handlerVault(OWNER_VAULT), async () => 'Allow')) as Promise<string>;
 
 const reasonOf = (r: ReturnType<ApiStore['save']>): string => (r.ok ? '' : r.reason);
 
@@ -252,7 +256,7 @@ describe.each(loaders)('an entry whose content does not parse, through %s', (_lo
     expect(reasonOf(refused)).toMatch(/could not be read \((file "owner\.json"|connection "owner"), id "owner"\)/);
     expect(reasonOf(refused)).toContain('delete "owner" with api_setup delete');
     expect(reasonOf(refused)).toContain('Nothing was saved');
-    expect(await callTool(store, { action: 'delete', id: 'owner' })).toBe('Deleted API profile "owner".');
+    expect(await deleteAgreed(store, 'owner')).toBe('Deleted API profile "owner".');
     expect(existsSync(join(dir, 'owner.json'))).toBe(false);
     expect(store.unreadableHolds('OWNER_REFRESH_TOKEN')).toBe(false);
     expect(store.save(sub(), dir).ok).toBe(true);
@@ -440,9 +444,9 @@ describe('two files with one id', () => {
       { id: 'a', profile: versions[0]! as unknown as Record<string, unknown> },
       { id: 'b', profile: versions[1]! as unknown as Record<string, unknown> },
     ]);
-    expect(await callTool(store, { action: 'delete', id: 'a' })).toBe('Deleted API profile "a".');
+    expect(await deleteAgreed(store, 'a')).toBe('Deleted API profile "a".');
     expect(reasonOf(store.save(bearer('shop', 'FRESH_KEY'), dir))).toContain('file "b.json"');
-    expect(await callTool(store, { action: 'delete', id: 'b' })).toBe('Deleted API profile "b".');
+    expect(await deleteAgreed(store, 'b')).toBe('Deleted API profile "b".');
     expect(store.save(bearer('shop', 'FRESH_KEY'), dir).ok).toBe(true);
   });
 });
