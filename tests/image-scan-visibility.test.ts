@@ -44,7 +44,7 @@ function globMatches(glob: string, path: string): boolean {
 /**
  * Whether a shell command segment deletes or empties the dpkg status. Forms known: `rm`
  * (also as `/bin/rm`, behind `then`/`do`, inside `sh -c "…"`, after `RUN --mount=…`),
- * `find … -delete` / `-exec rm`, `mv`, `truncate`, `shred`, `unlink`, a redirect onto it;
+ * `find … -delete` (or `-exec rm`), `mv`, `truncate`, `shred`, `unlink`, a redirect onto it;
  * a path given literally, quoted, as a glob or with braces; a recursive delete of a parent
  * (`/var/lib`, `/var/*`). Not known: a relative path after `cd`, a path built from a
  * variable — the workflow step is what catches those.
@@ -55,14 +55,14 @@ function deletesDpkgStatus(segment: string): boolean {
   const commands = words.map((w) => w.replace(/^.*\//, ''));
   const rm = commands.includes('rm');
   const recursive = (rm && words.some((w) => /^-[a-zA-Z]*[rR]/.test(w)))
-    || (commands.includes('find') && /\s-delete\b|-exec\s+(\S*\/)?rm\b/.test(text));
+    || (commands.includes('find') && /\s-delete\b/.test(text));
   const removes = rm || recursive || ['mv', 'truncate', 'shred', 'unlink'].some((c) => commands.includes(c));
   const bare = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
   const isTarget = (p: string) => ['/var/lib/dpkg', '/var/lib/dpkg/status'].some((t) => globMatches(bare(p), t));
   // A recursive delete of a parent takes the status with it; any other form acts on its own path.
   const isParent = (p: string) => ['/', '/var', '/var/lib'].some((a) => globMatches(bare(p), a));
-  // `2>/dev/null` and `>&2` redirect a stream, not onto the status; only `>`/`>>` onto a path counts.
-  const redirected = [...text.matchAll(/(?:^|[^0-9&])>{1,2}\s*(\/\S+)/g)].flatMap((m) => expandBraces(m[1]!));
+  // Any redirect onto the status empties it, whichever stream (`>`, `>>`, `2>`).
+  const redirected = [...text.matchAll(/>{1,2}\s*(\/\S+)/g)].flatMap((m) => expandBraces(m[1]!));
   if (redirected.some(isTarget)) return true;
   if (!removes) return false;
   const paths = words.filter((w) => w.startsWith('/')).flatMap(expandBraces);
@@ -84,7 +84,7 @@ describe('the image Dockerfile', () => {
     for (const s of ['rm -rf /var/lib/dpkg', 'rm -rf /var/lib/dpkg/', 'rm -rf /var/lib/{apt,dpkg}', 'rm -rf /var/lib/*', 'rm -rf /var/lib/dpk?',
       'find /var/lib/dpkg -delete', 'mv /var/lib/dpkg /tmp/x', ': > /var/lib/dpkg/status', 'rm /var/lib/dpkg/status', 'rm -rf /var/lib',
       'RUN --mount=type=cache,target=/var/cache/apt rm -rf /var/lib/dpkg', 'rm -rf "/var/lib/dpkg"', '/bin/rm -rf /var/lib/dpkg',
-      ' then rm -rf /var/lib/dpkg', 'sh -c "rm -rf /var/lib/dpkg"', 'rm -rf /var/*', 'find /var/lib -exec rm -rf {} +']) {
+      ' then rm -rf /var/lib/dpkg', 'sh -c "rm -rf /var/lib/dpkg"', 'rm -rf /var/*', 'find /var/lib -exec rm -rf {} +', 'echo x 2>/var/lib/dpkg/status']) {
       expect({ s, caught: deletesDpkgStatus(s) }).toEqual({ s, caught: true });
     }
     for (const s of ['rm -rf /var/lib/apt', 'rm -rf /usr/bin/dpkg /usr/bin/dpkg-*', 'ls /var/lib/dpkg', 'find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null', 'rm -f /var/lib',
