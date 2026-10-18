@@ -7847,12 +7847,9 @@ describe('write approvals per method and host (270)', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    // A GET that names two writes leads with both, and past three other writes the rest are
-    // counted, so the note keeps its URL inside the run report's cut (`collectWriteNotes`).
+    // A GET that names two writes leads with both: a grant needs the writes, not the GET.
     it.each([
       ['a GET that names PATCH and PUT', { url: 'https://h.example/a?_method=PUT', method: 'GET', headers: OVERRIDE_PATCH }, 'PATCH, PUT (sent as GET)'],
-      ['a POST that names four other writes', { url: 'https://h.example/a?_method=PUT&_method=PATCH&_method=MERGE&_method=PURGE', method: 'POST', body: '{}' }, 'POST (also naming MERGE, PATCH, PURGE and 1 more)'],
-      ['a GET that names four writes', { url: 'https://h.example/a?_method=PUT&_method=PATCH&_method=MERGE&_method=PURGE', method: 'GET' }, 'MERGE, PATCH, PURGE and 1 more (sent as GET)'],
     ] as const)('no interactive prompt, %s', async (_k, req, shown) => {
       const fetchMock = vi.fn().mockImplementation(async () => ok());
       vi.stubGlobal('fetch', fetchMock);
@@ -7932,16 +7929,7 @@ describe('write approvals per method and host (270)', () => {
         const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
         await visible(TWO, agent);
         const again = await visible({ url: 'https://h.example/a?_method=PATCH', method: 'PUT', headers: { 'X-HTTP-Method-Override': 'POST' }, body: '{}' }, agent);
-        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: requests naming PATCH, POST to this host were denied earlier in this batch.');
-        expect(prompt).toHaveBeenCalledTimes(1);
-      });
-
-      it('past three denied writes the rest are counted', async () => {
-        const { agent, prompt } = agent270({ answer: 'Deny', batch: {} });
-        const many = { url: 'https://h.example/a?_method=PUT&_method=PATCH&_method=MERGE&_method=PURGE', method: 'POST', body: '{}' };
-        await visible(many, agent);
-        const again = await visible(many, agent);
-        expect(again).toContain('Blocked: outbound POST (also naming MERGE, PATCH, PURGE and 1 more) to h.example was not asked: requests naming MERGE, PATCH, POST and 2 more to this host were denied earlier in this batch.');
+        expect(again).toContain('Blocked: outbound PUT (also naming PATCH, POST) to h.example was not asked: a PATCH or POST to this host was denied earlier in this batch.');
         expect(prompt).toHaveBeenCalledTimes(1);
       });
     });

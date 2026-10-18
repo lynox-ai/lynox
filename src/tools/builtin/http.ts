@@ -22,7 +22,7 @@ import { repairStrayCloseTag } from './model-json-body.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, methodListForNote, ungrantedWriteNote, urlForNote, writeForNote } from '../../core/write-notes.js';
+import { WRITE_POSSIBLY_LANDED_PREFIX, refusedReviewedHeaders, ungrantedWriteNote, urlForNote, writeForNote } from '../../core/write-notes.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite, SECRET_SHAPES } from '../../core/secret-store.js';
 import type { SecretShape, SecretShapeKind } from '../../core/secret-store.js';
@@ -3185,8 +3185,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             // gated as: a denied PUT stands against a PATCH that also names PUT.
             const deniedNamed = deniedHere === undefined ? [] : named.filter((m) => deniedHere.has(approvalKey(approvalMethod(m), hostname)));
             if (remembers && deniedNamed.length > 0) {
-              const denial = deniedNamed.length === 1 ? `a ${deniedNamed[0]} to this host was denied` : `requests naming ${methodListForNote(deniedNamed)} to this host were denied`;
-              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: ${denial} earlier in this batch.`);
+              blockedVerbatim(`Blocked: outbound ${refusedAs} to ${hostname} was not asked: a ${deniedNamed.join(' or ')} to this host was denied earlier in this batch.`);
             }
             // A call that waited in the queue raises no prompt once the run is aborted: the
             // prompt would outlive the run as a pending row and block the Session's next one.

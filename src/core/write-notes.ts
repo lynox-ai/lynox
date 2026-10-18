@@ -25,15 +25,6 @@ export function urlForNote(raw: string): string {
   }
 }
 
-/** The most of the other writes a refusal lists by name; the rest are counted. */
-const MAX_NAMED_IN_NOTE = 3;
-
-/** Methods for a note: up to three by name, the rest counted. */
-export function methodListForNote(methods: readonly string[]): string {
-  if (methods.length <= MAX_NAMED_IN_NOTE) return methods.join(', ');
-  return `${methods.slice(0, MAX_NAMED_IN_NOTE).join(', ')} and ${String(methods.length - MAX_NAMED_IN_NOTE)} more`;
-}
-
 /**
  * A write as a refusal names it, so the next attempt or grant covers each write a server may
  * run (`writeMethodsNamed`):
@@ -41,14 +32,13 @@ export function methodListForNote(methods: readonly string[]): string {
  *  - a write sent with an override naming others: the sent one first (`POST (also naming PATCH)`);
  *  - a read sent with an override naming writes: the writes first, since a grant never needs the
  *    read (`DELETE (sent as GET)`).
- * Past three other writes the rest are counted, so a note keeps room for the URL after it.
  */
 export function writeForNote(sentMethod: string, gatedMethod: string, named: readonly string[]): string {
   const alsoNamed = named.filter((m) => m !== sentMethod);
   if (alsoNamed.length === 0) return gatedMethod;
   return named.includes(sentMethod)
-    ? `${sentMethod} (also naming ${methodListForNote(alsoNamed)})`
-    : `${methodListForNote(named)} (sent as ${sentMethod})`;
+    ? `${sentMethod} (also naming ${alsoNamed.join(', ')})`
+    : `${named.join(', ')} (sent as ${sentMethod})`;
 }
 
 /**
