@@ -441,6 +441,26 @@ describe('extractContent', () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
+  // A delegated session records each hop it follows before it is requested
+  // (`delegatedRedirects`); what the callback throws stops the read there.
+  it('reports each hop before requesting it, and does not request one the callback refuses', async () => {
+    const redirect = { ok: false, status: 302, headers: new Headers({ location: 'https://cdn.example.com/final?sig=1' }) };
+    const page = (): unknown => ({
+      ok: true, status: 200, headers: new Headers({ 'content-type': 'text/html' }),
+      body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('<html><body>Moved</body></html>')); c.close(); } }),
+    });
+    mockFetch.mockResolvedValueOnce(redirect).mockResolvedValueOnce(page());
+    const hops: Array<[string, number]> = [];
+    await extractContent('https://example.com/old', undefined, undefined, (next) => { hops.push([next, mockFetch.mock.calls.length]); });
+    expect(hops).toEqual([['https://cdn.example.com/final?sig=1', 1]]);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce(redirect).mockResolvedValueOnce(page());
+    await expect(extractContent('https://example.com/old', undefined, undefined, () => { throw new Error('not recorded'); })).rejects.toThrow('not recorded');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('throws on too many redirects', async () => {
     // 6 redirects → exceeds MAX_REDIRECTS (5)
     for (let i = 0; i < 7; i++) {
