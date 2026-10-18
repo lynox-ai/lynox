@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { EngineDb } from './engine-db.js';
 import type { UndoKind } from '../types/index.js';
 import { TriggerStore, bulkPreviewTriggerId } from './trigger-store.js';
-import { OWNER_PRINCIPAL, isMandateTag, principalTag, type RequestPrincipal } from './request-principal.js';
+import { OWNER_PRINCIPAL, isMandateTag, principalFromTag, principalTag, type RequestPrincipal } from './request-principal.js';
 import type { ExternalImage, ExternalPlanned } from './bulk-external.js';
 import type { BulkListSource } from './bulk-list.js';
 import { BULK_MAX_TARGETS, BULK_MAX_TOTAL_BYTES } from './bulk-plan.js';
@@ -215,6 +215,7 @@ export const BULK_HALT_REASONS = {
   contract: 'a target lies outside the run\'s contract',
   stoppedByOwner: 'the owner stopped the run',
   mandateEnded: 'the access that planned this run has ended before it was approved',
+  unrecorded: 'a read for this run could not be recorded in the instance\'s log, so it was not sent',
   // A list source (`bulk-list.ts`):
   listed: 'the list is read; waiting for the owner to review its targets and start reading them',
   listNotAList: 'a page of the list is not a JSON array',
@@ -378,6 +379,18 @@ function planner(p: RequestPrincipal): [string, string | null] {
 }
 
 /**
+ * The delegated session that planned a run, or null when the owner did: a mandate's tag, with
+ * its grant when the row names one. A run from before v31 names no planner and is the owner's
+ * here; whether it may still run is {@link plannerHasEnded}'s question.
+ */
+export function delegatedPlannerOf(row: Pick<RunRow, 'principal' | 'mandate_id'>): RequestPrincipal | null {
+  if (row.principal === null || !isMandateTag(row.principal)) return null;
+  const p = principalFromTag(row.principal);
+  if (p.kind !== 'mandate') return null;
+  return row.mandate_id === null ? p : { ...p, mandateId: row.mandate_id };
+}
+
+/**
  * Whether the planner of an unapproved run no longer stands behind it (§3.13 B7):
  * - a run a mandate planned, once its grant is not live (ended, revoked, unknown, or none named);
  * - a run from before v31, which names no planner: the owner's only when it was planned in a
@@ -408,6 +421,9 @@ export interface BulkRunForPreview {
   phase: BulkPhase;
   haltReason: string | null;
   contractJson: string | null;
+  /** The delegated session that planned the run, or null for the owner's own: its reads are
+   *  recorded in the actor trail under this principal (`ExternalClientDeps.recordRead`). */
+  delegatedPlanner: RequestPrincipal | null;
 }
 
 /** The write verb an external run's stored contract grants besides GET, or null. Read
@@ -511,6 +527,8 @@ export interface BulkRunForApply {
   sourceRunId: string | null;
   /** The contract an external run was planned with; null for a local run. */
   contractJson: string | null;
+  /** As {@link BulkRunForPreview.delegatedPlanner}. */
+  delegatedPlanner: RequestPrincipal | null;
 }
 
 /** One target as the effect loop writes it: the state it must find, the state it writes. */
@@ -1608,7 +1626,7 @@ export class BulkLedger {
   getRunForPreview(runId: string): BulkRunForPreview | null {
     const r = this.runRow(runId);
     if (!r) return null;
-    return { id: r.id, kind: r.kind, targetSystem: r.target_system, phase: r.phase, haltReason: r.halt_reason, contractJson: r.contract_json };
+    return { id: r.id, kind: r.kind, targetSystem: r.target_system, phase: r.phase, haltReason: r.halt_reason, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r) };
   }
 
   /** Targets the preview has still to read, in seq order. A target read before — by an
@@ -1959,7 +1977,7 @@ export class BulkLedger {
       id: r.id, kind: r.kind, targetSystem: r.target_system, targetCollection: r.target_collection,
       atomic: r.atomic === 1, phase: r.phase, approvalChecksum: r.approval_checksum, maxTargets: r.max_targets,
       expiresAt: r.expires_at, applied: r.targets_applied, failed: r.targets_failed, haltReason: r.halt_reason,
-      sourceRunId: r.source_run_id, contractJson: r.contract_json,
+      sourceRunId: r.source_run_id, contractJson: r.contract_json, delegatedPlanner: delegatedPlannerOf(r),
     };
   }
 

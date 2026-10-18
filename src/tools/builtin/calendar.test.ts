@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { OWNER_PRINCIPAL } from '../../core/request-principal.js';
 import { calendarReadTool, CALENDAR_FEED_PREFIX } from './calendar.js';
 import { isInfraSecret } from '../../core/secret-store.js';
 import type { IAgent, SecretStoreLike } from '../../types/index.js';
@@ -16,6 +17,7 @@ const TZ_ICS = (...events: string[]): string => [
 
 function agentWith(secrets: Record<string, string>): IAgent {
   return {
+    principal: OWNER_PRINCIPAL,
     toolContext: {},
     secretStore: {
       listNames: () => Object.keys(secrets),
@@ -62,7 +64,7 @@ describe('calendar_read', () => {
       listNames: () => Object.keys(secrets),
       resolve: (n: string) => secrets[n] ?? null,
     } as unknown as SecretStoreLike;
-    const agent = { toolContext: {}, secretStore: scopeSecretStore(inner, ['STRIPE_KEY']) } as unknown as IAgent;
+    const agent = { principal: OWNER_PRINCIPAL, toolContext: {}, secretStore: scopeSecretStore(inner, ['STRIPE_KEY']) } as unknown as IAgent;
     const out = await calendarReadTool.handler({}, agent);
     expect(out).not.toContain('No calendar is connected');
     expect(fetchIcsFeed).toHaveBeenCalledTimes(1);

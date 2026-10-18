@@ -2858,7 +2858,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/search' }, agent);
 
       expect(result).toContain('keyword');
@@ -2885,7 +2885,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/any' }, agent);
 
       expect(result).toContain('"foo": "bar"');
@@ -2903,7 +2903,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/x' }, agent);
 
       expect(result).toContain('"a": 1');
@@ -3045,6 +3045,7 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
           apiStore: store,
@@ -3086,6 +3087,7 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
           apiStore: store,
@@ -3117,6 +3119,7 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
           apiStore: store,
@@ -3149,6 +3152,7 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
           apiStore: store,
@@ -3182,6 +3186,7 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
           apiStore: store,
@@ -3220,6 +3225,7 @@ describe('httpRequestTool', () => {
 
       const events: Array<Record<string, unknown>> = [];
       const agent = {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: {
           apiStore: store,
@@ -3246,7 +3252,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* never */ })));
 
-      const agent = { sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, sessionCounters: testCounters } as never;
       const started = Date.now();
       let err: Error | undefined;
       try {
@@ -3265,7 +3271,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* hang */ })));
 
-      const agent = { sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, sessionCounters: testCounters } as never;
       const started = Date.now();
       let err: Error | undefined;
       try {
@@ -3282,7 +3288,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn(() => new Promise<never>(() => { /* hang */ })));
 
-      const agent = { sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, sessionCounters: testCounters } as never;
       const started = Date.now();
       let err: Error | undefined;
       try {
@@ -3437,7 +3443,7 @@ describe('httpRequestTool', () => {
         status: 401, headers: { 'content-type': 'application/json' }, json: {},
       })));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.bexio.example/2.0/invoices', method: 'GET' }, agent);
 
       expect(result).toMatch(/Do NOT call api_setup fetch_token for it/i);
@@ -3510,6 +3516,7 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         sessionCounters: testCounters,
         // An access token, so the attach gets past "nothing to attach" and the
@@ -3571,6 +3578,7 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         sessionCounters: testCounters,
         secretStore: {
@@ -3628,6 +3636,7 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         sessionCounters: testCounters,
         secretStore: { resolve: (n: string) => (n === 'LITERAL_API_ACCESS_TOKEN' ? 'at-stale' : null) },
@@ -3689,6 +3698,7 @@ describe('httpRequestTool', () => {
       })));
 
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         sessionCounters: testCounters,
         secretStore: {
@@ -3743,6 +3753,7 @@ describe('httpRequestTool', () => {
       // an absent grant type that means client_credentials and nothing else.
       // Silencing the reminder here would take away the one recovery it has.
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         sessionCounters: testCounters,
         secretStore: { resolve: (n: string) => (n === 'SHOP_CC_ACCESS_TOKEN' ? 'at-stale' : null) },
@@ -3779,7 +3790,7 @@ describe('httpRequestTool', () => {
         status: 401, headers: { 'content-type': 'application/json' }, json: {},
       })));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://ok.bexio.example/2.0/invoices', method: 'GET' }, agent);
 
       // The narrower predicate earns its keep here: a callback origin alone must
@@ -3817,7 +3828,7 @@ describe('httpRequestTool', () => {
       });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       // Hint must be OUTSIDE the untrusted_data wrap so the agent treats
@@ -3850,7 +3861,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://api.example.com/v1/me' }, agent);
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
@@ -3865,7 +3876,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ status: 401, headers: {}, json: {} });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://no-profile-host.example.com/x' }, agent);
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2/i);
@@ -3891,7 +3902,7 @@ describe('httpRequestTool', () => {
       const mockResp = createMockResponse({ status: 200, headers: { 'content-type': 'application/json' }, json: { ok: true } });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResp));
 
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await handler({ url: 'https://o.example.com/v1/data' }, agent);
 
       expect(result).not.toMatch(/Agent reminder.*OAuth2 401/i);
@@ -3920,6 +3931,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
       vi.stubGlobal('fetch', fetchMock);
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => (k === 'SHOPIFY_SEO_ACCESS_TOKEN' ? 'shpat_managed_token' : undefined) },
         sessionCounters: testCounters,
@@ -3952,6 +3964,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } }));
       vi.stubGlobal('fetch', fetchMock);
       const agent = {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => (k === 'SHOPIFY_SEO_ACCESS_TOKEN' ? 'shpat_managed_token' : undefined) },
         sessionCounters: testCounters,
@@ -3997,6 +4010,7 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
@@ -4282,6 +4296,7 @@ describe('httpRequestTool', () => {
     const resolved: string[] = [];
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => { resolved.push(k); return secrets[k] ?? null; } },
         sessionCounters: testCounters,
@@ -4624,6 +4639,7 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
@@ -4808,7 +4824,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
       await handler(
         { url: 'https://api.crm.example/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
-        { toolContext: { apiStore: store }, sessionCounters: testCounters } as never,
+        { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never,
       );
       expect(sentHeader('authorization')).toBe('Bearer model_set');
     });
@@ -5172,6 +5188,7 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
@@ -5348,6 +5365,7 @@ describe('httpRequestTool', () => {
 
     function agentWith(store: unknown, secrets: Record<string, string>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         toolContext: { apiStore: store },
         secretStore: { resolve: (k: string) => secrets[k] ?? null },
         sessionCounters: testCounters,
@@ -5449,7 +5467,7 @@ describe('httpRequestTool', () => {
       const store = await storeFor('svc.example.com', auth);
       const key = 'sk_' + 'live_' + 'R'.repeat(20);
       mockDnsPublic();
-      const noVaultAgent = { toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
+      const noVaultAgent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters } as never;
       const result = await visible({ url: 'https://svc.example.com/v1/x', headers: { 'X-Key': key } }, noVaultAgent);
       expect(result).toContain('This service has an api_profile, but the engine did not attach its stored key to this request');
       expect(result).not.toContain('whose auth type the engine does not attach');
@@ -5557,7 +5575,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       const callArgs = fetchMock.mock.calls[0][1];
@@ -5584,7 +5602,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh-token-xyz' });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
         url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json',
         method: 'GET',
@@ -5616,7 +5634,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({ SHOPIFY_SEO_ACCESS_TOKEN: 'fresh' });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
         url: 'https://shop.commerce.example/admin/api/2026-04/x',
         headers: { authorization: 'Bearer stale-lowercase' },
@@ -5648,7 +5666,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const secretStore = makeSecretStore({});
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       const result = await visible({ url: 'https://shop.commerce.example/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
@@ -5684,7 +5702,7 @@ describe('httpRequestTool', () => {
         EXAMPLE_API_KEY: 'the-declared-key',
         PLAIN_BEARER_ACCESS_TOKEN: 'the-oauth2-convention-key',
       });
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
         url: 'https://api.example.com/v1/me',
         headers: { Authorization: 'Bearer agent-set-token' },
@@ -5730,7 +5748,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_A_KEY: 'key-a', CRM_B_KEY: 'key-b' }) } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_A_KEY: 'key-a', CRM_B_KEY: 'key-b' }) } as never;
 
       const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, agent);
       expect(refused).toContain('more than one api_profile maps to api.example.com (crm-a, crm-b)');
@@ -5753,7 +5771,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never;
+      const agent = { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never;
 
       const result = await visible({ url: 'https://api.example.com/v1/stats' }, agent);
 
@@ -5772,7 +5790,7 @@ describe('httpRequestTool', () => {
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
 
-      await handler({ url: 'https://api.example.com/v1/docs' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
+      await handler({ url: 'https://api.example.com/v1/docs' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -5791,7 +5809,7 @@ describe('httpRequestTool', () => {
         oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
       });
       const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live', CRM_API_REFRESH_TOKEN: 'rt-rejected' });
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired');
       expect(refused).toContain('action "connect"');
       expect(refused).not.toContain('ask_secret');
@@ -5812,7 +5830,7 @@ describe('httpRequestTool', () => {
         oauth_grant: { state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' },
       });
       const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at-live', CRM_API_REFRESH_TOKEN: 'rt-rejected' });
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('with ask_secret');
       expect(refused).not.toContain('action "connect"');
     });
@@ -5834,14 +5852,14 @@ describe('httpRequestTool', () => {
 
       const revokedStore = new ApiStore();
       revokedStore.register(oauth({ state: 'revoked', revoked_fp: tokenFingerprint('rt-rejected'), revoked_at: '2026-09-22T00:00:00.000Z' }));
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: revokedStore }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: revokedStore }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired (recorded 2026-09-22T00:00:00.000Z)');
       expect(refused).toContain('CRM_API_REFRESH_TOKEN');
       expect(fetchMock).not.toHaveBeenCalled();
 
       const liveStore = new ApiStore();
       liveStore.register(oauth({ minted_by: 'client-1' }));
-      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: liveStore }, sessionCounters: testCounters, secretStore } as never);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: liveStore }, sessionCounters: testCounters, secretStore } as never);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-live');
     });
 
@@ -5857,7 +5875,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-old' }) } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-old' }) } as never);
       expect(refused).toContain('as revoked or expired');
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -5877,7 +5895,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-2', CRM_API_REFRESH_TOKEN: 'rt-newer' }) } as never);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-2', CRM_API_REFRESH_TOKEN: 'rt-newer' }) } as never);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-2');
     });
@@ -5897,7 +5915,7 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
       // The profile's own slot still holds the rejected token; the derived slot has another.
       const secretStore = vaultOf({ CRM_API_ACCESS_TOKEN: 'at', CRM_RT: 'rt-rejected', CRM_API_REFRESH_TOKEN: 'rt-other' });
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never);
       expect(refused).toContain('as revoked or expired');
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -5918,7 +5936,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      await handler({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-cc', CRM_API_REFRESH_TOKEN: 'rt-rejected' }) } as never);
+      await handler({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({ CRM_API_ACCESS_TOKEN: 'at-cc', CRM_API_REFRESH_TOKEN: 'rt-rejected' }) } as never);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer at-cc');
     });
@@ -5934,7 +5952,7 @@ describe('httpRequestTool', () => {
       });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
+      const refused = await visible({ url: 'https://api.example.com/v1/contacts' }, { principal: OWNER_PRINCIPAL, toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore: vaultOf({}) } as never);
       // A new token stored under the derived name would never be read.
       expect(refused).toContain('"CRM_RT" with ask_secret');
     });
@@ -5957,6 +5975,7 @@ describe('httpRequestTool', () => {
 
     function htmlAgent(userConfig?: Record<string, unknown>): never {
       return {
+        principal: OWNER_PRINCIPAL,
         name: 'main',
         toolContext: userConfig ? { userConfig } : {},
         sessionCounters: testCounters,
@@ -6311,6 +6330,7 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     const store = await apiStoreWith({ type: 'oauth2', vault_keys: ['WOO_TOKEN'] });
     mockDnsPublic();
     const agent = {
+      principal: OWNER_PRINCIPAL,
       toolContext: { apiStore: store },
       secretStore: { resolve: () => null },
       sessionCounters: testCounters,

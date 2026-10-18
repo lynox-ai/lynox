@@ -89,6 +89,7 @@ function client(contract: NonNullable<ReturnType<typeof parseBulkContract>>): Ex
     rateLimit: () => profileLimit,
     scan: detectSecretInContent,
     connectedAccount: () => false,
+    recordRead: null,
   });
 }
 
@@ -464,20 +465,20 @@ describe('the worker\'s client for a list read', () => {
     const restore = serve(s);
     try {
       const id = startedList();
-      const engine = { getApiStore: () => new ApiStore(), getSecretStore: () => new SecretStore(), getToolContext: () => createToolContext({}) };
+      const engine = { getApiStore: () => new ApiStore(), getSecretStore: () => new SecretStore(), getToolContext: () => createToolContext({}), getAuditLog: () => null };
       const factory = await (WorkerLoop.prototype as unknown as {
         bulkClientFactory: (this: unknown) => Promise<(contractJson: string | null, listQuery?: ListQueryConstraints) => ExternalClient | null>;
       }).bulkClientFactory.call({ engine });
       const run = ledger.getListRun(id)!;
       const url = listPageUrl(HOST, run.source, 1);
       // Past the contract: what stops it is the missing stored credential, nothing is sent.
-      expect(await factory(run.contractJson, listQueryParams(run.source))!.get(url)).toEqual({ kind: 'no_credential' });
+      expect(await factory({ id: run.id, contractJson: run.contractJson, delegatedPlanner: null }, listQueryParams(run.source))!.get(url)).toEqual({ kind: 'no_credential' });
       // The stored contract alone grants no query.
-      expect(await factory(run.contractJson)!.get(url)).toEqual({ kind: 'not_granted' });
+      expect(await factory({ id: run.id, contractJson: run.contractJson, delegatedPlanner: null })!.get(url)).toEqual({ kind: 'not_granted' });
       // The copy grants the pages the engine may ask for, not one more.
       const last = url.replace(/page=1$/, `page=${String(maxListPages('woocommerce'))}`);
-      expect(await factory(run.contractJson, listQueryParams(run.source))!.get(last)).toEqual({ kind: 'no_credential' });
-      expect(await factory(run.contractJson, listQueryParams(run.source))!.get(url.replace(/page=1$/, 'page=102'))).toEqual({ kind: 'not_granted' });
+      expect(await factory({ id: run.id, contractJson: run.contractJson, delegatedPlanner: null }, listQueryParams(run.source))!.get(last)).toEqual({ kind: 'no_credential' });
+      expect(await factory({ id: run.id, contractJson: run.contractJson, delegatedPlanner: null }, listQueryParams(run.source))!.get(url.replace(/page=1$/, 'page=102'))).toEqual({ kind: 'not_granted' });
       expect(s.requests).toEqual([]);
     } finally {
       restore();

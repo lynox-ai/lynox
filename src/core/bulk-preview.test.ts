@@ -80,7 +80,7 @@ function contractFor(keys: string[]): ReturnType<typeof mintBulkContract> {
 }
 
 /** A client wired like the worker's, with an attach that fills the header. */
-function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all' } = {}): ExternalClient {
+function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: string[]; policy?: 'deny-all'; recordRead?: (url: string) => boolean } = {}): ExternalClient {
   const ctx = createToolContext({});
   if (opts.policy) applyNetworkPolicy(ctx, opts.policy, undefined);
   return externalClient({
@@ -95,6 +95,7 @@ function client(opts: { attach?: boolean; rateLimit?: string | null; keys?: stri
     rateLimit: () => opts.rateLimit ?? null,
     scan: detectSecretInContent,
     connectedAccount: () => false,
+    recordRead: opts.recordRead ?? null,
   });
 }
 
@@ -756,6 +757,7 @@ function workerFor(opts: { ack?: boolean; token?: string | null; costUsd?: numbe
     getApiStore: () => apiStore,
     getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? token : null) }),
     getToolContext: () => createToolContext({}),
+    getAuditLog: () => null,
     getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
     getUserConfig: () => ({}),
   } as unknown as Engine;
@@ -832,6 +834,7 @@ describe('bulk_plan → trigger → worker tick → previewed', () => {
         getApiStore: () => apiStore,
         getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
         getToolContext: () => createToolContext({}),
+        getAuditLog: () => null,
         getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
         getUserConfig: () => ({}),
       } as unknown as Engine;

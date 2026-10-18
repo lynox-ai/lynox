@@ -146,6 +146,8 @@ function makeEngine(opts?: {
   promptStore?: PromptStore | null;
   /** Ids of threads the owner deleted; the worker does not continue in one. */
   deletedThreads?: readonly string[];
+  /** The actor trail; by default one that takes every row, as a booted engine's does. */
+  auditLog?: { record: (entry: unknown) => void } | null;
 }): Engine {
   const tm = opts?.taskManager ?? null;
   const session = opts?.session ?? makeSession();
@@ -166,6 +168,7 @@ function makeEngine(opts?: {
     // The real Engine always has this. Every grant here is live: a mandate's run reaches the
     // worker only past the door, and the tests of an ended grant pass their own engine.
     getMandateEnds: vi.fn(() => ({ isLive: () => true })),
+    getAuditLog: vi.fn(() => (opts?.auditLog === undefined ? { record: vi.fn() } : opts.auditLog)),
   } as unknown as Engine;
 }
 
