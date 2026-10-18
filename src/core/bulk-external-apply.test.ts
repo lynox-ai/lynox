@@ -811,6 +811,58 @@ describe('applying an external run', () => {
     }
   });
 
+  // PRD customer-granted-operator-access §3.9: the reads an apply makes for a run a delegated
+  // session planned — the target before it is written, and after — are rows under the planner,
+  // each before it is sent. (The write itself is a row of its own concern.)
+  it('records the reads of an apply a delegated session planned, before each is sent', async () => {
+    const s = shop();
+    const restore = serve(s);
+    try {
+      const runId = await approvedRun([{ target: url(0), after: { price: '15' } }], client(), 'PUT');
+      engineDb.getDb().prepare('UPDATE bulk_runs SET principal = ?, mandate_id = ? WHERE id = ?').run('mandate:helper@example.invalid', 'grant-1', runId);
+      const apiStore = new ApiStore();
+      apiStore.register({
+        id: 'shop', name: 'Shop', base_url: `https://${HOST}/`, description: 'Shop',
+        auth: { type: 'bearer', vault_keys: ['SHOP_TOKEN'] },
+        custom_endpoint_ack: { accepted: true, hosts: [HOST], accepted_at: '2026-09-30T00:00:00.000Z' },
+      });
+      const triggers = new TriggerStore(engineDb);
+      const recordTaskRun = vi.fn((id: string, result: string, status: 'success' | 'failed' | 'timeout') => {
+        triggers.updateFields(id, { status: status === 'success' ? 'completed' : 'failed' });
+        triggers.updateRunResult(id, { lastRunAt: new Date().toISOString(), lastRunResult: result, lastRunStatus: status, nextRunAt: null });
+      });
+      const recs: Array<{ principal: unknown; action: string; target?: string; runId?: string }> = [];
+      const sentAtRecord: number[] = [];
+      const engine = {
+        getTaskManager: () => ({
+          getDueTriggers: () => triggers.getDue(), getExpiredWaitingTriggers: () => [], endWait: () => false,
+          claimLease: triggers.claimLease.bind(triggers), renewLease: triggers.renewLease.bind(triggers), releaseLease: triggers.releaseLease.bind(triggers),
+          getTrigger: (id: string) => triggers.getById(id), recordTaskRun,
+        }),
+        getBulkLedger: () => ledger,
+        getDataStore: () => null,
+        getApiStore: () => apiStore,
+        getSecretStore: () => ({ resolve: (k: string) => (k === 'SHOP_TOKEN' ? TOKEN : null) }),
+        getToolContext: () => createToolContext({}),
+        getAuditLog: () => ({ record: (e: (typeof recs)[number]) => { sentAtRecord.push(s.requests.length); recs.push(e); } }),
+        getRunHistory: () => ({ updateTrigger: (id: string, p: Parameters<TriggerStore['updateFields']>[1]) => triggers.updateFields(id, p) }),
+        getUserConfig: () => ({}),
+      } as unknown as Engine;
+      const loop = new WorkerLoop(engine, { hasChannels: () => false, notify: vi.fn() } as unknown as NotificationRouter, 60_000);
+      s.requests.length = 0;
+      await loop.tick();
+      await vi.waitFor(() => expect(recordTaskRun).toHaveBeenCalled(), { timeout: 10_000 });
+      expect(s.requests.map((r) => r.method)).toEqual(['GET', 'PUT', 'GET']);
+      const planner = { kind: 'mandate', email: 'helper@example.invalid', mandateId: 'grant-1' };
+      expect(recs.map((r) => [r.principal, r.action, r.target, r.runId])).toEqual([
+        [planner, 'bulk:read', `GET ${HOST}/products/0`, runId], [planner, 'bulk:read', `GET ${HOST}/products/0`, runId],
+      ]);
+      expect(sentAtRecord, 'each row before its read').toEqual([0, 2]);
+    } finally {
+      restore();
+    }
+  });
+
   it('the worker\'s own client reads the store: an unmeasured write to a connected account is not sent', async () => {
     const s = shop();
     const restore = serve(s);

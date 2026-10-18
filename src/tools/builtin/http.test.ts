@@ -7598,3 +7598,112 @@ describe('requests to a Shopify store are refused', () => {
     expect(control.headers['Authorization']).toBe('Bearer store-value');
   });
 });
+
+// PRD customer-granted-operator-access §3.9: inside a mandate's http_request, every request the
+// call's own row does not name — a redirect hop, a reading before a write — is a read row of its
+// own, written before that request is sent; one that cannot be written is not sent.
+describe('a mandate\'s reads inside one http_request', () => {
+  const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+  type Rec = { principal: unknown; action: string; target?: string; phase: string };
+  const recorder = (onRecord?: () => void): { recs: Rec[]; log: import('../../core/audit-log.js').AuditLog } => {
+    const recs: Rec[] = [];
+    return { recs, log: { record: (e: Rec) => { onRecord?.(); recs.push(e); } } as never };
+  };
+  const failing = { record: () => { throw new Error('disk full'); } } as never;
+
+  it('records a redirect hop as a read before it follows it, and the owner\'s hop not at all', async () => {
+    for (const principal of [MANDATE, OWNER_PRINCIPAL]) {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.invalid/next?sig=abc' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+      vi.stubGlobal('fetch', fetchMock);
+      const fetchedAtRecord: number[] = [];
+      const { recs, log } = recorder(() => { fetchedAtRecord.push(fetchMock.mock.calls.length); });
+      testCtx.auditLog = log;
+      const res = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal }));
+      expect(res).toContain('HTTP 200');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      if (principal === MANDATE) {
+        expect(recs).toEqual([expect.objectContaining({ principal: MANDATE, action: 'http_request:redirect', target: 'GET cdn.example.invalid/next', phase: 'read' })]);
+        expect(fetchedAtRecord, 'the row was written before the hop was sent').toEqual([1]);
+      } else {
+        expect(recs).toEqual([]);
+      }
+    }
+  });
+
+  it('does not follow a mandate\'s hop whose row cannot be written', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://cdn.example.invalid/next' } }))
+      .mockResolvedValueOnce(createMockResponse({ status: 200, json: { ok: true } }));
+    vi.stubGlobal('fetch', fetchMock);
+    testCtx.auditLog = failing;
+    const err = await handler({ url: 'https://api.example.invalid/v1/a' }, makeAgent({ principal: MANDATE })).then(() => null, (e: unknown) => e);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(err)).toMatch(/cannot be recorded/);
+  });
+
+  describe('a reading before a write to a connected account', () => {
+    async function withBexio(): Promise<void> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio-api', name: 'bexio', base_url: 'https://api.bexio.com', description: 'bexio API',
+        auth: {
+          type: 'oauth2', vault_keys: ['BEXIO_CLIENT_ID', 'BEXIO_CLIENT_SECRET'],
+          oauth: { grant_type: 'refresh_token', client_id_key: 'BEXIO_CLIENT_ID', client_secret_key: 'BEXIO_CLIENT_SECRET', preset_id: 'bexio', scope: 'contact_show kb_invoice_edit' },
+        },
+      });
+      testCtx.apiStore = store;
+    }
+    const invoice = { id: 7, document_nr: 'RE-00042', contact_address: 'Example Ltd', total: '19.150000', total_remaining_payments: '19.150000', currency_id: 1 };
+    const cancel = { url: 'https://api.bexio.com/2.0/kb_invoice/7/cancel', method: 'POST', body: '{}' };
+    function account(): ReturnType<typeof vi.fn> {
+      const readings: Record<string, () => Response> = {
+        '/2.0/kb_invoice/7': () => createMockResponse({ json: invoice }),
+        '/3.0/currencies/1': () => createMockResponse({ json: { id: 1, name: 'CHF' } }),
+      };
+      const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = new URL(String(input instanceof Request ? input.url : input));
+        if ((init?.method ?? 'GET') !== 'GET') return createMockResponse({ status: 200, json: { ok: true } });
+        return readings[url.pathname]?.() ?? createMockResponse({ status: 404, body: 'not found' });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('writes one read row per reading, each before it is sent; the owner\'s readings write none', async () => {
+      for (const principal of [MANDATE, OWNER_PRINCIPAL]) {
+        await withBexio();
+        mockDnsPublic();
+        const fetchMock = account();
+        const fetchedAtRecord: number[] = [];
+        const { recs, log } = recorder(() => { fetchedAtRecord.push(fetchMock.mock.calls.length); });
+        testCtx.auditLog = log;
+        await handler(cancel, makeAgent({ promptUser: vi.fn().mockResolvedValue('Allow'), principal })).catch(() => undefined);
+        const reads = recs.filter(r => r.phase === 'read');
+        if (principal === MANDATE) {
+          expect(reads.map(r => [r.action, r.target])).toEqual([
+            ['http_request:read-before-write', 'GET api.bexio.com/2.0/kb_invoice/7'],
+            ['http_request:read-before-write', 'GET api.bexio.com/3.0/currencies/1'],
+          ]);
+          expect(fetchedAtRecord, 'each row before its reading').toEqual([0, 1]);
+        } else {
+          expect(reads).toEqual([]);
+        }
+      }
+    });
+
+    it('refuses the write unasked and sends nothing when a reading cannot be recorded', async () => {
+      await withBexio();
+      mockDnsPublic();
+      const fetchMock = account();
+      testCtx.auditLog = failing;
+      const promptUser = vi.fn().mockResolvedValue('Allow');
+      const err = await handler(cancel, makeAgent({ promptUser, principal: MANDATE })).then(() => null, (e: unknown) => e);
+      expect(String(err)).toMatch(/reading \/2\.0\/kb_invoice\/7 cannot be recorded/);
+      expect(promptUser).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+});

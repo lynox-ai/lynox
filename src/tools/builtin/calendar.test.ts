@@ -518,3 +518,25 @@ END:VEVENT`,
     expect(out).toContain('incomplete');
   });
 });
+
+describe('calendar_read — a mandate\'s feed read', () => {
+  beforeEach(() => { vi.mocked(fetchIcsFeed).mockReset(); });
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'M-1' };
+  const withPrincipal = (principal: unknown, recs: Array<{ action: string; target?: string }>): IAgent => {
+    const a = agentWith({ [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://cal.example/private-abc123.ics' }) as unknown as Record<string, unknown>;
+    return { ...a, principal, toolContext: { auditLog: { record: (e: { action: string; target?: string }) => { recs.push(e); } } } } as unknown as IAgent;
+  };
+
+  it('records each feed by its label and host for a mandate, and hands the owner\'s read no recorder', async () => {
+    vi.mocked(fetchIcsFeed).mockResolvedValue({ ics: TZ_ICS(), truncated: false });
+    const recs: Array<{ action: string; target?: string }> = [];
+    await calendarReadTool.handler({}, withPrincipal(MANDATE, recs));
+    const onRead = vi.mocked(fetchIcsFeed).mock.calls[0]![2]!;
+    onRead('cal.example');
+    expect(recs).toEqual([expect.objectContaining({ action: 'calendar_read:feed', target: 'calendar=MAIN host=cal.example' })]);
+    expect(JSON.stringify(recs)).not.toContain('private-abc123');
+    vi.mocked(fetchIcsFeed).mockClear();
+    await calendarReadTool.handler({}, withPrincipal(OWNER_PRINCIPAL, []));
+    expect(vi.mocked(fetchIcsFeed).mock.calls[0]![2]).toBeUndefined();
+  });
+});

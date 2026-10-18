@@ -2564,6 +2564,45 @@ describe('api_setup tool', () => {
       }
     });
 
+    // PRD customer-granted-operator-access §3.9: the call's own row names the docs page; each
+    // linked section is a read of its own, recorded before it is fetched, or not fetched.
+    it('records each linked section a mandate\'s bootstrap reads, before it is read, and reads none it cannot record', async () => {
+      const MANDATE: RequestPrincipal = { kind: 'mandate', email: 'setup@example.org', mandateId: 'M-1' };
+      const landingHtml = '<html><body><a href="/v3/rate-limits">Rate limits</a><a href="/v3/pricing">Pricing details</a></body></html>';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === 'https://docs.example.com/api') return new Response(landingHtml, { status: 200, statusText: 'OK', headers: { 'content-type': 'text/html' } });
+        return new Response('SECTION', { status: 200, statusText: 'OK' });
+      });
+      try {
+        for (const fails of [false, true]) {
+          fetchSpy.mockClear();
+          stubExtraction({ description: 'API', auth: { type: 'bearer' } });
+          const recs: Array<{ action: string; target?: string }> = [];
+          const fetchedAtRecord: number[] = [];
+          const agent = createMockAgent(new ApiStore(), undefined, undefined, MANDATE) as unknown as { toolContext: Record<string, unknown> };
+          agent.toolContext['auditLog'] = { record: (e: { action: string; target?: string }) => {
+            if (fails) throw new Error('disk full');
+            fetchedAtRecord.push(fetchSpy.mock.calls.length);
+            recs.push(e);
+          } };
+          await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/api' }, agent as never);
+          const fetched = fetchSpy.mock.calls.map(c => String(c[0]));
+          if (fails) {
+            expect(fetched, 'no section was read without its row').toEqual(['https://docs.example.com/api']);
+          } else {
+            expect(recs.map(r => [r.action, r.target])).toEqual([
+              ['api_setup:read', 'GET docs.example.com/v3/rate-limits'], ['api_setup:read', 'GET docs.example.com/v3/pricing'],
+            ]);
+            expect(fetched).toHaveLength(3);
+            expect(fetchedAtRecord.every((n, i) => n === i + 1), 'each row before its section').toBe(true);
+          }
+        }
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('skips linked sections whose host differs from the docs URL host', async () => {
       const landingHtml = `<html><body><a href="https://evil.com/auth">Authentication</a></body></html>`;
       const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {

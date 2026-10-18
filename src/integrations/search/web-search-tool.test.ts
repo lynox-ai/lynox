@@ -500,3 +500,45 @@ describe('API-setup reminder injection', () => {
     expect(result).not.toContain('Agent reminder');
   });
 });
+
+// PRD customer-granted-operator-access §3.9: a delegated session reads nothing outside that no
+// row named first. The pages behind a search's results would be such reads, so a mandate's
+// search returns the results as found; a page it reads records every redirect hop it follows.
+describe('a mandate\'s web_research', () => {
+  const MANDATE = { kind: 'mandate' as const, email: 'setup@example.org', mandateId: 'M-1' };
+  const bare: SearchResult[] = [{ title: 'A', url: 'https://a.example.invalid/x', snippet: 's' }];
+
+  it('does not fetch the pages behind a mandate\'s results; the owner\'s are fetched', async () => {
+    for (const principal of [MANDATE, OWNER_PRINCIPAL]) {
+      const extractMod = await import('./content-extractor.js');
+      const spy = vi.spyOn(extractMod, 'extractContent').mockResolvedValue({ title: 'A', url: 'https://a.example.invalid/x', content: 'page', wordCount: 1, truncated: false });
+      // Earlier tests in this file spied on the same export; count this test's calls only.
+      spy.mockClear();
+      const result = await createWebSearchTool(mockProvider(bare)).handler({ action: 'search', query: 'q' }, { principal, toolContext: createToolContext({}) } as never);
+      expect(result).toContain('https://a.example.invalid/x');
+      expect(spy, principal.kind).toHaveBeenCalledTimes(principal === MANDATE ? 0 : 1);
+      spy.mockRestore();
+    }
+  });
+
+  it('hands the page read a hop recorder for a mandate, none for the owner', async () => {
+    for (const principal of [MANDATE, OWNER_PRINCIPAL]) {
+      const recs: Array<{ action: string; target?: string }> = [];
+      const toolContext = createToolContext({});
+      toolContext.auditLog = { record: (e: { action: string; target?: string }) => { recs.push(e); } } as never;
+      const extractMod = await import('./content-extractor.js');
+      const spy = vi.spyOn(extractMod, 'extractContent').mockResolvedValue({ title: 'T', url: 'https://a.example.invalid/x', content: 'page', wordCount: 1, truncated: false });
+      // Earlier tests in this file spied on the same export; count this test's calls only.
+      spy.mockClear();
+      await createWebSearchTool(mockProvider()).handler({ action: 'read', url: 'https://a.example.invalid/x' }, { principal, toolContext } as never);
+      const onRedirect = spy.mock.calls[0]![3];
+      if (principal === MANDATE) {
+        onRedirect!('https://b.example.invalid/y?z=1', 'GET');
+        expect(recs).toEqual([expect.objectContaining({ action: 'web_research:redirect', target: 'GET b.example.invalid/y' })]);
+      } else {
+        expect(onRedirect).toBeUndefined();
+      }
+      spy.mockRestore();
+    }
+  });
+});
